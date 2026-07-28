@@ -30,12 +30,38 @@ export const DEBUG_HOST = "127.0.0.1";
 export const STEAM_APP_ID = "3247080";
 
 /**
- * 玩家端必須自己設好的 Steam 啟動選項。插件偵測不到 CDP 時要顯示這行。
+ * 開 debug port 的命令列參數。
  *
- * 注意：一定要「透過 Steam」啟動。直接跑 exe 的話 greenworks 拿不到 Steam
- * 環境，遊戲的 main.js catch 會 app.quit()，視窗會秒退。
+ * ⚠ `--remote-debugging-port` **只能在啟動時指定**，不能對已在跑的程序補掛。
+ * 所以插件要自己啟動客戶端，不能叫玩家去設 Steam 啟動選項 —— 那個設定是
+ * 每個 Steam 帳號各自一份，玩家用小號開遊戲就失效。詳見 docs/launching.md。
  */
-export const REQUIRED_LAUNCH_OPTION = `--remote-debugging-port=${DEFAULT_DEBUG_PORT}`;
+export const DEBUG_PORT_SWITCH = `--remote-debugging-port=${DEFAULT_DEBUG_PORT}`;
+
+/**
+ * 桌面版可以**直接執行 exe** 帶參數啟動，不必透過 Steam：
+ *
+ * - `steam_appid.txt` 是官方包裡就有的檔案，Steamworks 因此能在直接執行時
+ *   初始化（前提：Steam 客戶端要在跑）
+ * - `main.js` 沒有 requestSingleInstanceLock，多開不互擋
+ * - Steam 初始化在 `ipcMain.handle('steam:init')`，是渲染層呼叫時才跑
+ * - 遊戲本來就會讀自訂 switch（x / y / fullscreen），不排斥額外參數
+ *
+ * ⚠ 尚未實測。測的時候要挑沒有進行中對戰的時機 —— 同一個 Steam 帳號重複
+ *   登入可能踢掉既有連線。
+ */
+export const GAME_EXECUTABLE = "UNLIGHTRevive.exe";
+
+/**
+ * 網頁版：用 Chromium 系瀏覽器帶 debug port 啟動。
+ *
+ * ⚠ `--user-data-dir` 是必要的不是選配。玩家已經開著 Chrome 時，用同一個
+ * profile 再啟動只會在既有實例開分頁，**命令列參數整個被忽略**，port 不會開。
+ * 用插件專屬 profile 才保證是全新實例，也不影響玩家平常的瀏覽器。
+ *
+ * 代價：新 profile 沒有 cookie，玩家要在裡面登入一次（之後會記住）。
+ */
+export const BROWSER_DEBUG_PORT = 1221;
 
 // ---------------------------------------------------------------------------
 // 遊戲前端（已實測）
