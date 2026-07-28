@@ -30,9 +30,12 @@ exe 時初始化 —— 那正是這個檔案存在的目的。前提只有一�
 **3. Steam 初始化是渲染層觸發的，不是啟動時**
 
 ```js
-ipcMain.handle('steam:init', () => {
-  try { return greenworks.init(); }
-  catch (error) { app.quit(); }     // ← 失敗才 quit
+ipcMain.handle("steam:init", () => {
+  try {
+    return greenworks.init();
+  } catch (error) {
+    app.quit();
+  } // ← 失敗才 quit
 });
 ```
 
