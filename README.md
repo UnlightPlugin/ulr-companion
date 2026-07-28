@@ -66,6 +66,7 @@ apps/
 docs/
   open-questions.md       開工前要先定案的事
   canonical-json.md       給 ULGG（PHP）實作同一套正規化用
+  release.md              WP-08：打包、自動更新、系統匣設計
 ```
 
 跨 package 直接用 `@ulr/xxx` import，指向原始碼，clone 下來不用先 build。
