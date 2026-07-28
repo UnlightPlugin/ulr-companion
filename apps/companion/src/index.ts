@@ -13,7 +13,7 @@
 
 import { readFileSync } from "node:fs";
 import { loadRulePackage, shortHash, contentHash, assertCostRule } from "@ulr/rule-schema";
-import { DEFAULT_DEBUG_PORT, REQUIRED_LAUNCH_OPTION } from "@ulr/cdp-adapter";
+import { BROWSER_DEBUG_PORT, DEBUG_PORT_SWITCH, DEFAULT_DEBUG_PORT } from "@ulr/cdp-adapter";
 import { API_SCHEMA_VERSION } from "@ulr/api-contract";
 
 function main(argv: string[]): number {
@@ -21,8 +21,9 @@ function main(argv: string[]): number {
   if (path === undefined) {
     console.log("ULR Companion（骨架）");
     console.log(`  API schema 版本 : ${API_SCHEMA_VERSION}`);
-    console.log(`  CDP 埠          : ${DEFAULT_DEBUG_PORT}`);
-    console.log(`  Steam 啟動選項  : ${REQUIRED_LAUNCH_OPTION}`);
+    console.log(`  桌面版 CDP 埠   : ${DEFAULT_DEBUG_PORT}`);
+    console.log(`  網頁版 CDP 埠   : ${BROWSER_DEBUG_PORT}`);
+    console.log(`  啟動參數        : ${DEBUG_PORT_SWITCH}`);
     console.log("\n用法：tsx apps/companion/src/index.ts <規則檔.json 或 .ulrcost.json>");
     return 0;
   }
