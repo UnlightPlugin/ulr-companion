@@ -99,8 +99,8 @@ cc078_L4
 | 能否不 patch 就監聽全部進來的事件  | ✅ `WSClient.onAny`                                                |
 | OK 鈕物件                          | ✅ `MainA` 場景，材質 `ok`，(570, 630)                             |
 | 遊戲怎麼做「不可按」               | 切 frame `"2"` + `input.enabled = false`                           |
-| 對手的 OK 狀態我方收不收得到       | ✅ `okVisibleB` / `okInvisibleB`                                   |
 | 對手動作                           | ✅ `cardclickedB` / `cardrotateB`                                  |
+| 對手按下 OK 我方收不收得到         | ❌ **收不到**，見下方「對手的 OK 狀態不會外洩」                    |
 
 ### 設計輪廓
 

@@ -102,13 +102,34 @@ export const RESULT_EVENTS = ["result", "duel_end", "quest_finish"] as const;
  */
 export const OK_EVENT = "I_am_ok";
 
-/** 伺服器控制兩邊 OK 鈕可用狀態的事件。B 是對手側 —— 對手的 OK 狀態我們也收得到。 */
+/**
+ * 伺服器控制 OK 鈕可用狀態的事件。
+ *
+ * ⚠ B 側**不是**「對手按了 OK」。實測前後文顯示 `okVisibleB` 出現在階段開始
+ * （啟用對手的 OK 鈕）、`okInvisibleB` 出現在 `timerPause` 之後（凍結期間
+ * 雙方 OK 鈕都停用）。它們反映的是階段與凍結狀態。
+ *
+ * **伺服器從不告訴客戶端對手按了 OK** —— 所有 log 裡 `I_am_ok` 出現 90 次
+ * 全部是 →送出，收到 0 次。所以「對手沒開插件時我方也看不到對方 OK」這個
+ * fairplay 性質是協定本身保證的，不是靠自律。
+ *
+ * `okInvisibleA` 會在階段自然結束前約 1.0 秒觸發，可當「伺服器要收了」的
+ * 預告訊號。
+ */
 export const OK_STATE_EVENTS = [
   "okVisibleA",
   "okInvisibleA",
   "okVisibleB",
   "okInvisibleB",
 ] as const;
+
+/**
+ * 階段倒數上限（實測 80.03s / 83.4s，樣本還少）。
+ *
+ * 倒數歸零時是**伺服器**結束階段，客戶端不會自動補送 `I_am_ok`。
+ * 所以插件攔下 OK 之後，一定要在歸零前自己送出，否則等於放棄該回合。
+ */
+export const PHASE_TIMEOUT_SECONDS = { observedMin: 80.0, observedMax: 83.4 } as const;
 
 /** 對手動作。用來在對手一動時自動解除我方的假鎖定。 */
 export const OPPONENT_ACTION_EVENTS = ["cardclickedB", "cardrotateB"] as const;
