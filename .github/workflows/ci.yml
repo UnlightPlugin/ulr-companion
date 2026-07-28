@@ -20,7 +20,9 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20.11"
+          # 刻意跑最低支援版本，這樣「在我機器上可以」的問題會在 CI 就爆出來。
+          # 20.19 是 eslint 依賴要求的下限。
+          node-version: "20.19"
           cache: npm
 
       - run: npm ci
