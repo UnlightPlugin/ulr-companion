@@ -124,12 +124,38 @@ export const OK_STATE_EVENTS = [
 ] as const;
 
 /**
- * 階段倒數上限（實測 80.03s / 83.4s，樣本還少）。
+ * 回合倒數 —— 安全邊際要從這裡算。
  *
- * 倒數歸零時是**伺服器**結束階段，客戶端不會自動補送 `I_am_ok`。
- * 所以插件攔下 OK 之後，一定要在歸零前自己送出，否則等於放棄該回合。
+ * ⚠ 不要用 `timerReset` → `timerstop` 當倒數區間。那是**整個階段**，
+ * 裡面包含好幾個回合加上動畫與非互動空檔（實測有一次 `okVisibleA` 在
+ * `timerReset` 之後 48 秒才出現，那 48 秒根本不能按 OK），量出來會是
+ * 80 秒上下，跟實際可操作時間差很多。
+ *
+ * 真正的倒數是 **`okVisibleA` → `okInvisibleA`**：實測 31.0 秒，
+ * 對應遊戲顯示的 30 秒加上約 1 秒的伺服器回報延遲。
+ *
+ * 歸零時是**伺服器**結束回合，客戶端不會自動補送 `I_am_ok` —— 所以插件
+ * 攔下 OK 之後一定要自己送出，否則等於棄權。
+ *
+ * 不同階段（抽牌／移動／攻擊／防禦）的秒數可能不同，樣本還在累積。
+ * 量測工具：`Desktop\Unlight\拖條量測.py`
  */
-export const PHASE_TIMEOUT_SECONDS = { observedMin: 80.0, observedMax: 83.4 } as const;
+export const OK_WINDOW_SECONDS = {
+  /** okVisibleA → okInvisibleA 的實測值 */
+  observed: 31.0,
+  /** 遊戲畫面顯示的秒數 */
+  displayed: 30,
+  /** 觀測值與顯示值的差，視為伺服器回報延遲 */
+  reportingLagSeconds: 1.0,
+} as const;
+
+/**
+ * 「誤按反悔」窗口：按下 OK 後先本地鎖定幾秒，對手期間有動作就解除，
+ * 沒動作就送出真 OK。第一期只做這個 —— 完整的雙邊方案要側通道。
+ *
+ * ⚠ 若按 OK 時視窗已所剩無幾，必須縮短這個窗口，否則會逾時棄權。
+ */
+export const UNDO_WINDOW_SECONDS = 3;
 
 /** 對手動作。用來在對手一動時自動解除我方的假鎖定。 */
 export const OPPONENT_ACTION_EVENTS = ["cardclickedB", "cardrotateB"] as const;
