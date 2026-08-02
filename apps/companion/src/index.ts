@@ -452,21 +452,35 @@ async function cmdWatch(args: string[]): Promise<number> {
 /** 遊戲沒開就等它開 —— 玩家不會為了插件而先開遊戲。 */
 const CONNECT_RETRY_MS = 2_000;
 
+/** 等待期間每隔這麼多次重試提醒一次（2 秒 × 15 = 30 秒）。 */
+const CONNECT_NAG_EVERY = 15;
+
 /**
  * 一直等到連得上為止。回傳分頁標題。
  *
  * ⚠ 沒有次數上限是刻意的。這支指令的預期用法是「開著它，然後去玩」——
  * 玩家什麼時候開遊戲、開幾次、中途關掉再開，都不該讓插件自己結束。
+ *
+ * ⚠ 但**不能安靜地等**。埠打錯的話症狀會是「跑起來之後什麼都沒發生」，
+ * 而真正的原因（連不上那個埠）只在第一行閃過去。所以每 30 秒把原因重印
+ * 一次，並且把等的是哪個埠講出來。
  */
-async function connectWhenReady(adapter: ReturnType<typeof createCdpAdapter>): Promise<string> {
+async function connectWhenReady(
+  adapter: ReturnType<typeof createCdpAdapter>,
+  port: number,
+): Promise<string> {
   for (let attempt = 1; ; attempt++) {
     try {
       const session = await adapter.connect();
       await adapter.waitForGame();
       return session.title;
     } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
       if (attempt === 1) {
-        console.log(`  等遊戲…（${err instanceof Error ? err.message : String(err)}）`);
+        console.log(`  等遊戲…（${reason}）`);
+      } else if (attempt % CONNECT_NAG_EVERY === 0) {
+        const waited = Math.round((attempt * CONNECT_RETRY_MS) / 1000);
+        console.log(`  還在等 :${port}（已經 ${waited} 秒）—— 埠對嗎？遊戲有帶 debug port 嗎？`);
       }
       await new Promise((r) => setTimeout(r, CONNECT_RETRY_MS));
     }
@@ -488,7 +502,8 @@ async function connectWhenReady(adapter: ReturnType<typeof createCdpAdapter>): P
  * socket 換過了沒（`patch-ok.ts` 的 `arm()`）。
  */
 async function cmdArbiter(args: string[]): Promise<number> {
-  const adapter = createCdpAdapter({ port: parsePort(args) });
+  const port = parsePort(args);
+  const adapter = createCdpAdapter({ port });
   const policyRaw = parseFlag(args, "--policy") ?? "either";
   if (policyRaw !== "either" && policyRaw !== "opponent" && policyRaw !== "never") {
     console.error(`--policy 只能是 either / opponent / never，收到 ${policyRaw}`);
@@ -497,7 +512,7 @@ async function cmdArbiter(args: string[]): Promise<number> {
   const deadline = Number(parseFlag(args, "--deadline") ?? 3);
 
   try {
-    const title = await connectWhenReady(adapter);
+    const title = await connectWhenReady(adapter, port);
     console.log(`✓ 接上「${title}」`);
 
     adapter.onOkPatchReport((r) => {

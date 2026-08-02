@@ -5,6 +5,17 @@
 
 ## 現在能跑的東西
 
+給人用的入口（會自己找客戶端，錯誤不會一閃而過）：
+
+```powershell
+.\tools\arbiter.ps1                # 只有一個客戶端在跑的話自己找
+.\tools\arbiter.ps1 -Port 9334     # 兩個都開著就要指定
+```
+
+雙擊 `tools\arbiter.cmd` 也可以 —— 它會 `pause`，視窗不會帶著錯誤訊息消失。
+
+底下實際跑的是：
+
 ```powershell
 npx tsx apps/companion/src/index.ts arbiter --port 9334 --policy either --deadline 3
 ```
