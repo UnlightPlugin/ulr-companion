@@ -75,7 +75,9 @@ Chromium 的參數變成無法辨識的 Node 選項，直接 exit 9。
 
 ### 陷阱 2：生效的是網頁版 `app.asar`
 
-`resources\app.asar` 有兩種，可以用同目錄的 `換名.bat` 互換：
+`resources\app.asar` 有兩種，靠**互換檔案**切換，一次只有一種生效。沒啟用的那個
+通常被改名留在同一個目錄，但**命名沒有標準**（社群的切換腳本各叫各的），所以程式
+裡一律**只認體積、不認檔名** —— 見 `cdp-adapter` 的 `detectGameInstall()`：
 
 | 版本   | 大小      | 行為                                                     |
 | ------ | --------- | -------------------------------------------------------- |
@@ -99,8 +101,44 @@ Chromium 的參數變成無法辨識的 Node 選項，直接 exit 9。
 Chrome、Edge、Brave 都是 Chromium，都吃 `--remote-debugging-port`。
 
 ```
-chrome.exe --remote-debugging-port=1221 --user-data-dir=<插件自己的 profile>
+chrome.exe --remote-debugging-port=9334 --user-data-dir=<插件自己的 profile>
 ```
+
+**已實作**：`cdp-adapter` 的 `ensureBrowser()`（`src/browser.ts`）。
+`companion web --steamid <id>` 會先呼叫它 —— 埠有人在聽就沿用，沒有就自己開一個。
+
+```
+npx tsx apps/companion/src/index.ts web --steamid <SteamID64>
+    [--port 9334] [--profile <目錄>] [--browser <chrome.exe>]
+```
+
+預設 profile 是 `%USERPROFILE%\ulr-cdp-profile`。
+
+### 這條路完全不經過 Steam
+
+2026-08-02 實測（`web --steamid` → `probe --port 9334`）：
+
+```
+✓ 已開新分頁 https://www.playunlight.online:14018/?steamid=***
+✓ 遊戲的 execution context = 2   window.game 已建立   Phaser 3.87
+```
+
+身分只有網址上的 `steamid`（token 沒有被用到，見 `boot-shell.ts` 開頭），所以：
+
+- **換帳號＝換一個 `--steamid`**，跟 Steam 客戶端登入的是誰無關。
+  Steam 網頁版本身沒有換帳號的路，這裡繞過了整個問題。
+- **不會卡在「正在停止」**。那是 Steam 在等遊戲行程收尾，我們沒讓 Steam 參與。
+  反過來說，Steam 卡在停止中的時候 `steam://rungameid` 會失效 —— 那正是
+  `refreshBundles()` 會失敗、更需要這條備援路徑的時候。
+
+Steam 只剩下**一個**用途：改版後重讀 bundle 檔名。那是每週一次，不是每次開遊戲。
+
+> ⚠ 兩個帳號**同時**開還是不行 —— 伺服器依 IP 擋多重登入（見文末附註）。
+> 這條路解決的是「換」帳號，不是「雙開」。
+
+> ⚠ `web --refresh` 仍然依賴 Steam 把網址交給**這一個**瀏覽器。`openExternal`
+> 走的是系統預設瀏覽器，玩家的預設若是另一個 profile 的 Chrome，遊戲會開在
+> 那邊，`--refresh` 就讀不到（症狀是等到逾時）。
 
 ### `--user-data-dir` 是必要的，不是選配
 
