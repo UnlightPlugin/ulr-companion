@@ -18,11 +18,11 @@
 
 .EXAMPLE
   .\tools\arbiter.ps1
-  自動找出跑著的客戶端。
+  接網頁版（:9334）。
 
 .EXAMPLE
-  .\tools\arbiter.ps1 -Port 9334
-  指定網頁版。兩個客戶端都開著的時候一定要指定。
+  .\tools\arbiter.ps1 -Port 9333
+  改接桌面版。
 
 .EXAMPLE
   .\tools\arbiter.ps1 -Policy opponent -Deadline 5
@@ -30,8 +30,8 @@
 #>
 [CmdletBinding()]
 param(
-  # 桌面版 9333、網頁版 9334。不給就自己找。
-  [int]$Port,
+  # 網頁版 9334（預設）、桌面版 9333。
+  [int]$Port = 9334,
   # either=雙方操作都取消 / opponent=只有對手 / never=都不取消（等同原本的鎖定）
   [ValidateSet("either", "opponent", "never")]
   [string]$Policy = "either",
@@ -67,7 +67,7 @@ function Stop-Here {
 }
 
 # ---------------------------------------------------------------------------
-# 找客戶端
+# 接哪一個客戶端
 # ---------------------------------------------------------------------------
 
 function Test-DebugPort {
@@ -80,26 +80,17 @@ function Test-DebugPort {
   }
 }
 
-if (-not $Port) {
-  Write-Host "找跑著的客戶端…" -ForegroundColor DarkGray
-  $found = @()
-  foreach ($p in 9333, 9334) { if (Test-DebugPort $p) { $found += $p } }
+$which = if ($Port -eq 9333) { "桌面版" } elseif ($Port -eq 9334) { "網頁版" } else { "自訂" }
 
-  if ($found.Count -eq 1) {
-    $Port = $found[0]
-    $which = if ($Port -eq 9333) { "桌面版" } else { "網頁版" }
-    Write-Host "  找到 $which（:$Port）" -ForegroundColor Green
-  } elseif ($found.Count -gt 1) {
-    # 不猜。猜錯的話會對著另一個帳號的客戶端動手。
-    Write-Fail "兩個客戶端都開著（$($found -join '、')），要指定用哪一個" @(
-      "改成：.\tools\arbiter.ps1 -Port 9334"
-    )
-    Stop-Here 1
-  } else {
-    # 遊戲還沒開不是錯誤 —— companion 本來就會等。但要講清楚它在等哪個埠。
-    $Port = 9333
-    Write-Host "  現在沒有客戶端在跑，先用桌面版的 :$Port 等。" -ForegroundColor Yellow
-    Write-Host "  要接網頁版的話請中斷，改用 -Port 9334。" -ForegroundColor Yellow
+# 遊戲還沒開**不是錯誤** —— companion 本來就會等。
+# 但如果要接的那個沒回應、另一個卻在跑，那多半是接錯了：講一句，不擋。
+# （關掉的埠是 connection refused，不會真的等滿 timeout。）
+if (-not (Test-DebugPort $Port)) {
+  $other = if ($Port -eq 9334) { 9333 } else { 9334 }
+  if (Test-DebugPort $other) {
+    $otherName = if ($other -eq 9333) { "桌面版" } else { "網頁版" }
+    Write-Host ":$Port（$which）沒有回應，但 :$other（$otherName）有在跑。" -ForegroundColor Yellow
+    Write-Host "要接那個的話中斷之後改用 -Port $other。" -ForegroundColor Yellow
   }
 }
 
@@ -116,7 +107,7 @@ $cmdArgs = @($entry, "arbiter", "--port", "$Port", "--policy", $Policy, "--deadl
 if ($Seconds) { $cmdArgs += @("--seconds", "$Seconds") }
 
 Write-Host ""
-Write-Host "移動階段仲裁  埠=$Port  策略=$Policy  底線=${Deadline}s" -ForegroundColor Cyan
+Write-Host "移動階段仲裁  $which :$Port  策略=$Policy  底線=${Deadline}s" -ForegroundColor Cyan
 Write-Host "⚠ 這會改變遊戲行為。Ctrl+C 結束並還原。" -ForegroundColor DarkGray
 Write-Host ""
 
