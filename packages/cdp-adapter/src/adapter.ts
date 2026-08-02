@@ -12,6 +12,8 @@
  * （docs/launching.md 的「偵測與降級」第 3 點講的是同一件事。）
  */
 
+import type { GameBundles } from "./boot-shell.js";
+import { BUNDLE_DISCOVERY_EXPRESSION, parseDiscoveredBundles } from "./boot-shell.js";
 import { CdpClient } from "./client.js";
 import { DEFAULT_DEBUG_PORT } from "./constants.js";
 import type { GameExecutionContext } from "./game-context.js";
@@ -26,6 +28,11 @@ import type { CdpTransport } from "./protocol.js";
 import type { GamePageSession } from "./session.js";
 import { attachToGamePage } from "./session.js";
 import { discoverDebuggerUrl, WebSocketTransport } from "./transport.js";
+import type { WsWatchReport } from "./ws-events.js";
+import { buildWsWatchScript, isWsWatchReport } from "./ws-events.js";
+import type { PageBridge } from "./arbiter-runner.js";
+import type { OkPatchReport } from "./patch-ok.js";
+import { buildOkPatchScript, isOkPatchReport, OK_PATCH_UNINSTALL_EXPRESSION } from "./patch-ok.js";
 
 /**
  * 頁面用來把資料送回 Node 的全域函式名。
@@ -63,6 +70,17 @@ export class NotConnectedError extends Error {
   }
 }
 
+/** 發給訂閱者。§9.1：訂閱者出錯不得讓插件或遊戲崩潰，所以每個都各自包起來。 */
+function dispatch<T>(handlers: ReadonlySet<(report: T) => void>, report: T): void {
+  for (const handler of [...handlers]) {
+    try {
+      handler(report);
+    } catch {
+      // 故意吞掉。
+    }
+  }
+}
+
 export class CdpAdapter {
   #options: CdpAdapterOptions;
   #client: CdpClient | null = null;
@@ -70,6 +88,8 @@ export class CdpAdapter {
   #tracker: ExecutionContextTracker | null = null;
   #context: GameExecutionContext | null = null;
   #reportHandlers = new Set<(report: CostPatchReport) => void>();
+  #wsHandlers = new Set<(report: WsWatchReport) => void>();
+  #okHandlers = new Set<(report: OkPatchReport) => void>();
 
   constructor(options: CdpAdapterOptions = {}) {
     this.#options = options;
@@ -180,6 +200,22 @@ export class CdpAdapter {
   }
 
   /**
+   * 讀出這個客戶端正在跑的三個 webpack bundle 檔名。
+   *
+   * 這是「免 Steam 啟動」不會因為遊戲改版而壞掉的關鍵：檔名帶 content hash，
+   * 每次改版都會變。上游那支 Greasyfork 腳本把檔名寫死，所以得靠作者每週發
+   * 新版；我們改成從**玩家自己跑著的客戶端**讀，正常從 Steam 開一次遊戲就
+   * 自己更新了。
+   *
+   * 要在正常 Steam 流程開起來的分頁上呼叫 —— 免 Steam 開的分頁是我們自己
+   * 用舊檔名重建的，從它身上讀只會讀回同一份舊資料。
+   */
+  async discoverBundles(): Promise<GameBundles> {
+    const raw = await this.evaluate<string>(BUNDLE_DISCOVERY_EXPRESSION);
+    return parseDiscoveredBundles(raw);
+  }
+
+  /**
    * 裝上自訂 COST。
    *
    * 鍵必須是 cc_asset 的 `filename`（`cc078_04` / `cc078_r04`），
@@ -235,12 +271,109 @@ export class CdpAdapter {
     return () => this.#reportHandlers.delete(handler);
   }
 
+  /**
+   * 開始監看 WebSocket 事件（WP-09）。
+   *
+   * ⚠ 跟 `installCostOverrides()` 不同，這支**不需要 reload** —— WSClient 的
+   * 原型與實例在遊戲跑起來之後一直都在，用 `Runtime.evaluate` 隨時掛得上去。
+   * 所以玩家正在對戰中也能接上來看，不必先把人踢出戰鬥。
+   *
+   * 回傳頁面給的狀態：`ok`（新裝好）／`updated`（本來就掛著，換了設定）／
+   * `no-socket`（還沒進遊戲或連線還沒建好，等一下再試）。
+   *
+   * ⚠ `updated` 只換**設定**，不換程式碼。改了 `ws-events.ts` 的邏輯要重載
+   * 遊戲才會生效 —— 症狀是「測試綠了但實際跑起來沒反應」。
+   * （`installOkPatch()` 沒有這個問題，它會先把舊 patch 拆掉再重裝。）
+   *
+   * §12：預設只收到事件名、參數形狀與時間戳。`valueEvents` 清單上的事件
+   * 才會帶值，而且**超長字串永遠只有長度** —— 界線在 `ws-events.ts` 的
+   * `shapeOf()` 與 `VALUE_MAX_STRING_LENGTH`。
+   */
+  async installWsWatch(
+    options: { valueEvents?: readonly string[] } = {},
+  ): Promise<"ok" | "updated" | "no-socket"> {
+    const source = buildWsWatchScript({
+      bindingName: REPORT_BINDING_NAME,
+      ...(options.valueEvents !== undefined ? { valueEvents: options.valueEvents } : {}),
+    });
+    const status = await this.evaluate<string>(source);
+    if (status === "ok" || status === "updated" || status === "no-socket") return status;
+    throw new Error(`監看腳本回傳了預期外的狀態：${String(status)}`);
+  }
+
+  /** 訂閱 WebSocket 事件。回傳的函式呼叫一次即取消訂閱。 */
+  onWsEvent(handler: (report: WsWatchReport) => void): () => void {
+    this.#wsHandlers.add(handler);
+    return () => this.#wsHandlers.delete(handler);
+  }
+
+  /**
+   * 裝上 `I_am_ok` 的攔截（WP-12）。
+   *
+   * ⚠ **這會改變遊戲行為** —— 玩家按下 OK 之後不會立刻送出。裝上去的同時
+   * 頁面會自己啟動失效保護（見 `patch-ok.ts`），所以就算這條 CDP 連線之後
+   * 斷掉，攔到的呼叫仍然會被送出去，玩家不會逾時棄權。
+   *
+   * 跟 `installWsWatch()` 一樣不需要 reload，而且**不需要先進對戰**：
+   *
+   * - `ok` —— 已經掛到 socket 上了
+   * - `waiting` —— 還沒進遊戲／還在大廳，頁面會自己補掛（不是錯誤）
+   *
+   * ⚠ **裝了就一定要有人餵心跳**（`ArbiterRunner` 的 tick 在做這件事），
+   * 否則頁面 3 秒後就會停止攔截。這是刻意的 —— 見 `patch-ok.ts` 開頭。
+   */
+  async installOkPatch(
+    options: { failsafeMs?: number; staleMs?: number } = {},
+  ): Promise<"ok" | "waiting"> {
+    const source = buildOkPatchScript({
+      bindingName: REPORT_BINDING_NAME,
+      ...(options.failsafeMs !== undefined ? { failsafeMs: options.failsafeMs } : {}),
+      ...(options.staleMs !== undefined ? { staleMs: options.staleMs } : {}),
+    });
+    const status = await this.evaluate<string>(source);
+    if (status === "ok" || status === "waiting") return status;
+    throw new Error(`OK 攔截腳本回傳了預期外的狀態：${String(status)}`);
+  }
+
+  /**
+   * 拆掉 `I_am_ok` 的攔截。
+   *
+   * ⚠ **結束前一定要跑這支。** 2026-08-03 實測：companion 結束時只
+   * `disconnect()`，頁面上的 patch 原封不動留著，於是玩家每個移動階段都被
+   * 壓滿 25 秒才送出、而且按第二次也取消不了（取消要 Node 下指令）。
+   * 心跳讓這件事不再是災難（3 秒後就停止攔截），但留著孤兒沒有任何好處。
+   *
+   * 拆的時候會**先把壓著的呼叫送出去**，不會害玩家棄權。
+   */
+  async uninstallOkPatch(): Promise<"uninstalled" | "not-installed"> {
+    const status = await this.evaluate<string>(OK_PATCH_UNINSTALL_EXPRESSION);
+    if (status === "uninstalled" || status === "not-installed") return status;
+    throw new Error(`拆 OK 攔截時回傳了預期外的狀態：${String(status)}`);
+  }
+
+  /** 訂閱 OK 攔截的回報。 */
+  onOkPatchReport(handler: (report: OkPatchReport) => void): () => void {
+    this.#okHandlers.add(handler);
+    return () => this.#okHandlers.delete(handler);
+  }
+
+  /** 把這個 adapter 當成 `ArbiterRunner` 的頁面橋接。 */
+  asPageBridge(): PageBridge {
+    return {
+      evaluate: <T>(expression: string): Promise<T> => this.evaluate<T>(expression),
+      onReport: (handler: (report: OkPatchReport) => void): (() => void) =>
+        this.onOkPatchReport(handler),
+    };
+  }
+
   async disconnect(): Promise<void> {
     this.#tracker?.dispose();
     this.#tracker = null;
     this.#context = null;
     this.#session = null;
     this.#reportHandlers.clear();
+    this.#wsHandlers.clear();
+    this.#okHandlers.clear();
     this.#client?.close();
     this.#client = null;
     await Promise.resolve();
@@ -258,14 +391,18 @@ export class CdpAdapter {
       // 頁面上可能有別人的腳本也在呼叫同名 binding。不是我們的就忽略。
       return;
     }
-    if (!isCostPatchReport(parsed)) return;
 
-    for (const handler of [...this.#reportHandlers]) {
-      try {
-        handler(parsed);
-      } catch {
-        // §9.1：訂閱者出錯不得讓插件或遊戲崩潰。
-      }
+    // 兩種回報共用同一個 binding，用 type 分流。
+    if (isCostPatchReport(parsed)) {
+      dispatch(this.#reportHandlers, parsed);
+      return;
+    }
+    if (isWsWatchReport(parsed)) {
+      dispatch(this.#wsHandlers, parsed);
+      return;
+    }
+    if (isOkPatchReport(parsed)) {
+      dispatch(this.#okHandlers, parsed);
     }
   }
 }

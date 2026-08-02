@@ -75,5 +75,131 @@ export type {
   CostPatchReport,
 } from "./patch-cost.js";
 
+export {
+  BUNDLE_DISCOVERY_EXPRESSION,
+  buildBookmarklet,
+  buildBookmarkUrl,
+  buildBootShellScript,
+  AUTH_DATASET_KEY,
+  buildExtensionContentScript,
+  buildExtensionFiles,
+  buildExtensionReadme,
+  BUNDLES_DATASET_KEY,
+  InvalidBundleError,
+  isCompleteBundleSet,
+  parseDiscoveredBundles,
+  STORAGE_KEY,
+} from "./boot-shell.js";
+export type {
+  BootShellOptions,
+  BundlesSource,
+  ExtensionOptions,
+  GameBundles,
+} from "./boot-shell.js";
+
+export { detectGameInstall } from "./game-install.js";
+export type { ClientMode, GameInstall } from "./game-install.js";
+
+export {
+  BrowserNotFoundError,
+  BrowserPortTimeoutError,
+  buildBrowserArgs,
+  DEFAULT_BROWSER_POLL_MS,
+  DEFAULT_BROWSER_PROFILE_DIR,
+  DEFAULT_BROWSER_READY_TIMEOUT_MS,
+  ensureBrowser,
+  findBrowser,
+  isDebugPortLive,
+} from "./browser.js";
+export type {
+  BrowserArgsOptions,
+  FoundBrowser,
+  LaunchBrowserOptions,
+  LaunchBrowserResult,
+} from "./browser.js";
+
+export {
+  BundlesNotFoundError,
+  DEFAULT_LAUNCH_POLL_MS,
+  DesktopClientActiveError,
+  DEFAULT_LAUNCH_TIMEOUT_MS,
+  discoverBundlesAcrossPages,
+  launchGameViaSteam,
+  openGameTab,
+  refreshBundles,
+  SteamLaunchUnsupportedError,
+} from "./boot.js";
+export type {
+  DiscoverBundlesResult,
+  OpenGameTabOptions,
+  OpenGameTabResult,
+  RefreshBundlesOptions,
+} from "./boot.js";
+
+export {
+  buildWsWatchScript,
+  DEFAULT_MAX_KEYS,
+  DEFAULT_RESCAN_INTERVAL_MS,
+  DEFAULT_VALUE_EVENTS,
+  isWsWatchReport,
+  VALUE_MAX_DEPTH,
+  VALUE_MAX_STRING_LENGTH,
+} from "./ws-events.js";
+export type {
+  WsDirection,
+  WsEventReport,
+  WsWatchError,
+  WsWatchInstalled,
+  WsWatchOptions,
+  WsWatchReport,
+} from "./ws-events.js";
+
+export {
+  ArbiterRunner,
+  commandsFor,
+  DEFAULT_TICK_INTERVAL_MS,
+  translate,
+} from "./arbiter-runner.js";
+export type { PageBridge, PageCommand, RunnerOptions } from "./arbiter-runner.js";
+
+export {
+  buildOkPatchScript,
+  DEFAULT_FAILSAFE_MS,
+  DEFAULT_STALE_MS,
+  isOkPatchReport,
+  OK_PATCH_GLOBAL,
+  OK_PATCH_UNINSTALL_EXPRESSION,
+} from "./patch-ok.js";
+export type {
+  OkIntercepted,
+  OkPressedAgain,
+  OkPatchError,
+  OkPatchEvent,
+  OkPatchInstalled,
+  OkPatchOptions,
+  OkPatchRearmed,
+  OkPatchReport,
+  OkPatchTick,
+  OkReleased,
+} from "./patch-ok.js";
+
+export {
+  initialState,
+  isOperation,
+  resetForNextPhase,
+  resetForNextTurn,
+  step,
+} from "./arbitration.js";
+export type {
+  ArbiterAction,
+  ArbiterConfig,
+  ArbiterInput,
+  ArbiterState,
+  CancelPolicy,
+  CardId,
+  SendReason,
+  StepResult,
+} from "./arbitration.js";
+
 export { CdpAdapter, createCdpAdapter, NotConnectedError, REPORT_BINDING_NAME } from "./adapter.js";
 export type { CdpAdapterOptions, CostPatchInstallation } from "./adapter.js";
