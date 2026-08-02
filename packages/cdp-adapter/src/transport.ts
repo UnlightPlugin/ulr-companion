@@ -37,7 +37,9 @@ export class DebuggerNotFoundError extends Error {
     super(
       `連不上 127.0.0.1:${port} 的 debug port（${cause}）。` +
         `檢查順序：spawn 時有沒有清掉 ELECTRON_RUN_AS_NODE → ` +
-        `app.asar 是不是視窗版（153KB 那個是網頁版，開完瀏覽器就自己退出）→ port 有沒有被佔。`,
+        `app.asar 是不是視窗版（153KB 那個是網頁版，開完瀏覽器就自己退出）→ port 有沒有被佔 → ` +
+        `這個埠有沒有落在 Windows 的保留範圍（netsh interface ipv4 show excludedportrange protocol=tcp）。` +
+        `最後那項的症狀特別像「參數被忽略」：瀏覽器照常開，但完全不會產生 DevToolsActivePort。`,
     );
   }
 }
