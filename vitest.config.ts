@@ -11,6 +11,8 @@ export default defineConfig({
       "@ulr/api-contract": r("./packages/api-contract/src/index.ts"),
       "@ulr/cost-engine": r("./packages/cost-engine/src/index.ts"),
       "@ulr/cdp-adapter": r("./packages/cdp-adapter/src/index.ts"),
+      "@ulr/arbiter-link": r("./packages/arbiter-link/src/index.ts"),
+      "@ulr/arbiter-engine": r("./packages/arbiter-engine/src/index.ts"),
     },
   },
   test: {

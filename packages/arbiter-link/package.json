@@ -1,0 +1,15 @@
+{
+  "name": "@ulr/arbiter-link",
+  "version": "0.0.0",
+  "private": true,
+  "description": "WP-15：移動階段仲裁的側通道 —— 中間人協定、本機 broker、可換傳輸的客戶端。",
+  "license": "MIT",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "ws": "^8.21.1"
+  }
+}
