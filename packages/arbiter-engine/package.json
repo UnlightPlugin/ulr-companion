@@ -1,0 +1,16 @@
+{
+  "name": "@ulr/arbiter-engine",
+  "version": "0.0.0",
+  "private": true,
+  "description": "WP-15：把 CDP、仲裁與側通道接成一個「開著它去玩」的長命物件。CLI 與托盤共用同一份。",
+  "license": "MIT",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@ulr/arbiter-link": "*",
+    "@ulr/cdp-adapter": "*"
+  }
+}
