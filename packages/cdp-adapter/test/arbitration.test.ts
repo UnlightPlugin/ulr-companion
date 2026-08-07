@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ArbiterConfig, ArbiterInput, ArbiterState } from "../src/arbitration.js";
-import { initialState, resetForNextPhase, step } from "../src/arbitration.js";
+import { initialState, resetAfterSend, resetForNextPhase, step } from "../src/arbitration.js";
 
 const BASE: ArbiterConfig = { seat: "A", policy: "either", deadlineSeconds: 3 };
 
@@ -30,7 +30,7 @@ describe("不變量 1：硬底線優先於一切", () => {
       { type: "press-ok" },
       { type: "tick", remainingSeconds: 3 },
     ]);
-    expect(sent(actions)).toEqual([{ type: "send-ok", reason: "deadline" }]);
+    expect(sent(actions)).toEqual([{ type: "send-ok", reason: "deadline", held: true }]);
     expect(state.committed).toBe(true);
   });
 
@@ -181,7 +181,7 @@ describe("準備的開關", () => {
 
   it("對手先好、我方後按 → 立刻放行", () => {
     const { actions } = run(BASE, [{ type: "opponent-ready", ready: true }, { type: "press-ok" }]);
-    expect(sent(actions)).toEqual([{ type: "send-ok", reason: "both-ready" }]);
+    expect(sent(actions)).toEqual([{ type: "send-ok", reason: "both-ready", held: true }]);
   });
 
   it("對手好了但我方還沒按 → 什麼都不做", () => {
@@ -212,7 +212,7 @@ describe("沒有側通道時（對手沒插件）", () => {
       { type: "tick", remainingSeconds: 10 },
       { type: "tick", remainingSeconds: 2.5 },
     ]);
-    expect(sent(actions)).toEqual([{ type: "send-ok", reason: "deadline" }]);
+    expect(sent(actions)).toEqual([{ type: "send-ok", reason: "deadline", held: true }]);
     expect(state.committed).toBe(true);
   });
 });
@@ -242,5 +242,108 @@ describe("move_select 預設不算操作", () => {
   it("打開選項後才取消", () => {
     const c: ArbiterConfig = { ...BASE, moveSelectCounts: true };
     expect(run(c, [{ type: "press-ok" }, ms]).state.ready).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WP-15：約定秒數強制提早結束
+// ---------------------------------------------------------------------------
+
+/** 約定 15 秒 = 剩 15 秒時強制結束（30 − 15）。 */
+const CAP15: ArbiterConfig = { ...BASE, capSeconds: 15 };
+
+describe("約定秒數：把 30 秒的階段縮成雙方講好的長度", () => {
+  it("⚠ 玩家根本沒按 OK 也照送 —— 那正是「縮短階段」的意思", () => {
+    const { actions, state } = run(CAP15, [{ type: "tick", remainingSeconds: 15 }]);
+    expect(sent(actions)).toEqual([{ type: "send-ok", reason: "agreed-cap", held: false }]);
+    expect(state.committed).toBe(true);
+  });
+
+  it("玩家已經按了就是重放，不是替他按", () => {
+    const { actions } = run(CAP15, [{ type: "press-ok" }, { type: "tick", remainingSeconds: 15 }]);
+    expect(sent(actions)).toEqual([{ type: "send-ok", reason: "agreed-cap", held: true }]);
+  });
+
+  it("還沒到門檻就什麼都不做", () => {
+    const { actions } = run(CAP15, [{ type: "tick", remainingSeconds: 15.5 }]);
+    expect(actions).toEqual([]);
+  });
+
+  it("觸發時要通知對手，讓兩邊同一瞬間收手", () => {
+    const { actions } = run(CAP15, [{ type: "tick", remainingSeconds: 14 }]);
+    expect(actions).toContainEqual({ type: "announce-force-end" });
+  });
+
+  it("capSeconds 是 null（沒配對到對手）就完全不觸發", () => {
+    const { actions } = run({ ...BASE, capSeconds: null }, [
+      { type: "tick", remainingSeconds: 0.5 },
+    ]);
+    expect(sent(actions)).toEqual([]);
+  });
+
+  it("⚠ 硬底線排在約定秒數前面 —— 它是安全機制", () => {
+    // 兩條同時成立時，送出的理由必須是 deadline：那條是「不讓玩家棄權」，
+    // 出錯的代價比「階段沒有準時結束」大得多。
+    const { actions } = run({ ...CAP15, capSeconds: 30 }, [
+      { type: "press-ok" },
+      { type: "tick", remainingSeconds: 2 },
+    ]);
+    expect(sent(actions)).toEqual([{ type: "send-ok", reason: "deadline", held: true }]);
+  });
+
+  it("phaseTotalSeconds 可以換 —— 門檻是 total − cap", () => {
+    const config: ArbiterConfig = { ...BASE, capSeconds: 10, phaseTotalSeconds: 40 };
+    expect(run(config, [{ type: "tick", remainingSeconds: 31 }]).actions).toEqual([]);
+    expect(sent(run(config, [{ type: "tick", remainingSeconds: 30 }]).actions)).toHaveLength(1);
+  });
+});
+
+describe("⚠ 送出之後不能在同一個階段再送一次", () => {
+  it("resetAfterSend 之後約定秒數不會再觸發", () => {
+    // 這是 `sent` 這個欄位存在的唯一理由。`committed` 送出即清（否則玩家的
+    // 第二次按下會被忽略，坑 #5），而約定秒數那條路不看 ready —— 少了 `sent`
+    // 就會每 250ms 再「強制結束」一次。
+    const after = resetAfterSend(run(CAP15, [{ type: "tick", remainingSeconds: 15 }]).state);
+    expect(after.committed).toBe(false);
+    expect(after.sent).toBe(true);
+    expect(run(CAP15, [{ type: "tick", remainingSeconds: 14 }], after).actions).toEqual([]);
+  });
+
+  it("但玩家的第二次按下仍然要處理得了", () => {
+    const after = resetAfterSend(run(CAP15, [{ type: "tick", remainingSeconds: 15 }]).state);
+    const { state } = run(CAP15, [{ type: "press-ok" }], after);
+    expect(state.ready).toBe(true);
+  });
+
+  it("換階段就整個清乾淨", () => {
+    const after = resetForNextPhase(
+      resetAfterSend(run(CAP15, [{ type: "tick", remainingSeconds: 15 }]).state),
+    );
+    expect(after.sent).toBe(false);
+    expect(sent(run(CAP15, [{ type: "tick", remainingSeconds: 15 }], after).actions)).toHaveLength(
+      1,
+    );
+  });
+});
+
+describe("對手那邊的門檻先到", () => {
+  it("跟著收手，而且**不再回頭通知他**（否則會互相轉發）", () => {
+    const { actions, state } = run(CAP15, [{ type: "peer-force-end" }]);
+    expect(actions).toEqual([{ type: "send-ok", reason: "peer-cap", held: false }]);
+    expect(state.committed).toBe(true);
+  });
+
+  it("已經送過就忽略", () => {
+    const after = resetAfterSend(initialState());
+    expect(run(CAP15, [{ type: "peer-force-end" }], after).actions).toEqual([]);
+  });
+
+  it("已經 commit 也忽略（不變量 2）", () => {
+    const { actions } = run(CAP15, [
+      { type: "press-ok" },
+      { type: "tick", remainingSeconds: 3 },
+      { type: "peer-force-end" },
+    ]);
+    expect(sent(actions)).toHaveLength(1);
   });
 });

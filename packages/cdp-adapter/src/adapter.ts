@@ -32,7 +32,19 @@ import type { WsWatchReport } from "./ws-events.js";
 import { buildWsWatchScript, isWsWatchReport } from "./ws-events.js";
 import type { PageBridge } from "./arbiter-runner.js";
 import type { OkPatchReport } from "./patch-ok.js";
-import { buildOkPatchScript, isOkPatchReport, OK_PATCH_UNINSTALL_EXPRESSION } from "./patch-ok.js";
+import {
+  buildOkPatchScript,
+  isOkPatchReport,
+  OK_PATCH_GLOBAL,
+  OK_PATCH_UNINSTALL_EXPRESSION,
+} from "./patch-ok.js";
+import type { SpeedPatchReport } from "./patch-speed.js";
+import {
+  buildSpeedPatchScript,
+  isSpeedPatchReport,
+  SPEED_PATCH_RENEW_EXPRESSION,
+  SPEED_PATCH_UNINSTALL_EXPRESSION,
+} from "./patch-speed.js";
 
 /**
  * 頁面用來把資料送回 Node 的全域函式名。
@@ -90,6 +102,8 @@ export class CdpAdapter {
   #reportHandlers = new Set<(report: CostPatchReport) => void>();
   #wsHandlers = new Set<(report: WsWatchReport) => void>();
   #okHandlers = new Set<(report: OkPatchReport) => void>();
+  #speedHandlers = new Set<(report: SpeedPatchReport) => void>();
+  #closeHandlers = new Set<(reason: string) => void>();
 
   constructor(options: CdpAdapterOptions = {}) {
     this.#options = options;
@@ -110,6 +124,16 @@ export class CdpAdapter {
       this.#options.transportFactory !== undefined
         ? await this.#options.transportFactory(port)
         : await WebSocketTransport.connect(await discoverDebuggerUrl(port));
+
+    // ⚠ 玩家關掉遊戲再開，是**新的** Electron／瀏覽器實例：新的 debugger URL、
+    // 新的 target、新的 execution context。舊的 contextId 留著會讓重連後每次
+    // evaluate 都撞 "Session with given id not found"。
+    this.#context = null;
+
+    transport.onClose((reason) => {
+      this.#context = null;
+      dispatch(this.#closeHandlers, reason);
+    });
 
     const client = new CdpClient(transport, {
       ...(this.#options.commandTimeoutMs !== undefined
@@ -265,6 +289,19 @@ export class CdpAdapter {
     await client.send("Page.reload", undefined, session.sessionId);
   }
 
+  /**
+   * 連線斷掉時通知。回傳的函式呼叫一次即取消訂閱。
+   *
+   * ⚠ 長時間掛著的功能（例如仲裁）**一定要接這個**。玩家關掉遊戲再開是
+   * 家常便飯，而症狀不是「插件報錯」而是「插件安靜地不再作用」——
+   * 每次 evaluate 都拿到 `Session with given id not found`，然後就沒了。
+   * 要玩家自己發現並重跑插件是不合理的。
+   */
+  onDisconnect(handler: (reason: string) => void): () => void {
+    this.#closeHandlers.add(handler);
+    return () => this.#closeHandlers.delete(handler);
+  }
+
   /** 訂閱注入腳本回報的結果。回傳的函式呼叫一次即取消訂閱。 */
   onCostPatchReport(handler: (report: CostPatchReport) => void): () => void {
     this.#reportHandlers.add(handler);
@@ -323,16 +360,43 @@ export class CdpAdapter {
    * 否則頁面 3 秒後就會停止攔截。這是刻意的 —— 見 `patch-ok.ts` 開頭。
    */
   async installOkPatch(
-    options: { failsafeMs?: number; staleMs?: number } = {},
+    options: {
+      failsafeMs?: number;
+      staleMs?: number;
+      hold?: boolean;
+      /** 準備中的染色。`null` = 不染色（官方原本的樣子），也是預設。 */
+      readyTint?: number | null;
+    } = {},
   ): Promise<"ok" | "waiting"> {
     const source = buildOkPatchScript({
       bindingName: REPORT_BINDING_NAME,
       ...(options.failsafeMs !== undefined ? { failsafeMs: options.failsafeMs } : {}),
       ...(options.staleMs !== undefined ? { staleMs: options.staleMs } : {}),
+      ...(options.hold !== undefined ? { hold: options.hold } : {}),
+      ...(options.readyTint !== undefined ? { readyTint: options.readyTint } : {}),
     });
     const status = await this.evaluate<string>(source);
     if (status === "ok" || status === "waiting") return status;
     throw new Error(`OK 攔截腳本回傳了預期外的狀態：${String(status)}`);
+  }
+
+  /**
+   * 換準備中的染色，不重裝 patch。
+   *
+   * ⚠ **一定要走這條，不要為了改顏色重裝。** `installOkPatch()` 會先拆再裝，
+   * 而拆的時候會把正壓著的 `I_am_ok` 送出去 —— 玩家只是在設定裡挑了個顏色，
+   * 卻讓他這回合的 OK 定案了。
+   */
+  async setReadyTint(tint: number | null): Promise<number | null> {
+    return this.evaluate<number | null>(
+      `(function () {
+        try {
+          var A = window.${OK_PATCH_GLOBAL};
+          if (!A || typeof A.setReadyTint !== "function") return null;
+          return A.setReadyTint(${tint === null ? "null" : String(Math.trunc(tint))});
+        } catch (e) { return null; }
+      })()`,
+    );
   }
 
   /**
@@ -357,6 +421,70 @@ export class CdpAdapter {
     return () => this.#okHandlers.delete(handler);
   }
 
+  /**
+   * 裝上演出加速（WP-14）。
+   *
+   * 跟 `installWsWatch()` / `installOkPatch()` 一樣不需要 reload，對戰中也能
+   * 接上；還沒進遊戲也裝得起來（回 `waiting`），頁面每 200ms 自己補上。
+   *
+   * ⚠ **只加速 tween 與 sprite 動畫，不碰 `scene.time`。** 倒數計時器住在
+   * `scene.time` 裡，加速它會讓畫面上的 TIME 跑快，而 WP-12 的硬底線讀的正是
+   * 那個數字 —— 兩個功能各自都對，合起來會害玩家被強制提早送出 `I_am_ok`。
+   * 理由與實測見 `patch-speed.ts` 檔頭。
+   *
+   * ⚠ 收益的期望值要講實話：實測約 **1 分鐘／場**（省的是決策窗開頭被殘留
+   * 動畫擋住的那 75 秒），不是「對戰快一半」。伺服器排程的部分動不了。
+   */
+  async installSpeedPatch(
+    options: { factor?: number; leaseMs?: number } = {},
+  ): Promise<"ok" | "waiting"> {
+    const source = buildSpeedPatchScript({
+      bindingName: REPORT_BINDING_NAME,
+      ...(options.factor !== undefined ? { factor: options.factor } : {}),
+      // ⚠ 一定要往下傳。漏掉的話呼叫端指定的租約會被安靜地換成預設值 ——
+      // 而症狀是「測試裡設 3 秒過期，實際等 3 秒卻沒過期」，看起來像租約壞了。
+      ...(options.leaseMs !== undefined ? { leaseMs: options.leaseMs } : {}),
+    });
+    const status = await this.evaluate<string>(source);
+    if (status === "ok" || status === "waiting") return status;
+    throw new Error(`加速腳本回傳了預期外的狀態：${String(status)}`);
+  }
+
+  /**
+   * 拆掉演出加速，把 `timeScale` 全部還原成 1。
+   *
+   * ⚠ 結束前一定要跑。留著孤兒的話玩家會一直在加速狀態，而且**沒有任何 UI
+   * 告訴他**（跟 patch-ok 的孤兒不同，這個不會痛，只會讓人以為遊戲本來就這樣，
+   * 之後回報「動畫怎麼變快了」而查不出原因）。
+   *
+   * 正常關閉走這條。**插件當掉時走的是租約**（`renewSpeedLease`）——
+   * 那條路不需要任何人還活著。
+   */
+  async uninstallSpeedPatch(): Promise<"uninstalled" | "not-installed"> {
+    const status = await this.evaluate<string>(SPEED_PATCH_UNINSTALL_EXPRESSION);
+    if (status === "uninstalled" || status === "not-installed") return status;
+    throw new Error(`拆加速時回傳了預期外的狀態：${String(status)}`);
+  }
+
+  /**
+   * 續一次租約 —— 「插件還活著」的唯一證明。
+   *
+   * 回 `not-installed` 代表頁面上那份不見了（多半是玩家重載過遊戲），
+   * 呼叫的人要重裝。**這個回傳值不能忽略**，否則症狀是「重載之後加速再也
+   * 沒回來」，而且完全沒有錯誤訊息。
+   */
+  async renewSpeedLease(): Promise<"renewed" | "not-installed"> {
+    const status = await this.evaluate<string>(SPEED_PATCH_RENEW_EXPRESSION);
+    if (status === "renewed" || status === "not-installed") return status;
+    throw new Error(`續約時回傳了預期外的狀態：${String(status)}`);
+  }
+
+  /** 訂閱加速的回報。 */
+  onSpeedPatchReport(handler: (report: SpeedPatchReport) => void): () => void {
+    this.#speedHandlers.add(handler);
+    return () => this.#speedHandlers.delete(handler);
+  }
+
   /** 把這個 adapter 當成 `ArbiterRunner` 的頁面橋接。 */
   asPageBridge(): PageBridge {
     return {
@@ -374,6 +502,8 @@ export class CdpAdapter {
     this.#reportHandlers.clear();
     this.#wsHandlers.clear();
     this.#okHandlers.clear();
+    this.#speedHandlers.clear();
+    this.#closeHandlers.clear();
     this.#client?.close();
     this.#client = null;
     await Promise.resolve();
@@ -403,6 +533,10 @@ export class CdpAdapter {
     }
     if (isOkPatchReport(parsed)) {
       dispatch(this.#okHandlers, parsed);
+      return;
+    }
+    if (isSpeedPatchReport(parsed)) {
+      dispatch(this.#speedHandlers, parsed);
     }
   }
 }

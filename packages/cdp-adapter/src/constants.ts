@@ -322,6 +322,53 @@ export const TIMER_DISPLAY = {
 export const SCENE_NAMING_NOTE =
   "場景名的 A 永遠是本地玩家（相對），事件名的 A 是固定座位（絕對）。";
 
+// ---------------------------------------------------------------------------
+// 聖水 + 麻痺（WP-15 的「準備時間縮減」修正項，2026-08-06 雙開實測定位）
+// ---------------------------------------------------------------------------
+
+/**
+ * 行動卡定義表在 Phaser JSON 快取裡的鍵。
+ *
+ * ⚠ **是 `event_info` 不是 `event_asset`。** `event_asset` 是**材質**的鍵，
+ * `event_info` 才是那份資料，而且它的形狀是 `{ frames: [...] }` 不是裸陣列。
+ * battle-events.md 先前寫的是 `event_asset.json`，那是指伺服器上的檔名 ——
+ * 執行期在 `game.cache.json` 裡取不到那個鍵（實測回 undefined）。
+ *
+ * 110 筆，`frames[n]` 的 `n` **就是材質的 frame 名**（材質也剛好 110 格，
+ * 名字是 "0"…"109"）。實測對照：0=劍1卡、21=槍1卡、42=防禦1卡、
+ * 91=聖水、94=聖杯卡、95=毒杯卡。
+ */
+export const EVENT_INFO_JSON_KEY = "event_info";
+
+/** 手牌 sprite 用的材質鍵。frame 名是數字字串，對到 `event_info.frames` 的索引。 */
+export const HAND_TEXTURE_KEY = "event_asset";
+
+/**
+ * 手牌陣列在 `MainA` 上的欄位名（10 個位置）。
+ *
+ * 實測每個位置是一個小陣列（外框、花色圖示、數字…），其中帶
+ * `HAND_TEXTURE_KEY` 材質的那個 sprite 的 frame 就是卡片種類。
+ *
+ * ⚠ **不要只走顯示清單。** 手牌會分頁（`MainA.page` / `currentPage` /
+ * `arrow_left` / `arrow_right`），沒翻到的那頁在畫面上根本不存在，
+ * 只看畫面會漏掉一半的手牌。
+ */
+export const HAND_ARRAY_FIELD = "arr1";
+
+/**
+ * 「拖時間」型的狀態效果（`state_info` 的鍵）。V1 移動規則第 3 條要的三個。
+ *
+ * | 鍵      | 說明                 |
+ * | ------- | -------------------- |
+ * | `mahi`  | 麻痺 —— 移動值變為 0 |
+ * | `movD`  | 降低移動             |
+ * | `jikai` | 自壞（回合數在訊息模板的 `__POINT__`）|
+ *
+ * 事件形狀：`state("mahi_2", "A", "B")` —— `<鍵>_<持續回合數>`、誰中了、
+ * 誰施加的，後兩個是**絕對座位**。
+ */
+export const STALL_STATE_KEYS = ["mahi", "movD", "jikai"] as const;
+
 /**
  * 「誤按反悔」窗口：按下 OK 後先本地鎖定幾秒，對手期間有動作就解除，
  * 沒動作就送出真 OK。第一期只做這個 —— 完整的雙邊方案要側通道。

@@ -45,7 +45,7 @@ describe("translate：頁面回報 → 仲裁輸入", () => {
 describe("commandsFor：仲裁動作 → 頁面指令", () => {
   const frame = (f: "0" | "2"): ArbiterAction => ({ type: "set-ok-frame", frame: f });
   const announce = (ready: boolean): ArbiterAction => ({ type: "announce-ready", ready });
-  const send: ArbiterAction = { type: "send-ok", reason: "both-ready" };
+  const send: ArbiterAction = { type: "send-ok", reason: "both-ready", held: true };
 
   it("⚠ 取消時一定要下 cancel，不能只改外觀", () => {
     // 光改外觀的話，被攔下來的呼叫還壓在頁面裡，失效保護時間到就會送出去
@@ -89,13 +89,27 @@ class FakeBridge implements PageBridge {
   armed = true;
   /** false = 頁面上的 patch 不見了（玩家重載了遊戲）。 */
   installed = true;
+  inPhase = true;
+  phaseId = 1;
+  hazard = false;
+  room: string | null = "room-1";
   #handlers = new Set<(r: OkPatchReport) => void>();
 
   evaluate<T>(expression: string): Promise<T> {
     this.calls.push(expression);
     if (expression.includes("tick()")) {
       const beat = this.installed
-        ? { remaining: this.remaining, armed: this.armed, seat: this.seat }
+        ? {
+            remaining: this.remaining,
+            armed: this.armed,
+            seat: this.seat,
+            inPhase: this.inPhase,
+            phaseId: this.phaseId,
+            hazard: this.hazard,
+            hold: true,
+            sent: false,
+            room: this.room,
+          }
         : null;
       return Promise.resolve(beat as T);
     }
@@ -403,5 +417,100 @@ describe("PageCommand 的型別涵蓋", () => {
     // 斷言把它釘住。
     const kinds: PageCommand["kind"][] = ["release", "cancel", "set-frame"];
     expect(new Set(kinds).size).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WP-15：約定秒數、換階段重置、patch 不見了要重裝
+// ---------------------------------------------------------------------------
+
+describe("ArbiterRunner：約定秒數（WP-15）", () => {
+  it("⚠ 玩家沒按 OK 也會下 force-end，而且是 force-end 不是 release", async () => {
+    // release 只放得掉「壓著的那一次」；玩家沒按時什麼都沒壓著，
+    // 下 release 的話會安靜地什麼都不做 —— 約定秒數等於不存在。
+    const bridge = new FakeBridge();
+    bridge.remaining = 15;
+    const runner = new ArbiterRunner(bridge, {
+      ...OPTIONS,
+      capSecondsFor: () => 15,
+      tickIntervalMs: 5,
+    });
+    await runner.start();
+    await new Promise((r) => setTimeout(r, 30));
+    runner.stop();
+    expect(bridge.ran("forceEnd")).not.toHaveLength(0);
+    expect(bridge.ran(".release(")).toHaveLength(0);
+  });
+
+  it("要把顯示秒數推給頁面，而且值沒變就不要重複往返", async () => {
+    const bridge = new FakeBridge();
+    bridge.remaining = 30;
+    const runner = new ArbiterRunner(bridge, {
+      ...OPTIONS,
+      capSecondsFor: () => 15,
+      tickIntervalMs: 5,
+    });
+    await runner.start();
+    await new Promise((r) => setTimeout(r, 40));
+    runner.stop();
+    // tick 跑了很多輪，setDisplayCap 只該送一次。
+    expect(bridge.ran("setDisplayCap")).toHaveLength(1);
+    expect(bridge.ran("setDisplayCap")[0]).toContain("15");
+  });
+
+  it("換階段就重置，而且告訴側通道我方不再是就緒狀態", async () => {
+    const announced: boolean[] = [];
+    const bridge = new FakeBridge();
+    const runner = new ArbiterRunner(bridge, {
+      ...OPTIONS,
+      tickIntervalMs: 5,
+      onAnnounceReady: (r) => announced.push(r),
+    });
+    await runner.start();
+    // ⚠ 先讓一個 tick 跑過去，runner 才對齊到目前的階段序號。
+    // 少了這步，下面那次「換階段」會被當成第一次看到（不重置），
+    // 而測試會綠得毫無意義。
+    await new Promise((r) => setTimeout(r, 15));
+    await bridge.emit({ type: "ok-intercepted", at: 0 });
+    expect(runner.state.ready).toBe(true);
+
+    bridge.phaseId = 2;
+    await new Promise((r) => setTimeout(r, 30));
+    runner.stop();
+    expect(runner.state.ready).toBe(false);
+    expect(announced).toContain(false);
+  });
+
+  it("換場（room 變了）要通知側通道換房", async () => {
+    const rooms: string[] = [];
+    const bridge = new FakeBridge();
+    const runner = new ArbiterRunner(bridge, {
+      ...OPTIONS,
+      tickIntervalMs: 5,
+      onRoomChange: (r) => rooms.push(r),
+    });
+    await runner.start();
+    await new Promise((r) => setTimeout(r, 20));
+    bridge.room = "room-2";
+    await new Promise((r) => setTimeout(r, 20));
+    runner.stop();
+    expect(rooms).toEqual(["room-1", "room-2"]);
+  });
+
+  it("⚠ patch 不見了要叫人重裝，不能只印錯誤", async () => {
+    // 這條路**不會**觸發重連（CDP 還好好的），所以沒接的話功能就永久失效了，
+    // 而且完全沒有徵兆。2026-08-06 雙開實測踩到。
+    let lost = 0;
+    const bridge = new FakeBridge();
+    bridge.installed = false;
+    const runner = new ArbiterRunner(bridge, {
+      ...OPTIONS,
+      tickIntervalMs: 5,
+      onPatchLost: () => lost++,
+    });
+    await runner.start();
+    await new Promise((r) => setTimeout(r, 30));
+    runner.stop();
+    expect(lost).toBeGreaterThan(0);
   });
 });

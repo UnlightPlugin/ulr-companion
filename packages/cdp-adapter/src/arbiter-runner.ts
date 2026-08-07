@@ -15,7 +15,7 @@
  */
 
 import type { ArbiterAction, ArbiterConfig, ArbiterInput, ArbiterState } from "./arbitration.js";
-import { initialState, resetForNextPhase, step } from "./arbitration.js";
+import { initialState, resetAfterSend, resetForNextPhase, step } from "./arbitration.js";
 import type { Seat } from "./constants.js";
 import type { OkPatchReport, OkPatchTick } from "./patch-ok.js";
 import { OK_PATCH_GLOBAL } from "./patch-ok.js";
@@ -46,7 +46,16 @@ export function translate(report: OkPatchReport): ArbiterInput | null {
 
 /** 要在頁面上執行的指令。 */
 export type PageCommand =
+  /** 把壓著的那次呼叫原封不動送出去。 */
   | { kind: "release" }
+  /**
+   * 讓這個階段的 `I_am_ok` 送出去，**玩家沒按也算**。
+   *
+   * 跟 `release` 分開是因為頁面要做的事完全不同：壓著的話重放，沒壓著的話
+   * 得**替玩家按一次 OK 鈕**。合成一個指令的話頁面就得自己判斷，而那個判斷
+   * 一旦寫錯，症狀是「約定秒數到了卻什麼都沒發生」。
+   */
+  | { kind: "force-end" }
   | { kind: "cancel" }
   | { kind: "set-frame"; frame: "0" | "2"; interactive: boolean };
 
@@ -63,7 +72,7 @@ export type PageCommand =
 export function commandsFor(actions: readonly ArbiterAction[]): PageCommand[] {
   const commands: PageCommand[] = [];
   const cancelling = actions.some((a) => a.type === "announce-ready" && !a.ready);
-  const releasing = actions.some((a) => a.type === "send-ok");
+  const send = actions.find((a) => a.type === "send-ok");
 
   for (const action of actions) {
     if (action.type !== "set-ok-frame") continue;
@@ -71,10 +80,10 @@ export function commandsFor(actions: readonly ArbiterAction[]): PageCommand[] {
       kind: "set-frame",
       frame: action.frame,
       // 送出之後才真的不能按；準備中一律保持可按。
-      interactive: !releasing,
+      interactive: send === undefined,
     });
   }
-  if (releasing) commands.push({ kind: "release" });
+  if (send !== undefined) commands.push(send.held ? { kind: "release" } : { kind: "force-end" });
   else if (cancelling) commands.push({ kind: "cancel" });
   return commands;
 }
@@ -92,7 +101,40 @@ export interface PageBridge {
 }
 
 export interface RunnerOptions {
-  config: Omit<ArbiterConfig, "seat">;
+  config: Omit<ArbiterConfig, "seat" | "capSeconds">;
+  /**
+   * 這個階段約定要在第幾秒結束。`null` = 不強制提早。
+   *
+   * ⚠ **每個 tick 都重新問**，不是啟動時讀一次。三個理由，每個都會在真實
+   * 對戰中發生：
+   *
+   *   1. 玩家在托盤裡改了秒數
+   *   2. 對手上線／離線 → 共同設定在「協商值」與「滿版 30 秒」之間切換
+   *   3. `hazard`（手牌有聖水又碰上麻痺）會在一場之內來回變
+   *
+   * 參數 `hazard` 由**頁面**判斷後帶上來 —— 手牌內容不離開頁面（§12）。
+   * 這個 callback 通常就是 `@ulr/arbiter-link` 的 `effectiveCapSeconds()`。
+   *
+   * 不給就是永遠不強制提早結束，也就是 WP-12 原本的行為。
+   */
+  capSecondsFor?: (hazard: boolean) => number | null;
+  /** 我方準備狀態變了 —— 轉給側通道。 */
+  onAnnounceReady?: (ready: boolean) => void;
+  /** 我這邊的約定秒數門檻到了 —— 叫對手也收手。 */
+  onAnnounceForceEnd?: () => void;
+  /** 換場了（新的 room id）。側通道要跟著換房，否則會停在上一場。 */
+  onRoomChange?: (roomId: string) => void;
+  /**
+   * 頁面上的 patch 不見了 —— 幾乎一定是玩家重載了遊戲（或打完一場回大廳時
+   * 頁面換了 document）。**一定要接，而且要真的重裝。**
+   *
+   * ⚠ 不接的後果是**功能永久失效而且完全沒有徵兆**：CDP 連線還好好的，所以
+   * 不會走重連那條路；`evaluate` 也照樣成功，只是 `window.__ulrArbiter` 已經
+   * 不存在了。玩家看到的是「插件開著，但按 OK 就直接送出去」，而終端機上只有
+   * 一行去重過的錯誤訊息。2026-08-06 雙開實測踩到：一邊還好好的，另一邊已經
+   * 空了半場。
+   */
+  onPatchLost?: () => void;
   /**
    * 多久跟頁面往返一次。畫面每秒跳一格，250ms 足以在硬底線前反應。
    *
@@ -136,6 +178,14 @@ export class ArbiterRunner {
    * 會把終端機洗掉，反而看不到真正該注意的那一行。
    */
   #lastError: string | null = null;
+  /** 上一次看到的移動階段序號。變了就代表換階段，狀態要重置。 */
+  #phaseId = -1;
+  /** 上一次推給頁面的顯示秒數。一樣就不要再往返一次。 */
+  #displayCap: number | null = null;
+  /** 上一次看到的 room id 雜湊。變了就代表換場。 */
+  #roomId: string | null = null;
+  /** 目前這個階段頁面回報的 hazard。 */
+  #hazard = false;
 
   constructor(bridge: PageBridge, options: RunnerOptions) {
     this.#bridge = bridge;
@@ -153,6 +203,36 @@ export class ArbiterRunner {
   /** 頁面上的攔截有沒有真的掛到 socket 上。還在大廳時是 false。 */
   get armed(): boolean {
     return this.#armed;
+  }
+
+  /** 手牌有聖水／聖杯又碰上麻痺。托盤顯示用。 */
+  get hazard(): boolean {
+    return this.#hazard;
+  }
+
+  /**
+   * 側通道說**兩邊都準備好了**。
+   *
+   * ⚠ 這是唯一從外面進來的就緒訊號，而且是合成的 —— 中間人不存在一則
+   * 「對手準備好了」可以發（`@ulr/arbiter-link` 的紅線 1）。
+   */
+  peerBothReady(): void {
+    void this.#apply({ type: "opponent-ready", ready: true });
+  }
+
+  /** 對手那邊的約定秒數門檻先到了，跟著收手。 */
+  peerForceEnd(): void {
+    void this.#apply({ type: "peer-force-end" });
+  }
+
+  /**
+   * 開關「準備」功能（攔 OK）。
+   *
+   * ⚠ **不是拆掉 patch。** 約定秒數那條路不需要攔截也要用到頁面（讀秒、
+   * 階段判斷、hazard、替玩家按 OK），拆掉會把另一個功能一起關掉。
+   */
+  async setHold(on: boolean): Promise<void> {
+    await this.#bridge.evaluate(`window.${OK_PATCH_GLOBAL}.setHold(${on ? "true" : "false"})`);
   }
 
   async start(): Promise<void> {
@@ -216,7 +296,11 @@ export class ArbiterRunner {
       // 第一次按 OK 之後就再也沒反應了）。
       //
       // 這裡也涵蓋失效保護那條路 —— 它不經過 Node，但頁面照樣會回報 released。
-      this.#state = resetForNextPhase(this.#state);
+      //
+      // ⚠ **是 resetAfterSend 不是 resetForNextPhase。** 差別只有 `sent`
+      // 留不留，而那個欄位擋的是「約定秒數在同一個階段裡重複觸發」。
+      this.#state = resetAfterSend(this.#state);
+      this.#options.onAnnounceReady?.(false);
       return;
     }
     if (report.type === "ok-intercepted") {
@@ -265,9 +349,14 @@ export class ArbiterRunner {
     if (beat === null || beat === undefined) {
       // patch 不在頁面上了 —— 幾乎一定是玩家重載了遊戲。
       this.#armed = false;
-      this.#reportError("頁面上的攔截不見了（遊戲重載過？）—— 要重新裝一次");
+      this.#reportError("頁面上的攔截不見了（遊戲重載過？）—— 重新裝一次");
+      // ⚠ **要真的重裝，不能只印錯誤。** 見 `onPatchLost` 的說明：
+      // 這條路不會觸發重連，所以沒有別人會來救。
+      this.#options.onPatchLost?.();
       return;
     }
+    // 裝回來了 → 階段序號是新的一份，重新對齊，不要當成「換階段」而誤觸重置。
+    if (this.#phaseId !== -1 && beat.phaseId < this.#phaseId) this.#phaseId = beat.phaseId;
     this.#armed = beat.armed;
 
     // ⚠ 座位每場重新分配（實測：同兩個客戶端連打兩場，:9334 從 B 變成 A）。
@@ -280,17 +369,60 @@ export class ArbiterRunner {
       if (!this.#state.ready) this.#seat = beat.seat;
     }
 
-    if (!this.#state.ready || this.#state.committed) {
+    this.#hazard = beat.hazard === true;
+
+    // ⚠ **換場一定要通知側通道。** 房號沒跟著換的話，兩個插件會停在上一場的
+    // 房裡 —— 症狀是「打第二場之後準備同步就失效了」，而且沒有任何錯誤訊息。
+    const room = typeof beat.room === "string" ? beat.room : null;
+    if (room !== null && room !== this.#roomId) {
+      this.#roomId = room;
+      this.#options.onRoomChange?.(room);
+    }
+
+    // ⚠ **換階段就重置，而且要看 phaseId 不是 `ok-released`。**
+    // 約定秒數那條路在整個階段裡可能一則 `ok-released` 都沒有（玩家根本沒按
+    // OK，是我們替他按的），只靠送出事件重置的話 `committed` 會卡在 true，
+    // 之後每個階段都不再仲裁 —— 而且完全沒有錯誤訊息（WP-12 的坑 #5 換了個
+    // 方式復發）。
+    if (typeof beat.phaseId === "number" && beat.phaseId !== this.#phaseId) {
+      const first = this.#phaseId === -1;
+      this.#phaseId = beat.phaseId;
+      if (!first) {
+        this.#state = resetForNextPhase(this.#state);
+        // 新階段一開始一定是「沒準備」。不明講的話中間人那邊還留著上一個
+        // 階段的旗標，下一次對手按下去就會立刻湊成 both-ready。
+        this.#options.onAnnounceReady?.(false);
+      }
+    }
+
+    await this.#syncDisplayCap();
+
+    if (this.#state.committed) {
       this.#lastError = null;
       return;
     }
     if (beat.remaining === null) {
-      // 讀不到秒數 = 硬底線失效，只剩頁面的失效保護。要讓呼叫端看得見。
-      this.#reportError("讀不到剩餘秒數（TIME 找不到）—— 硬底線失效");
+      // 讀不到秒數 = 硬底線與約定秒數都失效，只剩頁面的失效保護。
+      // ⚠ 只有在**壓著東西**的時候才吵 —— 不在有倒數的階段時讀不到是正常的。
+      if (this.#state.ready) this.#reportError("讀不到剩餘秒數（TIME 找不到）—— 硬底線失效");
       return;
     }
     this.#lastError = null;
     await this.#apply({ type: "tick", remainingSeconds: beat.remaining });
+  }
+
+  /**
+   * 把「這個階段其實只有幾秒」推給頁面，讓中間的數字與讀秒條跟著改。
+   *
+   * ⚠ 值沒變就不要往返 —— tick 是每秒四次，每次都送等於白花四次 CDP 呼叫。
+   */
+  async #syncDisplayCap(): Promise<void> {
+    const cap = this.#options.capSecondsFor?.(this.#hazard) ?? null;
+    if (cap === this.#displayCap) return;
+    this.#displayCap = cap;
+    await this.#bridge.evaluate(
+      `window.${OK_PATCH_GLOBAL}.setDisplayCap(${cap === null ? "null" : String(cap)})`,
+    );
   }
 
   async #apply(input: ArbiterInput): Promise<void> {
@@ -300,10 +432,21 @@ export class ArbiterRunner {
       if (this.#seat === null) return;
     }
 
-    const config: ArbiterConfig = { ...this.#options.config, seat: this.#seat };
+    const config: ArbiterConfig = {
+      ...this.#options.config,
+      seat: this.#seat,
+      capSeconds: this.#options.capSecondsFor?.(this.#hazard) ?? null,
+    };
     const result = step(config, this.#state, input);
     this.#state = result.state;
     this.#options.onStep?.({ input, state: result.state, actions: result.actions });
+
+    // ⚠ 側通道的通知要**在頁面指令之前**發。兩邊的門檻是各自算的，理論上
+    // 同時到，但實際上一定有幾十毫秒的差 —— 先講出去，對手才有機會跟上。
+    for (const action of result.actions) {
+      if (action.type === "announce-ready") this.#options.onAnnounceReady?.(action.ready);
+      else if (action.type === "announce-force-end") this.#options.onAnnounceForceEnd?.();
+    }
 
     for (const command of commandsFor(result.actions)) {
       await this.#run(command);
@@ -314,6 +457,9 @@ export class ArbiterRunner {
     switch (command.kind) {
       case "release":
         await this.#bridge.evaluate(`window.${OK_PATCH_GLOBAL}.release("arbiter")`);
+        return;
+      case "force-end":
+        await this.#bridge.evaluate(`window.${OK_PATCH_GLOBAL}.forceEnd("arbiter")`);
         return;
       case "cancel":
         await this.#bridge.evaluate(`window.${OK_PATCH_GLOBAL}.cancel()`);

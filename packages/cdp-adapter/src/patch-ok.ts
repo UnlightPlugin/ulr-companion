@@ -28,12 +28,27 @@
  * 仲裁只需要「這張是不是同一張」，不需要知道是哪一張 —— 見 `opaqueId`。
  */
 
-import { OK_BUTTON, WS_CLIENT } from "./constants.js";
+import {
+  EVENT_INFO_JSON_KEY,
+  HAND_ARRAY_FIELD,
+  HAND_TEXTURE_KEY,
+  OK_BUTTON,
+  STALL_STATE_KEYS,
+  WS_CLIENT,
+} from "./constants.js";
 import { embedJson } from "./embed.js";
 
 export interface OkPatchOptions {
   /** 頁面呼叫這個名字把事件送回 Node。由 `Runtime.addBinding` 建立。 */
   bindingName: string;
+  /**
+   * 一裝上去就要不要攔 OK（＝準備功能開著沒）。
+   *
+   * 關掉之後**完全退回遊戲原本的行為** —— 按 OK 立刻送出。但 patch 還在，
+   * 因為「準備時間縮減」不需要攔截也要用到它（強制提早結束、讀秒、hazard）。
+   * 執行期可以用 `A.setHold(bool)` 切換，不必重裝。
+   */
+  hold?: boolean;
   /**
    * 失效保護：攔住之後最多壓這麼久，時間到頁面自己送出。
    *
@@ -45,11 +60,47 @@ export interface OkPatchOptions {
   /**
    * Node 多久沒心跳就當它死了。
    *
-   * 死了之後頁面**停止攔截**（退回遊戲原本行為），而且會立刻放掉正壓著的
-   * 呼叫。要比 `ArbiterRunner` 的 tick 間隔寬鬆得多 —— 偶爾一次 CDP 往返
-   * 變慢不該讓功能忽開忽關。
+   * 死了之後**這個階段照常撐完**（降級成單邊，見 `OkDegraded`），
+   * 到下一個階段才停止攔截。要比 `ArbiterRunner` 的 tick 間隔寬鬆得多 ——
+   * 偶爾一次 CDP 往返變慢不該讓功能忽開忽關。
    */
   staleMs?: number;
+  /**
+   * 降級模式下，剩幾秒就自己把壓著的送出去。
+   *
+   * ⚠ **這是降級模式唯一的安全網。** Node 死了就沒有人會下釋放指令，而
+   * `failsafeMs`（25 秒）是從按下去算起、不是從階段剩餘秒數算起 —— 玩家在
+   * 階段後期才按的話，失效保護會晚於階段結束，也就是**逾時棄權**。
+   *
+   * 預設跟 Node 的 `DEFAULT_DEADLINE_SECONDS` 同一個值，玩家感受不到差別。
+   */
+  localDeadlineSeconds?: number;
+  /**
+   * 準備中把 OK 鈕染成什麼顏色。**`null` = 不染色**（官方原本的樣子）。
+   *
+   * ⚠ 染色原本的用途是「這個階段插件真的有在管」的視覺證明。設成 `null`
+   * 之後就沒有這個訊號了 —— 玩家要改看系統匣圖示與設定視窗。這是刻意提供的
+   * 選項（有人就是不想讓遊戲畫面被改），預設值由呼叫端決定。
+   */
+  readyTint?: number | null;
+}
+
+/** 降級模式的頁面端硬底線。跟 Node 的 `DEFAULT_DEADLINE_SECONDS` 對齊。 */
+export const DEFAULT_LOCAL_DEADLINE_SECONDS = 3;
+
+/** 準備中的琥珀色。跟遊戲原本的灰色鎖定分得開，也跟系統匣圖示同一個值。 */
+export const READY_TINT_AMBER = 0xffc247;
+
+/**
+ * 把玩家設的顏色夾成合法的 24-bit RGB。壞掉的值一律當成「不染色」。
+ *
+ * ⚠ 不要讓壞值變成 `0x000000` —— 那會把 OK 鈕染成全黑，看起來像遊戲壞了，
+ * 而玩家完全不會聯想到是自己在設定裡填錯了一個顏色。
+ */
+export function normalizeTint(value: number | null): number | null {
+  if (value === null || !Number.isFinite(value)) return null;
+  const n = Math.trunc(value);
+  return n < 0 || n > 0xffffff ? null : n;
 }
 
 /** 一個移動階段是 31 秒，25 秒的失效保護留 6 秒給伺服器與網路。 */
@@ -89,13 +140,44 @@ export interface OkReleased {
   /**
    * - `arbiter` —— Node 指示，正常路徑
    * - `phase-ended` —— 階段結束了，壓著已無意義（頁面自己判斷）
-   * - `node-gone` —— Node 心跳過期，不再等它（頁面自己判斷）
-   * - `failsafe` —— 壓滿上限，**代表連心跳都沒發揮作用**，看到就要查
+   * - `local-deadline` —— **降級模式**下由頁面自己顧的硬底線（見 `ok-degraded`）
+   * - `failsafe` —— 壓滿上限，**代表連硬底線都沒發揮作用**，看到就要查
    * - `reinstall` / `uninstall` —— 換版或拆掉前先送出去，避免半路丟掉害玩家棄權
+   * - `forced` —— 約定秒數到了，**玩家根本沒按 OK**，是我們替他按的
    */
-  by: "arbiter" | "phase-ended" | "node-gone" | "failsafe" | "reinstall" | "uninstall";
-  /** 從攔截到送出經過多久。 */
+  by:
+    | "arbiter"
+    | "phase-ended"
+    | "local-deadline"
+    | "failsafe"
+    | "reinstall"
+    | "uninstall"
+    | "forced";
+  /** 從攔截到送出經過多久。替玩家按的那條路是 0。 */
   heldMs: number;
+}
+
+/**
+ * Node 在這個階段中途失聯了，但**準備功能沒有當場消失**。
+ *
+ * ⚠ 這則存在的理由是一個真實的傷害情境：玩家按下 OK、看到按鈕變色、
+ * 以為「還能再按一次反悔」，而就在這時 Node 死掉。舊的行為是心跳一過期
+ * 就把壓著的那次**直接送出去** —— 玩家的反悔窗口在他不知情的狀況下變成
+ * 已定案，而畫面上什麼都沒說。
+ *
+ * 現在改成：**這個階段撐完**。頁面自己接手單邊的部分（再按一次可以取消、
+ * 剩 `localDeadlineSeconds` 秒時自己送出），到**下一個階段**才真的關掉功能。
+ * 換句話說，功能的開關只在階段邊界改變，永遠不會在玩家操作到一半時變。
+ *
+ * 單邊的「誤按反悔」本來就不需要對手也不需要 Node —— 頁面自己做得到。
+ * 需要 Node 的只有「等對手也好了才一起送」，而那個在降級模式下本來就沒了。
+ */
+export interface OkDegraded {
+  type: "ok-degraded";
+  /** 第幾個移動階段降級的。 */
+  phaseId: number;
+  /** 降級的當下有沒有正壓著玩家的 OK。 */
+  holding: boolean;
 }
 
 /** 對戰中的操作事件，已經去識別化。 */
@@ -136,6 +218,7 @@ export type OkPatchReport =
   | OkIntercepted
   | OkPressedAgain
   | OkReleased
+  | OkDegraded
   | OkPatchEvent
   | OkPatchInstalled
   | OkPatchRearmed
@@ -145,6 +228,7 @@ const REPORT_TYPES = new Set([
   "ok-intercepted",
   "ok-pressed-again",
   "ok-released",
+  "ok-degraded",
   "ok-patch-event",
   "ok-patch-installed",
   "ok-patch-rearmed",
@@ -162,7 +246,7 @@ export function isOkPatchReport(value: unknown): value is OkPatchReport {
 /** 頁面上掛控制介面的全域名稱。Node 用 `Runtime.evaluate` 呼叫它。 */
 export const OK_PATCH_GLOBAL = "__ulrArbiter";
 
-/** `state.tick()` 的回傳。一次往返同時做心跳與讀秒。 */
+/** `state.tick()` 的回傳。一次往返同時做心跳、讀秒、報階段與 hazard。 */
 export interface OkPatchTick {
   /** 畫面上的剩餘秒數。讀不到（不在有倒數的階段）就是 null。 */
   remaining: number | null;
@@ -170,7 +254,49 @@ export interface OkPatchTick {
   armed: boolean;
   /** 目前這場的座位。**每場重新分配，不能快取。** */
   seat: string | null;
+  /** 現在是不是在該仲裁的階段（移動階段）。 */
+  inPhase: boolean;
+  /**
+   * 第幾個移動階段。每進入一次就 +1。
+   *
+   * ⚠ **重置仲裁狀態要看它，不要看 `ok-released`。** 送出之後重置是對的，
+   * 但「約定秒數」那條路在同一個階段裡可能沒有任何 `ok-released`（玩家根本
+   * 沒按），只看送出事件會讓 `committed` 在階段之間漏掉重置。
+   */
+  phaseId: number;
+  /**
+   * 手牌有聖水／聖杯，而且場上有麻痺／降低移動／自壞。
+   *
+   * 這是「準備時間縮減」的修正項，為真時約定秒數再減 5 秒。
+   * 判斷完全在頁面做，**Node 只拿到一個布林** —— 手牌內容不離開頁面（§12）。
+   */
+  hazard: boolean;
+  /** 攔截功能開著沒。托盤切換之後用它確認頁面真的收到了。 */
+  hold: boolean;
+  /** 這個階段已經送出過 `I_am_ok` 了。 */
+  sent: boolean;
+  /**
+   * 這一場的 room id（`MainA.room`）。不在對戰中就是 null。
+   *
+   * ⚠ **這是高熵字串，不得記錄也不得上傳**（§12）。側通道要用它把兩個玩家
+   * 配在一起，但**只送雜湊過的**版本 —— `@ulr/arbiter-link` 的 `roomKey()`。
+   * 2026-08-06 雙開實測：同一場對戰兩個客戶端的 `MainA.room` 完全相同，
+   * 這也回答了 `battle-features.md` 那四個 probe 問題的第 4 條。
+   */
+  room: string | null;
 }
+
+/** 把 OK 送出去、不管玩家按了沒。回傳頁面做了什麼。 */
+export type ForceEndResult =
+  /** 壓著玩家按的那次 → 原封不動重放 */
+  | "released"
+  /** 玩家沒按 → 替他按了一次 OK 鈕 */
+  | "pressed"
+  /** 這個階段已經送過了 */
+  | "already-sent"
+  /** 不在移動階段，或找不到按鈕 */
+  | "not-in-phase"
+  | "no-button";
 
 /** 拆掉頁面上的 patch。Node 結束前一定要跑這句，否則會留下孤兒。 */
 export const OK_PATCH_UNINSTALL_EXPRESSION = `(function () {
@@ -198,15 +324,27 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
     bindingName: options.bindingName,
     failsafeMs: options.failsafeMs ?? DEFAULT_FAILSAFE_MS,
     staleMs: options.staleMs ?? DEFAULT_STALE_MS,
+    hold: options.hold ?? true,
     global: OK_PATCH_GLOBAL,
     okEvent: "I_am_ok",
+    /** hazard 判斷要用的三個東西，全部從 constants.ts 帶進來。 */
+    eventInfoKey: EVENT_INFO_JSON_KEY,
+    handTexture: HAND_TEXTURE_KEY,
+    handField: HAND_ARRAY_FIELD,
+    stallStates: STALL_STATE_KEYS,
     sendMethod: WS_CLIENT.sendMethod,
     listenAllMethod: WS_CLIENT.listenAllMethod,
     unlistenAllMethod: WS_CLIENT.unlistenAllMethod,
     okScene: OK_BUTTON.scene,
     okTexture: OK_BUTTON.textureKey,
-    /** 準備中的染色。琥珀色 —— 跟遊戲原本的灰色鎖定分得開。 */
-    readyTint: 0xffc247,
+    /**
+     * 準備中的染色。**預設 `null` = 不染色，維持官方原本的樣子。**
+     *
+     * ⚠ 預設不染色是玩家指定的。代價是少了「這個階段插件有在管」的畫面訊號，
+     * 所以系統匣圖示的三色語意變得更重要 —— 不要為了「畫面乾淨」也把它拿掉。
+     */
+    readyTint: options.readyTint === undefined ? null : normalizeTint(options.readyTint),
+    localDeadlineSeconds: options.localDeadlineSeconds ?? DEFAULT_LOCAL_DEADLINE_SECONDS,
     /**
      * 只在這些場景 active 時攔截。
      *
@@ -226,6 +364,7 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
   "use strict";
   var CFG = JSON.parse(${embedJson(config)});
   var G = CFG.global;
+  var has = Object.prototype.hasOwnProperty;
 
   /**
    * ⚠ 重新求值時要**先把舊的 patch 拆掉**，不能只換設定。
@@ -299,22 +438,242 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
    * 先攻決定），壓住 OK 只會拖慢節奏。
    */
   function inInterceptPhase() {
+    return movePhase() !== null;
+  }
+
+  /** 目前 active 的移動階段場景，不在就 null。 */
+  function movePhase() {
     try {
       var scenes = window.game.scene.keys;
       for (var i = 0; i < CFG.interceptScenes.length; i++) {
         var sc = scenes[CFG.interceptScenes[i]];
-        if (sc && sc.sys && sc.sys.settings && sc.sys.settings.active) return true;
+        if (sc && sc.sys && sc.sys.settings && sc.sys.settings.active) return sc;
       }
-      return false;
+      return null;
     } catch (e) {
       // 判斷不出來就**不要攔** —— 放行是安全的，攔錯階段會拖慢玩家。
-      return false;
+      return null;
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // 讀秒顯示：約定秒數要讓玩家看得見（玩家要求，2026-08-06）
+  //
+  // 遊戲的倒數**整段都是客戶端算的**（實測原始碼）：
+  //
+  //     this.timelimit = 30;                                   ← create()
+  //     this.time.addEvent({ delay: 100, ... timelimit -= .1 })
+  //     // update() 每一幀從 timelimit 重算三樣東西：
+  //     text.setText(timelimit.toPrecision(...))
+  //     colorIdx = trunc(timelimit / 30 * 240)   ← 240=藍 0=紅
+  //     guage.scaleX = timelimit / 30 * .934 + .066
+  //
+  // 三樣東西**全部是 timelimit 的純函式**，而且分母是寫死的 30。所以要讓
+  // 「約定 15 秒」看起來像真的只有 15 秒，只要在 update() 之後用
+  // (timelimit - (30 - cap)) / cap 重算同樣三樣東西就好。
+  //
+  // ⚠ **不要去改 this.timelimit 本身。** 那是伺服器那 31 秒的本機影子，
+  // 硬底線、hazard 判斷、失效保護全部靠它。改了它等於同時改掉三個安全機制，
+  // 而症狀會是「插件在還有很多時間的時候就把 OK 送出去」。
+  // 我們只覆蓋**畫出來的東西**。
+  //
+  // ⚠ 也因此 state.remaining() 改成直接讀 timelimit，不再解析畫面上的字 ——
+  // 那個字現在是我們自己寫的，拿它回推剩餘秒數會變成自己騙自己。
+  // -------------------------------------------------------------------------
+
+  /** 遊戲自己的分母。改版動到它的話畫面會歪，但不影響安全機制。 */
+  var GAME_PHASE_SECONDS = 30;
+
+  /** 照遊戲原本的規則把秒數格式化成畫面上那個字。 */
+  function formatTime(v) {
+    if (v > 10.1 || (v <= 10 && v >= 1)) return v.toPrecision(2);
+    if (v < 1 && v > 0.1) return v.toPrecision(1);
+    return (0).toPrecision(1);
+  }
+
+  /**
+   * 把 MovePhaseA 的 update() 包起來，畫成「這個階段只有 cap 秒」的樣子。
+   *
+   * ⚠⚠ **只換原型完全沒有效果。**（2026-08-06 對著真的遊戲實測踩到）
+   *
+   * Phaser 的 Systems 在 init 就把 scene.update 抄了一份：
+   *
+   *     // Systems.init
+   *     if (this.scene.update) this.sceneUpdate = this.scene.update;
+   *     // Systems.step —— 每一幀呼叫的是**那份抄本**
+   *     this.sceneUpdate.call(this.scene, time, delta);
+   *
+   * 所以場景建立**之後**才換原型，跑的還是舊的那份。症狀極度誤導：
+   * Object.getPrototypeOf(mp).update 檢查起來是新版、__ulrTimerPatched
+   * 也是 true，**但畫面完全沒變** —— 看起來像我們算錯了，其實是根本沒被呼叫。
+   *
+   * 所以兩邊都要換：
+   *
+   *   原型          → 場景之後重新 init 時會抄到新版（換場、重開對戰）
+   *   sys.sceneUpdate → 現在這一顆場景實例，立刻生效
+   *
+   * 這跟 SOCKET_LIFETIME_NOTE 是同一個形狀的坑：**原型上的東西跨場活著，
+   * 實例上的抄本每場重來。** 這個檔案裡已經有第二個了。
+   */
+  function patchDisplay(sc) {
+    try {
+      var proto = Object.getPrototypeOf(sc);
+      if (!proto || typeof proto.update !== "function") return false;
+      if (proto.__ulrTimerPatched) {
+        // 原型已經是新版了，但這一顆實例的抄本可能還是舊的。
+        adoptSceneUpdate(sc, proto);
+        return true;
+      }
+
+      var original = proto.update;
+      proto.update = function () {
+        var result = original.apply(this, arguments);
+        try {
+          var cap = state.displayCap;
+          if (cap === null || cap >= GAME_PHASE_SECONDS) return result;
+          if (typeof this.timelimit !== "number") return result;
+
+          var shown = this.timelimit - (GAME_PHASE_SECONDS - cap);
+          if (shown < 0) shown = 0;
+          var ratio = shown / cap;
+          if (this.text) this.text.setText(formatTime(shown));
+          if (this.hsv && this.guage) {
+            var ci = Math.trunc(ratio * 240);
+            if (ci < 0) ci = 0;
+            if (ci > 240) ci = 240;
+            this.colorIdx = ci;
+            this.guage.setFillStyle(this.hsv[ci].color);
+            // 0.066 是遊戲留的最小長度，照抄才不會在最後一刻整條消失。
+            this.guage.scaleX = ratio * 0.934 + 0.066;
+          }
+        } catch (e) {
+          // 畫壞了不能影響遊戲，也不能影響仲裁。
+        }
+        return result;
+      };
+      proto.__ulrTimerPatched = true;
+      state.displayProto = proto;
+      state.originalUpdate = original;
+      adoptSceneUpdate(sc, proto);
+      return true;
+    } catch (e) { return false; }
+  }
+
+  /**
+   * 讓**這一顆場景實例**改用原型上的新版 update。
+   *
+   * 見 patchDisplay 開頭：Phaser 每一幀跑的是 init 當時抄下來的
+   * sys.sceneUpdate，不是原型上那個。
+   */
+  function adoptSceneUpdate(sc, proto) {
+    try {
+      if (!sc.sys || sc.sys.sceneUpdate === proto.update) return;
+      if (state.displayScene !== sc) {
+        state.displayScene = sc;
+        state.originalSceneUpdate = sc.sys.sceneUpdate;
+      }
+      sc.sys.sceneUpdate = proto.update;
+    } catch (e) {}
+  }
+
+  /** 還原讀秒顯示。**拆 patch 前一定要跑**，否則玩家會看到一個沒人維護的假倒數。 */
+  function unpatchDisplay() {
+    try {
+      if (state.displayProto && state.originalUpdate) {
+        state.displayProto.update = state.originalUpdate;
+        delete state.displayProto.__ulrTimerPatched;
+      }
+    } catch (e) {}
+    // ⚠ 實例上的抄本也要還原，不然原型換回去了、這一顆場景照樣跑新版。
+    try {
+      if (state.displayScene && state.originalSceneUpdate) {
+        state.displayScene.sys.sceneUpdate = state.originalSceneUpdate;
+      }
+    } catch (e) {}
+    state.displayProto = null;
+    state.originalUpdate = null;
+    state.displayScene = null;
+    state.originalSceneUpdate = null;
   }
 
   /** Node 還在不在。沒心跳就當它死了。 */
   function nodeAlive() {
     return (Date.now() - state.lastBeat) <= CFG.staleMs;
+  }
+
+  // -------------------------------------------------------------------------
+  // hazard：手牌有聖水／聖杯 + 場上有麻痺（WP-15 的「再提早 5 秒」）
+  //
+  // ⚠ 整段**只回傳一個布林給 Node**。手牌是我方自己的資訊，不是隱藏資訊，
+  // 但沒有理由讓它離開頁面 —— §12 的做法一律是「邊界擋一次」。
+  // -------------------------------------------------------------------------
+
+  /** 行動卡定義表。取不到就當沒有 hazard（不縮短，安全的方向）。 */
+  function eventInfo() {
+    try {
+      var raw = window.game.cache.json.get(CFG.eventInfoKey);
+      if (!raw) return null;
+      return Array.isArray(raw) ? raw : (raw.frames || null);
+    } catch (e) { return null; }
+  }
+
+  /**
+   * 手牌裡有沒有聖水／聖杯（holy）或毒杯（holy_enemy）。
+   *
+   * （注入腳本是 TS 的樣板字串，這段註解裡不能用反引號。）
+   *
+   * ⚠ **走 arr1 而不是畫面上的物件。** 手牌會分頁，沒翻到的那頁在顯示清單裡
+   * 根本不存在 —— 只看畫面會漏掉一半，而漏掉的方向是「以為沒有聖水」，
+   * 也就是這條規則安靜地失效。
+   */
+  function handHasHoly() {
+    try {
+      var info = eventInfo();
+      var sc = mainScene();
+      var hand = sc && sc[CFG.handField];
+      if (!info || !hand) return false;
+
+      var found = false;
+      (function walk(o, d) {
+        if (found || !o || d > 3) return;
+        if (Array.isArray(o)) {
+          for (var i = 0; i < o.length; i++) walk(o[i], d + 1);
+          return;
+        }
+        if (typeof o !== "object") return;
+        if (o.texture && o.texture.key === CFG.handTexture && o.frame && o.visible) {
+          var card = info[Number(o.frame.name)];
+          if (card && (card.holy === true || card.holy_enemy === true)) found = true;
+        }
+      })(hand, 0);
+      return found;
+    } catch (e) { return false; }
+  }
+
+  /**
+   * 場上有沒有拖時間型的狀態（麻痺／降低移動／自壞）。
+   *
+   * 資料來自 state("mahi_2","A","B") 事件：<鍵>_<剩餘回合數>、誰中了、
+   * 誰施加的。伺服器**只在施加時通知一次**，所以剩餘回合要自己數 ——
+   * 每收到一次 endTurn 就全部減一。
+   *
+   * ⚠ 不用畫面上的圖示是因為分不出哪個圖示是哪個狀態（27 種共用一張圖集，
+   * 而 frame 對應關係沒有實測過）。事件這條至少每個欄位都有實測依據。
+   */
+  function stallStateActive() {
+    for (var seat in state.states) {
+      if (!has.call(state.states, seat)) continue;
+      var byKey = state.states[seat];
+      for (var key in byKey) {
+        if (!has.call(byKey, key)) continue;
+        if (byKey[key] > 0) return true;
+      }
+    }
+    return false;
+  }
+
+  function hazardNow() {
+    return stallStateActive() && handHasHoly();
   }
 
   /**
@@ -325,20 +684,82 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
    * 照攔不誤，但沒有人能下 cancel／release，玩家每個移動階段被壓滿 25 秒
    * （2026-08-03 實測）。不攔只是功能沒生效，攔了沒人管是實質傷害。
    */
+  /**
+   * ⚠ **看的是 holdThisPhase，不是 hold && nodeAlive()。**
+   *
+   * holdThisPhase 在**進入移動階段的那一刻**定案，整個階段不再改變。
+   * 這是刻意的：玩家按下 OK 之後，這次按壓會不會被壓著、能不能反悔，
+   * 從階段一開始就決定好了，不會因為中途 Node 死掉而在他手上改變。
+   *
+   * 舊版直接看 nodeAlive()，於是心跳一過期就當場停止攔截並把壓著的送出 ——
+   * 玩家以為還在反悔窗口裡，實際上已經定案了。見 OkDegraded 的說明。
+   *
+   * armed（攔截有沒有掛在 socket 上）仍然是即時的：那是「有沒有能力攔」，
+   * 不是「要不要攔」，沒有 socket 的時候根本沒有東西可以壓。
+   */
   function shouldIntercept() {
-    return state.armed && nodeAlive() && inInterceptPhase();
+    return state.holdThisPhase && state.armed && inInterceptPhase();
   }
 
   var state = {
     cfg: CFG,
     held: null,          // { self, args, at, timer }
-    /** 目前有沒有上琥珀色。由 phaseTick 維護，代表「這個階段插件有介入」。 */
+    /**
+     * 準備功能開著沒。關掉就完全不攔，退回遊戲原本行為。
+     *
+     * ⚠ patch 本身**不會**跟著拆掉 —— 「準備時間縮減」不需要攔截也要用到
+     * 讀秒、階段判斷與 hazard。兩個功能是獨立的開關（玩家可能只要其中一個）。
+     */
+    hold: CFG.hold !== false,
+    /**
+     * **這個階段**到底攔不攔。進入移動階段的那一刻由 hold && nodeAlive()
+     * 定案，整個階段不再改變 —— 見 shouldIntercept() 的說明。
+     */
+    holdThisPhase: false,
+    /**
+     * 這個階段中途 Node 死掉了，正在用單邊模式撐完。
+     *
+     * 進入下一個階段時會連同 holdThisPhase 一起重算，所以它自然歸零。
+     */
+    degraded: false,
+    /** 目前有沒有處在「插件正在管這個階段」的外觀。由 phaseTick 維護。 */
     tinted: false,
     phaseTick: null,
     /** Node 最後一次 tick() 的時間。0 = 從來沒有過，也就是還沒有人在管。 */
     lastBeat: 0,
     /** 攔截有沒有掛在 socket 上。 */
     armed: false,
+    /** 第幾個移動階段。每進入一次 +1 —— Node 用它判斷「換階段了」。 */
+    phaseId: 0,
+    /** 上一次 phaseTick 看到的階段狀態。用來抓「剛進入」那一刻。 */
+    wasInPhase: false,
+    /** 上一次真的送出 I_am_ok 是在第幾個階段。用來擋掉重複的強制送出。 */
+    sentPhase: -1,
+    /**
+     * 這一次 emit 直接放行。
+     *
+     * ⚠ **只在 forceEnd() 替玩家按 OK 的那一瞬間為真。** 我們按下去之後遊戲
+     * 自己會 emit I_am_ok，而那則會撞到我們自己的攔截 —— 沒有這個旗標的話，
+     * 「強制送出」會變成「強制壓住」，剛好反過來。
+     */
+    passthrough: false,
+    /**
+     * 目前的狀態效果剩餘回合數：{ A: { mahi: 2 }, B: {} }。
+     * 由 state 事件加、由 endTurn 減。
+     */
+    states: { A: {}, B: {} },
+    /**
+     * 畫面上的倒數要當成「只有這麼多秒」來畫。null = 照遊戲原本的。
+     *
+     * ⚠ 這**只影響顯示**。真正的剩餘秒數仍然是 this.timelimit，
+     * 硬底線與強制送出都讀它。
+     */
+    displayCap: null,
+    displayProto: null,
+    originalUpdate: null,
+    /** 目前接管了 sys.sceneUpdate 的那顆場景實例，以及它原本的抄本。 */
+    displayScene: null,
+    originalSceneUpdate: null,
     /** 目前掛著的那顆 socket 實例。**換房會換一顆** —— 見 SOCKET_LIFETIME_NOTE。 */
     socket: null,
     proto: null,
@@ -352,13 +773,112 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
      */
     tick: function () {
       state.lastBeat = Date.now();
-      return { remaining: state.remaining(), armed: state.armed, seat: state.seat() };
+      return {
+        remaining: state.remaining(),
+        armed: state.armed,
+        seat: state.seat(),
+        inPhase: inInterceptPhase(),
+        phaseId: state.phaseId,
+        hazard: hazardNow(),
+        hold: state.hold,
+        sent: state.sentPhase === state.phaseId,
+        room: state.room()
+      };
+    },
+    /**
+     * 告訴頁面「這個階段其實只有 n 秒」，讓中間那個數字與讀秒條跟著改。
+     *
+     * 傳 null（或 >= 30）就還原成遊戲原本的畫法。Node 每個 tick 都會叫，
+     * 所以值一樣時要便宜地早退 —— 不然每秒四次 CDP 往返都在做白工。
+     */
+    setDisplayCap: function (n) {
+      var next = (typeof n === "number" && n > 0 && n < GAME_PHASE_SECONDS) ? n : null;
+      if (state.displayCap === next) return next;
+      state.displayCap = next;
+      return next;
+    },
+    /**
+     * 開關準備功能。托盤切一下就會走到這裡，不必重裝 patch。
+     *
+     * **立刻生效**，包括同步 holdThisPhase。這跟「Node 死掉要等下一階段」
+     * 不衝突，兩者的差別是**誰下的令**：
+     *
+     * | 來源                 | 何時生效 | 為什麼                                   |
+     * | -------------------- | -------- | ---------------------------------------- |
+     * | 這個函式（Node 活著）| 立刻     | 是有人明確下的令，而且 UI 同步反映得出來 |
+     * | 心跳過期（沒人下令） | 下一階段 | 玩家不知情，當場改變會讓他以為還能反悔   |
+     *
+     * ⚠ 不要為了「一致」把這條也改成延後。玩家在托盤把準備關掉卻要等下一個
+     * 階段才有反應，那是「按了沒反應」，跟這次要修的問題一樣糟，只是反過來。
+     */
+    setHold: function (on) {
+      state.hold = on !== false;
+      state.holdThisPhase = state.hold && nodeAlive();
+      // ⚠ 關掉的當下如果正壓著東西，一定要立刻放掉 —— 否則那次 OK 會卡到
+      // 失效保護才送出，而玩家剛剛做的動作正是「把這個功能關掉」。
+      if (!state.hold && state.held) state.release("arbiter");
+      return state.hold;
+    },
+    /**
+     * 換準備中的染色。null = 不染色（官方原本的樣子）。
+     *
+     * 執行期就能換，不必重裝 —— 重裝會先把壓著的送出去，為了改一個顏色
+     * 讓玩家的 OK 定案完全不值得。
+     */
+    setReadyTint: function (v) {
+      var next = (typeof v === "number" && isFinite(v) && v >= 0 && v <= 0xffffff)
+        ? Math.floor(v) : null;
+      state.cfg.readyTint = next;
+      var sc = mainScene();
+      if (sc && sc.ok) {
+        // 正在染色中就立刻換過去；換成 null 或沒在染色都是清掉。
+        if (state.tinted && next !== null) sc.ok.setTint(next);
+        else sc.ok.clearTint();
+      }
+      return next;
+    },
+    /**
+     * 不管玩家按了沒，讓這個階段的 I_am_ok 送出去（WP-15 的約定秒數）。
+     *
+     * 兩條路，**都不需要知道 I_am_ok 的協定長什麼樣**（不變量 3）：
+     *
+     *   壓著玩家按的那次  → 原封不動重放
+     *   玩家根本沒按      → **替他按一次 OK 鈕**，讓遊戲自己去組那個封包
+     *
+     * ⚠ 第二條為什麼不是「自己 emit 一個 I_am_ok」：那要寫死參數
+     * （實測是 (this.room, this.id)），遊戲改版就會送出錯誤封包。
+     * 而 OK 鈕的 pointerdown handler 本來就是
+     * () => { this.ok.setTexture("ok",2).disableInteractive(),
+     *          this.socket.emit(<OK 事件名>, this.room, this.id) }
+     * —— 觸發它連送出後的按鈕外觀都一起對了（2026-08-06 實測）。
+     */
+    forceEnd: function (why) {
+      if (state.sentPhase === state.phaseId) return "already-sent";
+      if (!inInterceptPhase()) return "not-in-phase";
+      if (state.held) return state.release(why || "arbiter");
+
+      var sc = mainScene();
+      if (!sc || !sc.ok) return "no-button";
+      // 遊戲的 handler 會 disableInteractive()，之後 pinFrame 就沒有意義了。
+      state.pinFrame(null);
+      state.sentPhase = state.phaseId;
+      state.passthrough = true;
+      try {
+        sc.ok.emit("pointerdown");
+        report({ type: "ok-released", by: "forced", heldMs: 0 });
+      } catch (e) {
+        report({ type: "ok-patch-error", reason: "替玩家按 OK 失敗：" + String((e && e.message) || e) });
+      } finally {
+        state.passthrough = false;
+      }
+      return "pressed";
     },
     /** 把攔到的呼叫真的送出去。 */
     release: function (by) {
       var h = state.held;
       if (!h) return "nothing-held";
       state.held = null;
+      state.sentPhase = state.phaseId;
       try { clearTimeout(h.timer); } catch (e) {}
       // ⚠ 一定要在這裡收拾外觀，不能指望 Node 下指令。
       // 失效保護與心跳過期那兩條路完全沒有 Node 參與；而硬底線那條路 step()
@@ -477,8 +997,27 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
       var sc = mainScene();
       return (sc && typeof sc.PLAYER === "string") ? sc.PLAYER : null;
     },
-    /** 剩餘秒數：當前 active 階段場景裡 (380,318) 的 BitmapText。 */
+    /** 這一場的 room id。⚠ 高熵字串，出了這個函式就只能雜湊過再用（§12）。 */
+    room: function () {
+      var sc = mainScene();
+      return (sc && typeof sc.room === "string" && sc.room.length > 0) ? sc.room : null;
+    },
+    /**
+     * 剩餘秒數。
+     *
+     * ⚠ **移動階段一律讀 timelimit 這個欄位，不要讀畫面上的字。**
+     * 約定秒數生效時那個字是我們自己覆寫的（見 patchDisplay），拿它回推
+     * 剩餘量會變成自己騙自己 —— 而且錯的方向是「以為時間比實際少」，
+     * 硬底線會提早觸發。
+     *
+     * 其他階段（攻擊／防禦）沒有這個欄位可讀，仍然走原本的 BitmapText 掃描。
+     * 那條路 2026-08-02 實測定位過：(380,318)、每秒 1 格、10 秒以下有小數。
+     */
     remaining: function () {
+      try {
+        var mp = movePhase();
+        if (mp && typeof mp.timelimit === "number") return mp.timelimit;
+      } catch (e) {}
       try {
         var found = null;
         function walk(o, d) {
@@ -514,6 +1053,10 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
       try { clearInterval(state.phaseTick); } catch (e) {}
       state.phaseTick = null;
       try { state.pinFrame(null); } catch (e) {}
+      // ⚠ 讀秒顯示一定要還原。留著的話玩家會看到一個沒人在維護的假倒數 ——
+      // 而且它會停在錯的地方，比什麼都不做更糟。
+      state.displayCap = null;
+      try { unpatchDisplay(); } catch (e) {}
       try {
         var sc = mainScene();
         if (sc && sc.ok) sc.ok.clearTint();
@@ -537,6 +1080,11 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
   };
 
   function patchedEmit(name) {
+    // ⚠ **這是我們自己按下去的那一次，一定要放行。**
+    // forceEnd() 替玩家按 OK 鈕之後，遊戲自己會 emit I_am_ok —— 沒有這個
+    // 旗標的話它會撞到下面的攔截，「強制送出」變成「強制壓住」，剛好相反。
+    if (state.passthrough) return state.originalEmit.apply(this, arguments);
+
     if (String(name) === CFG.okEvent && shouldIntercept()) {
       // 已經壓著一個 → 這是「再按一次」。**不要送出**，也不要疊第二個 ——
       // 交給仲裁決定（它會判成取消準備，然後叫我們 cancel()）。
@@ -561,10 +1109,54 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
     return state.originalEmit.apply(this, arguments);
   }
 
+  /**
+   * 狀態效果的剩餘回合數。
+   *
+   *     state("mahi_2", "A", "B")   ← <鍵>_<回合數>、誰中了、誰施加的
+   *
+   * ⚠ 伺服器**只在施加時通知一次**，之後不會再告訴你還剩幾回合。所以要自己
+   * 數：每收到一次 endTurn 就全部減一。這也表示中途接上插件的那一場算不出來
+   * （沒看到施加的那一刻）—— 那只會讓 hazard 判成 false，也就是**不縮短**，
+   * 方向是安全的。
+   */
+  function trackState(args) {
+    try {
+      // ⚠ args[0] 是**事件名**（"state"），參數從 1 開始 —— onAny 的簽章是
+      // (name, ...args)。從 0 讀的話 key 會是 "stat"，永遠對不上任何狀態，
+      // 而症狀是「hazard 永遠不成立」，也就是這條規則安靜地不存在。
+      var raw = String(args[1] || "");
+      var cut = raw.lastIndexOf("_");
+      if (cut <= 0) return;
+      var key = raw.slice(0, cut);
+      var turns = parseInt(raw.slice(cut + 1), 10);
+      if (!isFinite(turns) || turns <= 0) return;
+      if (CFG.stallStates.indexOf(key) === -1) return;
+      var seat = (args[2] === "A" || args[2] === "B") ? args[2] : null;
+      if (seat === null) return;
+      state.states[seat][key] = turns;
+    } catch (e) {}
+  }
+
+  function decayStates() {
+    for (var seat in state.states) {
+      if (!has.call(state.states, seat)) continue;
+      var byKey = state.states[seat];
+      for (var key in byKey) {
+        if (!has.call(byKey, key)) continue;
+        byKey[key] -= 1;
+        if (byKey[key] <= 0) delete byKey[key];
+      }
+    }
+  }
+
   /** 操作事件：轉成去識別化的形式送回 Node。 */
   function onAnyHandler(name) {
     try {
       var n = String(name);
+      // 狀態效果只留在頁面裡（hazard 用），**不回報給 Node**。
+      if (n === "state") { trackState(arguments); return; }
+      if (n === "endTurn") { decayStates(); return; }
+
       var isClick = n.indexOf("cardclicked") === 0;
       var isRotate = n.indexOf("cardrotate") === 0;
       if (!isClick && !isRotate && n !== "move_select") return;
@@ -622,6 +1214,8 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
         // 新的一場 → 流水號重編。舊場的對應留著會讓兩場的牌撞號。
         refs = { A: {}, B: {} };
         refNext = { A: 1, B: 1 };
+        // 狀態效果也是上一場的。留著會讓新的一場一開始就以為有人被麻痺。
+        state.states = { A: {}, B: {} };
         state.armed = true;
         if (everArmed) report({ type: "ok-patch-rearmed", seat: state.seat() });
         everArmed = true;
@@ -637,7 +1231,7 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
   }
 
   /**
-   * 一直在跑的監看，管四件事。**它是這個 patch 唯一的自我修復機制**，
+   * 一直在跑的監看，管六件事。**它是這個 patch 唯一的自我修復機制**，
    * 所以裝的時候沒有 socket 也照樣要跑起來。
    *
    * 1. **socket 換了就重掛。** 重新開房、進任務都會換一顆。
@@ -646,26 +1240,78 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
    * 4. **染色 = 這個階段插件真的有在管。** 移動階段整段琥珀色（不管有沒有
    *    按下去），其他階段完全還原 —— 而 Node 死掉時也要還原，否則畫面在
    *    宣稱一個已經不存在的保護。
+   * 5. **數階段。** 每進入一次移動階段 phaseId +1，Node 靠它判斷「換階段了」。
+   * 6. **讀秒顯示的 patch 要補掛。** 場景是進對戰才建立的，裝插件的當下
+   *    多半還沒有 —— 跟 socket 完全一樣的問題，所以用同一個機制解。
    */
   state.phaseTick = setInterval(function () {
     try {
       arm();
 
-      var inPhase = inInterceptPhase();
+      var mp = movePhase();
+      var inPhase = mp !== null;
       var alive = nodeAlive();
 
-      if (state.held && !alive) state.release("node-gone");
-      else if (state.held && !inPhase) state.release("phase-ended");
+      // ⚠ 進入移動階段的**那一刻**才 +1。用「現在在不在」當條件會每 200ms 加一次。
+      if (inPhase && !state.wasInPhase) {
+        state.phaseId++;
+        // ⚠⚠ **這是唯一會把 holdThisPhase 變成 false 的地方**（setHold 除外）。
+        // 先歸零，由下面那行決定要不要開 —— 也就是「取消要等下一回」。
+        state.holdThisPhase = false;
+        state.degraded = false;
+      }
+      state.wasInPhase = inPhase;
+      if (mp !== null) patchDisplay(mp);
+
+      /**
+       * ⚠ **開啟隨時生效，關閉只在階段邊界。** 這個不對稱是刻意的：
+       *
+       *   關閉 → 玩家以為還能反悔，那次按壓卻定案了。**有傷害**，所以要等邊界。
+       *   開啟 → 他只是多拿到一個反悔窗口。**沒有傷害**，所以可以立刻。
+       *
+       * 少了這一行，「對戰中途才接上插件」會整個階段都沒有準備功能 ——
+       * 因為第一輪 phaseTick 跑在 Node 的第一次 tick() 之前，那時 alive 還是
+       * false，而不離開階段就永遠沒有下一個邊界可以翻正。
+       */
+      if (state.hold && alive) state.holdThisPhase = true;
+
+      // 這個階段本來在攔，中途 Node 卻死了 → 降級成單邊，不要當場取消。
+      if (inPhase && state.holdThisPhase && !alive && !state.degraded) {
+        state.degraded = true;
+        report({ type: "ok-degraded", phaseId: state.phaseId, holding: !!state.held });
+      } else if (state.degraded && alive) {
+        // 心跳在同一個階段內回來了 —— 回到正常模式，硬底線交還給 Node。
+        state.degraded = false;
+      }
+
+      if (state.held && !inPhase) {
+        state.release("phase-ended");
+      } else if (state.held && state.degraded) {
+        /**
+         * ⚠ **降級模式下沒有人會來救，硬底線得自己顧。**
+         *
+         * failsafeMs 不夠用：它是從「按下去」算起的 25 秒，而玩家可能在
+         * 階段剩 8 秒時才按 —— 那樣失效保護會落在階段結束之後，也就是
+         * **逾時棄權**。所以這裡改看階段還剩幾秒。
+         */
+        var left = state.remaining();
+        // 讀不到剩餘秒數就沒有安全網可言 —— 這種時候寧可早一點送出去。
+        if (left === null || left <= CFG.localDeadlineSeconds) state.release("local-deadline");
+      }
 
       var sc = mainScene();
       if (!sc || !sc.ok) return;
-      var engaged = inPhase && state.armed && alive;
+      // ⚠ 用 holdThisPhase 而不是 alive：降級中準備功能**仍然在運作**
+      // （單邊的反悔窗口還在），外觀就不該說它已經沒了。
+      var engaged = inPhase && state.armed && state.holdThisPhase;
       if (engaged && !state.tinted) {
-        sc.ok.setTint(CFG.readyTint);
+        if (CFG.readyTint !== null) sc.ok.setTint(CFG.readyTint);
         state.tinted = true;
       } else if (!engaged && state.tinted) {
         // 不再介入 → 完全還原，包括可能還掛著的 hover 收納。
         state.pinFrame(null);
+        // ⚠ 無條件 clearTint：玩家可能在染色期間把顏色改成「不染色」，
+        // 只在 readyTint !== null 時清的話那次的染色會永遠留在按鈕上。
         sc.ok.clearTint();
         state.tinted = false;
       }

@@ -165,18 +165,23 @@ export type { PageBridge, PageCommand, RunnerOptions } from "./arbiter-runner.js
 export {
   buildOkPatchScript,
   DEFAULT_FAILSAFE_MS,
+  DEFAULT_LOCAL_DEADLINE_SECONDS,
   DEFAULT_STALE_MS,
   isOkPatchReport,
+  normalizeTint,
   OK_PATCH_GLOBAL,
   OK_PATCH_UNINSTALL_EXPRESSION,
+  READY_TINT_AMBER,
 } from "./patch-ok.js";
 export type {
+  ForceEndResult,
   OkIntercepted,
   OkPressedAgain,
   OkPatchError,
   OkPatchEvent,
   OkPatchInstalled,
   OkPatchOptions,
+  OkDegraded,
   OkPatchRearmed,
   OkPatchReport,
   OkPatchTick,
@@ -184,8 +189,23 @@ export type {
 } from "./patch-ok.js";
 
 export {
+  buildSpeedPatchScript,
+  DEFAULT_SPEED_FACTOR,
+  DEFAULT_SPEED_LEASE_MS,
+  isSpeedPatchReport,
+  MAX_SPEED_FACTOR,
+  SPEED_PATCH_GLOBAL,
+  SPEED_PATCH_RENEW_EXPRESSION,
+  SPEED_PATCH_UNINSTALL_EXPRESSION,
+} from "./patch-speed.js";
+export type { SpeedPatchOptions, SpeedPatchReport } from "./patch-speed.js";
+
+export {
+  capThreshold,
+  DEFAULT_PHASE_TOTAL_SECONDS,
   initialState,
   isOperation,
+  resetAfterSend,
   resetForNextPhase,
   resetForNextTurn,
   step,

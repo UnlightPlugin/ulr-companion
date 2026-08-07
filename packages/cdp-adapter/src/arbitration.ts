@@ -64,6 +64,43 @@ export interface ArbiterConfig {
    * 發生在移動階段、同樣改變結果 —— 這是還沒拍板的設計問題，先做成選項。
    */
   moveSelectCounts?: boolean;
+  /**
+   * 這個階段**約定**要在第幾秒結束（WP-15）。`null` = 不強制提早。
+   *
+   * ⚠ 這跟 `deadlineSeconds` 是兩件完全不同的事，混起來會出人命：
+   *
+   * |                    | 誰決定的     | 沒按 OK 也會送嗎 | 為什麼存在         |
+   * | ------------------ | ------------ | ---------------- | ------------------ |
+   * | `deadlineSeconds`  | 本機，寫死   | ❌ 只有壓著才送  | 不讓玩家逾時棄權   |
+   * | `capSeconds`       | **雙方協商** | ✅ **會**        | 縮短整個移動階段   |
+   *
+   * 它會在玩家**還沒按 OK** 的情況下把 `I_am_ok` 送出去 —— 也就是替他承諾當下
+   * 的場面。這件事只有在**雙方都同意**時才做得起來，所以來源必須是側通道協商
+   * 出來的共同值（`@ulr/arbiter-link` 的 `effectiveCapSeconds()`）。沒配對到
+   * 對手時那個函式會回滿版 30 秒，等於這條規則自己關掉。
+   *
+   * 單方面縮短沒有意義：對手照樣想滿 30 秒，只有我提早承諾。
+   */
+  capSeconds?: number | null;
+  /**
+   * 移動階段畫面上顯示的總秒數。`capSeconds` 是從**階段開始**算的，而我們
+   * 讀得到的是**剩餘**秒數，兩者靠這個數字換算。
+   *
+   * ⚠ 用常數而不是「這個階段觀測到的最大值」是刻意的：兩個客戶端要算出
+   * **完全相同**的門檻。觀測值差個 1 秒，兩邊就會差 1 秒觸發，而那段時間差
+   * 正好是「先承諾的人被懲罰」的縮小版。時鐘飄移由側通道的 `force-end`
+   * 轉發兜底，不由這裡處理。
+   */
+  phaseTotalSeconds?: number;
+}
+
+/** `capSeconds` 換算成「剩餘秒數低於多少就強制結束」。 */
+export const DEFAULT_PHASE_TOTAL_SECONDS = 30;
+
+export function capThreshold(config: ArbiterConfig): number | null {
+  if (config.capSeconds === undefined || config.capSeconds === null) return null;
+  const total = config.phaseTotalSeconds ?? DEFAULT_PHASE_TOTAL_SECONDS;
+  return total - config.capSeconds;
 }
 
 export interface ArbiterState {
@@ -75,6 +112,19 @@ export interface ArbiterState {
   readonly opponentReady: boolean;
   /** 真的 `I_am_ok` 已經送出。之後不可撤銷。 */
   readonly committed: boolean;
+  /**
+   * 這個階段**已經送出過**一次 `I_am_ok`。
+   *
+   * ⚠ 跟 `committed` 是兩件事，而且非分開不可：
+   *
+   * `committed` 在頁面回報送出後要被清掉，否則玩家的第二次按下會被 Node
+   * 直接忽略 → 那次呼叫壓到失效保護才送出，而且取消不了（WP-12 的坑 #5）。
+   * 但清掉之後「約定秒數」那條路會在下一個 tick 又觸發一次 —— 它**不看
+   * `ready`**，所以清掉 `committed` 對它等於什麼都沒發生。
+   *
+   * 兩者的清除時機因此不同：`committed` 送出即清、`sent` **換階段才清**。
+   */
+  readonly sent: boolean;
 }
 
 export type ArbiterInput =
@@ -82,8 +132,16 @@ export type ArbiterInput =
   | { type: "game-event"; event: string; cardId?: CardId; clicked?: boolean }
   /** 玩家按了 OK 鈕（在這個設計裡它是「準備」）。 */
   | { type: "press-ok" }
-  /** 側通道回報對手的準備狀態。 */
+  /**
+   * 側通道回報**雙方都準備好了**。
+   *
+   * ⚠ 名字裡的 `opponent` 是歷史包袱，但語意是合成訊號：中間人只在兩邊都好
+   * 的時候發一則 `both-ready`，**從不**單獨告訴任何一方「對手好了」
+   * （`@ulr/arbiter-link` 的紅線 1）。`ready: false` 只有本機重置時會用到。
+   */
   | { type: "opponent-ready"; ready: boolean }
+  /** 對手那邊的約定秒數門檻到了。兩邊時鐘差一點時靠它拉齊。 */
+  | { type: "peer-force-end" }
   /** 讀到的剩餘秒數（來自畫面上的 TIME）。 */
   | { type: "tick"; remainingSeconds: number };
 
@@ -91,15 +149,28 @@ export type SendReason =
   /** 雙方都準備好了 —— 正常路徑 */
   | "both-ready"
   /** 時間不夠了，不等了 —— 硬底線 */
-  | "deadline";
+  | "deadline"
+  /** 約定的階段秒數到了（可能玩家根本還沒按 OK） */
+  | "agreed-cap"
+  /** 對手那邊的門檻先到，跟著收手 */
+  | "peer-cap";
 
 export type ArbiterAction =
-  /** 用**原始 emit 重放攔到的那次呼叫**送出真的 `I_am_ok`。 */
-  | { type: "send-ok"; reason: SendReason }
+  /**
+   * 送出真的 `I_am_ok`。
+   *
+   * `held` 為真代表頁面正壓著玩家按下的那次呼叫 —— 那就**原封不動重放**它。
+   * 為假代表玩家根本還沒按（約定秒數到了），頁面得**替他按一次 OK 鈕**，
+   * 讓遊戲自己去組那個封包。兩條路都不需要知道 `I_am_ok` 的協定長什麼樣
+   * （不變量 3）。
+   */
+  | { type: "send-ok"; reason: SendReason; held: boolean }
   /** OK 鈕的外觀。`"0"` 可按、`"2"` 灰掉 —— 遊戲自己就是用這兩個 frame。 */
   | { type: "set-ok-frame"; frame: "0" | "2" }
   /** 告訴側通道我方的準備狀態變了。 */
-  | { type: "announce-ready"; ready: boolean };
+  | { type: "announce-ready"; ready: boolean }
+  /** 告訴對手「我這邊的約定秒數到了」，讓他同一瞬間收手。 */
+  | { type: "announce-force-end" };
 
 export interface StepResult {
   state: ArbiterState;
@@ -112,6 +183,7 @@ export function initialState(): ArbiterState {
     ready: false,
     opponentReady: false,
     committed: false,
+    sent: false,
   };
 }
 
@@ -226,7 +298,7 @@ export function step(config: ArbiterConfig, state: ArbiterState, input: ArbiterI
 
       // 對手早就好了 → 這一按就是雙方就緒，直接放行。
       if (readyState.opponentReady) {
-        actions.push({ type: "send-ok", reason: "both-ready" });
+        actions.push({ type: "send-ok", reason: "both-ready", held: true });
         return { state: { ...readyState, committed: true }, actions };
       }
       return { state: readyState, actions };
@@ -238,20 +310,50 @@ export function step(config: ArbiterConfig, state: ArbiterState, input: ArbiterI
       if (input.ready && next.ready) {
         return {
           state: { ...next, committed: true },
-          actions: [{ type: "send-ok", reason: "both-ready" }],
+          actions: [{ type: "send-ok", reason: "both-ready", held: true }],
         };
       }
       return { state: next, actions };
     }
 
+    case "peer-force-end": {
+      if (state.committed || state.sent) return { state, actions };
+      // ⚠ **不再回頭通知對手**，否則兩邊會互相轉發同一則。他既然送得出來，
+      // 他自己那邊也早就送出去了。
+      return {
+        state: { ...state, committed: true },
+        actions: [{ type: "send-ok", reason: "peer-cap", held: state.ready }],
+      };
+    }
+
     case "tick": {
       if (state.committed) return { state, actions };
+
       // ⚠ 不變量 1：硬底線不看 opponentReady、不看策略、不看任何東西。
       // 只要玩家已經按過 OK 而時間快到了，就一定要送出去，否則等於棄權。
+      // **這條永遠排在約定秒數前面** —— 它是安全機制，另一條是便利機制。
       if (state.ready && input.remainingSeconds <= config.deadlineSeconds) {
         return {
           state: { ...state, committed: true },
-          actions: [{ type: "send-ok", reason: "deadline" }],
+          actions: [{ type: "send-ok", reason: "deadline", held: true }],
+        };
+      }
+
+      // 約定的階段秒數到了。⚠ **這條不看 `state.ready`** —— 玩家沒按也照送，
+      // 那正是「把 30 秒的階段縮成 15 秒」的意思。做得到的前提是雙方都同意，
+      // 而那個前提由 `capSeconds` 的來源保證（見它的說明）。
+      //
+      // ⚠ `state.sent` 是必要的第二道閘：送出之後 `committed` 會被清掉
+      // （見它的說明），而這條規則不看 `ready`，只看時間 —— 少了它，同一個
+      // 階段裡每 250ms 就會再「強制結束」一次。
+      const threshold = capThreshold(config);
+      if (!state.sent && threshold !== null && input.remainingSeconds <= threshold) {
+        return {
+          state: { ...state, committed: true },
+          actions: [
+            { type: "send-ok", reason: "agreed-cap", held: state.ready },
+            { type: "announce-force-end" },
+          ],
         };
       }
       return { state, actions };
@@ -261,7 +363,18 @@ export function step(config: ArbiterConfig, state: ArbiterState, input: ArbiterI
 
 /** 新的階段開始 —— 清掉準備與 commit，但**保留**場上的牌。 */
 export function resetForNextPhase(state: ArbiterState): ArbiterState {
-  return { ...state, ready: false, opponentReady: false, committed: false };
+  return { ...state, ready: false, opponentReady: false, committed: false, sent: false };
+}
+
+/**
+ * 頁面回報「送出去了」之後的重置。
+ *
+ * ⚠ 跟 `resetForNextPhase` 只差一個欄位，但那個欄位是關鍵：
+ * **`sent` 要留著。** 清掉 `committed` 是為了讓玩家的第二次按下還能被處理
+ * （坑 #5），但約定秒數那條路不看 `ready`，`committed` 一清它就會再送一次。
+ */
+export function resetAfterSend(state: ArbiterState): ArbiterState {
+  return { ...state, ready: false, opponentReady: false, committed: false, sent: true };
 }
 
 /** 新的一輪（牌全部收走）—— 場上集合也要清空。 */
