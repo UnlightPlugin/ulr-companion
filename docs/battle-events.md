@@ -95,14 +95,27 @@ this.PLAYER = e.side, this.OPPONENT = "A" === e.side ? "B" : "A", this.isPlayerA
 
 推導方式：一邊有、另一邊完全沒有。
 
-| 事件                              | 用途                           |
-| --------------------------------- | ------------------------------ |
-| `okVisibleA` / `okVisibleB`       | OK 鈕可用（座位偵測用這個）    |
-| `cardController1A` / `1B`         | 手牌控制器啟用                 |
-| `cardController2A` / `2B`         | 同上，第二階段                 |
-| `defensePhaseA` / `defensePhaseB` | 輪到你防禦                     |
-| `deleteDraw_A` / `deleteDraw_B`   | 棄牌                           |
-| `additionalDraw_B`                | 追加抽牌（只在 B 位出現 1 次） |
+| 事件                              | 用途                                 |
+| --------------------------------- | ------------------------------------ |
+| `okVisibleA` / `okVisibleB`       | OK 鈕可用（座位偵測用這個）          |
+| `cardController1A` / `1B`         | 手牌控制器**啟用**（＝可以出牌了）   |
+| `cardController2A` / `2B`         | 手牌控制器**停用**（＝你這半段結束） |
+| `defensePhaseA` / `defensePhaseB` | 輪到你防禦                           |
+| `deleteDraw_A` / `deleteDraw_B`   | 棄牌                                 |
+| `additionalDraw_B`                | 追加抽牌（只在 B 位出現 1 次）       |
+
+> ⚠ **2026-08-06 更正 `cardController2X` 的說明。** 原本寫「同上，第二階段」，
+> 那是誤讀 —— 讀原始碼（949.js:2990/2999）後確認 `1X` 是
+> `setInteractive()`、`2X` 是 `disableInteractive()`，兩者是**開與關**，
+> 不是第一與第二階段。
+>
+> ⚠ **判斷「現在能不能出牌」要看這兩個事件，不要看場景名。** 實測場景會先換
+> （`endPhase` → `scene.start("DefensePhaseA")`），`cardController1X` 晚
+> 1.5~3.7 秒才到。中間那段是預先出牌的機會窗，也是「明明在防禦階段卻點不動」
+> 的原因。
+>
+> 順帶：**攻擊與防禦是循序的**，`I_am_ok` → `cardController2X` 只要 41~44ms，
+> 自己那半段立刻結束、不等對手。細節見 [battle-preplay.md](battle-preplay.md)。
 
 ---
 
@@ -814,6 +827,30 @@ critical  control  target  dark
 玩家說明過「卡牌上方是生效的那一半，數字表示強度」—— 所以**轉牌就是翻面決定
 用哪一半**，這也是為什麼 `rotate` 是獨立事件而不是出牌的一部分。
 
+### ⚠ 這份表在執行期的鍵是 `event_info`，不是 `event_asset`（2026-08-06 更正）
+
+上面那段 JSON 的檔名在伺服器上叫 `event_asset.json`，但**在 Phaser 的 JSON
+快取裡取不到那個鍵**（實測回 `undefined`）。真正的鍵是 `event_info`，而且
+形狀是 `{ frames: [...] }` **不是裸陣列**：
+
+```js
+window.game.cache.json.get("event_info").frames; // 110 筆
+```
+
+`event_asset` 是**材質**的鍵（110 格，frame 名是 "0"…"109"），而 frame 名
+**就是 `frames[]` 的索引**。實測對照：
+
+```
+0=劍1卡  21=槍1卡  42=防禦1卡  91=聖水  94=聖杯卡  95=毒杯卡
+```
+
+所以「手牌有沒有聖水」是一句話：走 `MainA.arr1` 收帶 `event_asset` 材質的
+sprite，拿它的 frame 名去查 `frames[n].holy` / `.holy_enemy`。
+
+⚠ **要走 `arr1`，不要只看畫面上的顯示物件。** 手牌會分頁（`MainA.page` /
+`currentPage` / `arrow_left` / `arrow_right`），沒翻到的那頁在顯示清單裡根本
+不存在。漏掉的方向是「以為沒有聖水」——規則會安靜地失效。
+
 ### ⚠ 聖水／聖杯屬於哪一類，還沒確認
 
 `holy` / `holy_enemy` / `draw` / `break` / `heal` 這些欄位長在**行動卡**的結構上。
@@ -881,3 +918,84 @@ WP-12 兩種都用：攔 `I_am_ok` 靠原型，收出牌／轉牌事件靠實例
    所以沒有觸發。要量倒數就得**故意讓它跑到自然結束**。
 4. **`move_select` 為什麼是雙向的？** 唯一會回送給自己的操作事件。
    移動階段仲裁正好在這個階段，值得先搞清楚。
+
+---
+
+## 移動階段的倒數整段都是客戶端算的（2026-08-06 實測原始碼）
+
+`MovePhaseA` 的相關欄位：`timelimit` / `text`（BitmapText）/ `guage`
+（Rectangle）/ `hsv`（`Phaser.Display.Color.HSVColorWheel()`）/ `colorIdx`。
+
+```js
+this.timelimit = 30;                                       // create()
+this.time.addEvent({ delay: 100, ... this.timelimit -= .1 })
+// update() 每一幀從 timelimit 重算三樣東西：
+text.setText(timelimit.toPrecision(...))     // >10.1 或 1~10 用 2 位有效數字
+colorIdx = trunc(timelimit / 30 * 240)       // 240 = 藍、0 = 紅
+guage.scaleX = timelimit / 30 * .934 + .066  // .066 是最小長度
+```
+
+三樣東西全部是 `timelimit` 的純函式，而且**分母寫死 30**。
+
+這件事有兩個後果：
+
+1. **讀剩餘秒數直接讀 `MovePhaseA.timelimit` 就好**，不必掃 (380,318) 的
+   BitmapText 再 `parseFloat`。那條路仍然留著給攻擊／防禦階段用。
+2. 想讓「約定 15 秒」看起來真的只有 15 秒，只要在 `update()` 之後用
+   `(timelimit − (30 − cap)) / cap` 重算同樣三樣就好 —— 數字與讀秒條會一起對。
+   ⚠ **不要改 `timelimit` 本身**：硬底線、hazard、失效保護全部讀它。
+
+### ⚠⚠ Phaser 把 `scene.update` 抄了一份 —— 只換原型完全沒有效果
+
+```js
+// Systems.init
+if (this.scene.update) this.sceneUpdate = this.scene.update;
+// Systems.step —— 每一幀呼叫的是**那份抄本**
+this.sceneUpdate.call(this.scene, time, delta);
+```
+
+場景建立**之後**才換原型，跑的還是舊的那份。症狀極度誤導：
+`Object.getPrototypeOf(mp).update` 檢查起來是新版、自訂旗標也是 `true`，
+**但畫面完全沒變**——看起來像計算寫錯，其實是根本沒被呼叫。
+
+兩邊都要換：原型（之後 re-init 會抄到新版）＋ `sc.sys.sceneUpdate`
+（現在這一顆實例）。
+
+> 這跟下面「socket 的壽命」是**同一個形狀的坑**：原型上的東西跨場活著，
+> 實例上的抄本每場重來。碰到 Phaser 的東西要先問「這是原型還是實例」。
+
+---
+
+## OK 鈕的 pointerdown handler（2026-08-06 實測）
+
+```js
+this.ok = this.add.image(570, 630, "ok", 0).setInteractive().setDepth(100);
+this.ok.on("pointerover", () => this.ok.setTexture("ok", 1))
+       .on("pointerout",  () => this.ok.setTexture("ok", 0))
+       .on("pointerdown", () => {
+          this.ok.setTexture("ok", 2).disableInteractive(),
+          this.socket.emit(<OK 事件名>, this.room, this.id)
+       });
+```
+
+只有一個 `pointerdown` listener，不吃參數，也不檢查任何條件。
+
+所以要「替玩家按一次 OK」，`sc.ok.emit("pointerdown")` 就夠了 —— Phaser 的
+GameObject 就是 EventEmitter，**不管物件可不可按**。好處是插件永遠不需要
+知道那個事件的參數長什麼樣（WP-12 的不變量 3），而且送出後的按鈕外觀
+（frame 2 + 不可按）連帶對了。
+
+⚠ 這麼做的時候**必須有一個 pass-through 旗標**，否則遊戲 emit 出來的那則
+會撞到我們自己的攔截 ——「強制送出」變成「強制壓住」，方向剛好相反。
+
+---
+
+## room id 兩個客戶端完全相同（2026-08-06 雙開實測）
+
+`MainA.room` 在 :9333 與 :1221 上是同一個 32 字元字串。
+
+✅ 這回答了 [battle-features.md](battle-features.md) 動手前要 probe 的第 4 題
+（match id 可不可觀測），也就是側通道把兩個玩家配起來的依據。
+
+⚠ **它是高熵字串，不得記錄也不得上傳**（§12，跟 session token 同一個量級）。
+側通道只送 **SHA-256 前 64 bit** —— 中間人只需要回答「這兩個人在不在同一場」。
