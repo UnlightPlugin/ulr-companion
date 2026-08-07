@@ -1,0 +1,1129 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      ⚠ CSP 這裡是**必要的**，不是加好玩的。這個視窗的內容全部是我們自己寫死的，
+      所以連線來源可以鎖到只剩 'self'。§12 的原則：邊界擋一次，之後都安全。
+
+      ⚠ **外觀是純 CSS 重現的，一張遊戲圖檔都沒有。** 色票是 2026-08-07 從跑著的
+      客戶端量出來的（分頁 tab_chara/library_btn_*、底 option_bg、面板 edit_bg），
+      不是憑印象調的。這個選擇讓上面那行 `default-src 'none'` 成立 ——
+      要是改成載入遊戲的圖，就得放寬 img-src，而且離線時整個外觀會消失。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"
+    />
+    <title>ULR Companion</title>
+    <style>
+      :root {
+        /* --- 從客戶端量到的色票（見上方註解） --- */
+        --tab-off: #622b2f; /* edit/tab_chara.png frame 0 */
+        --tab-off-lo: #4a2024;
+        --tab-hover: #873136; /* frame 1 */
+        --tab-on: #d5d5d5; /* 選中是淺灰，不是更亮的紅 */
+        --tab-on-lo: #b4b4b4;
+        /*
+         * ⚠ 遊戲原本的分頁字幾乎是黑的（量到的暗部接近 #000），靠浮雕撐可讀性。
+         * 這裡刻意調亮一階：遊戲的分頁是大圖示尺寸，這個視窗是 13.5px 的文字，
+         * 照抄會變成看不清楚要點哪裡。像它，但不要像到不能用。
+         */
+        --ink-off: #d8b6b8;
+        --ink-on: #241013;
+
+        --bg: #1e2336; /* option_bg 的主色 */
+        --bg-lo: #161a29;
+        --panel: #272c3c;
+        --panel-hi: #313749;
+        --line: #0c0e16;
+        --rule: #434a60;
+
+        --text: #dfe2ea;
+        --dim: #939bb0;
+        --amber: #ffc247;
+        --green: #4cc96a;
+        --red: #b8434b;
+        --grey: #7d8496;
+
+        --serif: "Noto Serif TC", "Source Han Serif TC", "MS Mincho", "PMingLiU", Georgia, serif;
+        --sans: "Noto Sans TC", "Microsoft JhengHei", system-ui, sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+      }
+      body {
+        margin: 0;
+        background: var(--bg-lo);
+        color: var(--text);
+        font: 13px/1.6 var(--sans);
+        user-select: none;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+
+      /* --- 頂條：遊戲每個畫面上緣那條直紋 --- */
+      header {
+        flex: none;
+        height: 34px;
+        display: flex;
+        align-items: center;
+        padding: 0 12px;
+        border-bottom: 1px solid var(--line);
+        background:
+          repeating-linear-gradient(90deg, #2b3a42 0 3px, #26333a 3px 6px, #1d282e 6px 9px), #26282a;
+      }
+      header .brand {
+        font-family: var(--serif);
+        font-size: 13px;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        color: #b9c6cc;
+        text-shadow: 0 1px 0 #000;
+      }
+      header .ver {
+        margin-left: 10px;
+        padding: 1px 7px;
+        border: 1px solid #3a4a52;
+        border-radius: 2px;
+        font-size: 10.5px;
+        letter-spacing: 0.06em;
+        color: #8fa0a8;
+      }
+      header .who {
+        margin-left: auto;
+        font-size: 11.5px;
+        color: #8fa0a8;
+        letter-spacing: 0.04em;
+      }
+
+      /* --- 大分頁列 --- */
+      nav.tabs {
+        flex: none;
+        display: flex;
+        gap: 2px;
+        padding: 6px 8px 0;
+        background: var(--bg-lo);
+        border-bottom: 1px solid var(--line);
+      }
+      nav.tabs button {
+        appearance: none;
+        min-width: 92px;
+        padding: 6px 16px 5px;
+        border: 1px solid var(--line);
+        border-bottom: none;
+        border-radius: 2px 2px 0 0;
+        font-family: var(--serif);
+        font-size: 13.5px;
+        letter-spacing: 0.14em;
+        cursor: pointer;
+        color: var(--ink-off);
+        background: linear-gradient(180deg, var(--tab-off) 0%, var(--tab-off-lo) 100%);
+        /* 遊戲的分頁字是浮雕的，靠一暗一亮兩層陰影做出來 */
+        text-shadow:
+          0 1px 1px rgba(0, 0, 0, 0.75),
+          0 -1px 0 rgba(0, 0, 0, 0.35);
+      }
+      nav.tabs button:hover {
+        background: linear-gradient(180deg, var(--tab-hover) 0%, #6e282d 100%);
+        color: #f4e2e3;
+      }
+      nav.tabs button[aria-selected="true"] {
+        background: linear-gradient(180deg, var(--tab-on) 0%, var(--tab-on-lo) 100%);
+        color: var(--ink-on);
+        text-shadow: 0 1px 0 rgba(255, 255, 255, 0.6);
+      }
+
+      /* --- 主體：左側子分頁 + 內容 --- */
+      main {
+        flex: 1;
+        display: flex;
+        min-height: 0;
+        background:
+          radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.028) 1px, transparent 1px) 0 0 /
+            4px 4px,
+          linear-gradient(180deg, var(--bg) 0%, var(--bg-lo) 100%);
+      }
+
+      aside {
+        flex: none;
+        width: 116px;
+        padding: 10px 0;
+        border-right: 1px solid var(--line);
+        background: linear-gradient(90deg, rgba(0, 0, 0, 0.28), rgba(0, 0, 0, 0.06));
+        overflow-y: auto;
+      }
+      aside button {
+        appearance: none;
+        display: block;
+        width: 100%;
+        padding: 7px 10px 7px 16px;
+        border: none;
+        border-left: 3px solid transparent;
+        background: none;
+        color: var(--dim);
+        font-family: var(--serif);
+        font-size: 13px;
+        letter-spacing: 0.1em;
+        text-align: left;
+        cursor: pointer;
+      }
+      aside button:hover {
+        color: var(--text);
+        background: rgba(135, 49, 54, 0.22);
+      }
+      aside button[aria-selected="true"] {
+        color: #fff;
+        border-left-color: var(--red);
+        background: linear-gradient(90deg, rgba(184, 67, 75, 0.36), transparent);
+      }
+      /* 未實作的子分頁：看得見，但一眼看得出還不能用 */
+      aside button.todo::after {
+        content: "…";
+        color: var(--grey);
+        margin-left: 4px;
+      }
+
+      section.body {
+        flex: 1;
+        padding: 14px 16px;
+        overflow-y: auto;
+        min-width: 0;
+      }
+      h2 {
+        margin: 0 0 3px;
+        font-family: var(--serif);
+        font-size: 16px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+      }
+      /* 遊戲 Library 那條帶小飾釘的分隔線 */
+      .rule {
+        height: 1px;
+        margin: 9px 0 13px;
+        background: linear-gradient(90deg, var(--rule), rgba(67, 74, 96, 0.1));
+        position: relative;
+      }
+      .rule::before {
+        content: "";
+        position: absolute;
+        left: -3px;
+        top: -2.5px;
+        width: 6px;
+        height: 6px;
+        background: var(--rule);
+        transform: rotate(45deg);
+      }
+      .lede {
+        color: var(--dim);
+        font-size: 12px;
+        margin: 0;
+      }
+
+      .card {
+        background: linear-gradient(180deg, var(--panel-hi), var(--panel));
+        border: 1px solid var(--line);
+        border-radius: 3px;
+        padding: 11px 13px;
+        margin-bottom: 10px;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+      }
+      .row {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        gap: 10px;
+      }
+      .row + .row {
+        margin-top: 5px;
+      }
+      .dim {
+        color: var(--dim);
+      }
+      .big {
+        font-family: var(--serif);
+        font-size: 24px;
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+      }
+      .hint {
+        color: var(--dim);
+        font-size: 11.5px;
+        margin-top: 6px;
+        line-height: 1.65;
+      }
+      .warn {
+        color: var(--amber);
+      }
+      .bad {
+        color: var(--red);
+      }
+      .good {
+        color: var(--green);
+      }
+
+      label.toggle {
+        display: flex;
+        align-items: flex-start;
+        gap: 9px;
+        cursor: pointer;
+      }
+      label.toggle input {
+        margin: 4px 0 0;
+        flex: none;
+        accent-color: var(--red);
+      }
+      label.toggle b {
+        font-family: var(--serif);
+        letter-spacing: 0.05em;
+      }
+
+      input[type="range"] {
+        width: 100%;
+        margin: 10px 0 2px;
+        accent-color: var(--amber);
+      }
+      .ticks {
+        display: flex;
+        justify-content: space-between;
+        color: var(--dim);
+        font-size: 11px;
+      }
+
+      input[type="text"],
+      input[type="number"],
+      select {
+        background: #12151f;
+        border: 1px solid var(--line);
+        border-radius: 2px;
+        color: var(--text);
+        font: 12.5px var(--sans);
+        padding: 4px 7px;
+      }
+      input:focus,
+      select:focus {
+        outline: 1px solid var(--red);
+      }
+      select option {
+        background: #12151f;
+      }
+
+      /* 遊戲的通用按鈕（btn_gene）：淺灰漸層、按下去描紅邊 */
+      button.gene {
+        appearance: none;
+        padding: 4px 12px;
+        border: 1px solid #2a2c31;
+        border-radius: 2px;
+        background: linear-gradient(180deg, #cfd4da 0%, #9aa1ab 48%, #cdd2d8 52%, #eef1f4 100%);
+        color: #23262c;
+        font: 12px var(--sans);
+        cursor: pointer;
+      }
+      button.gene:hover {
+        border-color: var(--red);
+      }
+      button.gene:disabled {
+        opacity: 0.4;
+        cursor: default;
+        border-color: #2a2c31;
+      }
+      button.gene.danger:hover {
+        border-color: var(--red);
+        color: #7a1f26;
+      }
+
+      .presets {
+        display: flex;
+        gap: 6px;
+        margin: 10px 0 2px;
+        flex-wrap: wrap;
+      }
+      .presets button {
+        appearance: none;
+        padding: 5px 13px;
+        border: 1px solid var(--line);
+        border-radius: 2px;
+        background: linear-gradient(180deg, var(--tab-off), var(--tab-off-lo));
+        color: #e8d5d6;
+        font-family: var(--serif);
+        font-size: 13px;
+        letter-spacing: 0.06em;
+        cursor: pointer;
+      }
+      .presets button:hover {
+        background: linear-gradient(180deg, var(--tab-hover), #6e282d);
+      }
+      .presets button[aria-pressed="true"] {
+        background: linear-gradient(180deg, var(--tab-on), var(--tab-on-lo));
+        color: var(--ink-on);
+      }
+
+      /* --- 配置清單 --- */
+      table.profiles {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12.5px;
+      }
+      table.profiles th {
+        text-align: left;
+        font-weight: 500;
+        color: var(--dim);
+        font-size: 11.5px;
+        padding: 0 6px 5px;
+        border-bottom: 1px solid var(--rule);
+      }
+      table.profiles td {
+        padding: 5px 6px;
+        border-bottom: 1px solid rgba(67, 74, 96, 0.35);
+        vertical-align: middle;
+      }
+      table.profiles tr.self td {
+        background: rgba(184, 67, 75, 0.13);
+      }
+      table.profiles input[type="text"] {
+        width: 100%;
+      }
+      table.profiles input[type="number"] {
+        width: 72px;
+      }
+      .self-mark {
+        color: var(--amber);
+        font-size: 11px;
+      }
+
+      /* --- 未實作的頁 --- */
+      .todo-box {
+        border: 1px dashed var(--rule);
+        border-radius: 3px;
+        padding: 12px 14px;
+        background: rgba(0, 0, 0, 0.16);
+      }
+      .todo-box h3 {
+        margin: 0 0 6px;
+        font-family: var(--serif);
+        font-size: 13.5px;
+        font-weight: 600;
+        color: var(--text);
+        letter-spacing: 0.06em;
+      }
+      .todo-box ul {
+        margin: 6px 0 0;
+        padding-left: 18px;
+        color: var(--dim);
+        font-size: 12px;
+        line-height: 1.75;
+      }
+      .badge {
+        display: inline-block;
+        padding: 1px 7px;
+        border: 1px solid var(--rule);
+        border-radius: 2px;
+        font-size: 10.5px;
+        letter-spacing: 0.08em;
+        color: var(--grey);
+        vertical-align: 2px;
+        margin-left: 8px;
+      }
+
+      pre.log {
+        margin: 0;
+        max-height: 320px;
+        overflow: auto;
+        color: var(--dim);
+        font:
+          11px/1.6 ui-monospace,
+          Consolas,
+          monospace;
+        white-space: pre-wrap;
+        word-break: break-all;
+        user-select: text;
+      }
+
+      /* --- 底部狀態列：遊戲每個畫面下緣那條 --- */
+      footer {
+        flex: none;
+        display: flex;
+        align-items: center;
+        gap: 0;
+        height: 28px;
+        border-top: 1px solid var(--line);
+        background: linear-gradient(180deg, #0d0d0d, #050505);
+        font-size: 11.5px;
+      }
+      footer .cell {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        height: 18px;
+        margin: 0 4px;
+        padding: 0 10px;
+        border: 1px solid #2a2a28;
+        border-radius: 2px;
+        background: linear-gradient(180deg, #6a6866, #4c4a48);
+        color: #16181c;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      footer .cell.grow {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        display: block;
+        line-height: 16px;
+      }
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--grey);
+        flex: none;
+        box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5);
+      }
+      .dot.solo {
+        background: var(--amber);
+      }
+      .dot.paired {
+        background: var(--green);
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <span class="brand">Unlight&nbsp;Companion</span>
+      <!--
+        ⚠ 版本要**隨時看得見**，不能只藏在「設置 › 關於」。
+        自動更新是靜默的（updater.ts）—— 玩家不會知道自己被換過版，而回報問題時
+        第一個要問的就是版本。藏兩層深等於每次都要教他點去哪裡看。
+      -->
+      <span class="ver" id="ver"></span>
+      <span class="who" id="who"></span>
+    </header>
+
+    <nav class="tabs" id="tabs"></nav>
+
+    <main>
+      <aside id="side"></aside>
+      <section class="body" id="content"></section>
+    </main>
+
+    <footer>
+      <span class="cell"><span class="dot" id="dot"></span><span id="fProfile">—</span></span>
+      <span class="cell" id="fGame">等遊戲…</span>
+      <span class="cell" id="fLink">—</span>
+      <span class="cell grow" id="fLast">—</span>
+    </footer>
+
+    <script>
+      "use strict";
+
+      // =====================================================================
+      // 分頁結構
+      //
+      // ⚠ 大分頁**照里程碑分**，不是照實作狀態分。牌組／渦／獎勵／任務四個
+      // 這一輪不出現（範圍決定），但加回來只要在這裡多一筆 —— 畫面的其餘部分
+      // 完全不必動。
+      // =====================================================================
+      const TABS = [
+        {
+          id: "battle",
+          label: "戰鬥",
+          subs: [
+            { id: "ready", label: "準備" },
+            { id: "seconds", label: "秒數上限" },
+            // ⚠ 加速的引擎與協商都做好了，**刻意不開放**。理由見 battle/speed
+            // 那一頁：它動的是節奏，而節奏牽涉公平性，還沒驗夠。
+            { id: "speed", label: "加速", todo: true },
+            { id: "count", label: "記牌", todo: true },
+            { id: "replay", label: "牌譜", todo: true },
+          ],
+        },
+        { id: "deck", label: "牌組", subs: [{ id: "cost", label: "Cost 表", todo: true }] },
+        {
+          id: "vortex",
+          label: "渦",
+          subs: [
+            { id: "vspeed", label: "速度加倍", todo: true },
+            { id: "vteam", label: "推薦隊伍", todo: true },
+            { id: "vrank", label: "排名與獎勵", todo: true },
+          ],
+        },
+        { id: "bonus", label: "獎勵", subs: [{ id: "foresight", label: "未來視", todo: true }] },
+        { id: "quest", label: "任務", subs: [{ id: "chest", label: "寶箱標註", todo: true }] },
+        {
+          id: "settings",
+          label: "設置",
+          subs: [
+            { id: "profiles", label: "配置" },
+            { id: "link", label: "連線" },
+            { id: "startup", label: "啟動" },
+            { id: "update", label: "更新" },
+            { id: "log", label: "記錄" },
+            { id: "about", label: "關於" },
+          ],
+        },
+      ];
+
+      let tab = "battle";
+      let sub = "ready";
+      let snap = null;
+      /** 拖動滑桿時不要被推播的狀態蓋回去，不然會一直跳。 */
+      let dragging = false;
+      /** 正在編輯某個欄位時同理 —— 每次推播重畫會把游標踢掉。 */
+      let editing = null;
+
+      const $ = (id) => document.getElementById(id);
+      const esc = (s) =>
+        String(s).replace(
+          /[&<>"']/g,
+          (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+        );
+
+      // =====================================================================
+      // 外殼
+      // =====================================================================
+      function renderChrome() {
+        $("tabs").innerHTML = TABS.map(
+          (t) =>
+            `<button data-tab="${t.id}" aria-selected="${t.id === tab}">${esc(t.label)}</button>`,
+        ).join("");
+        const current = TABS.find((t) => t.id === tab);
+        $("side").innerHTML = current.subs
+          .map(
+            (s) =>
+              `<button data-sub="${s.id}" class="${s.todo ? "todo" : ""}" aria-selected="${
+                s.id === sub
+              }">${esc(s.label)}</button>`,
+          )
+          .join("");
+      }
+
+      $("tabs").addEventListener("click", (e) => {
+        const id = e.target.closest("button")?.dataset.tab;
+        if (!id || id === tab) return;
+        tab = id;
+        sub = TABS.find((t) => t.id === id).subs[0].id;
+        renderChrome();
+        renderBody();
+      });
+
+      $("side").addEventListener("click", (e) => {
+        const id = e.target.closest("button")?.dataset.sub;
+        if (!id || id === sub) return;
+        sub = id;
+        renderChrome();
+        renderBody();
+      });
+
+      // =====================================================================
+      // 狀態列
+      // =====================================================================
+      const LINK_TEXT = {
+        offline: "沒連上中間人",
+        solo: "還沒配到對手",
+        paired: "已配到對手",
+        incompatible: "⚠ 版本不合，已退回單邊",
+      };
+
+      function renderFooter() {
+        const st = snap?.status;
+        const p = snap?.profile;
+        $("ver").textContent = snap?.version ? `v${snap.version}` : "";
+        $("who").textContent = p ? `${p.name}　遊戲 :${p.port}　中間人 :${p.linkPort}` : "";
+        $("fProfile").textContent = p ? `${p.name} :${p.port}` : "—";
+        $("dot").className =
+          "dot " + (!st || !st.connected ? "" : st.link === "paired" ? "paired" : "solo");
+        $("fGame").textContent = !st
+          ? "啟動中…"
+          : !st.connected
+            ? "等遊戲…"
+            : st.armed
+              ? `對戰中${st.seat ? `（座位 ${st.seat}）` : ""}`
+              : "已接上，還沒進對戰";
+        $("fLink").textContent = st ? (LINK_TEXT[st.link] ?? st.link) : "—";
+        $("fLast").textContent = st?.error ? "⚠ " + st.error : (st?.lastSend ?? "—");
+      }
+
+      // =====================================================================
+      // 內容
+      // =====================================================================
+      const PAGES = {};
+
+      function renderBody() {
+        const fn = PAGES[`${tab}/${sub}`];
+        $("content").innerHTML = fn ? fn() : "";
+      }
+
+      function head(title, lede, badge) {
+        return (
+          `<h2>${esc(title)}${badge ? `<span class="badge">${esc(badge)}</span>` : ""}</h2>` +
+          `<div class="rule"></div>` +
+          (lede ? `<p class="lede">${lede}</p>` : "")
+        );
+      }
+
+      /** 未實作的頁長什麼樣。**要講清楚卡在哪**，不是只寫「敬請期待」。 */
+      function todoPage(title, why, items) {
+        return (
+          head(title, "", "未實作") +
+          `<div class="todo-box"><h3>${esc(why)}</h3><ul>` +
+          items.map((i) => `<li>${i}</li>`).join("") +
+          `</ul></div>`
+        );
+      }
+
+      // --- 戰鬥 › 準備 ------------------------------------------------------
+      /**
+       * OK 鈕的顏色。**「官方原本」是預設值**（玩家指定）。
+       *
+       * 琥珀色跟系統匣圖示的「已接上、還沒配對」同一個值，不是隨手挑的。
+       */
+      const TINTS = [
+        { label: "官方原本", value: null },
+        { label: "琥珀色", value: 0xffc247 },
+      ];
+      const hex = (n) => "#" + n.toString(16).padStart(6, "0");
+
+      PAGES["battle/ready"] = () => {
+        const st = snap?.status;
+        const on = snap?.profile.prefs.readyEnabled;
+        const tint = snap?.profile.readyTint ?? null;
+        const agreedOn = st?.agreed.readyEnabled;
+        return (
+          head("準備", "按下 OK 不立刻送出，等對手也按了才同時送出。") +
+          `<div class="card">
+             <label class="toggle">
+               <input type="checkbox" id="ready" ${on ? "checked" : ""} />
+               <span><b>啟用準備功能</b>
+                 <div class="hint">
+                   再按一次可以取消，對手一動也會解除。<br />
+                   ⚠ 兩邊都開才會生效；對手沒開時退回「誤按反悔」窗口。
+                 </div>
+               </span>
+             </label>
+           </div>
+           <div class="card">
+             <div class="row"><span><b>OK 鈕的顏色</b></span></div>
+             <div class="presets" id="tints">${TINTS.map(
+               (t) =>
+                 `<button data-tint="${t.value === null ? "" : t.value}" aria-pressed="${
+                   t.value === tint
+                 }">${esc(t.label)}</button>`,
+             ).join("")}</div>
+             <label class="toggle" style="margin-top:10px">
+               <input type="color" id="tintPick" value="${hex(tint ?? 0xffc247)}" />
+               <span><b>自訂顏色</b>
+                 <div class="hint">
+                   準備中（壓著 OK 沒送出）時把按鈕染成這個顏色。<br />
+                   ⚠ 選「官方原本」＝完全不改遊戲畫面，代價是少了「插件正在管這個階段」的視覺提示 ——
+                   那時要改看系統匣圖示。
+                 </div>
+               </span>
+             </label>
+           </div>
+           <div class="card">
+             <div class="row"><span class="dim">我這邊</span><span>${on ? "已開啟" : "已關閉"}</span></div>
+             <div class="row"><span class="dim">實際生效</span>
+               <span class="${agreedOn ? "good" : "warn"}">${
+                 st?.link === "paired"
+                   ? agreedOn
+                     ? "是（雙方都開）"
+                     : "否（對手沒開）"
+                   : on
+                     ? "單邊：誤按反悔窗口"
+                     : "否"
+               }</span></div>
+             <div class="row"><span class="dim">剛剛送出</span><span>${esc(st?.lastSend ?? "—")}</span></div>
+           </div>`
+        );
+      };
+
+      // --- 戰鬥 › 秒數上限 --------------------------------------------------
+      PAGES["battle/seconds"] = () => {
+        const st = snap?.status;
+        const prefs = snap?.profile.prefs;
+        const lim = snap?.limits ?? { minSeconds: 5, maxSeconds: 30 };
+        const paired = st?.link === "paired";
+        return (
+          head("秒數上限", "移動階段要多長。共同值取<b>雙方比較長的那個</b>。") +
+          `<div class="card">
+             <div class="row"><span><b>我希望的階段長度</b></span>
+               <span class="big" id="secLabel">${prefs?.phaseSeconds ?? 30}</span></div>
+             <input type="range" id="seconds" min="${lim.minSeconds}" max="${lim.maxSeconds}"
+                    step="1" value="${prefs?.phaseSeconds ?? 30}" />
+             <div class="ticks"><span>${lim.minSeconds} 秒</span><span>${lim.maxSeconds} 秒（不縮短）</span></div>
+             <div class="hint ${paired ? "" : "warn"}" id="agreed">${
+               paired
+                 ? `共同值 ${st.agreed.phaseSeconds} 秒（取雙方較長的那個）` +
+                   (st.hazard ? `，目前聖水＋麻痺生效中 → ${st.capSeconds} 秒` : "")
+                 : "還沒配到對手 —— 秒數不會縮短（單方面縮短只是自己更早承諾）"
+             }</div>
+           </div>
+           <div class="card">
+             <label class="toggle">
+               <input type="checkbox" id="hazard" ${prefs?.hazardShortenSeconds > 0 ? "checked" : ""} />
+               <span><b>聖水＋麻痺再提早 5 秒</b>
+                 <div class="hint">
+                   手牌有聖水／聖杯，而且場上有麻痺、降低移動或自壞時，這個階段再短 5 秒。<br />
+                   ⚠ 兩邊都開才生效；有一邊關掉，共同值就是 0。
+                 </div>
+               </span>
+             </label>
+           </div>`
+        );
+      };
+
+      // --- 戰鬥 › 加速（前瞻預告，刻意不開放） ------------------------------
+      //
+      // ⚠ 引擎、協商（取 min）、租約、實跑驗證都做好了，**這一頁仍然不給開關**。
+      // 理由不是沒做完，是它動的東西太敏感：加速改變的是對戰的節奏，而節奏
+      // 直接關係到誰有多少時間思考。實測收益只有約 1 分鐘／場，而判斷錯的代價
+      // 是公平性 —— 這個比例不值得先開放再修。
+      PAGES["battle/speed"] = () =>
+        todoPage("加速", "做好了，但先不開放", [
+          "<b>已完成</b>：只加速亮牌（每張 200ms 的排隊）與出牌後手牌被鎖的 110ms",
+          "<b>已完成</b>：協商取雙方較小值 —— 雙方都勾才生效，一方沒勾就是原速",
+          "<b>已完成</b>：插件當掉時頁面 10 秒內自己還原成原速（租約）",
+          "⛔ <b>倒數計時完全不碰</b> —— 那顆 Clock 加速會害硬底線提早觸發、被迫提早送出",
+          "⛔ 擲骰是 3D 物理，收斂看步數不看時間，這個開關對它無效",
+          "⚠ <b>先不開放的原因</b>：它改的是節奏，而節奏牽涉公平性。" +
+            "實測收益約 1 分鐘／場，伺服器排程那段動不了 —— 收益不大，判斷錯的代價卻是公平性",
+          "⚠ 任務（QP 排名）一律禁用；渦要渦主同意才開放 —— 這兩條規則還沒有地方掛",
+        ]);
+
+      // --- 戰鬥 › 記牌／牌譜（未實作） --------------------------------------
+      PAGES["battle/count"] = () =>
+        todoPage("記牌", "規劃好了，還沒實作", [
+          "只記<b>未出現的公牌</b>，不碰對手手牌（§12 紅線）",
+          "<b>預設不使用</b>；雙方同意時才顯示",
+          "可選擇「只記大牌」",
+          "卡在：要先有一份雙方同意的協商欄位，跟加速走同一條路",
+        ]);
+
+      PAGES["battle/replay"] = () =>
+        todoPage("牌譜", "規劃好了，還沒實作", [
+          "紀錄自己的牌譜，可在 ulgg 上回看",
+          "可選擇公開；也可設為「所有牌譜都公開」",
+          "公開時<b>對手一律匿名</b>",
+          "⚠ 這個功能最容易違反 §12 ——「完整記錄」的直覺跟「不得記錄對手未揭露資訊」衝突",
+          "卡在：ULGG 端的上傳 API（WP-04／WP-05）",
+        ]);
+
+      // --- 牌組／渦／獎勵／任務（前瞻預告） --------------------------------
+      //
+      // 這四個大分頁都還沒有實作。它們仍然出現在分頁列上，因為玩家要看得到
+      // 里程碑的形狀；每一頁都要寫清楚**卡在哪**，不是「敬請期待」。
+      PAGES["deck/cost"] = () =>
+        todoPage("Cost 表", "卡在 WP-02（Cost Engine）", [
+          "依規則包重算每張卡的 COST，直接顯示在牌組編輯畫面上",
+          "規則的身分是<b>內容的 SHA-256</b>，不是名字也不是版本號 —— WP-01 已完成",
+          "⚠ 自訂 COST 是<b>自我約束</b>：雙方同意才有意義，亞城／官方環境完全不受影響",
+          "卡在：WP-02 目前只有介面，還沒有實作",
+        ]);
+
+      PAGES["vortex/vspeed"] = () =>
+        todoPage("速度加倍", "卡在加速本身還沒開放", [
+          "⚠ 渦有<b>分數排名</b>，加速會影響排名的公平性",
+          "所以要<b>渦主同意</b>才開放使用，預設不同意",
+          "渦主本人預設可使用",
+          "卡在：加速引擎做好了但先不開放（見 戰鬥 › 加速），而且「渦主同意」需要一個伺服器端的授權來源",
+        ]);
+
+      PAGES["vortex/vteam"] = () =>
+        todoPage("推薦隊伍", "還沒開始", [
+          "依這一輪渦的敵人組成推薦隊伍",
+          "卡在：要先有渦的資料來源（ULGG 端）",
+        ]);
+
+      PAGES["vortex/vrank"] = () =>
+        todoPage("排名與獎勵", "還沒開始", [
+          "排名獎勵、目前排名及分數、即時狀態",
+          "卡在：要先有渦的資料來源（ULGG 端）",
+        ]);
+
+      PAGES["bonus/foresight"] = () =>
+        todoPage("未來視", "還沒開始", [
+          "HL 獎勵的未來視",
+          "卡在：要先確認獎勵結果在客戶端可不可觀測，而且<b>不得顯示伺服器尚未揭露的東西</b>（§12）",
+        ]);
+
+      PAGES["quest/chest"] = () =>
+        todoPage("寶箱標註", "還沒開始", [
+          "預覽任務時，自動標註寶箱內容",
+          "資料來源是已經爬好的靜態任務資料，不需要戳跑著的遊戲",
+          "⛔ <b>任務一律禁止速度加倍</b> —— 會影響 QP 排名，不能和沒用插件的人有差別，不符 fairplay 原則",
+        ]);
+
+      // --- 設置 › 配置 ------------------------------------------------------
+      PAGES["settings/profiles"] = () => {
+        const s = snap?.store;
+        if (!s) return "";
+        const rows = s.profiles
+          .map((p) => {
+            const self = p.id === snap.profile.id;
+            return `<tr class="${self ? "self" : ""}" data-id="${p.id}">
+              <td><input type="text" data-field="name" value="${esc(p.name)}" />
+                  ${self ? '<div class="self-mark">← 這個視窗</div>' : ""}</td>
+              <td><select data-field="kind">
+                    <option value="desktop" ${p.kind === "desktop" ? "selected" : ""}>桌面版</option>
+                    <option value="web" ${p.kind === "web" ? "selected" : ""}>網頁版</option>
+                  </select></td>
+              <td><input type="number" data-field="port" value="${p.port}" min="1" max="65535" /></td>
+              <td><input type="number" data-field="linkPort" value="${p.linkPort}" min="1" max="65535" /></td>
+              <td style="white-space:nowrap">
+                <button class="gene" data-act="launch" ${self ? "disabled" : ""}>開新實例</button>
+                <button class="gene" data-act="dup">複製</button>
+                <button class="gene danger" data-act="del" ${
+                  s.profiles.length <= 1 || self ? "disabled" : ""
+                }>刪除</button>
+              </td>
+            </tr>`;
+          })
+          .join("");
+        return (
+          head("配置", "一份配置管一個遊戲客戶端。要同時管兩個就開兩份。") +
+          `<div class="card">
+             <table class="profiles">
+               <thead><tr><th>名稱</th><th>客戶端</th><th>遊戲埠</th><th>中間人埠</th><th></th></tr></thead>
+               <tbody id="profileRows">${rows}</tbody>
+             </table>
+             <div style="margin-top:10px"><button class="gene" id="addProfile">新增配置</button></div>
+             <div class="hint">
+               ⚠ <b>改埠要重開那個實例才生效</b> —— 引擎綁在啟動時的埠上。<br />
+               ⚠ 兩份配置<b>不能用同一個遊戲埠</b>；撞到的話第二份會開不起來（Windows 的目錄鎖擋掉）。<br />
+               中間人埠則相反：要跟對手用<b>同一個</b>，預設值就是為了不用設定。
+             </div>
+           </div>` +
+          (snap.ephemeral
+            ? `<div class="card"><div class="hint warn" style="margin-top:0">
+                 這個視窗是用命令列的 <b>--port ${snap.profile.port}</b> 開的臨時配置，不在清單裡。
+                 改它的設定不會存下來。要留著就在上面「新增配置」。
+               </div></div>`
+            : "")
+        );
+      };
+
+      // --- 設置 › 連線 ------------------------------------------------------
+      PAGES["settings/link"] = () => {
+        const st = snap?.status;
+        const p = snap?.profile;
+        return (
+          head("連線", "這個視窗接的是哪一個客戶端。") +
+          `<div class="card">
+             <div class="row"><span class="dim">配置</span><span>${esc(p?.name ?? "—")}</span></div>
+             <div class="row"><span class="dim">遊戲 CDP 埠</span><span>:${p?.port}</span></div>
+             <div class="row"><span class="dim">中間人埠</span><span>:${p?.linkPort}</span></div>
+             <div class="row"><span class="dim">我是中間人</span><span>${
+               st?.hosting ? "是" : "否（連到別人開的）"
+             }</span></div>
+             <div class="hint">埠在「配置」那頁改。</div>
+           </div>
+           <div class="card">
+             <div class="row"><span class="dim">遊戲</span><span>${
+               !st ? "啟動中…" : st.connected ? "已接上" : "等遊戲…"
+             }</span></div>
+             <div class="row"><span class="dim">分頁</span><span>${esc(st?.title ?? "—")}</span></div>
+             <div class="row"><span class="dim">攔截已掛上</span><span>${
+               st?.armed ? "是" : "否（還在大廳）"
+             }</span></div>
+             <div class="row"><span class="dim">側通道</span><span>${
+               st ? (LINK_TEXT[st.link] ?? st.link) : "—"
+             }</span></div>
+             ${st?.error ? `<div class="hint warn">⚠ ${esc(st.error)}</div>` : ""}
+           </div>
+           <div class="card">
+             <div class="hint" style="margin-top:0">
+               接不上的話：CDP 的 <b>--remote-debugging-port 只能在啟動時指定</b>，
+               沒辦法對已經在跑的遊戲補掛。遊戲已經開著就要重開一次，
+               而插件<b>不會替你關掉正在打的遊戲</b>。
+             </div>
+           </div>`
+        );
+      };
+
+      // --- 設置 › 啟動 ------------------------------------------------------
+      PAGES["settings/startup"] = () => {
+        const s = snap?.store;
+        return (
+          head("啟動", "開機時要不要自己起來。") +
+          `<div class="card">
+             <label class="toggle">
+               <input type="checkbox" id="atLogin" ${snap?.launchAtLogin ? "checked" : ""} ${
+                 snap?.packaged ? "" : "disabled"
+               } />
+               <span><b>隨 Windows 開機啟動</b>
+                 <div class="hint">${
+                   snap?.packaged
+                     ? "開機後自動縮到系統匣，不跳視窗。"
+                     : "⚠ 開發模式下不能設 —— 會把 node_modules 裡的 electron.exe 寫進登錄檔，之後開機跳出空白視窗且很難查。打包後才可用。"
+                 }</div>
+               </span>
+             </label>
+           </div>
+           <div class="card">
+             <label class="toggle">
+               <input type="checkbox" id="startMin" ${s?.startMinimized ? "checked" : ""} />
+               <span><b>啟動時只留托盤圖示</b>
+                 <div class="hint">不跳設定視窗。點托盤圖示隨時叫得出來。</div>
+               </span>
+             </label>
+           </div>
+           <div class="card">
+             <div class="hint" style="margin-top:0">
+               <b>怎麼讓遊戲一開插件就接上</b><br />
+               安裝後用「UNLIGHT:Revive（含 ULR Companion）」那個捷徑 ——
+               插件先起來，再由它帶參數啟動遊戲。<br />
+               ⚠ 繞過插件直接開遊戲的話，debug 埠沒開，插件永遠接不上。
+             </div>
+           </div>`
+        );
+      };
+
+      // --- 設置 › 更新 ------------------------------------------------------
+      PAGES["settings/update"] = () =>
+        head("更新", "") +
+        `<div class="card">
+           <div class="row"><span class="dim">目前版本</span><span>${esc(snap?.version ?? "—")}</span></div>
+           <div class="row"><span class="dim">執行方式</span><span>${
+             snap?.packaged ? "已安裝" : "開發模式（未打包）"
+           }</span></div>
+         </div>
+         <div class="card">
+           <div class="hint" style="margin-top:0">
+             更新流程本身是完整的（檢查 → 下載 → 驗 SHA-256 → 暫存 → 安全時機套用），
+             但<b>還沒有預設的發布來源</b>，要設環境變數 <b>ULR_UPDATE_FEED</b> 才會啟動。<br />
+             ⚠ <b>套用一定不在對戰中發生。</b>「靜默」指的是不打擾，不是未經同意就重啟 ——
+             協定版本一變，中間人會回 incompatible，雙方當場退回單邊模式。
+             那件事發生在移動階段中間的話，玩家會看到約定秒數突然消失而不知道為什麼。
+           </div>
+         </div>`;
+
+      // --- 設置 › 記錄 ------------------------------------------------------
+      PAGES["settings/log"] = () =>
+        head("記錄", "最近的動作。查「剛剛到底發生了什麼」用的。") +
+        `<div class="card"><pre class="log" id="log">${esc(
+          (snap?.log ?? []).join("\n") || "（還沒有記錄）",
+        )}</pre></div>`;
+
+      // --- 設置 › 關於 ------------------------------------------------------
+      PAGES["settings/about"] = () =>
+        head("關於", "") +
+        `<div class="card">
+           <div class="row"><span class="dim">ULR Companion</span><span>${esc(snap?.version ?? "—")}</span></div>
+           <div class="hint">UNLIGHT:Revive 自訂 COST 規則與對戰追蹤的執行端。MIT 授權。</div>
+         </div>
+         <div class="card">
+           <div class="hint" style="margin-top:0">
+             <b>公平性立場</b><br />
+             這個插件只改<b>自己客戶端的顯示</b>，伺服器收到的東西一個字都沒變。<br />
+             · 不修改伺服器端技能判定，不繞過官方戰鬥規則<br />
+             · 自訂 COST 是<b>自我約束</b>：雙方同意才有意義<br />
+             · 不顯示也不上傳對手未揭露的手牌、牌組或任何隱藏資訊<br />
+             · 會改變節奏的功能（秒數、加速）一律<b>雙方同意才生效</b>
+           </div>
+         </div>
+         <div class="card">
+           <button class="gene" data-link="https://github.com/UnlightPlugin/ulr-companion">原始碼與問題回報</button>
+           <button class="gene" data-link="https://ulgg.online/">ULGG</button>
+         </div>`;
+
+      // =====================================================================
+      // 事件（委派：內容是每次重畫的，不能直接綁在元素上）
+      // =====================================================================
+      $("content").addEventListener("change", (e) => {
+        const t = e.target;
+        if (t.id === "ready") return void set({ readyEnabled: t.checked });
+        if (t.id === "hazard") return void set({ hazardShortenSeconds: t.checked ? 5 : 0 });
+        if (t.id === "seconds") {
+          dragging = false;
+          return void set({ phaseSeconds: Number(t.value) });
+        }
+        if (t.id === "tintPick") {
+          return void window.ulr.setReadyTint(parseInt(t.value.slice(1), 16)).then(apply);
+        }
+        if (t.id === "atLogin") return void options({ launchAtLogin: t.checked });
+        if (t.id === "startMin") return void options({ startMinimized: t.checked });
+
+        const row = t.closest("tr[data-id]");
+        if (row && t.dataset.field) {
+          editing = null;
+          const field = t.dataset.field;
+          const value = field === "port" || field === "linkPort" ? Number(t.value) : t.value;
+          const patch = { [field]: value };
+          // 換客戶端種類時順手把埠帶到那一種的預設，玩家少改一個欄位。
+          if (field === "kind") {
+            window.ulr.profiles.defaultPort(value).then((port) => {
+              window.ulr.profiles.edit(row.dataset.id, { kind: value, port }).then(apply);
+            });
+            return;
+          }
+          return void window.ulr.profiles.edit(row.dataset.id, patch).then(apply);
+        }
+      });
+
+      $("content").addEventListener("input", (e) => {
+        const t = e.target;
+        if (t.id === "seconds") {
+          dragging = true;
+          $("secLabel").textContent = t.value;
+        }
+        // 打字時記住是誰在被編輯，重畫後要把它還原（見 renderBody 的呼叫點）
+        if (t.closest("tr[data-id]")) editing = t;
+      });
+
+      $("content").addEventListener("click", (e) => {
+        const btn = e.target.closest("button");
+        if (!btn) return;
+
+        if (btn.dataset.tint !== undefined) {
+          const v = btn.dataset.tint === "" ? null : Number(btn.dataset.tint);
+          return void window.ulr.setReadyTint(v).then(apply);
+        }
+        if (btn.id === "addProfile") {
+          return void window.ulr.profiles.add().then(apply);
+        }
+        if (btn.dataset.link) {
+          return void window.ulr.openExternal(btn.dataset.link);
+        }
+
+        const row = btn.closest("tr[data-id]");
+        if (!row) return;
+        const id = row.dataset.id;
+        if (btn.dataset.act === "launch") return void window.ulr.profiles.launch(id).then(apply);
+        if (btn.dataset.act === "dup") return void window.ulr.profiles.add(id).then(apply);
+        if (btn.dataset.act === "del") return void window.ulr.profiles.remove(id).then(apply);
+      });
+
+      function set(prefs) {
+        return window.ulr.setPrefs(prefs).then(apply);
+      }
+      function options(patch) {
+        return window.ulr.setOptions(patch).then(apply);
+      }
+
+      // =====================================================================
+      // 套用一份快照
+      // =====================================================================
+      function apply(next) {
+        if (!next) return;
+        snap = next;
+        renderFooter();
+        // ⚠ 拖滑桿或打字時不要重畫內容區 —— 會把游標踢掉、滑桿跳回去。
+        // 狀態列照更新（它跟輸入無關，而且那才是玩家在等的資訊）。
+        if (dragging || (editing && document.activeElement === editing)) return;
+        editing = null;
+        renderBody();
+      }
+
+      renderChrome();
+      window.ulr.onState(apply);
+      window.ulr.state().then(apply);
+    </script>
+  </body>
+</html>

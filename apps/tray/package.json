@@ -1,0 +1,14 @@
+{
+  "name": "@ulr/tray",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ULR Companion 的托盤程式。一個視窗管一個遊戲客戶端，雙開就開兩個。",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/main.cjs",
+  "dependencies": {
+    "@ulr/arbiter-engine": "*",
+    "@ulr/arbiter-link": "*",
+    "@ulr/cdp-adapter": "*"
+  }
+}
