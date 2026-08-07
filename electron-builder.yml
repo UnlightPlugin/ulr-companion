@@ -1,0 +1,66 @@
+# 打包設定（WP-08）。設計與理由見 docs/release.md。
+#
+# ⚠ 打包的來源是 out/app，不是 apps/tray —— 見 scripts/pack-tray.mjs 的檔頭：
+# monorepo 的 workspace 相依（@ulr/*，版本寫 "*"）會讓 electron-builder 解析失敗，
+# 而執行期一個都不需要（esbuild 早就打進 main.cjs 了）。
+appId: online.ulgg.companion
+productName: ULR Companion
+copyright: MIT
+
+directories:
+  app: out/app
+  output: out/release
+  # ⚠ win.icon 是相對這裡解析的，不是相對 directories.app。
+  # scripts/pack-tray.mjs 會把現畫的 icon.ico 寫進來。
+  buildResources: build
+
+files:
+  - "**/*"
+  # ⚠ sourcemap 不進包。0.8 MB 不算多，但它會讓任何人反推出完整原始碼結構，
+  # 而打包版出問題時我們是看 log 而不是看 stack trace 的（updater.ts 的設計）。
+  - "!**/*.map"
+
+# ⚠ **只留遊戲有在服務的語言，其餘砍掉（44 MB → 約 4 MB）。**
+# Electron 預設把 Chromium 全部 55 個 locale pak 都包進去。這些 pak 只影響
+# Chromium 自己的內建 UI（右鍵選單、錯誤頁），**不會翻譯這個插件的介面** ——
+# 介面目前是寫死的繁中，要多語系是另一件事（i18n，還沒做）。
+#
+# 留 en-US 是因為它是 Chromium 的 fallback：只留 zh-TW 的話，缺字串的地方
+# 會變成空白而不是退回英文。
+electronLanguages:
+  - en-US
+  - zh-TW
+  - zh-CN
+  - ja
+  - ko
+
+# 壓縮率換打包時間。玩家只下載一次，我們每次發版多等一分鐘。
+compression: maximum
+
+win:
+  # ⚠ **不要用 portable。** portable exe 沒有安裝器，自我替換做不到，
+  # 等於放棄自動更新（docs/release.md §2）。
+  target: nsis
+  icon: icon.ico
+
+nsis:
+  oneClick: true # 不問安裝路徑，一路到底
+  # ⚠⚠ **這一行決定了能不能真的靜默更新。**
+  #   false → 裝到 %LOCALAPPDATA%，更新不需要 UAC → 真靜默
+  #   true  → 裝到 Program Files，**每一次更新都跳 UAC**，玩家會以為中毒
+  perMachine: false
+  allowToChangeInstallationDirectory: false
+  # 保留玩家的配置清單與本機規則包。解除安裝不該把 profiles.json 一起帶走。
+  deleteAppDataOnUninstall: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: ULR Companion
+# ⚠ 這裡**刻意沒有 publish 區塊。**
+#
+# docs/release.md 原本的設計是 electron-updater + GitHub Releases，但這個專案
+# 最後自己寫了 updater.ts（理由在那支的檔頭：套用的時機不能落在對戰中）。
+# 它讀的是 ULR_UPDATE_FEED 指到的一份 JSON，跟 electron-builder 的 latest.yml
+# 沒有關係。
+#
+# 現在還沒有發布來源，所以連 feed 都不設 —— 指向一個不存在的網址只會每小時
+# 失敗一次並洗掉 log，而且一旦寫死了預設值，之後改網址就得再發一版才能改。

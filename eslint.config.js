@@ -6,6 +6,14 @@ export default tseslint.config(
   {
     ignores: ["**/dist/**", "**/node_modules/**", "**/*.json"],
   },
+  {
+    // scripts/ 底下是給 Node 直接跑的建置腳本，不是 package 的一部分。
+    // 專案沒裝 `globals`，所以這裡手動列出用到的那幾個就好。
+    files: ["scripts/**/*.mjs"],
+    languageOptions: {
+      globals: { console: "readonly", process: "readonly", Buffer: "readonly" },
+    },
+  },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
   {

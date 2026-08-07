@@ -16,16 +16,21 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "tray:build": "node scripts/build-tray.mjs",
+    "tray": "npm run tray:build && node scripts/run-tray.mjs",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "vectors:generate": "tsx packages/rule-schema/scripts/generate-vectors.ts",
-    "verify": "npm run format:check && npm run lint && npm run typecheck && npm run test"
+    "verify": "npm run format:check && npm run lint && npm run typecheck && npm run test",
+    "dist": "tsx scripts/pack-tray.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
     "@types/node": "^22.10.2",
     "@types/ws": "^8.18.1",
+    "electron": "^38.8.6",
+    "electron-builder": "^26.15.3",
     "eslint": "^9.17.0",
     "prettier": "^3.4.2",
     "tsx": "^4.19.2",
