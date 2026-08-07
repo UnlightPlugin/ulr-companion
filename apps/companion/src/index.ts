@@ -17,7 +17,6 @@ import { join } from "node:path";
 import { API_SCHEMA_VERSION } from "@ulr/api-contract";
 import type { CostOverrides, CostPatchReport } from "@ulr/cdp-adapter";
 import {
-  ArbiterRunner,
   BROWSER_DEBUG_PORT,
   buildBookmarklet,
   buildBookmarkUrl,
@@ -32,6 +31,12 @@ import {
   openGameTab,
   refreshBundles,
 } from "@ulr/cdp-adapter";
+import { ArbiterEngine, SPEED_RENEW_MS } from "@ulr/arbiter-engine";
+import {
+  DEFAULT_HAZARD_SHORTEN_SECONDS,
+  DEFAULT_LINK_PORT,
+  MOVE_PHASE_TOTAL_SECONDS,
+} from "@ulr/arbiter-link";
 import { assertCostRule, contentHash, loadRulePackage, shortHash } from "@ulr/rule-schema";
 import {
   CACHE_PATH,
@@ -67,7 +72,15 @@ function usage(): void {
   console.log("                              即時印出 WebSocket 事件（不會 reload，對戰中可用）");
   console.log("                              預設濾掉心跳，--all 看全部");
   console.log("  arbiter [--port N] [--policy either|opponent|never] [--deadline 秒]");
+  console.log("       [--phase-seconds N] [--hazard-shorten N] [--no-ready]");
+  console.log(`       [--link-port N] [--no-link]   （中間人預設 :${DEFAULT_LINK_PORT}）`);
   console.log("                              移動階段仲裁（⚠ 會改變遊戲行為）");
+  console.log("                              --phase-seconds 是「我希望這個階段多長」，");
+  console.log("                              雙方取比較長的那個當共同值；沒配到對手就不縮短");
+  console.log("                              先開的那個插件自動當中間人，雙開不必多開一個視窗");
+  console.log("  speed [--port N] [--factor N]");
+  console.log("                              演出加速，只快動畫不動時鐘（預設 ×3）");
+  console.log("                              實測約省 1 分鐘／場，伺服器排程那段動不了");
   console.log("  rule <規則檔.json>          載入並驗證規則包");
   console.log("");
   console.log("  web --refresh [--no-launch] 讀當前版本的 bundle 檔名（必要時自己開 Steam 版）");
@@ -468,8 +481,9 @@ const CONNECT_NAG_EVERY = 15;
 async function connectWhenReady(
   adapter: ReturnType<typeof createCdpAdapter>,
   port: number,
-): Promise<string> {
-  for (let attempt = 1; ; attempt++) {
+  shouldStop: () => boolean,
+): Promise<string | null> {
+  for (let attempt = 1; !shouldStop(); attempt++) {
     try {
       const session = await adapter.connect();
       await adapter.waitForGame();
@@ -485,93 +499,202 @@ async function connectWhenReady(
       await new Promise((r) => setTimeout(r, CONNECT_RETRY_MS));
     }
   }
+  return null;
 }
 
 /**
- * 移動階段仲裁（WP-12）—— 單邊模式。
+ * 移動階段仲裁（WP-12 + WP-15 的側通道）。
  *
- * ⚠ **這會改變遊戲行為。** 按下 OK 之後不會立刻送出，會壓到硬底線
- * （或之後接上側通道後、對手也準備好時）。
+ * ⚠ **這會改變遊戲行為**，而且現在有兩條路會送出 `I_am_ok`：
  *
- * 目前沒有側通道，所以永遠等不到對手就緒 —— 行為等同「誤按反悔窗口」：
- * 按了 OK 還可以再按一次取消、對手一動也會自動解除，時間快到才真的送出。
+ *   準備功能    按下 OK 先壓著，等對手也好了才真的送出（再按一次可取消）
+ *   約定秒數    時間到了**就算玩家沒按也送**，把 30 秒的階段縮成講好的長度
  *
- * **這支要能全程掛著。** 玩家的實際流程是「開著它去玩」，所以四種時機都得
- * 成立：遊戲還沒開、開了還在大廳、對戰中途接手、打完一場重新開房。前三種
- * 靠這裡的等待與 `installOkPatch()` 的 `waiting` 狀態，第四種靠頁面自己偵測
- * socket 換過了沒（`patch-ok.ts` 的 `arm()`）。
+ * 第二條只有在**雙方都同意**時才會啟用 —— 沒配到對手時共同值會退回滿版
+ * 30 秒（`soloSettings()`），因為單方面縮短只是讓自己更早承諾。
+ *
+ * ⚠ **邏輯全部在 `@ulr/arbiter-engine`，這裡只負責印字。** 托盤跑的是同一份 ——
+ * 生命週期有六個「錯了就安靜失效」的細節（重連、換場、換階段、側通道比 CDP
+ * 活得久、runner 每次重連換一個、拆 patch），複製一份到 UI 那邊只會漂移。
  */
 async function cmdArbiter(args: string[]): Promise<number> {
-  const port = parsePort(args);
-  const adapter = createCdpAdapter({ port });
   const policyRaw = parseFlag(args, "--policy") ?? "either";
   if (policyRaw !== "either" && policyRaw !== "opponent" && policyRaw !== "never") {
     console.error(`--policy 只能是 either / opponent / never，收到 ${policyRaw}`);
     return 1;
   }
-  const deadline = Number(parseFlag(args, "--deadline") ?? 3);
+  const secondsRaw = parseFlag(args, "--seconds");
+  const linkPortRaw = parseFlag(args, "--link-port");
+  const deadlineRaw = parseFlag(args, "--deadline");
 
-  try {
-    const title = await connectWhenReady(adapter, port);
-    console.log(`✓ 接上「${title}」`);
+  const engine = new ArbiterEngine({
+    port: parsePort(args),
+    ...(linkPortRaw !== undefined ? { linkPort: Number(linkPortRaw) } : {}),
+    ...(args.includes("--no-link") ? { noLink: true } : {}),
+    policy: policyRaw,
+    ...(deadlineRaw !== undefined ? { deadlineSeconds: Number(deadlineRaw) } : {}),
+    prefs: {
+      phaseSeconds: Number(parseFlag(args, "--phase-seconds") ?? MOVE_PHASE_TOTAL_SECONDS),
+      hazardShortenSeconds: Number(
+        parseFlag(args, "--hazard-shorten") ?? DEFAULT_HAZARD_SHORTEN_SECONDS,
+      ),
+      readyEnabled: !args.includes("--no-ready"),
+    },
+    onLog: (line) => console.log(line),
+    onStatus: (status) => {
+      // 只在**摘要真的變了**的時候印一行。狀態每個 tick 都會發，
+      // 不去重的話終端機會被洗掉，反而看不到真正該注意的那一行。
+      const line =
+        `  ${describeLink(status.link)}` +
+        `  階段=${status.capSeconds === null ? "不縮短" : `${status.capSeconds}s`}` +
+        `${status.hazard ? "（聖水+麻痺）" : ""}` +
+        `  座位=${status.seat ?? "?"}` +
+        `${status.error === null ? "" : `  ✗ ${status.error}`}`;
+      if (line === lastLine) return;
+      lastLine = line;
+      console.log(line);
+    },
+  });
 
-    adapter.onOkPatchReport((r) => {
-      if (r.type === "ok-patch-error") console.error(`  ✗ ${r.reason}`);
-      else if (r.type === "ok-patch-rearmed") {
-        // 換房／進任務都會換一顆 socket。看得到這行才代表新的一場真的接上了。
-        console.log(`  ⟳ 換場，攔截已重新掛上  座位=${r.seat ?? "(還不知道)"}`);
-      } else if (r.type === "ok-released") {
-        // failsafe 代表連心跳都沒發揮作用 —— 最後一道防線，不該常發生。
-        const tag = { failsafe: "⚠ 失效保護", "node-gone": "⚠ 心跳過期" }[r.by as string] ?? r.by;
-        console.log(`  → 真的送出 I_am_ok（${tag}，壓了 ${(r.heldMs / 1000).toFixed(1)}s）`);
-      }
-    });
+  let lastLine = "";
+  await engine.start();
+  console.log(`✓ 仲裁已啟動  策略=${policyRaw}  我方希望的階段長度=${engine.prefs.phaseSeconds}s`);
+  console.log("  按下 OK 會被壓住；再按一次取消；對手一動也會解除。");
+  console.log("  沒配到對手時秒數不會縮短 —— 單方面縮短只是自己更早承諾。");
+  console.log("  遊戲不必先開，關掉再開也不用重跑這支。Ctrl+C 結束。\n");
 
-    // ⚠ 不必等到進對戰。沒有 socket 也裝得上去（回 waiting），頁面每 200ms
-    // 會自己去補掛 —— 「先開 companion 再開遊戲」才是玩家實際的順序。
-    const status = await adapter.installOkPatch();
+  await new Promise<void>((resolve) => {
+    process.on("SIGINT", () => resolve());
+    if (secondsRaw !== undefined) setTimeout(resolve, Number(secondsRaw) * 1000);
+  });
 
-    const runner = new ArbiterRunner(adapter.asPageBridge(), {
-      config: { policy: policyRaw, deadlineSeconds: deadline },
-      onError: (err) => console.error(`  ✗ ${err.message}`),
-      onStep: ({ input, state, actions }) => {
-        const what =
-          input.type === "tick" ? `tick ${input.remainingSeconds.toFixed(1)}s` : input.type;
-        if (actions.length === 0 && input.type === "tick") return; // 沒事的 tick 不印
-        console.log(
-          `  ${what.padEnd(16)} ready=${String(state.ready).padEnd(5)} ` +
-            `committed=${String(state.committed).padEnd(5)} ${actions.map((a) => a.type).join(",")}`,
-        );
-      },
-    });
-    await runner.start();
-    console.log(
-      `✓ 仲裁已啟動  座位=${runner.seat ?? "(還不知道)"}  策略=${policyRaw}  底線=${deadline}s`,
-    );
-    if (status === "waiting") console.log("  還沒進對戰 —— 進去之後會自己掛上，不必重跑。");
-    console.log("  按下 OK 會被壓住；再按一次取消；對手一動也會解除。Ctrl+C 結束。\n");
+  await engine.stop();
+  console.log("\n✓ 已收手（頁面上的攔截已拆除）");
+  return 0;
+}
 
-    const secondsRaw = parseFlag(args, "--seconds");
-    await new Promise<void>((resolve) => {
-      process.on("SIGINT", () => resolve());
-      if (secondsRaw !== undefined) setTimeout(resolve, Number(secondsRaw) * 1000);
-    });
-    runner.stop();
+function describeLink(status: string): string {
+  return (
+    {
+      offline: "側通道 離線",
+      solo: "側通道 已連上、還沒配到對手",
+      paired: "側通道 已配對",
+      incompatible: "側通道 ⚠ 版本不合，退回單邊",
+    }[status] ?? status
+  );
+}
 
-    // ⚠ **一定要拆。** 留著的話頁面上會有一個沒有鑰匙的鎖：原型上的 patch
-    // 照樣攔 I_am_ok，但沒有人能下 cancel／release。心跳讓它 3 秒後自己停手，
-    // 不拆仍然沒有任何好處（2026-08-03 就是這樣坑到玩家的）。
-    try {
-      const gone = await adapter.uninstallOkPatch();
-      console.log(gone === "uninstalled" ? "\n✓ 攔截已拆除，遊戲回到原本行為" : "\n（本來就沒裝）");
-    } catch (err) {
-      console.error(`\n✗ 拆不掉攔截：${err instanceof Error ? err.message : String(err)}`);
-      console.error("  遊戲重載一次就會乾淨（頁面上的 patch 不會跨載入存活）。");
-    }
-    return 0;
-  } finally {
-    await adapter.disconnect();
+/**
+ * 演出加速（WP-14）。
+ *
+ * ⚠ **這會改變畫面，但不會改變遊戲行為** —— 只有 tween 與 sprite 動畫變快，
+ * 送出的東西、伺服器判定、倒數計時全部不變。
+ *
+ * 收益要講實話：實測約 1 分鐘／場。省的是「決策窗開頭被殘留動畫擋住」那段
+ * （okVisibleX 到了但點不下去），不是整場對戰。伺服器排程的部分（一場約
+ * 230 秒）客戶端動不了 —— 見 docs/battle-timing.md。
+ *
+ * 跟 `arbiter` 一樣要能全程掛著：遊戲還沒開就等、關掉再開會自己接回去。
+ */
+async function cmdSpeed(args: string[]): Promise<number> {
+  const port = parsePort(args);
+  const factorRaw = parseFlag(args, "--factor");
+  const factor = factorRaw === undefined ? undefined : Number(factorRaw);
+  if (factor !== undefined && (!Number.isFinite(factor) || factor < 1)) {
+    console.error(`--factor 要是 ≥1 的數字，收到 ${String(factorRaw)}`);
+    return 1;
   }
+  const secondsRaw = parseFlag(args, "--seconds");
+
+  let stopping = false;
+  const stopped = new Promise<void>((resolve) => {
+    const finish = (): void => {
+      stopping = true;
+      resolve();
+    };
+    process.on("SIGINT", finish);
+    if (secondsRaw !== undefined) setTimeout(finish, Number(secondsRaw) * 1000);
+  });
+
+  for (let attach = 1; !stopping; attach++) {
+    const adapter = createCdpAdapter({ port });
+    try {
+      const title = await connectWhenReady(adapter, port, () => stopping);
+      if (title === null) break;
+      console.log(attach === 1 ? `✓ 接上「${title}」` : `✓ 重新接上「${title}」`);
+
+      const lost = new Promise<string>((resolve) => {
+        adapter.onDisconnect(resolve);
+      });
+
+      // 場景每個階段會換，所以只在**組合變了**的時候印一行，不然會洗畫面。
+      adapter.onSpeedPatchReport((r) => {
+        if (r.type === "speed-patch-error") console.error(`  ✗ ${r.reason}`);
+        else console.log(`  ×${r.factor}  ${r.sceneKeys.join(" ")}`);
+      });
+
+      const status = await adapter.installSpeedPatch(factor !== undefined ? { factor } : {});
+      if (attach === 1) {
+        console.log("");
+        console.log("  只加速演出（tween 與逐格動畫）。倒數計時、出牌判定、");
+        console.log("  伺服器結算全部不變 —— 倒數住在 scene.time，這支刻意不碰它，");
+        console.log("  否則 WP-12 的硬底線會跟著提早觸發。");
+        console.log("");
+        console.log("  預期收益約 1 分鐘／場。伺服器排程那 230 秒動不了。");
+        console.log("  Ctrl+C 結束（會自動還原）。");
+        if (status === "waiting") console.log("  還沒進遊戲 —— 進去之後會自己套上，不必重跑。");
+        console.log("");
+      }
+
+      /**
+       * ⚠ **一定要續約，否則 10 秒後頁面會自己還原成原速。**
+       *
+       * 那個租約是為了「插件當掉時加速不要留在頁面上」而存在的（見
+       * `patch-speed.ts` 的 `DEFAULT_SPEED_LEASE_MS`）。它不分是誰在裝，
+       * 所以命令列版本也要證明自己還活著 —— 少了這一段，症狀是
+       * 「跑起來有效，過十秒自己變回原速」，而且什麼錯誤都不會印。
+       */
+      const renew = setInterval(() => {
+        void adapter
+          .renewSpeedLease()
+          .then(async (r) => {
+            // 玩家重載過遊戲 → 頁面上那份沒了，重裝。
+            if (r === "not-installed") {
+              await adapter.installSpeedPatch(factor !== undefined ? { factor } : {});
+              console.log("  ⟳ 遊戲重載過，加速已重新套上");
+            }
+          })
+          .catch(() => {
+            // 連線正在死。下面那條 race 會處理，這裡不必吵。
+          });
+      }, SPEED_RENEW_MS);
+
+      const reason = await Promise.race([lost, stopped.then(() => null)]);
+      clearInterval(renew);
+      if (reason !== null) {
+        // 連線死了就不要再 evaluate —— 只會再拋一次錯。頁面那邊：遊戲還在的話
+        // 加速仍然套著（無害，但要還原），重連之後 install 會先拆再裝。
+        console.log(`\n⟳ 連線斷了（${reason}）—— 遊戲關掉了嗎？重新連…\n`);
+        continue;
+      }
+
+      try {
+        const gone = await adapter.uninstallSpeedPatch();
+        console.log(gone === "uninstalled" ? "\n✓ 已還原成原速" : "\n（本來就沒裝）");
+      } catch (err) {
+        console.error(`\n✗ 還原失敗：${err instanceof Error ? err.message : String(err)}`);
+        console.error("  遊戲重載一次就會乾淨（頁面上的加速不會跨載入存活）。");
+      }
+    } catch (err) {
+      console.error(`  ✗ ${err instanceof Error ? err.message : String(err)}`);
+      if (stopping) break;
+      console.log("⟳ 重新連…\n");
+      await new Promise((r) => setTimeout(r, CONNECT_RETRY_MS));
+    } finally {
+      await adapter.disconnect();
+    }
+  }
+  return 0;
 }
 
 function cmdRule(args: string[]): number {
@@ -623,6 +746,8 @@ async function main(argv: string[]): Promise<number> {
         return await cmdBrowser(args);
       case "arbiter":
         return await cmdArbiter(args);
+      case "speed":
+        return await cmdSpeed(args);
       case "web":
         return await cmdWeb(args);
       case "rule":

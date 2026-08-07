@@ -8,6 +8,7 @@
   "main": "./src/index.ts",
   "dependencies": {
     "@ulr/api-contract": "*",
+    "@ulr/arbiter-link": "*",
     "@ulr/cdp-adapter": "*",
     "@ulr/cost-engine": "*",
     "@ulr/rule-schema": "*"
