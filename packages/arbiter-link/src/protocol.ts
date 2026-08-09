@@ -16,8 +16,10 @@
  *    只在**兩邊都好**的時候發一則 `both-ready`。遊戲協定本身從不下發對手的
  *    OK 狀態（`constants.ts` 的 `OK_STATE_EVENTS`），這條性質原本是伺服器
  *    保證的；接了側通道之後它降級成**我們的設計選擇**，所以必須釘住。
- * 2. **協商一律取「對雙方都不更嚴格」的那一邊。** 秒數取 `max`、縮減取 `min`、
- *    開關取 `and`。任何一方都不可能被強加自己沒同意的限制。
+ * 2. **會讓某一方吃虧的東西一律取「對雙方都不更嚴格」的那一邊。** 秒數取 `max`、
+ *    開關取 `and`。任何一方都不可能被強加只有自己要承受的限制。
+ *    ⚠ 聖水規則是例外，而理由正是這條紅線本身：它**對雙方對稱**（同一個局面下
+ *    兩邊被砍同樣的秒數），沒有人能靠關掉它拿到優勢，所以不需要協商。
  * 3. **房號永遠是雜湊過的。** 原始 room id 是 32 字元的高熵字串（§12 的
  *    `VALUE_MAX_STRING_LENGTH` 正是為了擋這類東西），而中間人只需要「兩個人
  *    在不在同一場」，不需要知道那場是哪一場。之後換成 ulgg 的雲端伺服器時，
@@ -48,8 +50,29 @@ export const MOVE_PHASE_TOTAL_SECONDS = 30;
  */
 export const MIN_PHASE_SECONDS = 5;
 
-/** 聖水／聖杯 + 麻痺這組合預設再砍幾秒。玩家指定 5 秒。 */
+/**
+ * 「**防止壓秒出聖水**」規則再砍幾秒。玩家指定 5 秒，也是玩家命名的。
+ *
+ * 名字講的就是它要防的事：手上有聖水／聖杯、場上又有麻痺這類狀態時，
+ * 把決定拖到最後一秒才出聖水，對手完全沒有時間反應。這條規則把那個窗口
+ * 提早關掉，**兩邊一起**。
+ */
 export const DEFAULT_HAZARD_SHORTEN_SECONDS = 5;
+
+/** 規則的正式名稱（玩家命名）。UI 與記錄一律用它，不要各自翻譯。 */
+export const HAZARD_RULE_NAME = "防止壓秒出聖水";
+
+/**
+ * 階段長度低於這個值時，**聖水規則整條不套用**。
+ *
+ * ⚠ 玩家 2026-08-10 指定，理由是實際能不能出牌：階段只剩 9 秒的時候再砍 5 秒
+ * 只剩 4 秒，那連把牌拖到場上都來不及 —— 而「強制提早結束」送出的是**當下的
+ * 場面**，不是空手。10 秒砍成 5 秒還出得了牌，9 秒砍成 4 秒不行。
+ *
+ * ⚠ 這跟 `MIN_PHASE_SECONDS` 的夾擠**不是**同一回事，不要用夾的取代它：
+ * 夾擠會把 9 秒也變成 5 秒（仍然縮短了），而這條要的是**完全不動**。
+ */
+export const HAZARD_MIN_PHASE_SECONDS = 10;
 
 /**
  * 移動階段的預設長度。玩家指定 20 秒。
@@ -171,7 +194,7 @@ export function normalizePrefs(prefs: Partial<LinkPrefs> | undefined): LinkPrefs
  * | 項目           | 取法  | 為什麼                                       |
  * | -------------- | ----- | -------------------------------------------- |
  * | `phaseSeconds` | `max` | 玩家原話：我選 10、對方選 15 → 用 15         |
- * | `hazardShorten`| `min` | 一方關掉這條 → 共同值就是 0，不能硬加給他    |
+ * | `hazardShorten`| 固定  | **不協商**，握手就強制套用（見下面的說明）   |
  * | `readyEnabled` | `and` | 同步釋放要兩邊都參與才成立                   |
  * | `speedFactor`  | `min` | 一方沒勾（1）→ 共同值 1，兩邊都不加速        |
  *
@@ -182,7 +205,13 @@ export function normalizePrefs(prefs: Partial<LinkPrefs> | undefined): LinkPrefs
 export function negotiate(a: LinkPrefs, b: LinkPrefs): AgreedSettings {
   return {
     phaseSeconds: Math.max(a.phaseSeconds, b.phaseSeconds),
-    hazardShortenSeconds: Math.min(a.hazardShortenSeconds, b.hazardShortenSeconds),
+    // ⚠ **不協商，握手成功就強制套用**（玩家 2026-08-10 指定）。
+    //
+    // 它跟秒數、加速不同：那兩個是「誰願意讓步到哪」，一方不同意就該退回。
+    // 聖水規則是**雙方對稱的同一條規則** —— 兩邊在同一個局面下被砍同樣的秒數，
+    // 沒有一方能靠關掉它拿到優勢，所以也沒有什麼好協商的。
+    // 反過來說，允許單方關掉才是問題：對手關掉 → 共同值 0 → 這條規則消失。
+    hazardShortenSeconds: DEFAULT_HAZARD_SHORTEN_SECONDS,
     readyEnabled: a.readyEnabled && b.readyEnabled,
     speedFactor: Math.min(a.speedFactor, b.speedFactor),
   };
@@ -225,8 +254,11 @@ export function soloSettings(_prefs: LinkPrefs): AgreedSettings {
  * 但**不會低於 `MIN_PHASE_SECONDS`** —— 修正項可以疊，下限不行。
  */
 export function effectiveCapSeconds(agreed: AgreedSettings, hazard: boolean): number {
-  const raw = hazard ? agreed.phaseSeconds - agreed.hazardShortenSeconds : agreed.phaseSeconds;
-  return Math.max(MIN_PHASE_SECONDS, raw);
+  // ⚠ 階段本來就短的時候整條不套用 —— 見 HAZARD_MIN_PHASE_SECONDS。
+  // 條件看的是**協商出來的階段長度**，不是扣完的結果：拿結果去判斷會變成
+  // 「扣了才知道不該扣」，而 9→4 跟 10→5 的差別正是這條規則要擋的。
+  if (!hazard || agreed.phaseSeconds < HAZARD_MIN_PHASE_SECONDS) return agreed.phaseSeconds;
+  return Math.max(MIN_PHASE_SECONDS, agreed.phaseSeconds - agreed.hazardShortenSeconds);
 }
 
 // ---------------------------------------------------------------------------

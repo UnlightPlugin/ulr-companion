@@ -28,10 +28,22 @@ import { app } from "electron";
  * 而「關掉主帳號那個視窗，小號那個也不見了」完全不像是設計行為。
  */
 export function launchInstance(profileId: string): void {
+  /**
+   * ⚠ **`--show` 是必要的，不是選配**（玩家 2026-08-10 回報）。
+   *
+   * 玩家按「開新實例」的當下就是想看到那個視窗。但「開機縮到托盤」
+   * （`startMinimized`）是存在**共用**設定檔裡的，新實例一起來就讀到它，
+   * 於是安靜地縮進托盤 —— 從按鈕這一側看就是「按了沒反應」，而托盤圖示
+   * 又長得跟原本那個一模一樣，玩家根本分不出它到底開了沒。
+   *
+   * 這個旗標讓「玩家剛剛親手要求」勝過那個偏好。開機自動啟動走的是
+   * `--startup`，不帶這個，所以開機的行為完全不受影響。
+   */
+  const common = ["--profile", profileId, "--show"];
   const args = app.isPackaged
-    ? ["--profile", profileId]
+    ? common
     : // process.argv[1] = dist/main.cjs（scripts/run-tray.mjs 傳進來的）
-      [process.argv[1] ?? "", "--profile", profileId];
+      [process.argv[1] ?? "", ...common];
 
   const env = { ...process.env };
   delete env["ELECTRON_RUN_AS_NODE"];

@@ -846,172 +846,24 @@
              <div class="hint ${paired ? "" : "warn"}" id="agreed">${
                paired
                  ? `共同值 ${st.agreed.phaseSeconds} 秒（取雙方較長的那個）` +
-                   (st.hazard ? `，目前聖水＋麻痺生效中 → ${st.capSeconds} 秒` : "")
+                   (st.hazard ? `，防止壓秒出聖水生效中 → ${st.capSeconds} 秒` : "")
                  : npcRule
                    ? `正在打${npcRule} —— 對手是 NPC，秒數不縮短（這條只對真人對戰）`
                    : "還沒握手到對手 —— 秒數不會縮短（單方面縮短只是自己更早承諾）"
              }</div>
            </div>
            <div class="card">
-             <label class="toggle">
-               <input type="checkbox" id="hazard" ${prefs?.hazardShortenSeconds > 0 ? "checked" : ""} />
-               <span><b>聖水＋麻痺再提早 5 秒</b>
-                 <div class="hint">
-                   手牌有聖水／聖杯，而且場上有麻痺、降低移動或自壞時，這個階段再短 5 秒。<br />
-                   ⚠ 兩邊都開才生效；有一邊關掉，共同值就是 0。
-                 </div>
-               </span>
-             </label>
-           </div>`
-        );
-      };
-
-      // --- 戰鬥 › 加速（前瞻預告，刻意不開放） ------------------------------
-      //
-      // ⚠ 引擎、協商（取 min）、租約、實跑驗證都做好了，**這一頁仍然不給開關**。
-      // 理由不是沒做完，是它動的東西太敏感：加速改變的是對戰的節奏，而節奏
-      // 直接關係到誰有多少時間思考。實測收益只有約 1 分鐘／場，而判斷錯的代價
-      // 是公平性 —— 這個比例不值得先開放再修。
-      PAGES["battle/speed"] = () =>
-        todoPage("加速", "做好了，但先不開放", [
-          "<b>已完成</b>：只加速亮牌（每張 200ms 的排隊）與出牌後手牌被鎖的 110ms",
-          "<b>已完成</b>：協商取雙方較小值 —— 雙方都勾才生效，一方沒勾就是原速",
-          "<b>已完成</b>：插件當掉時頁面 10 秒內自己還原成原速（租約）",
-          "⛔ <b>倒數計時完全不碰</b> —— 那顆 Clock 加速會害硬底線提早觸發、被迫提早送出",
-          "⛔ 擲骰是 3D 物理，收斂看步數不看時間，這個開關對它無效",
-          "⚠ <b>先不開放的原因</b>：它改的是節奏，而節奏牽涉公平性。" +
-            "實測收益約 1 分鐘／場，伺服器排程那段動不了 —— 收益不大，判斷錯的代價卻是公平性",
-          "⚠ 任務（QP 排名）一律禁用；渦要渦主同意才開放 —— 這兩條規則還沒有地方掛",
-        ]);
-
-      // --- 戰鬥 › 記牌／牌譜（未實作） --------------------------------------
-      PAGES["battle/count"] = () =>
-        todoPage("記牌", "規劃好了，還沒實作", [
-          "只記<b>未出現的公牌</b>，不碰對手手牌（§12 紅線）",
-          "<b>預設不使用</b>；雙方同意時才顯示",
-          "可選擇「只記大牌」",
-          "卡在：要先有一份雙方同意的協商欄位，跟加速走同一條路",
-        ]);
-
-      PAGES["battle/replay"] = () =>
-        todoPage("牌譜", "規劃好了，還沒實作", [
-          "紀錄自己的牌譜，可在 ulgg 上回看",
-          "可選擇公開；也可設為「所有牌譜都公開」",
-          "公開時<b>對手一律匿名</b>",
-          "⚠ 這個功能最容易違反 §12 ——「完整記錄」的直覺跟「不得記錄對手未揭露資訊」衝突",
-          "卡在：ULGG 端的上傳 API（WP-04／WP-05）",
-        ]);
-
-      // --- 牌組／渦／獎勵／任務（前瞻預告） --------------------------------
-      //
-      // 這四個大分頁都還沒有實作。它們仍然出現在分頁列上，因為玩家要看得到
-      // 里程碑的形狀；每一頁都要寫清楚**卡在哪**，不是「敬請期待」。
-      PAGES["deck/cost"] = () =>
-        todoPage("Cost 表", "卡在 WP-02（Cost Engine）", [
-          "依規則包重算每張卡的 COST，直接顯示在牌組編輯畫面上",
-          "規則的身分是<b>內容的 SHA-256</b>，不是名字也不是版本號 —— WP-01 已完成",
-          "⚠ 自訂 COST 是<b>自我約束</b>：雙方同意才有意義，亞城／官方環境完全不受影響",
-          "卡在：WP-02 目前只有介面，還沒有實作",
-        ]);
-
-      PAGES["vortex/vspeed"] = () =>
-        todoPage("速度加倍", "卡在加速本身還沒開放", [
-          "⚠ 渦有<b>分數排名</b>，加速會影響排名的公平性",
-          "所以要<b>渦主同意</b>才開放使用，預設不同意",
-          "渦主本人預設可使用",
-          "卡在：加速引擎做好了但先不開放（見 戰鬥 › 加速），而且「渦主同意」需要一個伺服器端的授權來源",
-        ]);
-
-      PAGES["vortex/vteam"] = () =>
-        todoPage("推薦隊伍", "還沒開始", [
-          "依這一輪渦的敵人組成推薦隊伍",
-          "卡在：要先有渦的資料來源（ULGG 端）",
-        ]);
-
-      PAGES["vortex/vrank"] = () =>
-        todoPage("排名與獎勵", "還沒開始", [
-          "排名獎勵、目前排名及分數、即時狀態",
-          "卡在：要先有渦的資料來源（ULGG 端）",
-        ]);
-
-      PAGES["bonus/foresight"] = () =>
-        todoPage("未來視", "還沒開始", [
-          "HL 獎勵的未來視",
-          "卡在：要先確認獎勵結果在客戶端可不可觀測，而且<b>不得顯示伺服器尚未揭露的東西</b>（§12）",
-        ]);
-
-      PAGES["quest/chest"] = () =>
-        todoPage("寶箱標註", "還沒開始", [
-          "預覽任務時，自動標註寶箱內容",
-          "資料來源是已經爬好的靜態任務資料，不需要戳跑著的遊戲",
-          "⛔ <b>任務一律禁止速度加倍</b> —— 會影響 QP 排名，不能和沒用插件的人有差別，不符 fairplay 原則",
-        ]);
-
-      // --- 設置 › 配置 ------------------------------------------------------
-      /**
-       * 那一份配置的遊戲埠現在是什麼狀況。
-       *
-       * ⚠ **自己那一列跟別人那一列說的不是同一件事，而那個差別必須看得出來。**
-       *
-       * 自己：引擎真的連著，所以講得出「對戰中」。
-       * 別人：只有主程序每四秒敲一次 `/json/version` 的結果 —— 那只回答
-       *       「那個埠上有沒有遊戲」，**回答不了「有沒有插件在管它」**
-       *       （那是另一個 process，這個視窗問不到）。
-       *
-       * 混成同一句話的話，玩家會以為另一個客戶端已經被保護了。
-       */
-      function portStatus(p, self) {
-        const alive = snap?.gamePorts?.[p.port];
-        if (self) {
-          const st = snap?.status;
-          if (!st) return '<span class="dim">啟動中…</span>';
-          if (st.connected) return `<span class="good">${st.armed ? "對戰中" : "已接上"}</span>`;
-          return alive
-            ? '<span class="warn">遊戲開著，連線中…</span>'
-            : '<span class="dim">等遊戲…</span>';
-        }
-        if (alive === undefined) return '<span class="dim">檢查中…</span>';
-        return alive ? '<span class="good">遊戲開著</span>' : '<span class="dim">沒有回應</span>';
-      }
-
-      PAGES["settings/profiles"] = () => {
-        const s = snap?.store;
-        if (!s) return "";
-        // 只有一份配置時不必標「← 這個視窗」—— 那句話是用來在**兩份以上**裡
-        // 指出誰是誰的，清單只有一行時它只是在說廢話。
-        const many = s.profiles.length > 1;
-        const rows = s.profiles
-          .map((p) => {
-            const self = p.id === snap.profile.id;
-            return `<tr class="${self ? "self" : ""}" data-id="${p.id}">
-              <td><input type="text" data-field="name" value="${esc(p.name)}" />
-                  ${self && many ? "" : ""}</td>
-              <td><select data-field="kind">
-                    <option value="desktop" ${p.kind === "desktop" ? "selected" : ""}>桌面版</option>
-                    <option value="web" ${p.kind === "web" ? "selected" : ""}>網頁版</option>
-                  </select></td>
-              <td><input type="number" data-field="port" value="${p.port}" min="1" max="65535" /></td>
-              <td style="white-space:nowrap">${portStatus(p, self)}</td>
-              <td><input type="text" data-field="link" value="${esc(p.link)}"
-                         title="${esc(p.link)}" /></td>
-              <td style="white-space:nowrap">
-                <button class="gene" data-act="launch" ${self ? "disabled" : ""}>開新實例</button>
-                <button class="gene" data-act="dup">複製</button>
-                <button class="gene danger" data-act="del" ${
-                  s.profiles.length <= 1 || self ? "disabled" : ""
-                }>刪除</button>
-              </td>
-            </tr>`;
-          })
-          .join("");
-        return (
-          head("配置", "一份配置管一個遊戲客戶端。要同時管兩個就開兩份。") +
-          `<div class="card">
-             <table class="profiles">
-               <thead><tr><th>名稱</th><th>客戶端</th><th>遊戲埠</th><th>狀態</th><th>中間人</th><th></th></tr></thead>
-               <tbody id="profileRows">${rows}</tbody>
-             </table>
-             <div style="margin-top:10px"><button class="gene" id="addProfile">新增配置</button></div>
+             <div class="row"><span><b>防止壓秒出聖水</b></span
+               ><span class="good">握手後強制生效</span></div>
+             <div class="hint">
+               手牌有聖水／聖杯，而且場上有麻痺、降低移動或<b>剩一回合的自壞</b>時，
+               這個階段再短 5 秒。<br />
+               ⚠ <b>這條不需要雙方同意</b>，握手成功就一起套用 ——
+               它對兩邊對稱（同一個局面各砍同樣的秒數），沒有人能靠關掉它拿到優勢。<br />
+               ⚠ 階段長度<b>低於 10 秒時整條不套用</b>：9 秒再砍 5 秒只剩 4 秒，
+               那連把牌拖到場上都來不及。
+             </div>
+           </div>
              <div class="hint">
                ⚠ <b>改埠要重開那個實例才生效</b> —— 引擎綁在啟動時的埠上。<br />
                ⚠ 兩份配置<b>不能用同一個遊戲埠</b>；撞到的話第二份會開不起來（Windows 的目錄鎖擋掉）。<br />
@@ -1260,7 +1112,6 @@
       $("content").addEventListener("change", (e) => {
         const t = e.target;
         if (t.id === "ready") return void set({ readyEnabled: t.checked });
-        if (t.id === "hazard") return void set({ hazardShortenSeconds: t.checked ? 5 : 0 });
         if (t.id === "seconds") {
           dragging = false;
           return void set({ phaseSeconds: Number(t.value) });

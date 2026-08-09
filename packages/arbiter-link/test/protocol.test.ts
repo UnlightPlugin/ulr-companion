@@ -4,6 +4,7 @@ import {
   clampPhaseSeconds,
   clampSpeedFactor,
   decode,
+  DEFAULT_HAZARD_SHORTEN_SECONDS,
   DEFAULT_PHASE_SECONDS,
   DEFAULT_PREFS,
   effectiveCapSeconds,
@@ -39,12 +40,15 @@ describe("協商", () => {
     expect(negotiate(a, b)).toEqual(negotiate(b, a));
   });
 
-  it("⚠ 一方關掉聖水規則，共同值就是 0 —— 不能硬加給他", () => {
+  it("⚠ 聖水規則不協商 —— 握手成功就強制套用（玩家 2026-08-10 指定）", () => {
+    // 它是紅線 2 的**例外**，而理由正是紅線 2 本身：這條規則對雙方對稱
+    // （同一個局面兩邊被砍同樣的秒數），沒有人能靠關掉它拿到優勢。
+    // 反過來允許單方關掉才是問題 —— 對手一關，整條規則就消失。
     const agreed = negotiate(
       prefs({ hazardShortenSeconds: 5 }),
       prefs({ hazardShortenSeconds: 0 }),
     );
-    expect(agreed.hazardShortenSeconds).toBe(0);
+    expect(agreed.hazardShortenSeconds).toBe(DEFAULT_HAZARD_SHORTEN_SECONDS);
   });
 
   it("準備功能要兩邊都開才成立", () => {
@@ -150,8 +154,19 @@ describe("實際門檻", () => {
     );
   });
 
-  it("⚠ 修正項可以疊，下限不行", () => {
-    expect(effectiveCapSeconds(agreed({ phaseSeconds: 6, hazardShortenSeconds: 5 }), true)).toBe(
+  it("⚠ 階段本來就短（<10 秒）就整條不套用，不是夾到下限", () => {
+    // 玩家 2026-08-10 指定。判準是「還出不出得了牌」：10 秒砍成 5 秒還行，
+    // 9 秒砍成 4 秒連把牌拖到場上都來不及。
+    //
+    // ⚠ 這**不能**用 MIN_PHASE_SECONDS 的夾擠取代：夾擠會把 9 秒變成 5 秒
+    // （仍然縮短了），而這條要的是完全不動。
+    for (const seconds of [5, 6, 9]) {
+      expect(
+        effectiveCapSeconds(agreed({ phaseSeconds: seconds, hazardShortenSeconds: 5 }), true),
+      ).toBe(seconds);
+    }
+    // 剛好 10 秒是生效的第一格
+    expect(effectiveCapSeconds(agreed({ phaseSeconds: 10, hazardShortenSeconds: 5 }), true)).toBe(
       MIN_PHASE_SECONDS,
     );
   });

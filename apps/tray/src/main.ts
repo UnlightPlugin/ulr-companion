@@ -546,7 +546,12 @@ app.whenReady().then(() => {
   const fromUpdate = consumeUpdatedFlag();
   if (fromUpdate) log(`✓ 已更新到 ${VERSION}`);
   // `--startup` 是開機自動啟動帶的旗標。那個情境下也不要跳視窗。
-  if (!fromUpdate && !process.argv.includes("--startup") && !store.startMinimized) showWindow();
+  // ⚠ `--show` 是「玩家剛剛親手按了開新實例」，要勝過 startMinimized 這個偏好，
+  // 否則新實例會安靜地縮進托盤，看起來就是按了沒反應（見 launch.ts）。
+  const askedToShow = process.argv.includes("--show");
+  if (askedToShow) showWindow();
+  else if (!fromUpdate && !process.argv.includes("--startup") && !store.startMinimized)
+    showWindow();
 });
 
 // ⚠ 托盤程式沒有視窗時**不能結束**。這是 Electron 在 Windows/Linux 上的預設行為，
