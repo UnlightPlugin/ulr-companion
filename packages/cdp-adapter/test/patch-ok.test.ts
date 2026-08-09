@@ -1354,6 +1354,44 @@ describe("跑起來：hazard（聖水 + 麻痺）", () => {
     expect(page.arbiter.tick().hazard).toBe(true);
   });
 
+  it("⚠ 聖水從手上消失 → 當成狀態被解掉，秒數要加回去", async () => {
+    // 玩家 2026-08-09 回報：用聖水解掉麻痺之後，5 秒沒有加回去。
+    //
+    // 成因是伺服器**解除狀態時一則事件都不送**（錄 441 秒實證，7 則 state
+    // 全部是「施加」）。自己數回合的計數器因此留下幽靈，而只要手上還有
+    // 另一張聖水，hazard 的另一半仍然成立 → 一直扣著 5 秒。
+    const page = bootPage();
+    page.arbiter.tick();
+    await ticks(1);
+
+    // 手上兩張聖水，身上有麻痺 → hazard 成立
+    page.setHand([91, 94]);
+    await ticks(1);
+    page.socket?.fire("state", "mahi_3", "A", "B");
+    expect(page.arbiter.tick().hazard).toBe(true);
+
+    // 用掉一張解麻痺。手上還有一張，所以 holy 這一半仍然成立 ——
+    // 舊版就是卡在這裡，幽靈麻痺讓 hazard 一直是 true。
+    page.setHand([94]);
+    await ticks(1);
+    expect(page.arbiter.tick().hazard).toBe(false);
+  });
+
+  it("手牌沒少就不要亂清 —— 抽到新牌不是解除", async () => {
+    const page = bootPage();
+    page.arbiter.tick();
+    await ticks(1);
+    page.setHand([91]);
+    await ticks(1);
+    page.socket?.fire("state", "mahi_3", "A", "B");
+    expect(page.arbiter.tick().hazard).toBe(true);
+
+    // 又抽到一張聖水 —— 數量變多，狀態不該被清掉
+    page.setHand([91, 94]);
+    await ticks(1);
+    expect(page.arbiter.tick().hazard).toBe(true);
+  });
+
   it("清單外的狀態不算（例如中毒）", async () => {
     const page = bootPage();
     page.arbiter.tick();

@@ -691,16 +691,16 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
    * 根本不存在 —— 只看畫面會漏掉一半，而漏掉的方向是「以為沒有聖水」，
    * 也就是這條規則安靜地失效。
    */
-  function handHasHoly() {
+  function handHolyCount() {
     try {
       var info = eventInfo();
       var sc = mainScene();
       var hand = sc && sc[CFG.handField];
-      if (!info || !hand) return false;
+      if (!info || !hand) return 0;
 
-      var found = false;
+      var n = 0;
       (function walk(o, d) {
-        if (found || !o || d > 3) return;
+        if (!o || d > 3) return;
         if (Array.isArray(o)) {
           for (var i = 0; i < o.length; i++) walk(o[i], d + 1);
           return;
@@ -708,11 +708,51 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
         if (typeof o !== "object") return;
         if (o.texture && o.texture.key === CFG.handTexture && o.frame && o.visible) {
           var card = info[Number(o.frame.name)];
-          if (card && (card.holy === true || card.holy_enemy === true)) found = true;
+          if (card && (card.holy === true || card.holy_enemy === true)) n++;
         }
       })(hand, 0);
-      return found;
-    } catch (e) { return false; }
+      return n;
+    } catch (e) { return 0; }
+  }
+
+  function handHasHoly() {
+    return handHolyCount() > 0;
+  }
+
+  /**
+   * 聖水／聖杯離開手牌了 → 當成「我把狀態解掉了」，清掉我這一側的計數器。
+   *
+   * ⚠ **這是繞路，不是正解。** 正解是從遊戲現況重讀狀態，但伺服器解除時
+   * 一則事件都不送（2026-08-09 錄 441 秒實證），而遊戲把「誰中了什麼」放在
+   * 哪裡目前還沒找到。在那之前，用「聖水從手上消失了」當代理訊號。
+   *
+   * 為什麼是數手上的聖水，而不是去解析 cardclicked 的那個 num：
+   * num 要反查卡片種類得先建一張 num → 卡種的表，而 arr1 的格子上**沒有**任何
+   * 識別欄位（實測：Sprite 只有 acframe/acspe/acbow 幾張材質，data 是空的）。
+   * 數手上還剩幾張反而是直接觀察得到的事實。
+   *
+   * （注入腳本是 TS 的樣板字串，這段註解裡不能用反引號。）
+   *
+   * ⚠ **只清自己這一側。** 聖水解的是自己身上的狀態，對手的不歸我管。
+   *
+   * ⚠ 誤判的方向是安全的：多清了 → hazard 變 false → **不縮短**，不會從玩家
+   * 手上偷走 5 秒。反過來（該清沒清）才是玩家回報的那個問題。
+   * 手牌翻頁會讓沒翻到的那頁變 invisible、數字下降，也會走到這裡 —— 同樣是
+   * 往安全的方向錯。
+   */
+  function noticeHolyUsed() {
+    try {
+      var now = handHolyCount();
+      var before = state.holyCount;
+      state.holyCount = now;
+      if (before === null || now >= before) return;
+      var seat = state.seat();
+      if (seat !== "A" && seat !== "B") return;
+      state.states[seat] = {};
+      for (var k in state.statesAt) {
+        if (has.call(state.statesAt, k) && k.indexOf(seat + ":") === 0) delete state.statesAt[k];
+      }
+    } catch (e) {}
   }
 
   /**
@@ -846,6 +886,8 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
     states: { A: {}, B: {} },
     /** "座位:鍵" → 施加的時刻。只給 decayStates 判斷同一瞬間用。 */
     statesAt: {},
+    /** 上一次看到手上有幾張聖水／聖杯。null = 還沒看過。見 noticeHolyUsed。 */
+    holyCount: null,
     /**
      * 畫面上的倒數要當成「只有這麼多秒」來畫。null = 照遊戲原本的。
      *
@@ -1344,6 +1386,7 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
         // 狀態效果也是上一場的。留著會讓新的一場一開始就以為有人被麻痺。
         state.states = { A: {}, B: {} };
         state.statesAt = {};
+        state.holyCount = null;
         state.armed = true;
         if (everArmed) report({ type: "ok-patch-rearmed", seat: state.seat() });
         everArmed = true;
@@ -1375,6 +1418,8 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
   state.phaseTick = setInterval(function () {
     try {
       arm();
+      // 聖水從手上消失 → 當成狀態被解掉了（伺服器不會通知，見 noticeHolyUsed）
+      noticeHolyUsed();
 
       var mp = movePhase();
       var inPhase = mp !== null;
