@@ -1276,10 +1276,82 @@ describe("跑起來：hazard（聖水 + 麻痺）", () => {
     page.socket?.fire("state", "mahi_2", "A", "B");
     expect(page.arbiter.tick().hazard).toBe(true);
 
+    // ⚠ 回合之間要推時鐘。實測伺服器把 state 與 endTurn 送在同一個時間戳，
+    // 所以「剛施加」有一個寬限窗（見下面那條）——不推的話兩次 endTurn 都在
+    // 窗內，一次都不會扣。
+    await vi.advanceTimersByTimeAsync(1000);
     page.socket?.fire("endTurn");
     expect(page.arbiter.tick().hazard).toBe(true); // 還剩 1 回合
+    await vi.advanceTimersByTimeAsync(1000);
     page.socket?.fire("endTurn");
     expect(page.arbiter.tick().hazard).toBe(false); // 到期了
+  });
+
+  it("⚠ 自壞剩 2~4 回合不算，剩 1 回才算（玩家 2026-08-09 指定）", async () => {
+    // 這是把規格書原本的寫法補回來 —— battle-features.md 規則 3 寫的是
+    // 「剩一回自壞」，實作漏掉了「剩一回」三個字。
+    //
+    // 語意上也只有這樣才對：自壞還有好幾回合時跟拖時間無關，要到剩最後一回合
+    // 那一回合的決策才真的變重。
+    const page = bootPage();
+    page.arbiter.tick();
+    await ticks(1);
+    page.setHand([91]); // 手上有聖水，hazard 的另一半成立
+
+    /**
+     * ⚠ 回合之間一定要把時鐘往前推。
+     *
+     * 真實對戰裡兩次 endTurn 相隔數十秒，但假時鐘不推的話它們全部落在
+     * 「剛施加」的寬限窗內（見下一條測試），一次都不會扣 —— 那是測試不真實，
+     * 不是程式錯。
+     */
+    const endTurn = async (): Promise<void> => {
+      await vi.advanceTimersByTimeAsync(1000);
+      page.socket?.fire("endTurn");
+    };
+
+    page.socket?.fire("state", "jikai_4", "A", "B");
+    expect(page.arbiter.tick().hazard).toBe(false); // 還有 4 回
+    await endTurn();
+    expect(page.arbiter.tick().hazard).toBe(false); // 3
+    await endTurn();
+    expect(page.arbiter.tick().hazard).toBe(false); // 2
+    await endTurn();
+    expect(page.arbiter.tick().hazard).toBe(true); // 剩 1 回 → 才扣秒數
+  });
+
+  it("麻痺與降低移動沒有「剩一回」的分別，一生效就算", async () => {
+    // 它們一生效就在拖時間，跟自壞不是同一種東西。
+    const page = bootPage();
+    page.arbiter.tick();
+    await ticks(1);
+    page.setHand([91]);
+    page.socket?.fire("state", "mahi_3", "A", "B");
+    expect(page.arbiter.tick().hazard).toBe(true);
+  });
+
+  it("⚠ 跟 endTurn 同一瞬間到的狀態，不可以當場被扣掉一回合", async () => {
+    // 2026-08-09 錄事件流時發現：伺服器把 state 與 endTurn 送在同一個時間戳
+    //
+    //     t=385.5  state  mahi_2
+    //     t=385.5  endTurn
+    //
+    // 舊版會把 mahi_2 當場扣成 1，於是每個狀態都少算一回合。對「自壞剩一回」
+    // 那條規則來說，整條會錯開一回合 —— 剩 2 回就被當成剩 1 回。
+    const page = bootPage();
+    page.arbiter.tick();
+    await ticks(1);
+    page.setHand([91]);
+
+    page.socket?.fire("state", "jikai_2", "A", "B");
+    page.socket?.fire("endTurn"); // 同一瞬間
+    // 還是 2 回合 → 不算
+    expect(page.arbiter.tick().hazard).toBe(false);
+
+    // 下一個回合結束才真的扣 —— 這時才剩 1 回
+    await vi.advanceTimersByTimeAsync(1000);
+    page.socket?.fire("endTurn");
+    expect(page.arbiter.tick().hazard).toBe(true);
   });
 
   it("清單外的狀態不算（例如中毒）", async () => {

@@ -716,11 +716,36 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
   }
 
   /**
-   * 場上有沒有拖時間型的狀態（麻痺／降低移動／自壞）。
+   * 自壞**只有剩最後一回合**才算拖時間。
+   *
+   * ⚠ 玩家 2026-08-09 指定，而這其實是把規格書原本的寫法補回來 ——
+   * battle-features.md 規則 3 寫的是「剩一回自壞」，實作時漏掉了「剩一回」
+   * 這三個字，變成只要身上有自壞就算。
+   *
+   * 語意上也只有這樣才對：自壞還有 2~4 回合的時候，它跟拖時間完全無關；
+   * 要到剩最後一回合，那一回合的決策才真的變重（下一回合就爆了）。
+   * 麻痺與降低移動沒有這個分別 —— 它們一生效就在拖。
+   */
+  function stallCounts(key, turns) {
+    if (turns <= 0) return false;
+    return key === "jikai" ? turns === 1 : true;
+  }
+
+  /**
+   * 場上有沒有拖時間型的狀態（麻痺／降低移動／剩一回的自壞）。
    *
    * 資料來自 state("mahi_2","A","B") 事件：<鍵>_<剩餘回合數>、誰中了、
    * 誰施加的。伺服器**只在施加時通知一次**，所以剩餘回合要自己數 ——
    * 每收到一次 endTurn 就全部減一。
+   *
+   * ⚠⚠ **自己數是會留下幽靈的**（2026-08-09 錄 441 秒的事件流證實）：
+   * 玩家用聖水把麻痺解掉時，伺服器**一則事件都不送**。7 則 state 全部是
+   * 「施加」，沒有任何一則是「解除」。所以這個計數器只會在回合數自然歸零時
+   * 才消失，中途被解除的話它會一直留著。
+   *
+   * 後果正是玩家回報的那個：解完麻痺，秒數卻沒加回去（只要手上還有另一張
+   * 聖水／聖杯，hazard 的另一個條件仍然成立）。真正的修法是改成從遊戲的
+   * 現況重讀，不要自己數 —— 那需要先找到狀態的即時來源，還沒做。
    *
    * ⚠ 不用畫面上的圖示是因為分不出哪個圖示是哪個狀態（27 種共用一張圖集，
    * 而 frame 對應關係沒有實測過）。事件這條至少每個欄位都有實測依據。
@@ -731,7 +756,7 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
       var byKey = state.states[seat];
       for (var key in byKey) {
         if (!has.call(byKey, key)) continue;
-        if (byKey[key] > 0) return true;
+        if (stallCounts(key, byKey[key])) return true;
       }
     }
     return false;
@@ -819,6 +844,8 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
      * 由 state 事件加、由 endTurn 減。
      */
     states: { A: {}, B: {} },
+    /** "座位:鍵" → 施加的時刻。只給 decayStates 判斷同一瞬間用。 */
+    statesAt: {},
     /**
      * 畫面上的倒數要當成「只有這麼多秒」來畫。null = 照遊戲原本的。
      *
@@ -1211,17 +1238,40 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
       var seat = (args[2] === "A" || args[2] === "B") ? args[2] : null;
       if (seat === null) return;
       state.states[seat][key] = turns;
+      // ⚠ 記下施加的時刻，給 decayStates 判斷「這是同一瞬間的 endTurn」。
+      state.statesAt[seat + ":" + key] = Date.now();
     } catch (e) {}
   }
 
+  /**
+   * 剛施加的狀態，多久內收到的 endTurn 不算它頭上。
+   *
+   * ⚠ 2026-08-09 錄事件流時發現的：state 與 endTurn 是**同一個時間戳**到的
+   *
+   *     t=385.5  state  mahi_2
+   *     t=385.5  endTurn
+   *
+   * 於是 mahi_2 一到就被扣成 1 —— 每一個狀態都少算一回合，而症狀是
+   * 「hazard 提早一回合消失」。方向雖然安全（不縮短），但它是錯的，
+   * 而且會讓「自壞剩一回」這條規則整個錯開一回合。
+   */
+  var APPLIED_GRACE_MS = 300;
+
   function decayStates() {
+    var now = Date.now();
     for (var seat in state.states) {
       if (!has.call(state.states, seat)) continue;
       var byKey = state.states[seat];
       for (var key in byKey) {
         if (!has.call(byKey, key)) continue;
+        // 同一瞬間才剛施加的，這一次的 endTurn 不算它頭上。
+        var at = state.statesAt[seat + ":" + key];
+        if (at !== undefined && now - at < APPLIED_GRACE_MS) continue;
         byKey[key] -= 1;
-        if (byKey[key] <= 0) delete byKey[key];
+        if (byKey[key] <= 0) {
+          delete byKey[key];
+          delete state.statesAt[seat + ":" + key];
+        }
       }
     }
   }
@@ -1293,6 +1343,7 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
         refNext = { A: 1, B: 1 };
         // 狀態效果也是上一場的。留著會讓新的一場一開始就以為有人被麻痺。
         state.states = { A: {}, B: {} };
+        state.statesAt = {};
         state.armed = true;
         if (everArmed) report({ type: "ok-patch-rearmed", seat: state.seat() });
         everArmed = true;
