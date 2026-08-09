@@ -740,17 +740,43 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
    * 手牌翻頁會讓沒翻到的那頁變 invisible、數字下降，也會走到這裡 —— 同樣是
    * 往安全的方向錯。
    */
+  /**
+   * ⚠⚠ **2026-08-09 暫時停用，為了把兩個症狀分開。**
+   *
+   * 玩家在裝了這段之後回報：自壞剩 2 回合會縮短、剩 1 回合反而不縮短 ——
+   * 也就是插件的計數器比畫面**少 1**。而這段程式碼是嫌疑最大的一個：
+   *
+   *   1. 它會**整組清空**我方的狀態計數器
+   *   2. 它的觸發條件是「手上的聖水少了一張」，而手牌掃描實測出現過
+   *      **畫面有 9 張、掃描回報 0 張**的情況 —— 那會被當成聖水用掉了
+   *   3. 而且它清掉的東西包含自壞，但**聖水根本解不了自壞**
+   *
+   * 三件事湊起來，症狀會跟真正的 off-by-one 長得一模一樣。所以先停掉，
+   * 讓玩家重測一輪：
+   *
+   *   停掉後症狀消失 → 成因是這段（要改成只清聖水真的解得掉的狀態，
+   *                     而且要先修好手牌掃描的間歇性 0）
+   *   停掉後症狀還在 → 成因在別處，這段可以照原樣裝回來
+   *
+   * ⚠ 停用期間「聖水解掉麻痺、5 秒沒加回來」那個原始問題會回來 ——
+   * 那是刻意的取捨：一次只動一個變因，否則兩個症狀會互相掩蓋。
+   */
+  var HOLY_CLEAR_ENABLED = false;
+
   function noticeHolyUsed() {
     try {
       var now = handHolyCount();
       var before = state.holyCount;
       state.holyCount = now;
+      if (!HOLY_CLEAR_ENABLED) return;
       if (before === null || now >= before) return;
       var seat = state.seat();
       if (seat !== "A" && seat !== "B") return;
-      state.states[seat] = {};
-      for (var k in state.statesAt) {
-        if (has.call(state.statesAt, k) && k.indexOf(seat + ":") === 0) delete state.statesAt[k];
+      // ⚠ 裝回來的時候**不要再清 jikai**：聖水解不了自壞。
+      for (var key in state.states[seat]) {
+        if (!has.call(state.states[seat], key) || key === "jikai") continue;
+        delete state.states[seat][key];
+        delete state.statesAt[seat + ":" + key];
       }
     } catch (e) {}
   }
