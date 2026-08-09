@@ -35,6 +35,7 @@ import {
   OK_BUTTON,
   PVP_RULES,
   STALL_STATE_KEYS,
+  STATE_ICON_TEXTURE_KEY,
   WS_CLIENT,
 } from "./constants.js";
 import { embedJson } from "./embed.js";
@@ -351,6 +352,11 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
     handTexture: HAND_TEXTURE_KEY,
     handField: HAND_ARRAY_FIELD,
     stallStates: STALL_STATE_KEYS,
+    /**
+     * 狀態圖示的材質鍵。**frame 名就是狀態鍵**（`jikai` / `atkD3` / `defD3`），
+     * 同一個容器裡的 BitmapText 是剩餘回合數。2026-08-10 對著跑著的客戶端實測。
+     */
+    stateTexture: STATE_ICON_TEXTURE_KEY,
     sendMethod: WS_CLIENT.sendMethod,
     listenAllMethod: WS_CLIENT.listenAllMethod,
     unlistenAllMethod: WS_CLIENT.unlistenAllMethod,
@@ -816,16 +822,80 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
    * ⚠ 不用畫面上的圖示是因為分不出哪個圖示是哪個狀態（27 種共用一張圖集，
    * 而 frame 對應關係沒有實測過）。事件這條至少每個欄位都有實測依據。
    */
-  function stallStateActive() {
-    for (var seat in state.states) {
-      if (!has.call(state.states, seat)) continue;
-      var byKey = state.states[seat];
-      for (var key in byKey) {
-        if (!has.call(byKey, key)) continue;
-        if (stallCounts(key, byKey[key])) return true;
-      }
+  /**
+   * 一張狀態圖示的 frame 名對不對得上我們在意的那三個鍵。
+   *
+   * 實測 frame 名**就是狀態鍵本身**，有時後面接一個數值：
+   *
+   *     frame=jikai    自壞
+   *     frame=atkD3    攻擊力 -3
+   *     frame=defD3    防禦力 -3
+   *
+   * 所以用前綴比對。⚠ 不要用 indexOf(k) !== -1（包含），那會讓 movB 之類的
+   * 鍵互相誤中。
+   */
+  function stallMatches(frameName, turns) {
+    for (var i = 0; i < CFG.stallStates.length; i++) {
+      var k = CFG.stallStates[i];
+      if (frameName === k || frameName.indexOf(k) === 0) return stallCounts(k, turns);
     }
     return false;
+  }
+
+  /**
+   * ⚠⚠ **直接讀畫面上的狀態圖示，不再自己數回合。**（2026-08-10 改）
+   *
+   * 舊版靠 state 事件自己數，而那條路**結構上就不可能正確**：
+   *
+   *   - 伺服器**解除狀態時什麼都不送**（錄 441 秒實證），被解掉的會變成幽靈
+   *   - 自壞在移動階段結束時減，其他狀態在回合結束後減，我們只有一個 endTurn
+   *   - 只要漏收一次事件，計數器就永遠偏掉，而且再也回不來
+   *
+   * 症狀是玩家連續回報的「剩 2 回合會縮短、剩 1 回合反而不縮短」，而我照著
+   * 單次快照推了三次因果、三次方向都不一樣 —— 那正是在量一個不可信的東西。
+   *
+   * 現在讀的是**遊戲自己畫出來的那個數字**：
+   *
+   *     Image       tex=state_tmp   frame=jikai    ← 狀態種類
+   *     BitmapText  tex=state_font  text="2"       ← 剩餘回合，同一個容器裡
+   *
+   * 這是遊戲的真相，所以解除、時機差、漏事件三個問題一起消失。
+   *
+   * ⚠ 讀不到就回 false（不縮短）。跟這個檔案其他地方一樣：不確定時停手。
+   */
+  function stallStateActive() {
+    try {
+      var sc = mainScene();
+      if (!sc) return false;
+      var found = false;
+      (function walk(o, d) {
+        if (found || !o || d > 6 || o.visible === false) return;
+        var kids = o.list && o.list.length ? o.list : null;
+        if (!kids) return;
+
+        // 一個狀態 = 同一個容器裡「一張 state_tmp 圖 + 一個 BitmapText」
+        var key = null;
+        var turns = null;
+        for (var i = 0; i < kids.length; i++) {
+          var c = kids[i];
+          if (!c || c.visible === false) continue;
+          if (c.texture && c.texture.key === CFG.stateTexture && c.frame) {
+            key = String(c.frame.name);
+          } else if (c.type === "BitmapText") {
+            var v = parseInt(String(c.text), 10);
+            if (isFinite(v)) turns = v;
+          }
+        }
+        if (key !== null && turns !== null && stallMatches(key, turns)) {
+          found = true;
+          return;
+        }
+        for (var j = 0; j < kids.length && j < 150; j++) walk(kids[j], d + 1);
+      })(sc, 0);
+      return found;
+    } catch (e) {
+      return false;
+    }
   }
 
   function hazardNow() {

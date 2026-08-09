@@ -405,6 +405,8 @@ interface Page {
   setHand(frames: readonly number[]): void;
   /** 換戰鬥模式。`null` = 讀不到（還沒進戰鬥，或改版換了欄位）。 */
   setRule(rule: string | null): void;
+  /** 設定畫面上顯示的狀態圖示（種類 + 剩餘回合）。 */
+  setStatuses(entries: readonly { key: string; turns: number }[]): void;
 }
 
 const BINDING = "__test_binding";
@@ -450,6 +452,11 @@ function bootPage(
      * （2026-08-09，見 constants.ts 的 PVP_RULES）。
      */
     config: { rule: options.rule === undefined ? "duel" : options.rule },
+    /**
+     * 畫面上那排狀態圖示。**實測形狀**（2026-08-10）：一個容器裡放
+     * 一張 `state_tmp` 的圖（frame 名就是狀態鍵）＋一個 BitmapText（剩餘回合）。
+     */
+    list: [] as unknown[],
   };
   /** 遊戲自己的 pointerdown handler，逐字抄實測挖到的那一行。 */
   ok.on("pointerdown", () => {
@@ -587,6 +594,15 @@ function bootPage(
     },
     setHand(frames: readonly number[]): void {
       mainA["arr1"] = frames.map((f) => handCard(f));
+    },
+    setStatuses(entries: readonly { key: string; turns: number }[]): void {
+      mainA["list"] = entries.map((e) => ({
+        visible: true,
+        list: [
+          { visible: true, texture: { key: "state_tmp" }, frame: { name: e.key } },
+          { visible: true, type: "BitmapText", text: String(e.turns) },
+        ],
+      }));
     },
     setRule(rule: string | null): void {
       // ⚠ 整顆 config 拿掉，不是把 rule 設成 null —— 「還沒進戰鬥」時
@@ -1224,7 +1240,7 @@ describe("跑起來：讀秒顯示跟著約定秒數改", () => {
   });
 });
 
-describe("跑起來：hazard（聖水 + 麻痺）", () => {
+describe("跑起來：hazard（聖水 + 場上狀態）", () => {
   beforeEach(() => {
     vi.useFakeTimers();
   });
@@ -1232,7 +1248,17 @@ describe("跑起來：hazard（聖水 + 麻痺）", () => {
     vi.useRealTimers();
   });
 
-  it("只有聖水、沒有麻痺 → 不算", async () => {
+  /**
+   * ⚠ **狀態一律用 setStatuses（讀畫面），不要再用 state 事件。**
+   *
+   * 2026-08-10 改掉的：舊版靠 state 事件自己數回合，而那在結構上就不可能對
+   * （伺服器解除時什麼都不送、自壞與其他狀態減回合的時機不同、漏一次就永遠
+   * 偏掉）。玩家連續回報的「剩 2 縮短、剩 1 不縮短」就是這麼來的。
+   *
+   * 現在讀的是遊戲自己畫出來的圖示與數字，所以測試也要照那個形狀給。
+   */
+
+  it("只有聖水、沒有場上狀態 → 不算", async () => {
     const page = bootPage();
     page.arbiter.tick();
     await ticks(1);
@@ -1244,7 +1270,7 @@ describe("跑起來：hazard（聖水 + 麻痺）", () => {
     const page = bootPage();
     page.arbiter.tick();
     await ticks(1);
-    page.socket?.fire("state", "mahi_2", "A", "B");
+    page.setStatuses([{ key: "mahi", turns: 2 }]);
     expect(page.arbiter.tick().hazard).toBe(false);
   });
 
@@ -1253,7 +1279,7 @@ describe("跑起來：hazard（聖水 + 麻痺）", () => {
     page.arbiter.tick();
     await ticks(1);
     page.setHand([0, 91]);
-    page.socket?.fire("state", "mahi_2", "A", "B");
+    page.setStatuses([{ key: "mahi", turns: 2 }]);
     expect(page.arbiter.tick().hazard).toBe(true);
   });
 
@@ -1261,163 +1287,88 @@ describe("跑起來：hazard（聖水 + 麻痺）", () => {
     const page = bootPage();
     page.arbiter.tick();
     await ticks(1);
-    page.socket?.fire("state", "mahi_1", "B", "A");
+    page.setStatuses([{ key: "mahi", turns: 1 }]);
     page.setHand([94]);
     expect(page.arbiter.tick().hazard).toBe(true);
     page.setHand([95]);
     expect(page.arbiter.tick().hazard).toBe(true);
   });
 
-  it("⚠ 回合數要自己數 —— 伺服器只在施加時通知一次", async () => {
-    const page = bootPage();
-    page.arbiter.tick();
-    await ticks(1);
-    page.setHand([91]);
-    page.socket?.fire("state", "mahi_2", "A", "B");
-    expect(page.arbiter.tick().hazard).toBe(true);
-
-    // ⚠ 回合之間要推時鐘。實測伺服器把 state 與 endTurn 送在同一個時間戳，
-    // 所以「剛施加」有一個寬限窗（見下面那條）——不推的話兩次 endTurn 都在
-    // 窗內，一次都不會扣。
-    await vi.advanceTimersByTimeAsync(1000);
-    page.socket?.fire("endTurn");
-    expect(page.arbiter.tick().hazard).toBe(true); // 還剩 1 回合
-    await vi.advanceTimersByTimeAsync(1000);
-    page.socket?.fire("endTurn");
-    expect(page.arbiter.tick().hazard).toBe(false); // 到期了
-  });
-
   it("⚠ 自壞剩 2~4 回合不算，剩 1 回才算（玩家 2026-08-09 指定）", async () => {
-    // 這是把規格書原本的寫法補回來 —— battle-features.md 規則 3 寫的是
-    // 「剩一回自壞」，實作漏掉了「剩一回」三個字。
-    //
-    // 語意上也只有這樣才對：自壞還有好幾回合時跟拖時間無關，要到剩最後一回合
-    // 那一回合的決策才真的變重。
-    const page = bootPage();
-    page.arbiter.tick();
-    await ticks(1);
-    page.setHand([91]); // 手上有聖水，hazard 的另一半成立
-
-    /**
-     * ⚠ 回合之間一定要把時鐘往前推。
-     *
-     * 真實對戰裡兩次 endTurn 相隔數十秒，但假時鐘不推的話它們全部落在
-     * 「剛施加」的寬限窗內（見下一條測試），一次都不會扣 —— 那是測試不真實，
-     * 不是程式錯。
-     */
-    const endTurn = async (): Promise<void> => {
-      await vi.advanceTimersByTimeAsync(1000);
-      page.socket?.fire("endTurn");
-    };
-
-    page.socket?.fire("state", "jikai_4", "A", "B");
-    expect(page.arbiter.tick().hazard).toBe(false); // 還有 4 回
-    await endTurn();
-    expect(page.arbiter.tick().hazard).toBe(false); // 3
-    await endTurn();
-    expect(page.arbiter.tick().hazard).toBe(false); // 2
-    await endTurn();
-    expect(page.arbiter.tick().hazard).toBe(true); // 剩 1 回 → 才扣秒數
-  });
-
-  it("麻痺與降低移動沒有「剩一回」的分別，一生效就算", async () => {
-    // 它們一生效就在拖時間，跟自壞不是同一種東西。
+    // 把規格書原本就寫的「剩一回自壞」補回來 —— 自壞還有好幾回合時跟拖時間
+    // 無關，要到剩最後一回合那一回合的決策才真的變重。
     const page = bootPage();
     page.arbiter.tick();
     await ticks(1);
     page.setHand([91]);
-    page.socket?.fire("state", "mahi_3", "A", "B");
+
+    for (const turns of [4, 3, 2]) {
+      page.setStatuses([{ key: "jikai", turns }]);
+      expect(page.arbiter.tick().hazard).toBe(false);
+    }
+    page.setStatuses([{ key: "jikai", turns: 1 }]);
     expect(page.arbiter.tick().hazard).toBe(true);
   });
 
-  it("⚠ 跟 endTurn 同一瞬間到的狀態，不可以當場被扣掉一回合", async () => {
-    // 2026-08-09 錄事件流時發現：伺服器把 state 與 endTurn 送在同一個時間戳
-    //
-    //     t=385.5  state  mahi_2
-    //     t=385.5  endTurn
-    //
-    // 舊版會把 mahi_2 當場扣成 1，於是每個狀態都少算一回合。對「自壞剩一回」
-    // 那條規則來說，整條會錯開一回合 —— 剩 2 回就被當成剩 1 回。
+  it("麻痺與降低移動沒有「剩一回」的分別，1~9 都算", async () => {
     const page = bootPage();
     page.arbiter.tick();
     await ticks(1);
     page.setHand([91]);
+    for (const turns of [1, 3, 9]) {
+      page.setStatuses([{ key: "mahi", turns }]);
+      expect(page.arbiter.tick().hazard).toBe(true);
+      page.setStatuses([{ key: "movD", turns }]);
+      expect(page.arbiter.tick().hazard).toBe(true);
+    }
+  });
 
-    page.socket?.fire("state", "jikai_2", "A", "B");
-    page.socket?.fire("endTurn"); // 同一瞬間
-    // 還是 2 回合 → 不算
+  it("⚠ frame 名帶數值也要認得（atkD3 那種寫法）", async () => {
+    // 實測 frame 名有時後面接一個數值：atkD3 = 攻擊力 -3、defD3 = 防禦力 -3。
+    // 所以比對要用前綴，而 movD 這種鍵才不會漏掉帶數值的版本。
+    const page = bootPage();
+    page.arbiter.tick();
+    await ticks(1);
+    page.setHand([91]);
+    page.setStatuses([{ key: "movD3", turns: 2 }]);
+    expect(page.arbiter.tick().hazard).toBe(true);
+  });
+
+  it("⚠ 前綴比對不可以誤中別的狀態鍵", async () => {
+    // atkD / defD / movB 都不在清單裡，不能因為長得像就算進去。
+    const page = bootPage();
+    page.arbiter.tick();
+    await ticks(1);
+    page.setHand([91]);
+    page.setStatuses([
+      { key: "atkD3", turns: 1 },
+      { key: "defD3", turns: 1 },
+      { key: "movB2", turns: 1 },
+      { key: "poison", turns: 3 },
+    ]);
     expect(page.arbiter.tick().hazard).toBe(false);
-
-    // 下一個回合結束才真的扣 —— 這時才剩 1 回
-    await vi.advanceTimersByTimeAsync(1000);
-    page.socket?.fire("endTurn");
-    expect(page.arbiter.tick().hazard).toBe(true);
   });
 
-  it.skip("⚠ 聖水從手上消失 → 當成狀態被解掉，秒數要加回去（2026-08-09 暫時停用）", async () => {
-    // ⚠ **這條測試現在是 skip 的，而且不可以就這樣留著。**
-    //
-    // 玩家裝了這個功能之後回報「自壞剩 2 縮短、剩 1 不縮短」——計數器比畫面
-    // 少 1。這段是嫌疑最大的（它整組清空狀態，而觸發條件靠的手牌掃描實測會
-    // 間歇性讀到 0 張）。為了一次只動一個變因，先用 HOLY_CLEAR_ENABLED 停掉。
-    //
-    // 玩家重測後：症狀消失 → 修這段再把測試打開；症狀還在 → 直接打開。
-    // 玩家 2026-08-09 回報：用聖水解掉麻痺之後，5 秒沒有加回去。
-    //
-    // 成因是伺服器**解除狀態時一則事件都不送**（錄 441 秒實證，7 則 state
-    // 全部是「施加」）。自己數回合的計數器因此留下幽靈，而只要手上還有
-    // 另一張聖水，hazard 的另一半仍然成立 → 一直扣著 5 秒。
+  it("⚠ 狀態從畫面上消失就立刻不算 —— 這是改讀畫面的全部理由", async () => {
+    // 玩家用聖水解掉麻痺時，伺服器**一則事件都不送**（錄 441 秒實證）。
+    // 靠事件數回合的版本會留下幽靈，5 秒永遠加不回來；讀畫面則是自動正確。
     const page = bootPage();
     page.arbiter.tick();
     await ticks(1);
-
-    // 手上兩張聖水，身上有麻痺 → hazard 成立
     page.setHand([91, 94]);
-    await ticks(1);
-    page.socket?.fire("state", "mahi_3", "A", "B");
+    page.setStatuses([{ key: "mahi", turns: 3 }]);
     expect(page.arbiter.tick().hazard).toBe(true);
 
-    // 用掉一張解麻痺。手上還有一張，所以 holy 這一半仍然成立 ——
-    // 舊版就是卡在這裡，幽靈麻痺讓 hazard 一直是 true。
-    page.setHand([94]);
-    await ticks(1);
+    // 解掉了：畫面上的圖示不見（手上還有一張聖水，所以另一半仍然成立）
+    page.setStatuses([]);
     expect(page.arbiter.tick().hazard).toBe(false);
   });
 
-  it("手牌沒少就不要亂清 —— 抽到新牌不是解除", async () => {
+  it("讀不到就當成沒有，不要亂縮短", async () => {
     const page = bootPage();
     page.arbiter.tick();
     await ticks(1);
     page.setHand([91]);
-    await ticks(1);
-    page.socket?.fire("state", "mahi_3", "A", "B");
-    expect(page.arbiter.tick().hazard).toBe(true);
-
-    // 又抽到一張聖水 —— 數量變多，狀態不該被清掉
-    page.setHand([91, 94]);
-    await ticks(1);
-    expect(page.arbiter.tick().hazard).toBe(true);
-  });
-
-  it("清單外的狀態不算（例如中毒）", async () => {
-    const page = bootPage();
-    page.arbiter.tick();
-    await ticks(1);
-    page.setHand([91]);
-    page.socket?.fire("state", "poison_3", "A", "B");
-    expect(page.arbiter.tick().hazard).toBe(false);
-  });
-
-  it("換場要把狀態清掉，否則新的一場一開始就以為有人被麻痺", async () => {
-    const page = bootPage();
-    page.arbiter.tick();
-    await ticks(1);
-    page.setHand([91]);
-    page.socket?.fire("state", "mahi_3", "A", "B");
-    expect(page.arbiter.tick().hazard).toBe(true);
-
-    page.swapSocket();
-    await ticks(1);
     expect(page.arbiter.tick().hazard).toBe(false);
   });
 });

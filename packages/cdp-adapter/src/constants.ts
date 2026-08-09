@@ -401,6 +401,27 @@ export const HAND_ARRAY_FIELD = "arr1";
 export const STALL_STATE_KEYS = ["mahi", "movD", "jikai"] as const;
 
 /**
+ * 畫面上那排狀態圖示的材質鍵（2026-08-10 對著跑著的客戶端實測）。
+ *
+ * 一個狀態 = 同一個容器裡的兩個物件：
+ *
+ * ```
+ * Image       tex=state_tmp    frame=jikai     ← 種類，frame 名就是狀態鍵
+ * BitmapText  tex=state_font   text="2"        ← 剩餘回合數
+ * ```
+ *
+ * frame 名有時會接一個數值（`atkD3` = 攻擊力 -3、`defD3` = 防禦力 -3），
+ * 所以比對狀態鍵要用**前綴**，不要用「包含」—— 後者會讓 `movB` / `movD`
+ * 這類鍵互相誤中。
+ *
+ * ⚠⚠ **這是唯一可信的來源，不要再用 `state` 事件自己數回合。**
+ * 自己數在結構上就不可能正確：伺服器解除狀態時什麼都不送（錄 441 秒實證）、
+ * 自壞與其他狀態減回合的時機不同、漏收一次事件就永遠偏掉。2026-08-09 那一輪
+ * 「剩 2 回合會縮短、剩 1 回合反而不縮短」就是這麼來的。
+ */
+export const STATE_ICON_TEXTURE_KEY = "state_tmp";
+
+/**
  * 「誤按反悔」窗口：按下 OK 後先本地鎖定幾秒，對手期間有動作就解除，
  * 沒動作就送出真 OK。第一期只做這個 —— 完整的雙邊方案要側通道。
  *
