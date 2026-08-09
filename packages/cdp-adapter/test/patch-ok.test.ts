@@ -456,7 +456,13 @@ function bootPage(
      * 畫面上那排狀態圖示。**實測形狀**（2026-08-10）：一個容器裡放
      * 一張 `state_tmp` 的圖（frame 名就是狀態鍵）＋一個 BitmapText（剩餘回合）。
      */
-    list: [] as unknown[],
+    /**
+     * ⚠ **一定要放在 children.list，不是 list。**
+     * Phaser 的 Scene 是 children.list，容器才是 list。假頁面用 list 的話，
+     * 只看 list 的實作會在測試裡全綠、在真的頁面上一個狀態都讀不到
+     * —— 2026-08-10 真的踩到了。
+     */
+    children: { list: [] as unknown[] },
   };
   /** 遊戲自己的 pointerdown handler，逐字抄實測挖到的那一行。 */
   ok.on("pointerdown", () => {
@@ -596,7 +602,7 @@ function bootPage(
       mainA["arr1"] = frames.map((f) => handCard(f));
     },
     setStatuses(entries: readonly { key: string; turns: number }[]): void {
-      mainA["list"] = entries.map((e) => ({
+      (mainA["children"] as { list: unknown[] }).list = entries.map((e) => ({
         visible: true,
         list: [
           { visible: true, texture: { key: "state_tmp" }, frame: { name: e.key } },

@@ -870,7 +870,16 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
       var found = false;
       (function walk(o, d) {
         if (found || !o || d > 6 || o.visible === false) return;
-        var kids = o.list && o.list.length ? o.list : null;
+        // ⚠ **Scene 的子物件在 children.list，容器的在 list。**
+        // 只看 list 的話從 Scene 起步第一層就結束了 —— 而假頁面若剛好給了
+        // list，測試會全綠而實際頁面一個狀態都讀不到（2026-08-10 實測踩到）。
+        // remaining() 早就有這個 fallback，這裡漏抄了。
+        var kids =
+          o.list && o.list.length
+            ? o.list
+            : o.children && o.children.list
+              ? o.children.list
+              : null;
         if (!kids) return;
 
         // 一個狀態 = 同一個容器裡「一張 state_tmp 圖 + 一個 BitmapText」
