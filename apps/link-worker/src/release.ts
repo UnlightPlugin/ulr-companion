@@ -59,7 +59,16 @@ export interface SignedRelease {
  * 就當作「這次沒更新」然後安靜結束 —— 那正是我們要的行為。回一份 version 是
  * 空字串的清單反而會讓它每小時判定一次「有新版」。
  */
-export const CURRENT_RELEASE: SignedRelease | null = null;
+export const CURRENT_RELEASE: SignedRelease | null = {
+  manifest: {
+    version: "0.2.0",
+    url: "https://github.com/UnlightPlugin/ulr-companion/releases/download/v0.2.0/ULR-Companion-Setup-0.2.0.exe",
+    sha256: "2f2ca53cbcd66260a817832ad4110d11953ecd1b1c92b1b0b5253105beac8188",
+    notes: "雲端中間人；安裝可選路徑；Steam 啟動選項教學",
+  },
+  signature:
+    "Bi35gcsYDI8xEtsO27rkULkM8zgOp7F+e+gFTbQ8M6ixXBGDpGPWP+uMNnl9YXO3aG6fDlIjXTw79octgiJBBg==",
+};
 
 // 發版時把上面那行換成 `npm run release:sign` 印出來的那一段（形狀如下，
 // 保留這段當範本，不要刪）：
