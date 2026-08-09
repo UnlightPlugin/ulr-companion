@@ -61,13 +61,13 @@ export interface SignedRelease {
  */
 export const CURRENT_RELEASE: SignedRelease | null = {
   manifest: {
-    version: "0.3.0",
-    url: "https://github.com/UnlightPlugin/ulr-companion/releases/download/v0.3.0/ULR-Companion-Setup-0.3.0.exe",
-    sha256: "5f99712575c05f9cad887b4eb18b4286bfc503df8ad54b82fdbeb9d38764760c",
-    notes: "準備與秒數只在真人對戰、且握手成功時生效",
+    version: "0.3.1",
+    url: "https://github.com/UnlightPlugin/ulr-companion/releases/download/v0.3.1/ULR-Companion-Setup-0.3.1.exe",
+    sha256: "482b61fdbfdf58b968029f66ebda423a7350b77d2d04140ca0d5da6189d3932a",
+    notes: "更新完會自己回到系統匣，不用再手動開",
   },
   signature:
-    "Pjl72p83yXe6BCrWE+WHc5CCcnaO2IBd1pEtkLn7xVDNNoFTkS8VJhQcziw86pW/WLmetUuw5hUoKK3MT6ZJAQ==",
+    "t94iHpkIpljK1PuNCBOv67bmu84WuSDawXhCeqTkMjDW0NsQf+JsHqls9O47p4NJEahilumIbw8mafkuqQBDDw==",
 };
 
 // 發版時把上面那行換成 `npm run release:sign` 印出來的那一段（形狀如下，
