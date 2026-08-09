@@ -92,8 +92,13 @@ describe("單邊模式", () => {
     expect(soloSettings(prefs({ hazardShortenSeconds: 5 })).hazardShortenSeconds).toBe(0);
   });
 
-  it("但準備功能保留玩家自己的設定（單邊的反悔窗口本來就有價值）", () => {
-    expect(soloSettings(prefs({ readyEnabled: true })).readyEnabled).toBe(true);
+  it("⚠ 準備功能也一律關掉 —— 沒握手成功就什麼都不做（玩家 2026-08-09 指定）", () => {
+    // 這條推翻了先前「單邊保留誤按反悔窗口」的設計。理由是那個窗口在單邊時
+    // **只有成本沒有收益**：收益（對手也停下來等）需要對手也有插件，
+    // 而成本（我的 OK 被壓著、對手照樣在動）單邊就要付。
+    //
+    // 於是四個欄位現在是同一個意思：沒握手就什麼都不做。
+    expect(soloSettings(prefs({ readyEnabled: true })).readyEnabled).toBe(false);
     expect(soloSettings(prefs({ readyEnabled: false })).readyEnabled).toBe(false);
   });
 

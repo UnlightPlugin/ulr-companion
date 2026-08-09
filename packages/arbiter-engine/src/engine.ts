@@ -117,6 +117,16 @@ export interface EngineStatus {
   hosting: boolean;
   /** 協商後的共同設定。**沒配對到人時秒數會是滿版 30**。 */
   agreed: AgreedSettings;
+  /**
+   * 對手是**真人**（`duel` / `ranked`）。任務、渦、活動、還沒進對戰都是 `false`。
+   *
+   * ⚠ 為 `false` 時**準備與約定秒數整組不生效**，而且那是刻意的 ——
+   * UI 一定要講出來，否則玩家看到「已接上、已配對」卻沒有任何反應，
+   * 只會以為插件壞了。
+   */
+  pvp: boolean;
+  /** 這一場是哪種戰鬥（`duel` / `quest` / `raid` …）。不在對戰中是 `null`。 */
+  rule: string | null;
   /** 這個階段有沒有「聖水＋麻痺」。 */
   hazard: boolean;
   /** 目前實際生效的階段秒數（已含 hazard 修正）。null = 不縮短。 */
@@ -164,6 +174,8 @@ export class ArbiterEngine {
       // ⚠ 起始值是**單邊**設定，不是玩家自己選的秒數。沒配對到人就不縮短，
       // 而 UI 從第一幀起就該顯示這個事實。
       agreed: soloSettings(this.#prefs),
+      pvp: false,
+      rule: null,
       hazard: false,
       capSeconds: null,
       lastSend: null,
@@ -208,8 +220,12 @@ export class ArbiterEngine {
       // 會用到還沒協商過的值，等於單方面加速。
       this.#link.client.setPrefs(this.#prefs);
     } else {
-      this.#emit({ agreed: soloSettings(this.#prefs) });
-      void this.#runner?.setHold(this.#prefs.readyEnabled);
+      // ⚠ `--no-link` 就是「永遠不會握手」。setHold 一定要走 agreed 而不是
+      // prefs —— 直接讀玩家的偏好會讓單邊模式下準備照樣攔，正是 2026-08-09
+      // 要修掉的行為（見 `soloSettings`）。
+      const agreed = soloSettings(this.#prefs);
+      this.#emit({ agreed });
+      void this.#runner?.setHold(agreed.readyEnabled);
       void this.#syncSpeed();
     }
   }
@@ -267,6 +283,10 @@ export class ArbiterEngine {
 
   /** 目前該用的階段秒數。`null` = 不強制提早結束。 */
   #capFor(hazard: boolean): number | null {
+    // ⚠ 對 NPC 一律不縮短。`ArbiterRunner` 在非對戰時本來就不會走到這裡，
+    // 但這個函式也被 `onStep` 拿去算要顯示的秒數 —— 兩條路要給同一個答案，
+    // 否則 UI 會顯示一個根本不會被執行的門檻。
+    if (!this.#status.pvp) return null;
     const cap = effectiveCapSeconds(this.#status.agreed, hazard);
     return cap >= MOVE_PHASE_TOTAL_SECONDS ? null : cap;
   }
@@ -384,7 +404,17 @@ export class ArbiterEngine {
             this.#link?.client.announceForceEnd(reason);
           },
           // ⚠ 原始 room id 到這裡為止 —— 送出去的只有雜湊（§12）。
-          onRoomChange: (room) => this.#link?.client.setRoom(roomKey(room)),
+          // `null` = 離開對戰（回大廳，或去打任務／渦）→ 直接退出那間房，
+          // 否則會沿用上一場的配對，讓 NPC 戰也拿到 both-ready。
+          onRoomChange: (room) => this.#link?.client.setRoom(room === null ? null : roomKey(room)),
+          onModeChange: ({ pvp, rule }) => {
+            this.#emit({ pvp, rule });
+            // 只在**進**了非對戰時講一句。玩家看到「已配對」卻沒反應時，
+            // 這一行是唯一告訴他原因的東西。
+            if (!pvp && rule !== null) {
+              this.#log(`· ${describeRule(rule)}—— 準備與秒數都不生效（只對真人對戰）`);
+            }
+          },
           /**
            * 遊戲重載把 patch 沖掉了 → 重裝。
            *
@@ -412,7 +442,16 @@ export class ArbiterEngine {
         const reason = await Promise.race([lost, stopped.then(() => null)]);
         runner.stop();
         this.#runner = null;
-        this.#emit({ connected: false, armed: false, seat: null, speedApplied: null });
+        // ⚠ 模式也要清掉。留著「上一次是對戰」會讓重連後的第一段時間 UI 說
+        // 功能生效中，而那時根本還沒問過頁面。
+        this.#emit({
+          connected: false,
+          armed: false,
+          seat: null,
+          speedApplied: null,
+          pvp: false,
+          rule: null,
+        });
 
         if (reason !== null) {
           // ⚠ 這裡**不要**試著拆攔截 —— 連線已經死了，evaluate 只會再拋一次錯。
@@ -521,6 +560,24 @@ export class ArbiterEngine {
 
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * rule 字串 → 玩家看得懂的名字。
+ *
+ * 認不出來的照原樣印出來，**不要吞掉** —— 遊戲改版多一種模式時，那一行就是
+ * 唯一的線索（而症狀會是「這個模式底下插件突然不動了」）。
+ */
+function describeRule(rule: string): string {
+  const names: Record<string, string> = {
+    quest: "任務",
+    raid: "渦",
+    event: "活動",
+    duel: "對戰",
+    ranked: "排名戰",
+  };
+  const name = names[rule];
+  return name === undefined ? `非對戰模式（${rule}）` : `${name}（對手是 NPC）`;
 }
 
 function sleep(ms: number): Promise<void> {

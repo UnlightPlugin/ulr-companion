@@ -196,16 +196,24 @@ export function negotiate(a: LinkPrefs, b: LinkPrefs): AgreedSettings {
  * 縮短階段這件事**只在雙方都同意時才有意義**（`battle-features.md` 規則 3
  * 的末節講的是同一件事）。
  *
- * 準備功能則保留玩家自己的設定：單邊的「按了還能反悔」本來就有價值。
- *
  * ⚠ **加速也一律關掉**，理由同秒數：它提早把決策窗還給我，對手沒有。
  * 這會讓加速在對手沒裝插件時完全用不到 —— 那是刻意的代價，不是遺漏。
+ *
+ * ⚠⚠ **準備功能 2026-08-09 起也一律關掉**（玩家指定：「是玩家的話，只有握手
+ * 成功時才生效」）。這推翻了先前「單邊保留誤按反悔窗口」的設計，理由是那個
+ * 窗口在單邊時**只有成本沒有收益**：
+ *
+ *   - 收益（對手也停下來等）需要對手也有插件，那正是 `paired` 的定義
+ *   - 成本卻是單邊就要付的：我按下 OK 之後被壓著不送，對手照樣在動
+ *
+ * 換句話說，單邊模式下它只是把我自己的 OK 延後，沒有任何人因此受益。
+ * 所以這裡四個欄位現在是同一個意思：**沒握手就什麼都不做。**
  */
-export function soloSettings(prefs: LinkPrefs): AgreedSettings {
+export function soloSettings(_prefs: LinkPrefs): AgreedSettings {
   return {
     phaseSeconds: MOVE_PHASE_TOTAL_SECONDS,
     hazardShortenSeconds: 0,
-    readyEnabled: prefs.readyEnabled,
+    readyEnabled: false,
     speedFactor: MIN_SPEED_FACTOR,
   };
 }

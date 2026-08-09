@@ -93,6 +93,13 @@ class FakeBridge implements PageBridge {
   phaseId = 1;
   hazard = false;
   room: string | null = "room-1";
+  /**
+   * 對手是真人嗎。**預設 true**，因為這個檔案幾乎每一條都在驗仲裁本身。
+   *
+   * 打任務／渦（`pvp: false`）時整個 runner 是短路的 —— 那條路另有一組測試。
+   */
+  pvp = true;
+  rule: string | null = "duel";
   #handlers = new Set<(r: OkPatchReport) => void>();
 
   evaluate<T>(expression: string): Promise<T> {
@@ -104,6 +111,8 @@ class FakeBridge implements PageBridge {
             armed: this.armed,
             seat: this.seat,
             inPhase: this.inPhase,
+            pvp: this.pvp,
+            rule: this.rule,
             phaseId: this.phaseId,
             hazard: this.hazard,
             hold: true,
@@ -482,7 +491,7 @@ describe("ArbiterRunner：約定秒數（WP-15）", () => {
   });
 
   it("換場（room 變了）要通知側通道換房", async () => {
-    const rooms: string[] = [];
+    const rooms: (string | null)[] = [];
     const bridge = new FakeBridge();
     const runner = new ArbiterRunner(bridge, {
       ...OPTIONS,
@@ -495,6 +504,102 @@ describe("ArbiterRunner：約定秒數（WP-15）", () => {
     await new Promise((r) => setTimeout(r, 20));
     runner.stop();
     expect(rooms).toEqual(["room-1", "room-2"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("ArbiterRunner：對手是 NPC 就整組停手（玩家 2026-08-09 指定）", () => {
+  it("打任務／渦時不強制結束、不推顯示秒數", async () => {
+    const bridge = new FakeBridge();
+    bridge.pvp = false;
+    bridge.rule = "raid";
+    // 秒數門檻早就到了 —— 是對戰的話這一輪就會替玩家按 OK。
+    bridge.remaining = 5;
+    const runner = new ArbiterRunner(bridge, {
+      ...OPTIONS,
+      capSecondsFor: () => 15,
+      tickIntervalMs: 5,
+    });
+    await runner.start();
+    await new Promise((r) => setTimeout(r, 40));
+    runner.stop();
+
+    expect(bridge.ran("forceEnd")).toHaveLength(0);
+    expect(bridge.ran(".release(")).toHaveLength(0);
+    // 讀秒也不可以被改寫成 15 秒。
+    expect(bridge.ran("setDisplayCap").filter((c) => c.includes("15"))).toHaveLength(0);
+    expect(runner.pvp).toBe(false);
+    expect(runner.rule).toBe("raid");
+  });
+
+  it("⚠ 從對戰換到渦，一定要把側通道的房退掉", async () => {
+    // 不退的話兩個插件會**留在上一場對戰的房裡繼續配對**，於是渦裡照樣
+    // both-ready、照樣有約定秒數 —— 同一個 bug 繞過頁面閘門從側通道回來。
+    const rooms: (string | null)[] = [];
+    const bridge = new FakeBridge();
+    const runner = new ArbiterRunner(bridge, {
+      ...OPTIONS,
+      tickIntervalMs: 5,
+      onRoomChange: (r) => rooms.push(r),
+    });
+    await runner.start();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(rooms).toEqual(["room-1"]);
+
+    // 打完了，去打渦。room 換了但那不是對戰的房。
+    bridge.pvp = false;
+    bridge.rule = "raid";
+    bridge.room = "raid-room";
+    await new Promise((r) => setTimeout(r, 20));
+    runner.stop();
+
+    expect(rooms).toEqual(["room-1", null]);
+  });
+
+  it("模式變了要通知一次，而且只通知一次", async () => {
+    // onStep 傳不了這件事 —— 非對戰時仲裁一步都不會走。
+    const modes: { pvp: boolean; rule: string | null }[] = [];
+    const bridge = new FakeBridge();
+    bridge.pvp = false;
+    bridge.rule = "quest";
+    const runner = new ArbiterRunner(bridge, {
+      ...OPTIONS,
+      tickIntervalMs: 5,
+      onModeChange: (m) => modes.push(m),
+    });
+    await runner.start();
+    await new Promise((r) => setTimeout(r, 30));
+    bridge.pvp = true;
+    bridge.rule = "duel";
+    await new Promise((r) => setTimeout(r, 30));
+    runner.stop();
+
+    expect(modes).toEqual([
+      { pvp: false, rule: "quest" },
+      { pvp: true, rule: "duel" },
+    ]);
+  });
+
+  it("回到對戰之後要恢復正常仲裁", async () => {
+    const bridge = new FakeBridge();
+    bridge.pvp = false;
+    bridge.rule = "quest";
+    bridge.remaining = 5;
+    const runner = new ArbiterRunner(bridge, {
+      ...OPTIONS,
+      capSecondsFor: () => 15,
+      tickIntervalMs: 5,
+    });
+    await runner.start();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(bridge.ran("forceEnd")).toHaveLength(0);
+
+    bridge.pvp = true;
+    bridge.rule = "duel";
+    await new Promise((r) => setTimeout(r, 30));
+    runner.stop();
+    expect(bridge.ran("forceEnd")).not.toHaveLength(0);
   });
 
   it("⚠ patch 不見了要叫人重裝，不能只印錯誤", async () => {

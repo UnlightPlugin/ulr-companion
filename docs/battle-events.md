@@ -866,6 +866,58 @@ sprite，拿它的 frame 名去查 `frames[n].holy` / `.holy_enemy`。
 
 ---
 
+## 對手是真人還是 NPC：`MainA.config.rule`（2026-08-09 實測）
+
+一個小寫字串，五種值：
+
+| 值       | 是什麼   | 對手 |
+| -------- | -------- | ---- |
+| `duel`   | 一般對戰 | 真人 |
+| `ranked` | 排名戰   | 真人 |
+| `quest`  | 任務     | NPC  |
+| `raid`   | 渦       | NPC  |
+| `event`  | 活動     | NPC  |
+
+同一顆 config 物件也掛在 `BackA` / `Log` / `Raid_MatchBoot` 上，讀 `MainA` 那顆就好。
+`config` 的其他鍵有 `room_id`、`room_stage`、`room_playerAinfo`… —— **裡面有房號與
+玩家資料，§12 一律不得記錄**，只取 `rule`。
+
+### ⚠ 光看階段分不出來
+
+打渦與打任務時 `MovePhaseA` 照樣 active、OK 鈕照樣在、倒數照樣跑。也就是說
+**「在不在移動階段」這個問題在 NPC 戰裡也回答「在」** —— 這正是 2026-08-09
+玩家回報「打渦、打任務時準備與秒數照樣生效」的成因。判斷模式一定要另外問。
+
+### 判斷用白名單，不要抄遊戲那個否定式
+
+遊戲自己有兩種寫法。決定 socket 怎麼來的那個是**否定式**：
+
+```js
+"quest" !== rule && "raid" !== rule && "event" !== rule; // → 當成對戰
+```
+
+但圍住「只有對真人才有意義」的功能時，它用的是**肯定式**（兩處，實測從
+`String(MainA.constructor)` 讀出來）：
+
+```js
+("duel" === this.config.rule || "ranked" === this.config.rule)
+  && this.socket.emit("match_surrender", …)      // 投降
+"duel" === this.config.rule || "ranked" === this.config.rule
+  { … e.on(`stamp_${this.PLAYER}`, …) }          // 貼圖
+```
+
+**插件要抄的是後者。** 兩者的失敗方向相反：
+
+| 判準             | 改版多一種 PvE 模式時      | 改版多一種 PvP 模式時 |
+| ---------------- | -------------------------- | --------------------- |
+| 否定式（黑名單） | **在打王時替玩家按 OK** ❌ | 正常                  |
+| 肯定式（白名單） | 功能沒生效 ✅              | 功能沒生效            |
+
+前者是實質傷害，後者只是功能沒開 —— 跟心跳、跟 `movePhase()` 讀不到就放行
+是同一條原則：**不確定的時候要停手。** 實作在 `constants.ts` 的 `PVP_RULES`。
+
+---
+
 ## ⚠ socket 的壽命：原型跨場活著，實例**每場換一顆**（2026-08-03 實測）
 
 改前端的東西有兩種掛法，而它們的壽命完全不同。混用而沒有意識到這件事，

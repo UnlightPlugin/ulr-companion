@@ -122,8 +122,15 @@ export interface RunnerOptions {
   onAnnounceReady?: (ready: boolean) => void;
   /** 我這邊的約定秒數門檻到了 —— 叫對手也收手。 */
   onAnnounceForceEnd?: () => void;
-  /** 換場了（新的 room id）。側通道要跟著換房，否則會停在上一場。 */
-  onRoomChange?: (roomId: string) => void;
+  /**
+   * 換場了（新的 room id）。側通道要跟著換房，否則會停在上一場。
+   *
+   * ⚠ **`null` = 離開對戰**（回大廳，或進了任務／渦／活動）。這條路一定要接：
+   * 打完一場對戰接著去打渦，房號如果不跟著清掉，兩個插件會**留在上一場的房裡
+   * 繼續配對成功**，於是渦裡照樣有準備與約定秒數 —— 正是 2026-08-09 要修的東西，
+   * 只是繞了一圈從側通道回來。
+   */
+  onRoomChange?: (roomId: string | null) => void;
   /**
    * 頁面上的 patch 不見了 —— 幾乎一定是玩家重載了遊戲（或打完一場回大廳時
    * 頁面換了 document）。**一定要接，而且要真的重裝。**
@@ -142,6 +149,14 @@ export interface RunnerOptions {
    * `staleMs` 就會停止攔截。調得比 `staleMs` 還慢會讓功能忽開忽關。
    */
   tickIntervalMs?: number;
+  /**
+   * 對手是真人還是 NPC 變了（換場、離開對戰）。
+   *
+   * ⚠ **不能靠 `onStep` 傳這件事。** 非對戰時整個仲裁是短路的，一步都不會走 ——
+   * 也就是最需要告訴玩家「為什麼沒生效」的那個狀態，剛好是 `onStep` 永遠不會
+   * 觸發的狀態。
+   */
+  onModeChange?: (info: { pvp: boolean; rule: string | null }) => void;
   /** 每一步的決策都丟出來，讓 CLI／UI 可以顯示。 */
   onStep?: (info: {
     input: ArbiterInput;
@@ -186,6 +201,13 @@ export class ArbiterRunner {
   #roomId: string | null = null;
   /** 目前這個階段頁面回報的 hazard。 */
   #hazard = false;
+  /**
+   * 對手是真人嗎。**還沒問過是 `null`** —— 跟 `false` 分開才能讓
+   * `onModeChange` 在第一次確定時就發一則，而不是等它「變成」false。
+   */
+  #pvp: boolean | null = null;
+  /** 這一場的 rule 字串，純粹給 UI 與記錄。 */
+  #rule: string | null = null;
 
   constructor(bridge: PageBridge, options: RunnerOptions) {
     this.#bridge = bridge;
@@ -208,6 +230,20 @@ export class ArbiterRunner {
   /** 手牌有聖水／聖杯又碰上麻痺。托盤顯示用。 */
   get hazard(): boolean {
     return this.#hazard;
+  }
+
+  /**
+   * 對手是真人（`duel` / `ranked`）。任務、渦、活動、還沒進對戰都是 `false`。
+   *
+   * ⚠ 這是**頁面**判的，不是這裡推的 —— 見 `OkPatchTick.pvp`。
+   */
+  get pvp(): boolean {
+    return this.#pvp === true;
+  }
+
+  /** 這一場的 rule 字串。給 UI 講「為什麼沒生效」用的。 */
+  get rule(): string | null {
+    return this.#rule;
   }
 
   /**
@@ -359,6 +395,35 @@ export class ArbiterRunner {
     if (this.#phaseId !== -1 && beat.phaseId < this.#phaseId) this.#phaseId = beat.phaseId;
     this.#armed = beat.armed;
 
+    /**
+     * ⚠⚠ **對手是 NPC 就整組停手**（玩家 2026-08-09 指定：打渦、打任務都不要生效）。
+     *
+     * 頁面那邊已經有一道硬閘門（`inPvpMatch()`），這裡這道**不是重複** ——
+     * 它管的是頁面碰不到的三樣東西：讀秒改寫的 cap、側通道的房、仲裁狀態。
+     * 其中側通道那條最容易漏：打完一場對戰接著去打渦，房號不清掉的話兩個
+     * 插件會**留在上一場的房裡繼續配對**，於是渦裡照樣有 both-ready。
+     */
+    const pvp = beat.pvp === true;
+    const rule = typeof beat.rule === "string" ? beat.rule : null;
+    if (pvp !== this.#pvp || rule !== this.#rule) {
+      this.#pvp = pvp;
+      this.#rule = rule;
+      this.#options.onModeChange?.({ pvp, rule });
+    }
+    if (!pvp) {
+      // 上一場對戰的 cap 會跟著飄進任務裡，把畫面上的倒數畫成假的。
+      await this.#pushDisplayCap(null);
+      if (this.#roomId !== null) {
+        this.#roomId = null;
+        this.#options.onRoomChange?.(null);
+      }
+      // 頁面本來就不會攔，但 committed／ready 若停在上一場的值，回到對戰時
+      // 第一個階段會整個不仲裁 —— 那是 WP-12 坑 #5 換個方式復發。
+      if (this.#state.ready || this.#state.committed) this.#state = initialState();
+      this.#lastError = null;
+      return;
+    }
+
     // ⚠ 座位每場重新分配（實測：同兩個客戶端連打兩場，:9334 從 B 變成 A）。
     // 換房時 socket 比 MainA 早一步換好，所以 rearmed 當下 MainA.PLAYER 可能
     // 還是上一場的 side。tick 本來就把座位帶回來了，順手校正。
@@ -417,7 +482,11 @@ export class ArbiterRunner {
    * ⚠ 值沒變就不要往返 —— tick 是每秒四次，每次都送等於白花四次 CDP 呼叫。
    */
   async #syncDisplayCap(): Promise<void> {
-    const cap = this.#options.capSecondsFor?.(this.#hazard) ?? null;
+    await this.#pushDisplayCap(this.#options.capSecondsFor?.(this.#hazard) ?? null);
+  }
+
+  /** 真的推給頁面。分出來是因為非對戰那條路要強制推 `null`，不是推協商值。 */
+  async #pushDisplayCap(cap: number | null): Promise<void> {
     if (cap === this.#displayCap) return;
     this.#displayCap = cap;
     await this.#bridge.evaluate(

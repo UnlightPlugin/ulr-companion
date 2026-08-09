@@ -681,6 +681,14 @@
         incompatible: "⚠ 版本不合，已退回單邊",
       };
 
+      /**
+       * 對手是 NPC 的那幾種 rule（`status.rule`）。認不出來就不特別講。
+       *
+       * ⚠ 這幾種模式底下**準備與秒數整組不生效**（2026-08-09），所以每一處
+       * 顯示「生效中／已配對」的地方都要先問過它，否則 UI 會宣稱一個不存在的保護。
+       */
+      const NPC_RULE_TEXT = { quest: "任務", raid: "渦", event: "活動" };
+
       function renderFooter() {
         const st = snap?.status;
         const p = snap?.profile;
@@ -698,9 +706,17 @@
           : !st.connected
             ? "等遊戲…"
             : st.armed
-              ? `對戰中${st.seat ? `（座位 ${st.seat}）` : ""}`
+              ? // ⚠ 打任務／渦時也是 armed，但那不是「對戰中」。講成對戰中的話，
+                // 玩家會合理地期待準備與秒數在管 —— 而它們刻意沒有。
+                NPC_RULE_TEXT[st.rule]
+                ? `${NPC_RULE_TEXT[st.rule]}中（對手是 NPC）`
+                : `對戰中${st.seat ? `（座位 ${st.seat}）` : ""}`
               : "已接上，還沒進對戰";
-        $("fLink").textContent = st ? (LINK_TEXT[st.link] ?? st.link) : "—";
+        $("fLink").textContent = st
+          ? st.connected && !st.pvp && NPC_RULE_TEXT[st.rule]
+            ? "不生效（NPC）"
+            : (LINK_TEXT[st.link] ?? st.link)
+          : "—";
         $("fLast").textContent = st?.error ? "⚠ " + st.error : (st?.lastSend ?? "—");
       }
 
@@ -744,11 +760,28 @@
       ];
       const hex = (n) => "#" + n.toString(16).padStart(6, "0");
 
+      /**
+       * 準備功能現在到底有沒有在管，以及**為什麼沒有**。
+       *
+       * ⚠ 「否」一個字是不夠的。這個功能有四種不生效的理由，而玩家能自己處理的
+       * 只有其中兩種（自己關掉、對手沒開）；另外兩種（在打 NPC、還沒握手）
+       * 講不清楚的話，他會以為插件壞了而去重裝。
+       */
+      function readyWhy(st, on) {
+        if (!on) return "否（我自己關掉了）";
+        if (!st?.connected) return "否（還沒接上遊戲）";
+        const npc = NPC_RULE_TEXT[st.rule];
+        if (npc) return `否（正在打${npc}，對手是 NPC）`;
+        if (st.link !== "paired") return "否（還沒握手到對手的插件）";
+        if (!st.agreed.readyEnabled) return "否（對手把準備關掉了）";
+        return "是（雙方都開，已握手）";
+      }
+
       PAGES["battle/ready"] = () => {
         const st = snap?.status;
         const on = snap?.profile.prefs.readyEnabled;
         const tint = snap?.profile.readyTint ?? null;
-        const agreedOn = st?.agreed.readyEnabled;
+        const live = on && st?.pvp && st?.link === "paired" && st?.agreed.readyEnabled;
         return (
           head("準備", "按下 OK 不立刻送出，等對手也按了才同時送出。") +
           `<div class="card">
@@ -757,7 +790,9 @@
                <span><b>啟用準備功能</b>
                  <div class="hint">
                    再按一次可以取消，對手一動也會解除。<br />
-                   ⚠ 兩邊都開才會生效；對手沒開時退回「誤按反悔」窗口。
+                   ⚠ <b>只在跟真人對戰、而且兩邊都握手成功時生效。</b>
+                   打任務、打渦（對手是 NPC）以及對手沒裝插件時完全不介入 ——
+                   單方面壓著自己的 OK 只會讓自己更早承諾。
                  </div>
                </span>
              </label>
@@ -784,15 +819,7 @@
            <div class="card">
              <div class="row"><span class="dim">我這邊</span><span>${on ? "已開啟" : "已關閉"}</span></div>
              <div class="row"><span class="dim">實際生效</span>
-               <span class="${agreedOn ? "good" : "warn"}">${
-                 st?.link === "paired"
-                   ? agreedOn
-                     ? "是（雙方都開）"
-                     : "否（對手沒開）"
-                   : on
-                     ? "單邊：誤按反悔窗口"
-                     : "否"
-               }</span></div>
+               <span class="${live ? "good" : "warn"}">${esc(readyWhy(st, on))}</span></div>
              <div class="row"><span class="dim">剛剛送出</span><span>${esc(st?.lastSend ?? "—")}</span></div>
            </div>`
         );
@@ -803,7 +830,11 @@
         const st = snap?.status;
         const prefs = snap?.profile.prefs;
         const lim = snap?.limits ?? { minSeconds: 5, maxSeconds: 30 };
-        const paired = st?.link === "paired";
+        // ⚠ 「配到對手」不等於「秒數會生效」—— 打任務／渦時對面是 NPC，
+        // 這條規則整組不套用（2026-08-09）。兩件事混在同一個布林裡的話，
+        // 玩家會在渦裡看到「共同值 15 秒」然後等一個永遠不會來的強制結束。
+        const paired = st?.link === "paired" && st?.pvp === true;
+        const npcRule = NPC_RULE_TEXT[st?.rule];
         return (
           head("秒數上限", "移動階段要多長。共同值取<b>雙方比較長的那個</b>。") +
           `<div class="card">
@@ -816,7 +847,9 @@
                paired
                  ? `共同值 ${st.agreed.phaseSeconds} 秒（取雙方較長的那個）` +
                    (st.hazard ? `，目前聖水＋麻痺生效中 → ${st.capSeconds} 秒` : "")
-                 : "還沒配到對手 —— 秒數不會縮短（單方面縮短只是自己更早承諾）"
+                 : npcRule
+                   ? `正在打${npcRule} —— 對手是 NPC，秒數不縮短（這條只對真人對戰）`
+                   : "還沒握手到對手 —— 秒數不會縮短（單方面縮短只是自己更早承諾）"
              }</div>
            </div>
            <div class="card">

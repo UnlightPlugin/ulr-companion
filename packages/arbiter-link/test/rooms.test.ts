@@ -8,11 +8,17 @@ const ROOM = "room0000";
 
 const prefs = (over: Partial<LinkPrefs> = {}): LinkPrefs => ({ ...DEFAULT_PREFS, ...over });
 
-/** 沒配對到人時該看到的共同設定：秒數滿版、聖水規則關掉。 */
+/**
+ * 沒配對到人時該看到的共同設定：**四個欄位全部退回「什麼都不做」**。
+ *
+ * 2026-08-09 起 `readyEnabled` 也在其中 —— 玩家指定「只有握手成功時才生效」，
+ * 理由見 `soloSettings()`。
+ */
 const SOLO = {
   ...DEFAULT_PREFS,
   phaseSeconds: MOVE_PHASE_TOTAL_SECONDS,
   hazardShortenSeconds: 0,
+  readyEnabled: false,
 };
 
 function hello(room = ROOM, over: Partial<LinkPrefs> = {}): Extract<ClientMessage, { t: "hello" }> {

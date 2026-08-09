@@ -378,6 +378,53 @@ export const STALL_STATE_KEYS = ["mahi", "movD", "jikai"] as const;
 export const UNDO_WINDOW_SECONDS = 3;
 
 // ---------------------------------------------------------------------------
+// 對手是真人還是 NPC（2026-08-09 對著跑著的客戶端實測）
+// ---------------------------------------------------------------------------
+
+/**
+ * 這一場是哪種戰鬥。**`MainA.config.rule`**，一個小寫字串。
+ *
+ * 2026-08-09 實測：打渦的時候讀到 `"raid"`，打任務讀到 `"quest"`，
+ * 而且兩種情況 `MovePhaseA` 都會 active —— 也就是**光看階段分不出對手是誰**。
+ * 這正是玩家回報的那個 bug：打渦、打任務時準備與約定秒數照樣生效。
+ *
+ * 除了 `MainA`，`BackA` / `Log` / `Raid_MatchBoot` 上也是同一份 config 物件。
+ * 讀 `MainA` 那顆就好 —— 這個檔案裡跟 OK 鈕有關的東西全部以它為準。
+ */
+export const BATTLE_RULE_PATH = "MainA.config.rule";
+
+/**
+ * 對手是**真人**的兩種 rule。只有這兩種底下插件才該介入。
+ *
+ * ⚠ 這不是我們挑的分類，是**遊戲自己的**。`MainA` 的原始碼裡有兩處用完全
+ * 相同的條件把 PvP 專屬功能圍起來（2026-08-09 從 `String(MainA.constructor)`
+ * 讀出來的）：
+ *
+ * ```js
+ * ("duel" === this.config.rule || "ranked" === this.config.rule)
+ *   && this.socket.emit("match_surrender", …)     // 投降：只有對人才有意義
+ * "duel" === this.config.rule || "ranked" === this.config.rule
+ *   { … e.on(`stamp_${this.PLAYER}`, …) }         // 貼圖：只能傳給真人
+ * ```
+ *
+ * 也就是說，「這一場對面坐的是不是人」遊戲自己就要回答，而它的答案就是這兩個值。
+ */
+export const PVP_RULES = ["duel", "ranked"] as const;
+
+/**
+ * 對手是 NPC 的三種 rule。**列在這裡是為了說明，判斷一律用 `PVP_RULES`。**
+ *
+ * ⚠ 遊戲自己在別的地方用的是反過來的寫法（`"quest" !== rule && "raid" !== rule
+ * && "event" !== rule` → 當成對戰，見 `SOCKET_LIFETIME_NOTE`）。**不要抄那個方向。**
+ * 黑名單的失敗模式是「改版多一種 PvE 模式 → 插件把它當對戰，在打王的時候
+ * 替玩家按 OK」；白名單的失敗模式是「改版多一種 PvP 模式 → 功能沒生效」。
+ *
+ * 前者是實質傷害，後者只是功能沒開 —— 跟心跳、跟 `movePhase()` 讀不到就放行
+ * 是同一條原則：**不確定的時候要停手，不是繼續介入。**
+ */
+export const NPC_RULES = ["quest", "raid", "event"] as const;
+
+// ---------------------------------------------------------------------------
 // 座位（2026-08-02 雙邊實測，見 docs/battle-events.md）
 // ---------------------------------------------------------------------------
 

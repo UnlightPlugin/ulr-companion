@@ -155,10 +155,29 @@ async function probeGamePorts(): Promise<void> {
   pushState();
 }
 
-/** 托盤圖示的顏色語意見 `icon.ts`：綠色只留給「兩邊真的講好了」。 */
+/**
+ * 托盤圖示的顏色語意見 `icon.ts`：綠色只留給「兩邊真的講好了」。
+ *
+ * ⚠ **打任務／渦時不能是綠的。** 那時功能整組不生效（對手是 NPC），
+ * 而綠色的意思是「保護生效中」—— 讓它在那裡亮著，圖示就是在說謊。
+ */
 function iconState(status: EngineStatus | null): IconState {
   if (status === null || !status.connected) return "idle";
-  return status.link === "paired" ? "paired" : "solo";
+  return status.link === "paired" && status.pvp ? "paired" : "solo";
+}
+
+/**
+ * 非對戰模式的一句話。`null` = 現在是對戰、還沒進去，或認不出這個模式。
+ *
+ * ⚠ 認不出來時**不要瞎編一句**。遊戲改版多一種模式時，這裡回 null 會讓 UI
+ * 退回原本那句「還沒握手」，那雖然不精確但不會誤導；硬掰成「對手是 NPC」
+ * 則可能剛好講反。真正的判斷在 `status.pvp`，這個函式只負責措辭。
+ */
+function npcNote(status: EngineStatus | null): string | null {
+  if (status === null || !status.connected || status.pvp || status.rule === null) return null;
+  const names: Record<string, string | undefined> = { quest: "任務", raid: "渦", event: "活動" };
+  const name = names[status.rule];
+  return name === undefined ? null : `${name}中 —— 對手是 NPC，不生效`;
 }
 
 /**
@@ -178,10 +197,13 @@ function tooltip(status: EngineStatus | null): string {
   parts.push(
     status.connected ? `已接上${status.seat === null ? "" : `（座位 ${status.seat}）`}` : "等遊戲…",
   );
+  const npc = npcNote(status);
   parts.push(
-    status.link === "paired"
-      ? `已配對  階段 ${status.capSeconds ?? MOVE_PHASE_TOTAL_SECONDS}s`
-      : "單邊模式（秒數不縮短）",
+    npc !== null
+      ? npc
+      : status.link === "paired" && status.pvp
+        ? `已配對  階段 ${status.capSeconds ?? MOVE_PHASE_TOTAL_SECONDS}s`
+        : "還沒握手（準備與秒數都不生效）",
   );
   return parts.join("\n");
 }
@@ -208,10 +230,15 @@ function buildMenu(): Menu {
       enabled: false,
     },
     {
+      // ⚠ 三種狀態要分得出來，混成一句話玩家就只會看到「沒反應」：
+      //   打任務／渦   對手是 NPC，功能本來就不該生效
+      //   對戰但沒握手 對手沒插件（或中間人連不上）
+      //   已握手       真的在管
       label:
-        latest?.link === "paired"
+        npcNote(latest) ??
+        (latest?.link === "paired" && latest.pvp === true
           ? `已配到對手  共同階段 ${latest.capSeconds ?? MOVE_PHASE_TOTAL_SECONDS} 秒`
-          : "還沒配到對手（秒數不縮短）",
+          : "還沒握手到對手（準備與秒數都不生效）"),
       enabled: false,
     },
     { type: "separator" },

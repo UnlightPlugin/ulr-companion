@@ -33,6 +33,7 @@ import {
   HAND_ARRAY_FIELD,
   HAND_TEXTURE_KEY,
   OK_BUTTON,
+  PVP_RULES,
   STALL_STATE_KEYS,
   WS_CLIENT,
 } from "./constants.js";
@@ -257,6 +258,22 @@ export interface OkPatchTick {
   /** 現在是不是在該仲裁的階段（移動階段）。 */
   inPhase: boolean;
   /**
+   * 對手是**真人**（`duel` / `ranked`）。任務、渦、活動都是 `false`。
+   *
+   * ⚠ **這是頁面回報的，不是 Node 推的。** 硬閘門在頁面裡（`inPvpMatch()`），
+   * 這個欄位只是讓 Node 少做白工、並且讓托盤講得出「為什麼沒生效」。
+   * Node 少判一次只是多幾次 CDP 往返；頁面少判一次就是打渦時被替按 OK。
+   */
+  pvp: boolean;
+  /**
+   * 這一場的 rule 字串（`duel` / `ranked` / `quest` / `raid` / `event`）。
+   * 不在對戰中、或值長得不像模式名就是 `null`。
+   *
+   * ⚠ 只給 UI 與記錄用，**判斷一律看 `pvp`** —— 兩邊各自解析同一個字串
+   * 就是在等它們哪天漂開。
+   */
+  rule: string | null;
+  /**
    * 第幾個移動階段。每進入一次就 +1。
    *
    * ⚠ **重置仲裁狀態要看它，不要看 `ok-released`。** 送出之後重置是對的，
@@ -294,6 +311,8 @@ export type ForceEndResult =
   | "pressed"
   /** 這個階段已經送過了 */
   | "already-sent"
+  /** **對手是 NPC**（任務／渦／活動）—— 這個功能整組不生效 */
+  | "not-pvp"
   /** 不在移動階段，或找不到按鈕 */
   | "not-in-phase"
   | "no-button";
@@ -337,6 +356,11 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
     unlistenAllMethod: WS_CLIENT.unlistenAllMethod,
     okScene: OK_BUTTON.scene,
     okTexture: OK_BUTTON.textureKey,
+    /**
+     * 只有這兩種 rule 底下對手才是真人。**白名單，不是黑名單** ——
+     * 理由見 `constants.ts` 的 `NPC_RULES`。
+     */
+    pvpRules: PVP_RULES,
     /**
      * 準備中的染色。**預設 `null` = 不染色，維持官方原本的樣子。**
      *
@@ -441,6 +465,44 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
     return movePhase() !== null;
   }
 
+  /**
+   * 這一場的 rule（quest / raid / event / duel / ranked）。讀不到就 null。
+   *
+   * 值在 MainA.config.rule，2026-08-09 對著跑著的客戶端實測：
+   * 打渦讀到 "raid"、打任務讀到 "quest"。
+   */
+  function battleRule() {
+    try {
+      var sc = mainScene();
+      var r = sc && sc.config && sc.config.rule;
+      // 只收像模式名的短小寫字串 —— 別的東西一律當成「不知道」。
+      return (typeof r === "string" && /^[a-z_]{1,16}$/.test(r)) ? r : null;
+    } catch (e) { return null; }
+  }
+
+  /**
+   * ⚠⚠ **對手是真人嗎。這是整個 patch 的總開關。**
+   *
+   * 玩家 2026-08-09 回報：打渦、打任務時「準備」與「約定秒數」照樣生效。
+   * 成因是這個檔案原本只問「在不在移動階段」—— 而任務與渦的移動階段
+   * 跟對戰長得一模一樣（實測兩者都會讓 MovePhaseA active）。
+   *
+   * 對 NPC 生效不只是多餘，是**有害**的：
+   *
+   *   準備   對面是程式，永遠不會「也按 OK」→ 每個移動階段都壓到底線才送出
+   *   秒數   替玩家按 OK，而他正在打王、正想多看兩秒
+   *
+   * ⚠ **讀不到 rule 一律當成不是 PvP。** 方向是刻意的：不介入只是功能沒開，
+   * 介入錯了是替玩家做了他沒要求的決定。跟 movePhase() 讀不到就放行、
+   * 跟心跳過期就停手是同一條原則。
+   *
+   * （注入腳本是 TS 的樣板字串，這段註解裡不能用反引號。）
+   */
+  function inPvpMatch() {
+    var r = battleRule();
+    return r !== null && CFG.pvpRules.indexOf(r) !== -1;
+  }
+
   /** 目前 active 的移動階段場景，不在就 null。 */
   function movePhase() {
     try {
@@ -531,6 +593,9 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
         try {
           var cap = state.displayCap;
           if (cap === null || cap >= GAME_PHASE_SECONDS) return result;
+          // ⚠ 對 NPC 不改讀秒。放在 cap 判斷**之後**是為了成本：非對戰時
+          // Node 本來就會把 cap 設成 null，上面那行早退，這裡每幀不用再問一次。
+          if (!inPvpMatch()) return result;
           if (typeof this.timelimit !== "number") return result;
 
           var shown = this.timelimit - (GAME_PHASE_SECONDS - cap);
@@ -697,8 +762,14 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
    * armed（攔截有沒有掛在 socket 上）仍然是即時的：那是「有沒有能力攔」，
    * 不是「要不要攔」，沒有 socket 的時候根本沒有東西可以壓。
    */
+  /**
+   * ⚠ inPvpMatch() 是**即時**的，跟 holdThisPhase 那套「階段邊界才改」不同。
+   *
+   * 那條規則存在的理由是「玩家按下去之後，遊戲規則不可以在他手上變」。模式
+   * 不是那種東西 —— 它在一場戰鬥裡不會變，跨場才變，而跨場本來就是邊界。
+   */
   function shouldIntercept() {
-    return state.holdThisPhase && state.armed && inInterceptPhase();
+    return state.holdThisPhase && state.armed && inInterceptPhase() && inPvpMatch();
   }
 
   var state = {
@@ -778,6 +849,8 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
         armed: state.armed,
         seat: state.seat(),
         inPhase: inInterceptPhase(),
+        pvp: inPvpMatch(),
+        rule: battleRule(),
         phaseId: state.phaseId,
         hazard: hazardNow(),
         hold: state.hold,
@@ -854,6 +927,10 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
      */
     forceEnd: function (why) {
       if (state.sentPhase === state.phaseId) return "already-sent";
+      // ⚠ **對 NPC 絕對不要替玩家按 OK。** 這條是玩家 2026-08-09 回報的
+      // 「打渦、打任務時秒數照樣生效」裡最有感的那一半 —— 他在打王，
+      // 而插件替他結束了移動階段。Node 那邊也有一道，但這道是最後的保證。
+      if (!inPvpMatch()) return "not-pvp";
       if (!inInterceptPhase()) return "not-in-phase";
       if (state.held) return state.release(why || "arbiter");
 
@@ -1303,7 +1380,11 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
       if (!sc || !sc.ok) return;
       // ⚠ 用 holdThisPhase 而不是 alive：降級中準備功能**仍然在運作**
       // （單邊的反悔窗口還在），外觀就不該說它已經沒了。
-      var engaged = inPhase && state.armed && state.holdThisPhase;
+      //
+      // ⚠ 而 inPvpMatch() 一定要跟 shouldIntercept() 用同一個判準：染色的語意是
+      // 「這個階段插件真的有在管」。打渦時染了色卻不會攔，那個顏色就是在說謊，
+      // 而玩家會照著它去按 OK。
+      var engaged = inPhase && state.armed && state.holdThisPhase && inPvpMatch();
       if (engaged && !state.tinted) {
         if (CFG.readyTint !== null) sc.ok.setTint(CFG.readyTint);
         state.tinted = true;

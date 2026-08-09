@@ -84,7 +84,11 @@ describe("buildOkPatchScript", () => {
     // engaged 看的是 holdThisPhase 而不是 alive：**降級中準備功能仍然在運作**
     // （單邊的反悔窗口還在），外觀就不該說它已經沒了。真正該還原的時機是
     // 下一個階段開始、holdThisPhase 重算成 false 的那一刻。
-    expect(script).toContain("var engaged = inPhase && state.armed && state.holdThisPhase;");
+    // ⚠ inPvpMatch() 必須跟 shouldIntercept() 用同一個判準：打渦時染了色卻不會
+    // 攔，那個顏色就是在說謊，而玩家會照著它去按 OK。
+    expect(script).toContain(
+      "var engaged = inPhase && state.armed && state.holdThisPhase && inPvpMatch();",
+    );
     expect(script).toContain("if (engaged && !state.tinted)");
     expect(script).toContain("sc.ok.clearTint();");
     // setOkFrame 不可以再碰染色
@@ -119,7 +123,9 @@ describe("buildOkPatchScript", () => {
     //
     // 所以判準改成 holdThisPhase，而且**不對稱**：開啟隨時生效、關閉只在
     // 階段邊界。沒有鑰匙的鎖由 localDeadline 那條路解決。
-    expect(script).toContain("return state.holdThisPhase && state.armed && inInterceptPhase();");
+    expect(script).toContain(
+      "return state.holdThisPhase && state.armed && inInterceptPhase() && inPvpMatch();",
+    );
     // 唯一會變成 false 的地方在階段邊界（setHold 是玩家自己下的令，另計）
     expect(script).toContain("state.holdThisPhase = false;");
     expect(script).toContain("if (state.hold && alive) state.holdThisPhase = true;");
@@ -367,6 +373,8 @@ interface Page {
       armed: boolean;
       seat: string | null;
       inPhase: boolean;
+      pvp: boolean;
+      rule: string | null;
       phaseId: number;
       hazard: boolean;
       hold: boolean;
@@ -395,6 +403,8 @@ interface Page {
   frame(timelimit?: number): { text: string; scaleX: number; fill: number };
   /** 手牌換成這些 event_info 索引。91 = 聖水。 */
   setHand(frames: readonly number[]): void;
+  /** 換戰鬥模式。`null` = 讀不到（還沒進戰鬥，或改版換了欄位）。 */
+  setRule(rule: string | null): void;
 }
 
 const BINDING = "__test_binding";
@@ -406,7 +416,9 @@ const BINDING = "__test_binding";
  * 測試多半在驗染色的行為，而正式預設值本身另有一條測試釘住
  * （「⚠ 預設不染色」）。要驗「不染色」的行為就明確傳 `readyTint: null`。
  */
-function bootPage(options: { withSocket?: boolean; readyTint?: number | null } = {}): Page {
+function bootPage(
+  options: { withSocket?: boolean; readyTint?: number | null; rule?: string | null } = {},
+): Page {
   const pageScript = buildOkPatchScript({
     bindingName: "__test_binding",
     readyTint: options.readyTint === undefined ? READY_TINT_AMBER : options.readyTint,
@@ -430,6 +442,14 @@ function bootPage(options: { withSocket?: boolean; readyTint?: number | null } =
     sys: { settings: { active: true } },
     // 0=劍1卡、91=聖水（實測索引，見 constants.ts 的 EVENT_INFO_JSON_KEY）
     arr1: [handCard(0), handCard(0)],
+    /**
+     * ⚠ **預設是對戰**，因為這個檔案裡幾乎每一條測試都在驗「有在管的時候」
+     * 的行為。要驗 NPC（任務／渦）就明確 `setRule("quest")`。
+     *
+     * 實測形狀：`MainA.config.rule`，值是 quest / raid / event / duel / ranked
+     * （2026-08-09，見 constants.ts 的 PVP_RULES）。
+     */
+    config: { rule: options.rule === undefined ? "duel" : options.rule },
   };
   /** 遊戲自己的 pointerdown handler，逐字抄實測挖到的那一行。 */
   ok.on("pointerdown", () => {
@@ -567,6 +587,12 @@ function bootPage(options: { withSocket?: boolean; readyTint?: number | null } =
     },
     setHand(frames: readonly number[]): void {
       mainA["arr1"] = frames.map((f) => handCard(f));
+    },
+    setRule(rule: string | null): void {
+      // ⚠ 整顆 config 拿掉，不是把 rule 設成 null —— 「還沒進戰鬥」時
+      // MainA.config 本身就不存在，讀 config.rule 會是存取 undefined 的屬性。
+      if (rule === null) delete mainA["config"];
+      else mainA["config"] = { rule };
     },
   };
 }
@@ -754,6 +780,146 @@ describe("跑起來：心跳與攔截", () => {
     expect(page.arbiter.held).not.toBeNull();
     expect(page.arbiter.release("arbiter")).toBe("released");
     expect(page.sent).toHaveLength(1);
+  });
+});
+
+describe("跑起來：只對真人對戰生效（玩家 2026-08-09 回報）", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /**
+   * 症狀：打渦、打任務時準備與約定秒數照樣生效。
+   *
+   * 成因不是邏輯寫錯 —— 是判準少了一個維度。任務與渦的移動階段跟對戰**長得
+   * 一模一樣**（實測兩者都讓 MovePhaseA active），所以「在不在移動階段」這個
+   * 問題在兩種情況下都回答「在」。
+   */
+  for (const rule of ["quest", "raid", "event"]) {
+    it(`⚠ ${rule}：按 OK 直接送出，一點都不攔`, async () => {
+      const page = bootPage({ rule });
+      page.arbiter.tick();
+      await ticks(1);
+      pressOk(page);
+
+      expect(page.sent).toHaveLength(1);
+      expect(page.arbiter.held).toBeNull();
+    });
+
+    it(`⚠ ${rule}：絕對不可以替玩家按 OK`, async () => {
+      // 這是最有感的那一半 —— 玩家在打王，而插件替他結束了移動階段。
+      const page = bootPage({ rule });
+      page.arbiter.tick();
+      await ticks(1);
+
+      expect(page.arbiter.forceEnd("arbiter")).toBe("not-pvp");
+      expect(page.sent).toHaveLength(0);
+    });
+  }
+
+  it("ranked（排名戰）跟 duel 一樣是真人，要照常生效", async () => {
+    // 遊戲自己就是用 ("duel"===rule || "ranked"===rule) 圍住投降與貼圖的。
+    const page = bootPage({ rule: "ranked" });
+    page.arbiter.tick();
+    await ticks(1);
+    pressOk(page);
+
+    expect(page.sent).toHaveLength(0);
+    expect(page.arbiter.held).not.toBeNull();
+  });
+
+  it("⚠ 讀不到 rule 就當成不是對戰 —— 不確定時停手", async () => {
+    // 方向是刻意的：不介入只是功能沒開，介入錯了是替玩家做了他沒要求的決定。
+    // 遊戲改版把 config.rule 換掉時，這條決定我們是安靜失效還是亂按 OK。
+    const page = bootPage({ rule: null });
+    page.arbiter.tick();
+    await ticks(1);
+    pressOk(page);
+
+    expect(page.sent).toHaveLength(1);
+    expect(page.arbiter.tick().pvp).toBe(false);
+    expect(page.arbiter.tick().rule).toBeNull();
+  });
+
+  it("⚠ 認不得的新模式也當成不是對戰", async () => {
+    // 白名單的失敗方向：改版多一種 PvE 模式 → 功能沒生效（安全）。
+    // 黑名單會反過來 → 在打王時替玩家按 OK（有害）。見 constants.ts 的 NPC_RULES。
+    const page = bootPage({ rule: "boss_rush" });
+    page.arbiter.tick();
+    await ticks(1);
+    pressOk(page);
+
+    expect(page.sent).toHaveLength(1);
+    expect(page.arbiter.tick().pvp).toBe(false);
+  });
+
+  it("⚠ 打 NPC 時不可以染色 —— 那個顏色代表「插件在管這個階段」", async () => {
+    const page = bootPage({ rule: "raid" });
+    page.arbiter.tick();
+    await ticks(2);
+    expect(page.ok.tint).toBeNull();
+
+    // 對照組：同一個頁面換成對戰就該染上去。
+    page.setRule("duel");
+    page.setMovePhase(false);
+    await ticks(1);
+    page.setMovePhase(true);
+    page.arbiter.tick();
+    await ticks(1);
+    expect(page.ok.tint).not.toBeNull();
+  });
+
+  it("⚠ 打 NPC 時不可以改寫讀秒 —— 就算 cap 還留著", async () => {
+    // Node 那邊也會把 cap 推成 null，但那是**另一個程序**。它沒跑到、跑慢了、
+    // 或整個掛掉時，畫面上仍然不可以出現一個假的倒數。
+    const page = bootPage({ rule: "quest" });
+    page.arbiter.tick();
+    await ticks(1);
+    page.arbiter.setDisplayCap(15);
+
+    expect(page.frame(30)).toEqual({ text: "30", scaleX: 1, fill: 240 });
+  });
+
+  it("tick 要把模式帶回 Node", async () => {
+    const page = bootPage({ rule: "raid" });
+    page.arbiter.tick();
+    await ticks(1);
+    expect(page.arbiter.tick()).toMatchObject({ pvp: false, rule: "raid" });
+
+    page.setRule("duel");
+    expect(page.arbiter.tick()).toMatchObject({ pvp: true, rule: "duel" });
+  });
+
+  it("打完對戰接著打任務，同一個 patch 要跟著改判", async () => {
+    // 換場不會重裝 patch（socket 換一顆而已），所以模式判斷必須是**每次現讀**，
+    // 不能在安裝時算一次就快取起來 —— 那正是座位那個 bug 的形狀。
+    const page = bootPage({ rule: "duel" });
+    page.arbiter.tick();
+    await ticks(1);
+    pressOk(page);
+    expect(page.arbiter.held).not.toBeNull();
+    page.arbiter.release("arbiter");
+
+    page.setRule("quest");
+    page.swapSocket();
+    page.setMovePhase(false);
+    await ticks(1);
+    page.setMovePhase(true);
+    // 新階段開始時**遊戲自己**會把 OK 鈕還原成可按 —— 上一個階段送出後它停在
+    // frame 2 + disableInteractive。假頁面沒有那段，手動補上，否則下面的
+    // pressOk 會因為「按鈕按不動」而什麼都不做，測試就變成假綠。
+    page.ok.setTexture("ok", 0);
+    page.ok.setInteractive();
+    page.arbiter.tick();
+    await ticks(1);
+
+    const before = page.sent.length;
+    pressOk(page);
+    expect(page.sent).toHaveLength(before + 1); // 直接送出，沒攔
+    expect(page.arbiter.held).toBeNull();
   });
 });
 
