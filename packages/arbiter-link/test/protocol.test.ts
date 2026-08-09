@@ -154,21 +154,29 @@ describe("實際門檻", () => {
     );
   });
 
-  it("⚠ 階段本來就短（<10 秒）就整條不套用，不是夾到下限", () => {
-    // 玩家 2026-08-10 指定。判準是「還出不出得了牌」：10 秒砍成 5 秒還行，
-    // 9 秒砍成 4 秒連把牌拖到場上都來不及。
-    //
-    // ⚠ 這**不能**用 MIN_PHASE_SECONDS 的夾擠取代：夾擠會把 9 秒變成 5 秒
-    // （仍然縮短了），而這條要的是完全不動。
-    for (const seconds of [5, 6, 9]) {
-      expect(
-        effectiveCapSeconds(agreed({ phaseSeconds: seconds, hazardShortenSeconds: 5 }), true),
-      ).toBe(seconds);
+  it("⚠ 砍完不得低於 8 秒（玩家 2026-08-10 指定）", () => {
+    // 判準是還出不出得了牌：砍到 4~5 秒連把牌拖到場上都來不及，而強制提早
+    // 結束送出的是**當下的場面**，不是空手。
+    const cap = (phaseSeconds: number): number =>
+      effectiveCapSeconds(agreed({ phaseSeconds, hazardShortenSeconds: 5 }), true);
+    expect(cap(9)).toBe(8);
+    expect(cap(10)).toBe(8);
+    expect(cap(13)).toBe(8);
+    // 底線之上照常砍 5 秒
+    expect(cap(20)).toBe(15);
+    expect(cap(30)).toBe(25);
+  });
+
+  it("⚠ 這條規則永遠不會把階段變**長**", () => {
+    // 玩家把階段設成 5 秒時，max(8, 0) = 8 會比原本還長 —— 一條用來縮短的
+    // 規則反而加時間，而且只在少數設定值下出現，極難注意到。
+    for (let seconds = MIN_PHASE_SECONDS; seconds <= MOVE_PHASE_TOTAL_SECONDS; seconds++) {
+      const withRule = effectiveCapSeconds(
+        agreed({ phaseSeconds: seconds, hazardShortenSeconds: 5 }),
+        true,
+      );
+      expect(withRule).toBeLessThanOrEqual(seconds);
     }
-    // 剛好 10 秒是生效的第一格
-    expect(effectiveCapSeconds(agreed({ phaseSeconds: 10, hazardShortenSeconds: 5 }), true)).toBe(
-      MIN_PHASE_SECONDS,
-    );
   });
 });
 

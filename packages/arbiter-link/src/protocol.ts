@@ -63,16 +63,24 @@ export const DEFAULT_HAZARD_SHORTEN_SECONDS = 5;
 export const HAZARD_RULE_NAME = "防止壓秒出聖水";
 
 /**
- * 階段長度低於這個值時，**聖水規則整條不套用**。
+ * 「防止壓秒出聖水」砍完之後的**下限**。玩家 2026-08-10 指定 8 秒。
  *
- * ⚠ 玩家 2026-08-10 指定，理由是實際能不能出牌：階段只剩 9 秒的時候再砍 5 秒
- * 只剩 4 秒，那連把牌拖到場上都來不及 —— 而「強制提早結束」送出的是**當下的
- * 場面**，不是空手。10 秒砍成 5 秒還出得了牌，9 秒砍成 4 秒不行。
+ * 判準是實際還出不出得了牌：砍到 4~5 秒連把牌拖到場上都來不及，而強制提早
+ * 結束送出的是**當下的場面**，不是空手。所以砍多少都不會低於 8 秒：
  *
- * ⚠ 這跟 `MIN_PHASE_SECONDS` 的夾擠**不是**同一回事，不要用夾的取代它：
- * 夾擠會把 9 秒也變成 5 秒（仍然縮短了），而這條要的是**完全不動**。
+ * ```
+ *  9 → 8      10 → 8      13 → 8      20 → 15      30 → 25
+ * ```
+ *
+ * ⚠ **這是 `MIN_PHASE_SECONDS`（5）之外的另一個下限，不要合併。**
+ * 那個是「玩家能設定的階段長度」的下限，這個是「這條規則能砍到哪」的下限，
+ * 兩者的理由不同也不會一起改。
+ *
+ * ⚠ 先前的寫法是「低於 10 秒整條不套用」，同一個需求的另一種近似 ——
+ * 玩家看到之後改成夾下限，因為 13→8 這種情況用「不套用」表達不出來
+ * （13 沒有低於 10，但砍完的 8 正好就是底）。
  */
-export const HAZARD_MIN_PHASE_SECONDS = 10;
+export const HAZARD_FLOOR_SECONDS = 8;
 
 /**
  * 移動階段的預設長度。玩家指定 20 秒。
@@ -254,11 +262,15 @@ export function soloSettings(_prefs: LinkPrefs): AgreedSettings {
  * 但**不會低於 `MIN_PHASE_SECONDS`** —— 修正項可以疊，下限不行。
  */
 export function effectiveCapSeconds(agreed: AgreedSettings, hazard: boolean): number {
-  // ⚠ 階段本來就短的時候整條不套用 —— 見 HAZARD_MIN_PHASE_SECONDS。
-  // 條件看的是**協商出來的階段長度**，不是扣完的結果：拿結果去判斷會變成
-  // 「扣了才知道不該扣」，而 9→4 跟 10→5 的差別正是這條規則要擋的。
-  if (!hazard || agreed.phaseSeconds < HAZARD_MIN_PHASE_SECONDS) return agreed.phaseSeconds;
-  return Math.max(MIN_PHASE_SECONDS, agreed.phaseSeconds - agreed.hazardShortenSeconds);
+  if (!hazard) return agreed.phaseSeconds;
+  const shortened = Math.max(
+    HAZARD_FLOOR_SECONDS,
+    agreed.phaseSeconds - agreed.hazardShortenSeconds,
+  );
+  // ⚠ **再夾一次「不得比原本長」。** 少了這行，玩家把階段設成 5 秒時這條規則
+  // 會把它「砍」成 8 秒 —— 一條用來縮短的規則反而把時間變長，而且只在少數
+  // 設定值下出現，極難注意到。
+  return Math.min(agreed.phaseSeconds, shortened);
 }
 
 // ---------------------------------------------------------------------------
