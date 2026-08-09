@@ -168,7 +168,17 @@ export function startAutoUpdate(options: UpdaterOptions): () => void {
     const env = { ...process.env };
     delete env["ELECTRON_RUN_AS_NODE"];
     try {
-      // `/S` = NSIS 的靜默安裝。oneClick 的安裝器裝完會自己啟動新版。
+      // `/S` = NSIS 的靜默安裝。
+      //
+      // ⚠ **裝完誰把新版叫起來，是安裝器那邊的事**（`scripts/installer.nsh`
+      // 的 `customInstall`），不是這裡。這一行原本的註解寫著「oneClick 的安裝器
+      // 裝完會自己啟動新版」—— 那句話在安裝器從 oneClick 改成引導式的那一刻
+      // 就過期了，而症狀要到玩家回報「更新完插件就不見了」才看得出來
+      // （2026-08-09）。引導式的「啟動程式」是完成頁上的核取方塊，而 `/S`
+      // 整個跳過完成頁。
+      //
+      // ⚠ **不要在這裡也 relaunch 一次。** 這個 app 沒有 single instance lock
+      // （雙開是預期用法），兩邊都做會變成同一個埠開兩份、搶同一份 userData。
       const child = spawn(ready.path, ["/S"], { detached: true, stdio: "ignore", env });
       child.unref();
     } catch (err) {
