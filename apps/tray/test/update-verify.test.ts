@@ -1,8 +1,8 @@
 import { generateKeyPairSync, sign } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { canonicalBytes } from "@ulr/rule-schema";
+import { canonicalBytes } from "@ulr/rule-schema/canonical";
 import type { UpdateManifest } from "../src/update-verify.js";
-import { verifySignedFeed } from "../src/update-verify.js";
+import { isNewerVersion, verifySignedFeed } from "../src/update-verify.js";
 
 const keys = generateKeyPairSync("ed25519");
 const PUBLIC_PEM = keys.publicKey.export({ type: "spki", format: "pem" }).toString();
@@ -103,6 +103,41 @@ describe("發布清單的簽章", () => {
   it("壞掉的輸入一律回 null，不拋例外", () => {
     for (const bad of [null, undefined, 42, "x", [], {}, { manifest: 1, signature: "x" }]) {
       expect(verifySignedFeed(bad, PUBLIC_PEM)).toBeNull();
+    }
+  });
+});
+
+describe("只往新版走（防降版重播）", () => {
+  it("⚠ 舊版本不會觸發更新 —— 舊清單的簽章永遠有效", () => {
+    // 攻擊者拿到伺服器之後不必偽造任何東西，把半年前那份簽好的清單重播出來
+    // 就能讓所有人裝回舊版（連同那一版已經修掉的問題）。
+    expect(isNewerVersion("0.2.0", "0.2.1")).toBe(false);
+    expect(isNewerVersion("0.1.0", "1.0.0")).toBe(false);
+    expect(isNewerVersion("1.9.9", "2.0.0")).toBe(false);
+  });
+
+  it("同一版也不更新", () => {
+    expect(isNewerVersion("0.2.1", "0.2.1")).toBe(false);
+  });
+
+  it("真的比較新才更新", () => {
+    expect(isNewerVersion("0.2.1", "0.2.0")).toBe(true);
+    expect(isNewerVersion("0.3.0", "0.2.9")).toBe(true);
+    expect(isNewerVersion("1.0.0", "0.9.9")).toBe(true);
+    expect(isNewerVersion("0.2.10", "0.2.9")).toBe(true);
+  });
+
+  it("⚠ 看不懂的版本號一律拒絕，不要猜", () => {
+    const cases: [string, string][] = [
+      ["", "0.2.0"],
+      ["0.2", "0.1.0"],
+      ["1.2.3.4", "0.1.0"],
+      ["v1.2.3", "0.1.0"],
+      ["abc", "0.1.0"],
+      ["0.2.1", "壞掉的"],
+    ];
+    for (const [a, b] of cases) {
+      expect(isNewerVersion(a, b), `${a} vs ${b}`).toBe(false);
     }
   });
 });

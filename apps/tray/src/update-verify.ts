@@ -32,7 +32,7 @@
  */
 
 import { createPublicKey, verify } from "node:crypto";
-import { canonicalBytes } from "@ulr/rule-schema";
+import { canonicalBytes } from "@ulr/rule-schema/canonical";
 
 /** 發布清單本身。跟 `apps/link-worker/src/release.ts` 的形狀一致。 */
 export interface UpdateManifest {
@@ -67,6 +67,44 @@ function isManifest(value: unknown): value is UpdateManifest {
   if (typeof m["sha256"] !== "string" || !/^[0-9a-f]{64}$/.test(m["sha256"])) return false;
   if (m["notes"] !== undefined && typeof m["notes"] !== "string") return false;
   return true;
+}
+
+/**
+ * `candidate` 是不是**嚴格比** `current` 新。
+ *
+ * ⚠⚠ **這一條是防「降版攻擊」（rollback）的，簽章擋不住它。**
+ *
+ * 簽章保證「這份清單是我們發的」，但**舊清單的簽章永遠有效** —— 攻擊者拿到
+ * 伺服器之後不必偽造任何東西，只要把半年前那份簽好的清單**重播**出來，
+ * 每一台客戶端就會乖乖裝回舊版，包括那一版所有已經修掉的問題。
+ *
+ * 原本的判斷是 `manifest.version !== currentVersion`（不一樣就更新），
+ * 那對重播完全沒有抵抗力。改成「只往新的走」之後，重播舊清單的結果是
+ * **什麼都不會發生**。
+ *
+ * 解析不了的版本號一律回 `false`。**拒絕比猜測安全** —— 看不懂的東西不該
+ * 觸發一次靜默安裝。
+ */
+export function isNewerVersion(candidate: string, current: string): boolean {
+  const parse = (v: string): number[] | null => {
+    // 只認 `1.2.3`（後面可以有 `-beta.1` 之類的東西，但那不參與比較 ——
+    // 預發布版的排序規則很微妙，而這個專案還不需要它）。
+    const core = v.trim().split("-")[0] ?? "";
+    const parts = core.split(".");
+    if (parts.length !== 3) return null;
+    const nums = parts.map((p) => (/^\d+$/.test(p) ? Number(p) : Number.NaN));
+    return nums.some((n) => Number.isNaN(n)) ? null : nums;
+  };
+
+  const a = parse(candidate);
+  const b = parse(current);
+  if (a === null || b === null) return false;
+  for (let i = 0; i < 3; i++) {
+    const x = a[i] ?? 0;
+    const y = b[i] ?? 0;
+    if (x !== y) return x > y;
+  }
+  return false;
 }
 
 /**

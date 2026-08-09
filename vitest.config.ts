@@ -7,6 +7,7 @@ export default defineConfig({
   resolve: {
     // 對齊 tsconfig 的 paths，測試不用先 build
     alias: {
+      "@ulr/rule-schema/canonical": r("./packages/rule-schema/src/canonical.ts"),
       "@ulr/rule-schema": r("./packages/rule-schema/src/index.ts"),
       "@ulr/api-contract": r("./packages/api-contract/src/index.ts"),
       "@ulr/cost-engine": r("./packages/cost-engine/src/index.ts"),

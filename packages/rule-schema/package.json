@@ -8,6 +8,7 @@
   "main": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
+    "./canonical": "./src/canonical.ts",
     "./schema/cost-rule.schema.json": "./schema/cost-rule.schema.json"
   },
   "files": [

@@ -18,12 +18,19 @@
  * `incompatible`，雙方**當場退回單邊模式**（`@ulr/arbiter-link` 的版本註解）。
  * 在移動階段中間發生的話，玩家會看到約定秒數突然消失而不知道為什麼。
  *
- * ## 現在的狀態
+ * ## 信任鏈（2026-08-09 上線）
  *
- * 更新流程本身是完整的（檢查 → 下載 → 驗雜湊 → 暫存 → 安全時機套用），
- * 但**沒有預設的發布來源** —— `ULR_UPDATE_FEED` 沒設就整支不啟動。
- * 這是刻意的：指向一個還不存在的網址只會每小時失敗一次並洗掉 log，
- * 而且一旦寫死了預設值，之後改網址就得再發一版才能改。
+ *     驗簽章 → 只往新版走 → 網址白名單 → 大小上限 → 驗雜湊 → 安全時機套用
+ *
+ * 每一道擋的是不同的東西，少一道就有一條路徑沒被蓋到：
+ *
+ * | 關卡         | 擋什麼                                             |
+ * | ------------ | -------------------------------------------------- |
+ * | 簽章         | **發布伺服器被入侵**（雜湊擋不住，那也是它寫的）   |
+ * | 只往新版走   | **重播舊清單**（舊簽章永遠有效，簽章擋不住）       |
+ * | 網址白名單   | 發版手滑；私鑰外流時縮小爆炸半徑                   |
+ * | 大小上限     | 無限長的串流把記憶體吃光                           |
+ * | 雜湊         | 檔案在路上被換掉、只有檔案儲存空間被入侵           |
  */
 
 import { spawn } from "node:child_process";
@@ -34,7 +41,7 @@ import { app } from "electron";
 import { DEFAULT_UPDATE_FEED } from "@ulr/arbiter-link";
 import { UPDATE_PUBLIC_KEY } from "./update-key.js";
 import type { UpdateManifest } from "./update-verify.js";
-import { verifySignedFeed } from "./update-verify.js";
+import { isNewerVersion, verifySignedFeed } from "./update-verify.js";
 
 /** 多久檢查一次。一小時 —— 這不是需要即時的東西。 */
 const CHECK_INTERVAL_MS = 60 * 60 * 1000;
@@ -117,7 +124,10 @@ export function startAutoUpdate(options: UpdaterOptions): () => void {
       const manifest = await fetchManifest(feed);
       // ⚠ `null` 有兩種可能：還沒發過版（404），或**簽章驗不過**。後者要看得見 ——
       // 它要嘛是發版流程出錯，要嘛是有人在冒充發布來源，兩種都不該安靜略過。
-      if (manifest === null || manifest.version === options.currentVersion) return;
+      if (manifest === null) return;
+      // ⚠ **只往新的走。** 舊清單的簽章永遠有效，所以「版本不一樣就更新」
+      // 等於對重播舊清單毫無抵抗力 —— 見 `isNewerVersion()`。
+      if (!isNewerVersion(manifest.version, options.currentVersion)) return;
 
       log(
         `↓ 有新版 ${manifest.version}${manifest.notes === undefined ? "" : `：${manifest.notes}`}`,

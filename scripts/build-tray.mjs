@@ -52,6 +52,40 @@ await build({
   logLevel: "info",
 });
 
+/**
+ * ⚠⚠ **出貨前的最後一道：掃掉「測試會過但 app 開不起來」的東西。**
+ *
+ * 2026-08-09 真的發生過，而且已經發到 GitHub Release 才被抓到：
+ * `update-verify.ts` 為了一個 `canonicalBytes` 去 import `@ulr/rule-schema` 的
+ * **根**，而根匯出會把 `validate.ts` 一起帶進來 —— 那支在模組載入時就跑
+ *
+ *     new URL("../schema/…json", import.meta.url)
+ *
+ * ESM 底下沒問題，**打成 CJS 之後 `import.meta.url` 是 `undefined`**，
+ * `new URL(path, undefined)` 直接丟 `TypeError: Invalid URL`，而且是在
+ * 主程序載入時 —— 玩家看到的是一個 JavaScript error 對話框，插件完全打不開。
+ *
+ * **476 個測試全部綠的。** 因為 vitest 跑的是 ESM 原始碼，而出貨的是這支
+ * 產生的 CJS bundle —— 兩個不同的世界。單元測試在設計上就照不到這裡。
+ *
+ * 所以這道關卡不是「防禦性寫作」，是那次事故的直接產物。
+ */
+const bundle = readFileSync(join(out, "main.cjs"), "utf8");
+const landmines = [
+  // esbuild 把 CJS 裡的 import.meta 換成一個空物件，於是 .url 是 undefined
+  ["import_meta.url", "有模組在載入時用 import.meta.url —— CJS 打包後那是 undefined"],
+];
+const hits = landmines.filter(([needle]) => bundle.includes(needle));
+if (hits.length > 0) {
+  console.error("");
+  console.error("✗ bundle 裡有會讓 app 開不起來的東西：");
+  for (const [needle, why] of hits) console.error(`    ${needle} —— ${why}`);
+  console.error("");
+  console.error("  多半是 import 到某個 package 的**根**，把不需要的模組一起拖進來了。");
+  console.error("  改成 import 子路徑（例如 @ulr/rule-schema/canonical）。");
+  process.exit(1);
+}
+
 // 畫面是靜態檔案，直接複製過去 —— 沒有需要編譯的東西。
 cpSync(join(app, "renderer"), join(out, "renderer"), { recursive: true });
 console.log(`✓ 托盤已打包到 ${out}`);

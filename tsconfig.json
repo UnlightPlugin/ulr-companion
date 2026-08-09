@@ -23,6 +23,11 @@
     // 直接指到原始碼，contributor clone 下來不用先 build 就能跨 package import
     "baseUrl": ".",
     "paths": {
+      // ⚠ 子路徑排在根**前面**（Vite 的 alias 是前綴比對）。
+      // `canonical.ts` 是純函式；根匯出會把 `validate.ts` 一起帶進來，而那支在
+      // 模組載入時就 `new URL(..., import.meta.url)` + 讀檔 —— 打成 CJS 之後
+      // `import.meta.url` 是 undefined，**整個 app 開不起來**。
+      "@ulr/rule-schema/canonical": ["packages/rule-schema/src/canonical.ts"],
       "@ulr/rule-schema": ["packages/rule-schema/src/index.ts"],
       "@ulr/api-contract": ["packages/api-contract/src/index.ts"],
       "@ulr/cost-engine": ["packages/cost-engine/src/index.ts"],
