@@ -21,9 +21,11 @@ import type { WebSocket } from "ws";
 import type { ClientMessage } from "./protocol.js";
 import { decode, encode } from "./protocol.js";
 import { RoomRegistry } from "./rooms.js";
+import { DEFAULT_LINK_PORT } from "./target.js";
 
-/** 中間人的預設埠。避開 CDP 的 9333／9334 與遊戲自己的那幾條。 */
-export const DEFAULT_LINK_PORT = 9350;
+// ⚠ 預設埠搬到 `target.ts` 了 —— 那支沒有 I/O，托盤與雲端的解析都要用到它，
+// 而從這裡拿的話會連 `ws` 一起拉進去。這裡只負責再匯出，呼叫端不必改。
+export { DEFAULT_LINK_PORT } from "./target.js";
 
 /** 只聽本機。**不要**把它變成參數。 */
 const LINK_HOST = "127.0.0.1";

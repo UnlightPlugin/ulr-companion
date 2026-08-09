@@ -31,6 +31,9 @@ export {
   clampHazardShorten,
   clampPhaseSeconds,
   clampSpeedFactor,
+  CLOSE_TOO_BIG,
+  CLOSE_TOO_FAST,
+  CLOSE_WRONG_ROOM,
   DEFAULT_HAZARD_SHORTEN_SECONDS,
   DEFAULT_PHASE_SECONDS,
   DEFAULT_PREFS,
@@ -65,8 +68,25 @@ export type { Member, Outgoing } from "./rooms.js";
 export { AddressInUseError, DEFAULT_LINK_PORT, LinkBroker } from "./broker.js";
 export type { BrokerOptions } from "./broker.js";
 
-export { DEFAULT_RECONNECT_MS, LinkClient } from "./link-client.js";
+export {
+  DEFAULT_RECONNECT_MS,
+  LinkClient,
+  reconnectDelayFor,
+  THROTTLED_RECONNECT_MS,
+} from "./link-client.js";
 export type { LinkClientOptions, LinkStatus } from "./link-client.js";
+
+// 階段 3：中間人的位址從「一個埠號」變成「一個字串」，兩種傳輸共用同一份解析。
+export {
+  DEFAULT_LINK_TARGET,
+  DEFAULT_UPDATE_FEED,
+  describeTarget,
+  endpointOf,
+  parseLinkTarget,
+  roomUrl,
+  SERVICE_ORIGIN,
+} from "./target.js";
+export type { LinkTarget } from "./target.js";
 
 export { LinkNode } from "./node.js";
 export type { LinkNodeOptions } from "./node.js";

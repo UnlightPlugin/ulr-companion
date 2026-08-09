@@ -14,12 +14,21 @@
  */
 
 import type { LinkPrefs } from "./protocol.js";
-import { DEFAULT_LINK_PORT, AddressInUseError, LinkBroker } from "./broker.js";
+import { AddressInUseError, LinkBroker } from "./broker.js";
 import type { LinkClientOptions } from "./link-client.js";
 import { LinkClient } from "./link-client.js";
+import type { LinkTarget } from "./target.js";
+import { DEFAULT_LINK_PORT, endpointOf } from "./target.js";
 
-export interface LinkNodeOptions extends Omit<LinkClientOptions, "url"> {
-  port?: number;
+export interface LinkNodeOptions extends Omit<LinkClientOptions, "endpoint"> {
+  /**
+   * 中間人在哪。預設是本機。
+   *
+   * ⚠ **`remote` 的時候絕對不搶埠。** 「先搶著當中間人」是為了讓同一台電腦上
+   * 的兩個插件不必手動開 broker；連到雲端時那件事沒有意義，而且真的開起來的話
+   * 玩家的機器會多一個誰都不會連的監聽埠。
+   */
+  target?: LinkTarget;
   prefs: LinkPrefs;
 }
 
@@ -54,10 +63,18 @@ export class LinkNode {
   }
 
   static async start(options: LinkNodeOptions): Promise<LinkNode> {
-    const port = options.port ?? DEFAULT_LINK_PORT;
-    const { port: _port, ...clientOptions } = options;
-    const client = new LinkClient({ ...clientOptions, url: `ws://127.0.0.1:${port}` });
+    const target: LinkTarget = options.target ?? { kind: "local", port: DEFAULT_LINK_PORT };
+    const { target: _target, ...clientOptions } = options;
+    const client = new LinkClient({ ...clientOptions, endpoint: endpointOf(target) });
+    const port = target.kind === "local" ? target.port : 0;
     const node = new LinkNode(client, port, options.onLog);
+
+    // 雲端：中間人是別人開的，這邊只當客戶端。
+    if (target.kind === "remote") {
+      options.onLog?.(`  中間人：${target.endpoint}`);
+      client.start();
+      return node;
+    }
 
     await node.#tryHost();
     client.start();
@@ -78,7 +95,11 @@ export class LinkNode {
     if (this.#stopped) return;
     // 只有在**自己沒在當中間人、而且也連不上別人**的時候才搶。連得上就代表
     // 有人在當，搶了只會把現有的連線打斷。
-    if (this.#broker !== null || this.#client.status !== "offline") return;
+    //
+    // ⚠ `idle`（還沒進對戰）也算「沒連上」。不含它的話，玩家在大廳時沒有人會
+    // 是中間人，等到真的進對戰才開始搶 —— 而那正是最不該多花三秒的時候。
+    if (this.#broker !== null) return;
+    if (this.#client.status !== "offline" && this.#client.status !== "idle") return;
     await this.#tryHost();
   }
 

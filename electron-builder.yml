@@ -44,12 +44,24 @@ win:
   icon: icon.ico
 
 nsis:
-  oneClick: true # 不問安裝路徑，一路到底
+  # ⚠ **從 oneClick 改成引導式，理由只有一個：讓玩家自己選安裝路徑。**
+  # C 槽是大多數人最先滿的那一顆，而這個程式裝完約 250 MB（Electron 把整個
+  # Chromium 靜態連進 exe）。`allowToChangeInstallationDirectory` 只在引導式
+  # 安裝器有意義 —— oneClick 時 electron-builder 會直接拒絕建置。
+  #
+  # 代價是多了兩頁（選路徑、完成）。可接受：那是玩家**要**看到的兩頁。
+  oneClick: false
+  allowToChangeInstallationDirectory: true
   # ⚠⚠ **這一行決定了能不能真的靜默更新。**
-  #   false → 裝到 %LOCALAPPDATA%，更新不需要 UAC → 真靜默
+  #   false → 裝到使用者自己的目錄，更新不需要 UAC → 真靜默
   #   true  → 裝到 Program Files，**每一次更新都跳 UAC**，玩家會以為中毒
   perMachine: false
-  allowToChangeInstallationDirectory: false
+  # ⚠ 引導式安裝器預設會多問一頁「要裝給誰用」，選「所有使用者」就會掉進上面
+  # 那個 UAC 陷阱。`scripts/installer.nsh` 直接把那一頁跳掉、鎖成 per-user，
+  # 這一行則是不給「提權裝到 Program Files」這條路。兩層都留著。
+  allowElevation: false
+  # ⚠ 不是慣例的 build/installer.nsh —— build/ 整個在 .gitignore 裡（產生物）。
+  include: scripts/installer.nsh
   # 保留玩家的配置清單與本機規則包。解除安裝不該把 profiles.json 一起帶走。
   deleteAppDataOnUninstall: false
   createDesktopShortcut: true

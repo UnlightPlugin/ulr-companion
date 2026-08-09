@@ -31,6 +31,10 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { app } from "electron";
+import { DEFAULT_UPDATE_FEED } from "@ulr/arbiter-link";
+import { UPDATE_PUBLIC_KEY } from "./update-key.js";
+import type { UpdateManifest } from "./update-verify.js";
+import { verifySignedFeed } from "./update-verify.js";
 
 /** 多久檢查一次。一小時 —— 這不是需要即時的東西。 */
 const CHECK_INTERVAL_MS = 60 * 60 * 1000;
@@ -38,19 +42,16 @@ const CHECK_INTERVAL_MS = 60 * 60 * 1000;
 /** 開起來之後先等一下再檢查，不要跟遊戲啟動搶頻寬。 */
 const FIRST_CHECK_DELAY_MS = 60 * 1000;
 
-/** 發布清單的網址。沒設就不啟動自動更新。 */
+/**
+ * 發布清單的網址。環境變數可以覆蓋，**但一定有預設值**。
+ *
+ * ⚠ 舊版沒有預設值，於是自動更新對**所有玩家**都是關掉的 —— 打包版沒有人會
+ * 去設環境變數。那是最安靜的一種壞掉：你發出去的每一份都停在當初那一版，
+ * 而且你不會收到任何「更新失敗」的回報，因為它根本沒開始過。
+ *
+ * 環境變數留著是為了開發：指到本機的假 feed 就能測整條流程，不必真的發版。
+ */
 const FEED_ENV = "ULR_UPDATE_FEED";
-
-/** 發布清單的形狀。刻意做得很小 —— 欄位越多，壞掉的方式越多。 */
-interface UpdateManifest {
-  version: string;
-  /** 安裝檔的網址。 */
-  url: string;
-  /** 安裝檔的 SHA-256（十六進位）。**沒有它就不裝。** */
-  sha256: string;
-  /** 給玩家看的一行說明，會寫進 log。 */
-  notes?: string;
-}
 
 export interface UpdaterOptions {
   /**
@@ -79,9 +80,23 @@ export interface UpdaterOptions {
  * 那是玩家真正在用的東西。
  */
 export function startAutoUpdate(options: UpdaterOptions): () => void {
-  const feed = process.env[FEED_ENV];
-  if (feed === undefined || feed.length === 0) {
-    options.onLog?.(`（沒設 ${FEED_ENV}，自動更新未啟動）`);
+  const override = process.env[FEED_ENV];
+  const feed = override !== undefined && override.length > 0 ? override : DEFAULT_UPDATE_FEED;
+
+  // ⚠⚠ **沒有公鑰就整支不啟動。**
+  //
+  // 沒有信任根的時候，正確的行為是**不更新**，不是「先相信伺服器再說」——
+  // 後者正是「Cloudflare 帳號被盜 = 每一台電腦被接管」那條路徑。
+  if (UPDATE_PUBLIC_KEY.length === 0) {
+    options.onLog?.("（沒有發布公鑰，自動更新未啟動）");
+    return () => {};
+  }
+
+  // ⚠ **開發模式不要自動更新。** `process.execPath` 是 node_modules 裡的
+  // electron.exe，真的裝下去會把開發環境換成打包版 —— 而且下一次 `npm run tray`
+  // 又跑回舊的，症狀是「我明明改了程式碼，跑起來卻是別的行為」。
+  if (!app.isPackaged) {
+    options.onLog?.("（開發模式，自動更新未啟動）");
     return () => {};
   }
 
@@ -100,6 +115,8 @@ export function startAutoUpdate(options: UpdaterOptions): () => void {
         return;
       }
       const manifest = await fetchManifest(feed);
+      // ⚠ `null` 有兩種可能：還沒發過版（404），或**簽章驗不過**。後者要看得見 ——
+      // 它要嘛是發版流程出錯，要嘛是有人在冒充發布來源，兩種都不該安靜略過。
       if (manifest === null || manifest.version === options.currentVersion) return;
 
       log(
@@ -209,28 +226,74 @@ export function consumeUpdatedFlag(): boolean {
   }
 }
 
+/**
+ * 拿發布清單並**驗簽章**。驗不過回 `null`。
+ *
+ * ⚠ **驗章在讀任何欄位之前。** 先比版本再驗章的話，一份沒簽的清單仍然能
+ * 控制流程要不要往下走。這裡的順序是：HTTP → 驗章 → 才開始相信 `version`。
+ *
+ * ⚠ 「來源是 HTTPS」不足以當作可信 —— HTTPS 保證的是「這確實是那台伺服器
+ * 說的」，而我們要防的正是**那台伺服器被人接管**。
+ */
 async function fetchManifest(feed: string): Promise<UpdateManifest | null> {
   const res = await fetch(feed, { headers: { accept: "application/json" } });
+  // 404 = 還沒發過任何一版。這是正常狀態，不是錯誤。
   if (!res.ok) return null;
   const raw: unknown = await res.json();
-  if (typeof raw !== "object" || raw === null) return null;
-  const m = raw as Record<string, unknown>;
-  if (typeof m["version"] !== "string" || typeof m["url"] !== "string") return null;
-  // ⚠ **沒有雜湊就整份丟掉。** 下載回來的是會被執行的東西，
-  // 「來源是 HTTPS」不足以當作它沒被換過的理由。
-  if (typeof m["sha256"] !== "string" || m["sha256"].length !== 64) return null;
-  return {
-    version: m["version"],
-    url: m["url"],
-    sha256: m["sha256"].toLowerCase(),
-    ...(typeof m["notes"] === "string" ? { notes: m["notes"] } : {}),
-  };
+  return verifySignedFeed(raw, UPDATE_PUBLIC_KEY);
+}
+
+/**
+ * 安裝檔可以從哪裡下載。**白名單，不是黑名單。**
+ *
+ * 清單已經簽過了，所以正常情況下這個網址本來就是我們寫的 —— 這一層擋的是
+ * 另外兩件事：**發版時自己手滑貼錯網址**（當場就會失敗，而不是等玩家更新爆掉），
+ * 以及**萬一私鑰外流**時把爆炸半徑縮小到「攻擊者還得同時控制 GitHub」。
+ *
+ * ⚠ 只比對**第一個**網址。GitHub 的 release 檔案會轉址到
+ * `objects.githubusercontent.com`，那是 GitHub 自己的事 —— 能決定轉去哪的
+ * 只有 github.com，所以跟著轉是安全的。
+ */
+const ALLOWED_DOWNLOAD_HOSTS = ["github.com", "ulr-link.lldavuull.workers.dev"];
+
+/**
+ * 安裝檔的大小上限。目前約 82 MB，300 MB 給了三倍餘裕。
+ *
+ * ⚠ `arrayBuffer()` 會把整個回應讀進記憶體。沒有上限的話，一個壞掉（或惡意）的
+ * 來源可以送一個無限長的串流把記憶體吃光 —— 而那發生在**背景**，玩家只會看到
+ * 插件突然消失。
+ */
+const MAX_INSTALLER_BYTES = 300 * 1024 * 1024;
+
+function isAllowedDownload(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    // ⚠ 一定要 https。http 的話「雜湊對得上」只證明檔案跟清單一致，
+    // 不證明清單沒被路上的人連著檔案一起換掉。
+    if (parsed.protocol !== "https:") return false;
+    return ALLOWED_DOWNLOAD_HOSTS.includes(parsed.hostname);
+  } catch {
+    return false;
+  }
 }
 
 async function download(manifest: UpdateManifest): Promise<string | null> {
+  if (!isAllowedDownload(manifest.url)) {
+    throw new Error(`安裝檔的網址不在白名單裡：${manifest.url}`);
+  }
   const res = await fetch(manifest.url);
   if (!res.ok) return null;
+
+  // 先看 Content-Length —— 能在開始讀之前就擋掉的話就不要讀。
+  const declared = Number(res.headers.get("content-length") ?? "0");
+  if (Number.isFinite(declared) && declared > MAX_INSTALLER_BYTES) {
+    throw new Error(`安裝檔太大（宣稱 ${Math.round(declared / 1024 / 1024)} MB）`);
+  }
   const bytes = Buffer.from(await res.arrayBuffer());
+  // 沒有 Content-Length、或它是假的時候，這一道才是真的那一道。
+  if (bytes.length > MAX_INSTALLER_BYTES) {
+    throw new Error(`安裝檔太大（實際 ${Math.round(bytes.length / 1024 / 1024)} MB）`);
+  }
 
   const actual = createHash("sha256").update(bytes).digest("hex");
   if (actual !== manifest.sha256) {

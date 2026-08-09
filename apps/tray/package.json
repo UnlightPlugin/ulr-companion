@@ -1,6 +1,6 @@
 {
   "name": "@ulr/tray",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "ULR Companion 的托盤程式。一個視窗管一個遊戲客戶端，雙開就開兩個。",
   "license": "MIT",

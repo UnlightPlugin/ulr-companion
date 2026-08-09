@@ -392,9 +392,42 @@
       table.profiles input[type="number"] {
         width: 72px;
       }
+      /* 中間人那一欄是一整個網址（36 字元），不再是四位數的埠。
+         窄於這個寬度會被切成 `wss://ulr-link.lldavuull.work`，而看不到尾巴的
+         網址沒有辦法用眼睛核對 —— 那正是這一格唯一的用途。 */
+      table.profiles td:nth-child(5) {
+        min-width: 250px;
+      }
       .self-mark {
         color: var(--amber);
         font-size: 11px;
+      }
+
+      /* 步驟教學：玩家要照著做的東西，行距要鬆、序號要看得見 */
+      ol.steps {
+        margin: 8px 0 0;
+        padding-left: 20px;
+        color: var(--text);
+        font-size: 12px;
+        line-height: 1.9;
+      }
+      ol.steps li {
+        margin-bottom: 2px;
+      }
+      code {
+        display: inline-block;
+        padding: 1px 6px;
+        margin: 1px 0;
+        border: 1px solid var(--rule);
+        border-radius: 2px;
+        background: #12151f;
+        color: var(--amber);
+        font:
+          11.5px ui-monospace,
+          Consolas,
+          monospace;
+        /* 玩家要把這一行複製到 Steam 去 —— 選得起來是這個元素的全部用途 */
+        user-select: text;
       }
 
       /* --- 未實作的頁 --- */
@@ -560,15 +593,29 @@
           id: "settings",
           label: "設置",
           subs: [
-            { id: "profiles", label: "配置" },
             { id: "link", label: "連線" },
             { id: "startup", label: "啟動" },
             { id: "update", label: "更新" },
             { id: "log", label: "記錄" },
             { id: "about", label: "關於" },
+            // ⚠ **「配置」是整個介面裡優先級最低的一格，而且預設看不見。**
+            //
+            // 它管的是多開（一個視窗管一個遊戲客戶端，要管兩個就開兩份）。
+            // 預設的使用者不知道有這回事，也不需要知道 —— 裝完就是一個視窗，
+            // 埠、中間人埠、「開新實例」對他全都是雜訊。
+            //
+            // 要打開它得自己去 關於 那頁最底下勾「進階：同時管兩個遊戲客戶端」。
+            // 排在關於後面是刻意的：找得到的人本來就是在找它。
+            { id: "profiles", label: "配置", advanced: true },
           ],
         },
       ];
+
+      /** 這個大分頁現在該顯示哪幾格。進階的那幾格只有玩家自己打開才出現。 */
+      function subsOf(t) {
+        const multi = snap?.store?.multiProfile === true;
+        return t.subs.filter((s) => !s.advanced || multi);
+      }
 
       let tab = "battle";
       let sub = "ready";
@@ -594,7 +641,7 @@
             `<button data-tab="${t.id}" aria-selected="${t.id === tab}">${esc(t.label)}</button>`,
         ).join("");
         const current = TABS.find((t) => t.id === tab);
-        $("side").innerHTML = current.subs
+        $("side").innerHTML = subsOf(current)
           .map(
             (s) =>
               `<button data-sub="${s.id}" class="${s.todo ? "todo" : ""}" aria-selected="${
@@ -608,7 +655,7 @@
         const id = e.target.closest("button")?.dataset.tab;
         if (!id || id === tab) return;
         tab = id;
-        sub = TABS.find((t) => t.id === id).subs[0].id;
+        sub = subsOf(TABS.find((t) => t.id === id))[0].id;
         renderChrome();
         renderBody();
       });
@@ -625,6 +672,9 @@
       // 狀態列
       // =====================================================================
       const LINK_TEXT = {
+        // ⚠ idle 不是錯誤，是「還不需要連」。跟 offline 分開講是刻意的 ——
+        // 混成同一句的話，玩家在大廳看到「沒連上中間人」會以為壞了。
+        idle: "還沒進對戰",
         offline: "沒連上中間人",
         solo: "還沒配到對手",
         paired: "已配到對手",
@@ -634,9 +684,13 @@
       function renderFooter() {
         const st = snap?.status;
         const p = snap?.profile;
+        // ⚠ 埠號只在多開時出現。沒開多開的人只有一個客戶端，兩個數字對他而言
+        // 是「我是不是該去設定什麼」的焦慮來源，不是資訊。
+        const multi = snap?.store?.multiProfile === true;
         $("ver").textContent = snap?.version ? `v${snap.version}` : "";
-        $("who").textContent = p ? `${p.name}　遊戲 :${p.port}　中間人 :${p.linkPort}` : "";
-        $("fProfile").textContent = p ? `${p.name} :${p.port}` : "—";
+        $("who").textContent =
+          p && multi ? `${p.name}　遊戲 :${p.port}　中間人 ${esc(p.link)}` : "";
+        $("fProfile").textContent = p ? (multi ? `${p.name} :${p.port}` : p.name) : "—";
         $("dot").className =
           "dot " + (!st || !st.connected ? "" : st.link === "paired" ? "paired" : "solo");
         $("fGame").textContent = !st
@@ -861,21 +915,52 @@
         ]);
 
       // --- 設置 › 配置 ------------------------------------------------------
+      /**
+       * 那一份配置的遊戲埠現在是什麼狀況。
+       *
+       * ⚠ **自己那一列跟別人那一列說的不是同一件事，而那個差別必須看得出來。**
+       *
+       * 自己：引擎真的連著，所以講得出「對戰中」。
+       * 別人：只有主程序每四秒敲一次 `/json/version` 的結果 —— 那只回答
+       *       「那個埠上有沒有遊戲」，**回答不了「有沒有插件在管它」**
+       *       （那是另一個 process，這個視窗問不到）。
+       *
+       * 混成同一句話的話，玩家會以為另一個客戶端已經被保護了。
+       */
+      function portStatus(p, self) {
+        const alive = snap?.gamePorts?.[p.port];
+        if (self) {
+          const st = snap?.status;
+          if (!st) return '<span class="dim">啟動中…</span>';
+          if (st.connected) return `<span class="good">${st.armed ? "對戰中" : "已接上"}</span>`;
+          return alive
+            ? '<span class="warn">遊戲開著，連線中…</span>'
+            : '<span class="dim">等遊戲…</span>';
+        }
+        if (alive === undefined) return '<span class="dim">檢查中…</span>';
+        return alive ? '<span class="good">遊戲開著</span>' : '<span class="dim">沒有回應</span>';
+      }
+
       PAGES["settings/profiles"] = () => {
         const s = snap?.store;
         if (!s) return "";
+        // 只有一份配置時不必標「← 這個視窗」—— 那句話是用來在**兩份以上**裡
+        // 指出誰是誰的，清單只有一行時它只是在說廢話。
+        const many = s.profiles.length > 1;
         const rows = s.profiles
           .map((p) => {
             const self = p.id === snap.profile.id;
             return `<tr class="${self ? "self" : ""}" data-id="${p.id}">
               <td><input type="text" data-field="name" value="${esc(p.name)}" />
-                  ${self ? '<div class="self-mark">← 這個視窗</div>' : ""}</td>
+                  ${self && many ? "" : ""}</td>
               <td><select data-field="kind">
                     <option value="desktop" ${p.kind === "desktop" ? "selected" : ""}>桌面版</option>
                     <option value="web" ${p.kind === "web" ? "selected" : ""}>網頁版</option>
                   </select></td>
               <td><input type="number" data-field="port" value="${p.port}" min="1" max="65535" /></td>
-              <td><input type="number" data-field="linkPort" value="${p.linkPort}" min="1" max="65535" /></td>
+              <td style="white-space:nowrap">${portStatus(p, self)}</td>
+              <td><input type="text" data-field="link" value="${esc(p.link)}"
+                         title="${esc(p.link)}" /></td>
               <td style="white-space:nowrap">
                 <button class="gene" data-act="launch" ${self ? "disabled" : ""}>開新實例</button>
                 <button class="gene" data-act="dup">複製</button>
@@ -890,14 +975,17 @@
           head("配置", "一份配置管一個遊戲客戶端。要同時管兩個就開兩份。") +
           `<div class="card">
              <table class="profiles">
-               <thead><tr><th>名稱</th><th>客戶端</th><th>遊戲埠</th><th>中間人埠</th><th></th></tr></thead>
+               <thead><tr><th>名稱</th><th>客戶端</th><th>遊戲埠</th><th>狀態</th><th>中間人</th><th></th></tr></thead>
                <tbody id="profileRows">${rows}</tbody>
              </table>
              <div style="margin-top:10px"><button class="gene" id="addProfile">新增配置</button></div>
              <div class="hint">
                ⚠ <b>改埠要重開那個實例才生效</b> —— 引擎綁在啟動時的埠上。<br />
                ⚠ 兩份配置<b>不能用同一個遊戲埠</b>；撞到的話第二份會開不起來（Windows 的目錄鎖擋掉）。<br />
-               中間人埠則相反：要跟對手用<b>同一個</b>，預設值就是為了不用設定。
+               <b>狀態</b>只說那個埠上<b>有沒有遊戲在回話</b>。別份配置看不到「插件有沒有在管它」——
+               一個視窗只管一個客戶端。<br />
+               中間人<b>不用改</b>：預設就是雲端那一個，跟所有玩家共用。<br />
+               　留空＝雲端（預設）　<b>local</b>＝同一台電腦上的另一個插件（開發用）
              </div>
            </div>` +
           (snap.ephemeral
@@ -910,19 +998,89 @@
       };
 
       // --- 設置 › 連線 ------------------------------------------------------
+      /**
+       * 「怎麼讓插件接得到遊戲」。
+       *
+       * ⚠ **這一段必須留在畫面上，不能只寫在 docs 裡。** CDP 的
+       * `--remote-debugging-port` **只能在啟動時指定**，沒辦法對已經在跑的遊戲
+       * 補掛 —— 所以在托盤還沒有「幫你開遊戲」那個功能之前，玩家一定得自己去
+       * Steam 設一次。而會需要這段話的人，正是那個對著「等遊戲…」不知道下一步
+       * 要做什麼的人：他不會去翻 GitHub 上的文件。
+       *
+       * 桌面版與網頁版**設定的地方完全不同**，所以分開講 —— 混在一起的話，
+       * 網頁版的玩家會去改一個對他毫無作用的欄位，然後以為插件壞了。
+       */
+      function howToConnect(p) {
+        const port = p?.port ?? 9333;
+        if (p?.kind === "web") {
+          return `<div class="card">
+             <div class="row"><span><b>接不上？網頁版的埠不在 Steam 設</b></span></div>
+             <div class="hint">
+               網頁版的遊戲外殼只做一件事：拿 Steam 票券 → 開瀏覽器 → <b>自己關掉</b>。
+               所以能掛 CDP 的是<b>那個瀏覽器</b>，不是遊戲程序。
+             </div>
+             <ol class="steps">
+               <li>找到遊戲開瀏覽器用的那支 <code>launch-chrome.cmd</code></li>
+               <li>把裡面的 <code>--remote-debugging-port=…</code> 改成
+                   <code>${port}</code>（<b>檢查埠的那一行也要一起改</b>）</li>
+               <li><b>把 Chrome 完全關掉</b>，再從遊戲開一次</li>
+             </ol>
+             <div class="hint">
+               ⚠ <b>Steam 的啟動選項要清空</b> —— 網頁版的外殼不吃那個參數。<br />
+               ⚠ <b>Chrome 一定要先全部關掉。</b> 同一個 <code>--user-data-dir</code>
+               已經有實例在跑時，新的那次只會開一個分頁，
+               <b>debug port 參數會被整個忽略</b>，埠停在舊的值 —— 而畫面上沒有任何錯誤。
+             </div>
+           </div>`;
+        }
+        return `<div class="card">
+           <div class="row"><span><b>接不上？在 Steam 設一次就好</b></span></div>
+           <div class="hint">
+             CDP 的 <b>debug port 只能在啟動時指定</b>，沒辦法對已經在跑的遊戲補掛。
+             插件<b>不會替你關掉正在打的遊戲</b>，所以這件事要你自己做一次。
+           </div>
+           <ol class="steps">
+             <li>Steam 遊戲庫 → 對 <b>UNLIGHT:Revive</b> 按右鍵 → <b>內容…</b></li>
+             <li>在「一般」分頁裡找到 <b>啟動選項</b></li>
+             <li>填入這一行（<b>整行就這樣，前後不要加別的</b>）：<br />
+                 <code>--remote-debugging-port=${port}</code></li>
+             <li>關掉那個視窗（Steam 會自己存）</li>
+             <li><b>把遊戲完全關掉，再從 Steam 開一次</b></li>
+           </ol>
+           <div class="hint">
+             ⚠ 這裡的數字要跟上面那個<b>遊戲 CDP 埠</b>一樣。改了一邊就要改另一邊。<br />
+             ⚠ <b>遊戲一開就自己關掉？</b>那不是失敗，是<b>網頁版</b>的
+             <code>app.asar</code> 正在生效（約 153 KB）。它的工作就是開瀏覽器然後退出。
+             要用桌面版就得換回視窗版那份（約 404 MB）。<br />
+             ⚠ <b>從 VS Code 的終端機開遊戲會 exit 9</b>（<code>ELECTRON_RUN_AS_NODE</code>
+             被繼承，Electron 被當成純 Node 跑）。從 Steam 開不會有這個問題。
+           </div>
+         </div>`;
+      }
+
       PAGES["settings/link"] = () => {
         const st = snap?.status;
         const p = snap?.profile;
+        // ⚠ 中間人的那兩行只在多開時出現。目前的中間人**只聽 127.0.0.1**，
+        // 也就是只把同一台電腦上的兩份插件配成一對 —— 沒開多開的人不管把它
+        // 設成幾號都不會有任何效果，露出來只會讓他以為自己漏設了什麼。
+        const multi = snap?.store?.multiProfile === true;
         return (
           head("連線", "這個視窗接的是哪一個客戶端。") +
           `<div class="card">
-             <div class="row"><span class="dim">配置</span><span>${esc(p?.name ?? "—")}</span></div>
-             <div class="row"><span class="dim">遊戲 CDP 埠</span><span>:${p?.port}</span></div>
-             <div class="row"><span class="dim">中間人埠</span><span>:${p?.linkPort}</span></div>
-             <div class="row"><span class="dim">我是中間人</span><span>${
-               st?.hosting ? "是" : "否（連到別人開的）"
+             <div class="row"><span class="dim">客戶端</span><span>${
+               p?.kind === "web" ? "網頁版" : "桌面版"
              }</span></div>
-             <div class="hint">埠在「配置」那頁改。</div>
+             <div class="row"><span class="dim">遊戲 CDP 埠</span><span>:${p?.port}</span></div>
+             ${
+               multi
+                 ? `<div class="row"><span class="dim">中間人</span><span>${esc(p?.link ?? "—")}</span></div>
+                    <div class="row"><span class="dim">我是中間人</span><span>${
+                      st?.hosting ? "是" : "否（連到別人開的）"
+                    }</span></div>
+                    <div class="hint">埠在「配置」那頁改。</div>`
+                 : ""
+             }
            </div>
            <div class="card">
              <div class="row"><span class="dim">遊戲</span><span>${
@@ -937,13 +1095,7 @@
              }</span></div>
              ${st?.error ? `<div class="hint warn">⚠ ${esc(st.error)}</div>` : ""}
            </div>
-           <div class="card">
-             <div class="hint" style="margin-top:0">
-               接不上的話：CDP 的 <b>--remote-debugging-port 只能在啟動時指定</b>，
-               沒辦法對已經在跑的遊戲補掛。遊戲已經開著就要重開一次，
-               而插件<b>不會替你關掉正在打的遊戲</b>。
-             </div>
-           </div>`
+           ${howToConnect(p)}`
         );
       };
 
@@ -977,9 +1129,9 @@
            <div class="card">
              <div class="hint" style="margin-top:0">
                <b>怎麼讓遊戲一開插件就接上</b><br />
-               安裝後用「UNLIGHT:Revive（含 ULR Companion）」那個捷徑 ——
-               插件先起來，再由它帶參數啟動遊戲。<br />
-               ⚠ 繞過插件直接開遊戲的話，debug 埠沒開，插件永遠接不上。
+               在 Steam 的啟動選項裡設一次 debug port —— 步驟在
+               <b>設置 › 連線</b>那一頁。設好之後每次從 Steam 開遊戲，插件都會自己接上。<br />
+               ⚠ 沒設的話 debug 埠不會開，插件<b>永遠</b>接不上，而畫面上只會寫「等遊戲…」。
              </div>
            </div>`
         );
@@ -1009,7 +1161,15 @@
         head("記錄", "最近的動作。查「剛剛到底發生了什麼」用的。") +
         `<div class="card"><pre class="log" id="log">${esc(
           (snap?.log ?? []).join("\n") || "（還沒有記錄）",
-        )}</pre></div>`;
+        )}</pre></div>
+         <div class="card">
+           <div class="hint" style="margin-top:0">
+             這一頁只留最近 40 行，<b>完整記錄寫在檔案裡</b>（關掉插件也還在）：<br />
+             <code>${esc(snap?.logPath ?? "—")}</code><br />
+             回報問題時請附上它。<b>裡面不含任何遊戲內容</b> —— 沒有手牌、沒有牌組、
+             沒有對手是誰，房號也是截短的雜湊，可以直接貼。
+           </div>
+         </div>`;
 
       // --- 設置 › 關於 ------------------------------------------------------
       PAGES["settings/about"] = () =>
@@ -1029,8 +1189,36 @@
            </div>
          </div>
          <div class="card">
+           <div class="hint" style="margin-top:0">
+             <b>這個插件會連到哪裡、送什麼</b><br />
+             只有兩個對外連線，兩個都連到同一台伺服器（Cloudflare Workers）：<br />
+             · <b>中間人</b>（對戰中）—— 送<b>雜湊過的場次編號</b>與你的四個偏好設定<br />
+             · <b>檢查更新</b>（每小時一次）—— 只問「最新版是哪一版」<br />
+             <br />
+             <b>不會送出去的東西：</b>你的名字、Steam 帳號或 token、對手是誰、
+             任何一張手牌或牌組內容、對戰結果。<br />
+             伺服器只回答一個問題：<b>「這兩條連線在不在同一場對戰」</b> ——
+             場次編號是 SHA-256 截斷過的，它<b>認不出那是哪一場，也認不出你是誰</b>。<br />
+             <br />
+             ⚠ 沒進對戰時<b>完全不連線</b>。中間人連不上時自動退回單邊模式，
+             功能會少，但不會壞。
+           </div>
+         </div>
+         <div class="card">
            <button class="gene" data-link="https://github.com/UnlightPlugin/ulr-companion">原始碼與問題回報</button>
            <button class="gene" data-link="https://ulgg.online/">ULGG</button>
+         </div>
+         <div class="card">
+           <label class="toggle">
+             <input type="checkbox" id="multi" ${snap?.store?.multiProfile ? "checked" : ""} />
+             <span><b>進階：同時管兩個遊戲客戶端</b>
+               <div class="hint">
+                 平常不需要。<b>一個視窗管一個遊戲</b>，裝好就是這樣，不必設定任何東西。<br />
+                 打開之後左邊會多一格「配置」（在這一頁下面），托盤選單會多一個「開新實例」，
+                 狀態列會開始顯示埠號 —— 那些是給要同時開兩個帳號的人用的。
+               </div>
+             </span>
+           </label>
          </div>`;
 
       // =====================================================================
@@ -1049,12 +1237,13 @@
         }
         if (t.id === "atLogin") return void options({ launchAtLogin: t.checked });
         if (t.id === "startMin") return void options({ startMinimized: t.checked });
+        if (t.id === "multi") return void options({ multiProfile: t.checked });
 
         const row = t.closest("tr[data-id]");
         if (row && t.dataset.field) {
           editing = null;
           const field = t.dataset.field;
-          const value = field === "port" || field === "linkPort" ? Number(t.value) : t.value;
+          const value = field === "port" ? Number(t.value) : t.value;
           const patch = { [field]: value };
           // 換客戶端種類時順手把埠帶到那一種的預設，玩家少改一個欄位。
           if (field === "kind") {
@@ -1118,6 +1307,12 @@
         // 狀態列照更新（它跟輸入無關，而且那才是玩家在等的資訊）。
         if (dragging || (editing && document.activeElement === editing)) return;
         editing = null;
+        // ⚠ 側邊那排會隨「進階：多開」增減，所以每次套用快照都要重畫，不能只在
+        // 切分頁時畫。而關掉多開的那一刻若玩家正站在「配置」上，那一格已經不
+        // 存在了 —— 退回第一格，不要把他留在一片空白上。
+        const visible = subsOf(TABS.find((t) => t.id === tab));
+        if (!visible.some((s) => s.id === sub)) sub = visible[0].id;
+        renderChrome();
         renderBody();
       }
 

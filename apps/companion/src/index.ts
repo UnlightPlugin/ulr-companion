@@ -73,7 +73,10 @@ function usage(): void {
   console.log("                              預設濾掉心跳，--all 看全部");
   console.log("  arbiter [--port N] [--policy either|opponent|never] [--deadline 秒]");
   console.log("       [--phase-seconds N] [--hazard-shorten N] [--no-ready]");
-  console.log(`       [--link-port N] [--no-link]   （中間人預設 :${DEFAULT_LINK_PORT}）`);
+  console.log("       [--link <位址>] [--no-link]   （預設是雲端中間人，不用設）");
+  console.log(
+    `                              --link local（本機 :${DEFAULT_LINK_PORT}，開發用）｜wss://…`,
+  );
   console.log("                              移動階段仲裁（⚠ 會改變遊戲行為）");
   console.log("                              --phase-seconds 是「我希望這個階段多長」，");
   console.log("                              雙方取比較長的那個當共同值；沒配到對手就不縮短");
@@ -524,12 +527,13 @@ async function cmdArbiter(args: string[]): Promise<number> {
     return 1;
   }
   const secondsRaw = parseFlag(args, "--seconds");
-  const linkPortRaw = parseFlag(args, "--link-port");
+  // `--link-port`（純數字）是舊用法，parseLinkTarget 把數字當成本機的埠。
+  const linkRaw = parseFlag(args, "--link") ?? parseFlag(args, "--link-port");
   const deadlineRaw = parseFlag(args, "--deadline");
 
   const engine = new ArbiterEngine({
     port: parsePort(args),
-    ...(linkPortRaw !== undefined ? { linkPort: Number(linkPortRaw) } : {}),
+    ...(linkRaw !== undefined ? { link: linkRaw } : {}),
     ...(args.includes("--no-link") ? { noLink: true } : {}),
     policy: policyRaw,
     ...(deadlineRaw !== undefined ? { deadlineSeconds: Number(deadlineRaw) } : {}),

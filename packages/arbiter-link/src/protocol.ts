@@ -287,6 +287,27 @@ export type ServerMessage =
 
 export type LinkMessage = ClientMessage | ServerMessage;
 
+// ---------------------------------------------------------------------------
+// 關閉代碼
+// ---------------------------------------------------------------------------
+
+/**
+ * 中間人主動斷線時用的代碼。**1000～2999 是 WebSocket 規格保留的**，
+ * 自訂一律 4000 以上。
+ *
+ * ⚠ **這是協定的一部分，不是伺服器的內部細節。** 客戶端必須分得出來 ——
+ * 4001 要立刻用新網址重連，4008 要**停下來**。全部混成同一個代碼的話，
+ * 客戶端唯一能做的就是無腦重連，而那對 4008 剛好是最糟的反應（它會一直
+ * 被踢，而且是自己造成的）。
+ */
+
+/** 你連的那間房不是你說的那間 —— 換個網址重連。 */
+export const CLOSE_WRONG_ROOM = 4001;
+/** 你送太快了。**不要立刻重連。** */
+export const CLOSE_TOO_FAST = 4008;
+/** 那則訊息太大。協定裡不存在這麼大的訊息，所以這通常代表有東西壞了。 */
+export const CLOSE_TOO_BIG = 4009;
+
 export function encode(message: LinkMessage): string {
   return JSON.stringify(message);
 }

@@ -1,0 +1,16 @@
+{
+  // ⚠ 這一份是**獨立**的，根 tsconfig 的 `exclude` 把 apps/link-worker 排掉了。
+  // 理由：這裡的全域是 Cloudflare 的 runtime（`WebSocketPair`、`DurableObject`），
+  // 根設定的 `types: ["node"]` 在這裡是錯的，混在一起兩邊都會滿江紅。
+  //
+  // `paths`（@ulr/* 指到原始碼）是從根繼承來的，`baseUrl` 也還是指到 repo 根 ——
+  // TypeScript 的 baseUrl 相對於**宣告它的那份**設定檔解析，不是相對這一份。
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "types": ["@cloudflare/workers-types"]
+  },
+  // ⚠ 一定要覆寫。`include`／`exclude` 會從 extends 來的那份繼承，而那份正好
+  // 把這個資料夾排除掉了 —— 不覆寫的話這裡會變成「一個檔案都不檢查」而且不報錯。
+  "include": ["src/**/*", "test/**/*"],
+  "exclude": []
+}

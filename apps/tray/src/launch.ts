@@ -45,6 +45,13 @@ export function launchInstance(profileId: string): void {
 }
 
 /**
+ * 開機自動啟動時帶的參數：一律縮到托盤 —— 開機就跳三個視窗出來沒有人會喜歡。
+ *
+ * ⚠ **寫入與讀取必須用同一份。** 見 `launchAtLoginEnabled()`。
+ */
+const STARTUP_ARGS = ["--startup"];
+
+/**
  * 隨 Windows 開機啟動。
  *
  * ⚠ **開發時不要真的設下去。** `process.execPath` 在開發時是 node_modules
@@ -53,15 +60,26 @@ export function launchInstance(profileId: string): void {
  */
 export function setLaunchAtLogin(enabled: boolean): void {
   if (!app.isPackaged) return;
-  app.setLoginItemSettings({
-    openAtLogin: enabled,
-    // 開機自動啟動時一律縮到托盤 —— 開機就跳三個視窗出來沒有人會喜歡。
-    args: ["--startup"],
-  });
+  app.setLoginItemSettings({ openAtLogin: enabled, args: STARTUP_ARGS });
 }
 
-/** 目前真的有設開機啟動嗎。以系統為準，不是以設定檔為準。 */
+/**
+ * 目前真的有設開機啟動嗎。以系統為準，不是以設定檔為準。
+ *
+ * ⚠⚠ **`getLoginItemSettings()` 不帶參數問會得到錯的答案。** Windows 上的
+ * `openAtLogin` 是「登錄檔裡那一行**字串**跟 `路徑 + args` 完全一樣嗎」，而
+ * `args` 的預設值是**空陣列** —— 我們是帶著 `--startup` 寫進去的，所以不帶
+ * 參數問一定回 false。
+ *
+ * 症狀是「打勾打不上去」：登錄檔其實寫成功了，但推回畫面的快照說沒開，
+ * 重畫之後勾就彈回來。查的時候會往「IPC 沒通」「權限不足」找，而兩個都不是。
+ *
+ * `executableWillLaunchAtLogin` 是同一件事的另一個問法：它**忽略參數**，只問
+ * 「這個 exe 開機會不會被叫起來」，而且會把工作管理員裡的「已停用」算進去。
+ * 兩個都收，是為了不管哪一版 Electron 都不會再退化成「勾不起來」。
+ */
 export function launchAtLoginEnabled(): boolean {
   if (!app.isPackaged) return false;
-  return app.getLoginItemSettings().openAtLogin;
+  const settings = app.getLoginItemSettings({ args: STARTUP_ARGS });
+  return settings.openAtLogin || settings.executableWillLaunchAtLogin;
 }

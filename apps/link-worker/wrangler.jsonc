@@ -1,0 +1,39 @@
+// 雲端中間人的部署設定（階段 2）
+// ================================
+//   npm --workspace apps/link-worker run dev      本機跑（真的 workerd，不是模擬器）
+//   npm --workspace apps/link-worker run deploy   部署上去
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ulr-link",
+  "main": "src/index.ts",
+  // ⚠ **不要填「今天」。** workerd（wrangler 內附的那顆 runtime）支援的最新
+  // 日期是它自己發版的那天；填一個比它新的日期，`wrangler dev` 會直接起不來：
+  //   This Worker requires compatibility date "…", but the newest date
+  //   supported by this server binary is "…"
+  // 要往前推就先 `npm i -D wrangler@latest`，再改這裡。
+  "compatibility_date": "2026-08-08",
+
+  // ⚠ **這個旗標是必要的，不是順手加的。** `@ulr/arbiter-link/protocol` 的
+  // 檔頭有一行 `import { createHash } from "node:crypto"`（`roomKey()` 用的）。
+  // 中間人自己從來不算房號 —— 房號是客戶端算好送上來的 —— 但 import 寫在模組
+  // 頂層，打包時一定要解析得掉。沒有這個旗標的話 `wrangler deploy` 會在
+  // 「找不到 node:crypto」失敗，而錯誤訊息看起來完全不像是這個原因。
+  "compatibility_flags": ["nodejs_compat"],
+
+  // 一個 DO 實例 = 一間房。繫結名 ROOMS 對應 `index.ts` 的 `env.ROOMS`。
+  "durable_objects": {
+    "bindings": [{ "name": "ROOMS", "class_name": "LinkRoom" }],
+  },
+
+  // ⚠ `new_sqlite_classes`（不是 `new_classes`）：SQLite 版的 DO 才在免費方案
+  // 裡。我們一個位元組都沒有寫進 storage（狀態全掛在 WebSocket 上），但類別
+  // 註冊時仍然要指定儲存後端。
+  //
+  // ⚠ migrations 是**只能往前加**的清單。已經部署過的 tag 不要改、不要刪，
+  // 改了會讓 Cloudflare 認不出既有的 DO 類別。
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["LinkRoom"] }],
+
+  // console.log 會進 Cloudflare 的觀測後台。⚠ 因此 log 一律只印截短的房號，
+  // 見 `guard.ts` 的 `shortRoom()`。
+  "observability": { "enabled": true },
+}

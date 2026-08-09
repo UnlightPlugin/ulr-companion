@@ -78,7 +78,7 @@ export function removeProfile(id: string): ProfileStore {
 }
 
 export function updateOptions(
-  patch: Partial<Pick<ProfileStore, "launchAtLogin" | "startMinimized">>,
+  patch: Partial<Pick<ProfileStore, "launchAtLogin" | "startMinimized" | "multiProfile">>,
 ): ProfileStore {
   return mutate((s) => ({ ...s, ...patch }));
 }

@@ -23,19 +23,24 @@
  */
 
 import { join } from "node:path";
+import type { MenuItemConstructorOptions } from "electron";
 import { app, BrowserWindow, ipcMain, Menu, nativeImage, screen, shell, Tray } from "electron";
 import type { EngineStatus } from "@ulr/arbiter-engine";
 import { ArbiterEngine } from "@ulr/arbiter-engine";
 import type { LinkPrefs } from "@ulr/arbiter-link";
 import {
+  describeTarget,
   MAX_SPEED_FACTOR,
   MIN_PHASE_SECONDS,
   MIN_SPEED_FACTOR,
   MOVE_PHASE_TOTAL_SECONDS,
+  parseLinkTarget,
 } from "@ulr/arbiter-link";
+import { discoverDebuggerUrl } from "@ulr/cdp-adapter";
 import { trayIconPng } from "./icon.js";
 import type { IconState } from "./icon.js";
 import { launchAtLoginEnabled, launchInstance, setLaunchAtLogin } from "./launch.js";
+import { openLogFile } from "./log-file.js";
 import type { ClientKind, Profile, ProfileStore } from "./profiles.js";
 import {
   addProfile,
@@ -63,6 +68,7 @@ let store: ProfileStore = {
   lastUsedId: null,
   launchAtLogin: false,
   startMinimized: false,
+  multiProfile: false,
 };
 let profile: Profile;
 /** 這份配置是命令列臨時建的，不在清單裡 —— 改它不落地。 */
@@ -85,14 +91,88 @@ let engine: ArbiterEngine | null = null;
 let latest: EngineStatus | null = null;
 const logLines: string[] = [];
 
+/**
+ * 記錄同時寫進檔案。
+ *
+ * ⚠ 記憶體那份（`logLines`）上限 200 行、關掉就沒 —— 出事時**查不到任何東西**。
+ * 自動更新是靜默的、側通道是背景連的，真的被冒充或大規模斷線時，這份檔案是
+ * 唯一能回答「什麼時候開始的」的東西。內容限制見 `log-file.ts`。
+ */
+const logFile = openLogFile(app.getPath("userData"));
+
+function log(line: string): void {
+  logLines.push(line);
+  if (logLines.length > 200) logLines.shift();
+  logFile.write(line);
+}
+
+/**
+ * 每個遊戲埠上有沒有一個開著 debug port 的客戶端在回話。
+ *
+ * ⚠ **這是配置表唯一能對「別份配置」說的話。** 一個托盤實例只綁一個埠，引擎
+ * 也只看自己那一個 —— 它沒有任何辦法知道另一份配置的插件狀態（那是另一個
+ * process，甚至可能根本沒開）。但「那個埠上有沒有遊戲」是問得到的：CDP 的
+ * `/json/version` 就是拿來回答這件事的。
+ *
+ * 所以表格裡自己那一列顯示引擎的真實狀態，其他列只敢說「遊戲開著／沒有回應」。
+ * 混成同一句話會讓玩家以為插件已經在管另一個客戶端了。
+ */
+const gamePorts = new Map<number, boolean>();
+let probeTimer: ReturnType<typeof setInterval> | null = null;
+
+/** 探測間隔。玩家盯著設定頁看的時候要夠即時，但這是每 N 秒的 HTTP 請求。 */
+const PROBE_INTERVAL_MS = 4_000;
+/** 單次探測的上限。埠沒人聽的話 loopback 會立刻 ECONNREFUSED，這是防它掛住。 */
+const PROBE_TIMEOUT_MS = 800;
+
+const probeFetch: typeof fetch = (input, init) =>
+  fetch(input, { ...init, signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
+
+/**
+ * 把每一份配置的遊戲埠敲一遍。
+ *
+ * ⚠ **只在設定視窗看得見的時候做。** 托盤程式大部分時間是背景常駐的，
+ * 沒人在看的時候每四秒發三個 HTTP 請求是純粹的浪費（而且會出現在防火牆與
+ * 資源監視器上，看起來像插件在偷偷做什麼）。
+ */
+async function probeGamePorts(): Promise<void> {
+  if (window === null || !window.isVisible()) return;
+  const ports = [...new Set(store.profiles.map((p) => p.port))];
+  const seen = await Promise.all(
+    ports.map(async (port): Promise<readonly [number, boolean]> => {
+      try {
+        // 重用 cdp-adapter 那支 —— 它已經處理過「回應裡沒有 webSocketDebuggerUrl」
+        // 這種「埠有人聽但不是遊戲」的情況。
+        await discoverDebuggerUrl(port, probeFetch);
+        return [port, true];
+      } catch {
+        return [port, false];
+      }
+    }),
+  );
+  gamePorts.clear();
+  for (const [port, alive] of seen) gamePorts.set(port, alive);
+  pushState();
+}
+
 /** 托盤圖示的顏色語意見 `icon.ts`：綠色只留給「兩邊真的講好了」。 */
 function iconState(status: EngineStatus | null): IconState {
   if (status === null || !status.connected) return "idle";
   return status.link === "paired" ? "paired" : "solo";
 }
 
+/**
+ * 視窗標題與提示的開頭。
+ *
+ * ⚠ **只有多開打開時才寫配置名與埠。** 那兩個東西存在的唯一理由是「兩份實例
+ * 同時開著時分得出誰是誰」；只有一份的時候，它們對玩家而言是兩個看不懂的數字。
+ */
+function heading(): string {
+  return store.multiProfile ? `ULR Companion — ${profile.name} :${profile.port}` : "ULR Companion";
+}
+
 function tooltip(status: EngineStatus | null): string {
-  const head = `ULR Companion — ${profile.name} :${profile.port}`;
+  const head = heading();
   if (status === null) return head;
   const parts = [head];
   parts.push(
@@ -116,9 +196,15 @@ function refreshTray(): void {
 function buildMenu(): Menu {
   const prefs = engine?.prefs;
   const others = store.profiles.filter((p) => p.id !== profile.id);
-  return Menu.buildFromTemplate([
+  const items: MenuItemConstructorOptions[] = [
     {
-      label: `${profile.name}  遊戲 :${profile.port}  中間人 :${profile.linkPort}`,
+      // 只有一份實例時，「配置名 + 兩個埠」對玩家沒有意義 —— 換成他真正在等的
+      // 那件事：插件到底接上遊戲了沒。
+      label: store.multiProfile
+        ? `${profile.name}  遊戲 :${profile.port}  中間人 ${describeTarget(parseLinkTarget(profile.link))}`
+        : latest?.connected === true
+          ? "已接上遊戲"
+          : "等遊戲…",
       enabled: false,
     },
     {
@@ -136,21 +222,29 @@ function buildMenu(): Menu {
       checked: prefs?.readyEnabled === true,
       click: (item) => applyPrefs({ readyEnabled: item.checked }),
     },
-    { type: "separator" },
-    {
-      label: "開新實例",
-      // 只剩自己這一份時就沒有別的可開了 —— 引導玩家去設定頁新增。
-      submenu:
-        others.length === 0
-          ? [{ label: "（沒有其他配置，去設定 › 配置新增）", enabled: false }]
-          : others.map((p) => ({
-              label: `${p.name}  :${p.port}`,
-              click: () => launchInstance(p.id),
-            })),
-    },
-    { type: "separator" },
-    { label: "結束", click: () => void quit() },
-  ]);
+  ];
+
+  // ⚠ 多開沒打開就**整段不出現**。留一個灰掉的「開新實例」只會讓沒聽過多開的
+  // 玩家停下來想「我是不是漏了什麼」——那正是這次要拿掉的東西。
+  if (store.multiProfile) {
+    items.push(
+      { type: "separator" },
+      {
+        label: "開新實例",
+        // 只剩自己這一份時就沒有別的可開了 —— 引導玩家去設定頁新增。
+        submenu:
+          others.length === 0
+            ? [{ label: "（沒有其他配置，去設定 › 配置新增）", enabled: false }]
+            : others.map((p) => ({
+                label: `${p.name}  :${p.port}`,
+                click: () => launchInstance(p.id),
+              })),
+      },
+    );
+  }
+
+  items.push({ type: "separator" }, { label: "結束", click: () => void quit() });
+  return Menu.buildFromTemplate(items);
 }
 
 function applyPrefs(next: Partial<LinkPrefs>): void {
@@ -178,6 +272,10 @@ interface Snapshot {
   version: string;
   packaged: boolean;
   launchAtLogin: boolean;
+  /** 記錄檔在哪。回報問題時要請玩家附上它。 */
+  logPath: string;
+  /** 遊戲埠 → 那個埠上有沒有客戶端在回話。見 `gamePorts` 的註解。 */
+  gamePorts: Record<number, boolean>;
   limits: { minSeconds: number; maxSeconds: number; minSpeed: number; maxSpeed: number };
 }
 
@@ -192,6 +290,8 @@ function snapshot(): Snapshot {
     version: VERSION,
     packaged: app.isPackaged,
     launchAtLogin: launchAtLoginEnabled(),
+    logPath: logFile.path,
+    gamePorts: Object.fromEntries(gamePorts),
     limits: {
       minSeconds: MIN_PHASE_SECONDS,
       maxSeconds: MOVE_PHASE_TOTAL_SECONDS,
@@ -221,8 +321,8 @@ function showWindow(): void {
     minWidth: 680,
     minHeight: 560,
     show: false,
-    // 兩份實例同時開著時，標題是唯一分得出誰是誰的東西。
-    title: `ULR Companion — ${profile.name} :${profile.port}`,
+    // 兩份實例同時開著時，標題是唯一分得出誰是誰的東西 —— 所以只有多開時才寫。
+    title: heading(),
     autoHideMenuBar: true,
     backgroundColor: "#12151f",
     webPreferences: {
@@ -233,6 +333,19 @@ function showWindow(): void {
       sandbox: true,
     },
   });
+  // ⚠⚠ **這個視窗只能顯示我們自己那一個檔案，不准去任何別的地方。**
+  //
+  // 它的內容是寫死的本機 HTML，所以正常情況下**永遠不會**有導覽或開新視窗 ——
+  // 也就是說，這兩個處理器一旦真的被觸發，那本身就代表出事了（渲染層被塞了
+  // 東西）。擋在這裡的代價是零，不擋的代價是那段東西可以把整個視窗換成
+  // 一個遠端頁面，而玩家看到的還是同一個標題列。
+  //
+  // 外部連結有專門的入口（`ulr:open-external`，主程序那端有白名單）。
+  window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  window.webContents.on("will-navigate", (event) => event.preventDefault());
+  // 附掛 webview 這個 app 從來不需要，直接關掉整個攻擊面。
+  window.webContents.on("will-attach-webview", (event) => event.preventDefault());
+
   // ⚠ 頁面的 <title> 會蓋掉 BrowserWindow 的標題。擋掉它 —— 兩份實例同時開著
   // 時，工作列上的標題是唯一分得出「這個視窗管哪個客戶端」的東西。
   window.on("page-title-updated", (event) => event.preventDefault());
@@ -250,7 +363,11 @@ function showWindow(): void {
     positionNearTray();
     window?.show();
     pushState();
+    // 立刻探一次 —— 不要讓玩家對著「檢查中…」乾等一個間隔。
+    void probeGamePorts();
   });
+  // 從托盤再叫出來時同理。
+  window.on("show", () => void probeGamePorts());
 }
 
 /** 開在滑鼠附近，不要跳到主螢幕正中央 —— 雙開時那會蓋住另一個。 */
@@ -270,6 +387,8 @@ function positionNearTray(): void {
 let quitting = false;
 async function quit(): Promise<void> {
   quitting = true;
+  if (probeTimer !== null) clearInterval(probeTimer);
+  probeTimer = null;
   // ⚠ 一定要等引擎收乾淨：它會把頁面上的攔截拆掉。留著孤兒的話遊戲裡的
   // OK 鈕會有 3 秒（心跳）處在沒人管的狀態。
   await engine?.stop();
@@ -291,12 +410,11 @@ app.whenReady().then(() => {
 
   engine = new ArbiterEngine({
     port: profile.port,
-    linkPort: profile.linkPort,
+    link: profile.link,
     prefs: profile.prefs,
     readyTint: profile.readyTint,
     onLog: (line) => {
-      logLines.push(line);
-      if (logLines.length > 200) logLines.shift();
+      log(line);
       pushState();
     },
     onStatus: (status) => {
@@ -347,7 +465,7 @@ app.whenReady().then(() => {
     (
       _event,
       id: string,
-      patch: { name?: string; port?: number; linkPort?: number; kind?: ClientKind },
+      patch: { name?: string; port?: number; link?: string; kind?: ClientKind },
     ) => {
       editProfile(id, patch);
       return snapshot();
@@ -361,10 +479,18 @@ app.whenReady().then(() => {
 
   ipcMain.handle(
     "ulr:options",
-    (_event, patch: { launchAtLogin?: boolean; startMinimized?: boolean }) => {
+    (
+      _event,
+      patch: { launchAtLogin?: boolean; startMinimized?: boolean; multiProfile?: boolean },
+    ) => {
       store = updateOptions(patch);
       // 登錄檔是真實來源，設定檔只是記錄玩家的意圖。兩個都要動。
       if (patch.launchAtLogin !== undefined) setLaunchAtLogin(patch.launchAtLogin);
+      // 多開開關會改變標題與托盤選單的內容，兩個都要當場跟上。
+      if (patch.multiProfile !== undefined) {
+        window?.setTitle(heading());
+        refreshTray();
+      }
       pushState();
       return snapshot();
     },
@@ -378,18 +504,20 @@ app.whenReady().then(() => {
     return true;
   });
 
+  probeTimer = setInterval(() => void probeGamePorts(), PROBE_INTERVAL_MS);
+
   void engine.start();
   // 靜默下載、安全的時機才套用。細節與那個「安全」的定義見 updater.ts。
   startAutoUpdate({
     currentVersion: VERSION,
     isBusy: () => latest?.armed === true,
-    onLog: (l) => logLines.push(l),
+    onLog: (l) => log(l),
   });
 
   // ⚠ 更新後由安裝檔叫起來的那一次**不要跳視窗**。玩家可能正在打字、
   // 正在看牌組 —— 更新本來就該是他察覺不到的事，跳一個視窗出來剛好相反。
   const fromUpdate = consumeUpdatedFlag();
-  if (fromUpdate) logLines.push(`✓ 已更新到 ${VERSION}`);
+  if (fromUpdate) log(`✓ 已更新到 ${VERSION}`);
   // `--startup` 是開機自動啟動帶的旗標。那個情境下也不要跳視窗。
   if (!fromUpdate && !process.argv.includes("--startup") && !store.startMinimized) showWindow();
 });

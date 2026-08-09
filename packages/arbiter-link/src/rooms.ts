@@ -46,6 +46,30 @@ export class RoomRegistry {
     return [...this.#members.values()].filter((m) => m.room === room);
   }
 
+  /** 這個連線的成員。沒 join 過就是 `null`。 */
+  memberOf(id: string): Member | null {
+    return this.#members.get(id) ?? null;
+  }
+
+  /**
+   * 把一個成員直接放回來，**不產生任何訊息**。
+   *
+   * ⚠ 這是給**雲端版**用的，本機 broker 不會叫它。Cloudflare 的 Durable Object
+   * 在連線閒置時會被移出記憶體（hibernation），醒來時是一個**全新的物件** ——
+   * `RoomRegistry` 這份記憶跟著沒了，但兩條 WebSocket 還連著。
+   *
+   * 醒來的那一刻要做的事是「把記憶重建成斷電前的樣子」，而不是「重新加入」：
+   * 走 `join()` 的話會對兩邊各補送一次 welcome／agreed，玩家會看到約定秒數
+   * 無緣無故閃一下；更糟的是 `ready` 會被重設成 false，剛按下的 OK 就這樣
+   * 掉了一次。所以這裡**只還原狀態，一個字都不送**。
+   *
+   * 狀態本身存在各自的 WebSocket 上（`serializeAttachment`），那是唯一能跨越
+   * hibernation 的地方。
+   */
+  restore(member: Member): void {
+    this.#members.set(member.id, { ...member });
+  }
+
   #peer(member: Member): Member | null {
     for (const other of this.#members.values()) {
       if (other.id !== member.id && other.room === member.room) return other;

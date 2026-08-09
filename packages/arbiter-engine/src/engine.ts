@@ -32,13 +32,12 @@
 
 import type { AgreedSettings, ForceReason, LinkPrefs, LinkStatus } from "@ulr/arbiter-link";
 import {
-  DEFAULT_LINK_PORT,
   effectiveCapSeconds,
   LinkNode,
-  LOBBY_ROOM_KEY,
   MIN_SPEED_FACTOR,
   MOVE_PHASE_TOTAL_SECONDS,
   normalizePrefs,
+  parseLinkTarget,
   roomKey,
   soloSettings,
 } from "@ulr/arbiter-link";
@@ -77,8 +76,14 @@ export const SPEED_RENEW_MS = Math.floor(DEFAULT_SPEED_LEASE_MS / 3);
 export interface EngineOptions {
   /** 遊戲的 CDP 埠。桌面版 9333、網頁版看你怎麼開。 */
   port?: number;
-  /** 中間人的埠。**兩個插件要用同一個**，預設值就是為了不用設定。 */
-  linkPort?: number;
+  /**
+   * 中間人在哪。**兩個插件要指到同一個**，預設值就是為了不用設定。
+   *
+   * 一個字串，`parseLinkTarget()` 看得懂的都收：`local`、`9350`、
+   * `wss://ulr-link.xxx.workers.dev`。舊的 `linkPort`（數字）也還吃得下 ——
+   * 純數字就是本機的那個埠。
+   */
+  link?: string;
   /** 完全不接側通道（單邊模式）。 */
   noLink?: boolean;
   policy?: CancelPolicy;
@@ -153,7 +158,8 @@ export class ArbiterEngine {
       title: null,
       seat: null,
       armed: false,
-      link: "offline",
+      // 還沒進對戰 —— 這不是「連不上」，是「還不需要連」。
+      link: "idle",
       hosting: false,
       // ⚠ 起始值是**單邊**設定，不是玩家自己選的秒數。沒配對到人就不縮短，
       // 而 UI 從第一幀起就該顯示這個事實。
@@ -215,8 +221,12 @@ export class ArbiterEngine {
 
     if (this.#options.noLink !== true) {
       this.#link = await LinkNode.start({
-        port: this.#options.linkPort ?? DEFAULT_LINK_PORT,
-        room: LOBBY_ROOM_KEY,
+        target: parseLinkTarget(this.#options.link),
+        // ⚠ **不是 LOBBY_ROOM_KEY。** `null` = 還沒進對戰 → 根本不連線。
+        // 大廳那個房號在本機無害，接上公網之後會變成「所有沒在對戰的人擠進
+        // 同一間房」，而且其中兩個會被真的配成一對。見 link-worker 的
+        // `parseRoomPath()`。
+        room: null,
         prefs: this.#prefs,
         onLog: (line) => this.#log(line),
         onChange: ({ status, agreed }) => {

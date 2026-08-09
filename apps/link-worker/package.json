@@ -1,0 +1,21 @@
+{
+  "name": "@ulr/link-worker",
+  "version": "0.0.0",
+  "private": true,
+  "description": "雲端中間人：Cloudflare Workers + Durable Objects。規則沿用 @ulr/arbiter-link，這裡只有膠水。",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "typecheck": "tsc -p . --noEmit"
+  },
+  "dependencies": {
+    "@ulr/arbiter-link": "*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250109.0",
+    "wrangler": "^4.0.0"
+  }
+}

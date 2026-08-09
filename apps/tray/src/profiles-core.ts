@@ -15,7 +15,7 @@
  */
 
 import type { LinkPrefs } from "@ulr/arbiter-link";
-import { DEFAULT_LINK_PORT, normalizePrefs } from "@ulr/arbiter-link";
+import { DEFAULT_LINK_TARGET, normalizePrefs } from "@ulr/arbiter-link";
 import { DEFAULT_DEBUG_PORT, normalizeTint } from "@ulr/cdp-adapter";
 
 /** 客戶端種類。只影響提示文字與預設埠，不影響接線方式（兩邊都是 CDP）。 */
@@ -27,8 +27,14 @@ export interface Profile {
   name: string;
   /** 遊戲的 CDP 埠。**這也是實例的身分**（見 `main.ts` 的 userData 分離）。 */
   port: number;
-  /** 中間人的埠。要跟對手用同一個，預設值就是為了不用設定。 */
-  linkPort: number;
+  /**
+   * 中間人在哪。**要跟對手指到同一個**，預設值就是為了不用設定。
+   *
+   * 一個字串而不是埠號，因為它現在有兩種可能（階段 3）：
+   * `local` = 同一台電腦上的另一個插件（雙開）；`wss://…` = 雲端的中間人，
+   * 那才配得到真正的對手。解析在 `parseLinkTarget()`，怎麼填都對。
+   */
+  link: string;
   kind: ClientKind;
   prefs: LinkPrefs;
   /**
@@ -54,6 +60,17 @@ export interface ProfileStore {
   launchAtLogin: boolean;
   /** 啟動時不要跳視窗，只留托盤圖示。 */
   startMinimized: boolean;
+  /**
+   * 進階：同時管兩個遊戲客戶端（多開）。**預設關閉。**
+   *
+   * ⚠ 這是給**完全不知道有多開這回事**的玩家設計的。關著的時候整套多開的
+   * 概念都不出現：沒有「配置」那一頁、托盤沒有「開新實例」、狀態列與視窗
+   * 標題不寫埠號。一個玩家裝完就是一個視窗管一個遊戲，不必知道埠是什麼。
+   *
+   * 打開之後「配置」才出現，而且**放在設置的最後一格（關於的下面）** ——
+   * 它是整個介面裡優先級最低的東西：只有已經知道自己要多開的人才會去找它。
+   */
+  multiProfile: boolean;
 }
 
 const DESKTOP_PORT = DEFAULT_DEBUG_PORT;
@@ -76,6 +93,18 @@ export function clampPort(value: unknown, fallback: number): number {
   return Number.isInteger(n) && n > 0 && n < 65536 ? n : fallback;
 }
 
+/**
+ * 中間人那一格。空的、壞的一律回預設（**雲端**）—— 這格填錯不該讓插件開不起來。
+ *
+ * ⚠ 只收字串。舊設定檔那個 `linkPort`（數字）**刻意不搬過來** —— 見
+ * `normalizeProfile()`。
+ */
+export function normalizeLink(raw: unknown): string {
+  if (typeof raw !== "string") return DEFAULT_LINK_TARGET;
+  const trimmed = raw.trim();
+  return trimmed === "" ? DEFAULT_LINK_TARGET : trimmed;
+}
+
 export function normalizeProfile(raw: unknown): Profile | null {
   if (typeof raw !== "object" || raw === null) return null;
   const r = raw as Record<string, unknown>;
@@ -86,7 +115,15 @@ export function normalizeProfile(raw: unknown): Profile | null {
     id,
     name: raw2 === "" ? (kind === "web" ? "網頁版" : "桌面版") : raw2,
     port: clampPort(r["port"], defaultPortFor(kind)),
-    linkPort: clampPort(r["linkPort"], DEFAULT_LINK_PORT),
+    // ⚠ **舊設定檔的 `linkPort` 刻意丟掉，不搬過來。**
+    //
+    // 它一定是某個本機的埠（那時候只有本機中間人），而本機中間人只配得到
+    // 同一台電腦上的另一個插件。搬過來的話，每個既有使用者升級之後都會停在
+    // 一個永遠配不到對手的中間人上，而畫面上完全看不出來 —— 狀態列寫
+    // 「還沒配到對手」，那句話在對手真的沒裝插件時也是同一句。
+    //
+    // 開發者要本機的話，在 進階 › 配置 那一格填 `local` 就有了。
+    link: normalizeLink(r["link"]),
     kind,
     prefs: normalizePrefs(r["prefs"] as Partial<LinkPrefs> | undefined),
     readyTint: normalizeTint(typeof r["readyTint"] === "number" ? r["readyTint"] : null),
@@ -98,7 +135,7 @@ export function defaultProfile(kind: ClientKind = "desktop"): Profile {
     id: newId(),
     name: kind === "web" ? "網頁版" : "桌面版",
     port: defaultPortFor(kind),
-    linkPort: DEFAULT_LINK_PORT,
+    link: DEFAULT_LINK_TARGET,
     kind,
     prefs: normalizePrefs(undefined),
     // 預設不染色 —— 玩家指定「官方原本的白色」是預設值。
@@ -112,6 +149,7 @@ export function emptyStore(): ProfileStore {
     lastUsedId: null,
     launchAtLogin: false,
     startMinimized: false,
+    multiProfile: false,
   };
 }
 
@@ -138,6 +176,9 @@ export function normalizeStore(raw: unknown): ProfileStore {
     lastUsedId: lastUsedId !== null && ids.has(lastUsedId) ? lastUsedId : null,
     launchAtLogin: r["launchAtLogin"] === true,
     startMinimized: r["startMinimized"] === true,
+    // ⚠ `=== true` 而不是「有值就算」：舊的設定檔沒有這個欄位，那時候的預設
+    // 就該是關閉。多開是使用者要**明確打開**的東西，不是繼承來的。
+    multiProfile: r["multiProfile"] === true,
   };
 }
 
@@ -196,7 +237,16 @@ export function updateIn(
 /**
  * 這個實例要用哪一份配置。
  *
- * 優先序：`--profile <id>` → `--port <n>` 對得上的那份 → 上次用的 → 第一份。
+ * 優先序：`--profile <id>` → `--port <n>` 對得上的那份 → **清單第一份**。
+ *
+ * ⚠ **不看「上次用的那份」。** 那個行為在多開的人身上很方便，但在其他人身上
+ * 是「我只是想開插件，它卻綁到我上次測試用的網頁版」—— 而畫面上只寫「等遊戲…」，
+ * 完全看不出來是綁錯了客戶端。不帶參數的啟動要是**可預測的**：
+ * 清單第一份（新安裝就是桌面版 :9333）。
+ *
+ * 要開別份的人本來就有明確的入口 —— 托盤的「開新實例」帶的是 `--profile <id>`，
+ * 不受這條影響。`lastUsedId` 仍然記著（`profiles.json` 裡看得到最後開的是哪一份，
+ * 玩家回報問題時有用），只是不再拿來決定啟動。
  *
  * ⚠ `--port` 那條是為了**相容舊的用法**（`npm run tray -- --port 9333`）。
  * 對不上任何配置時不要當作錯誤：那多半是玩家在試一個新埠，直接臨時建一份
@@ -223,17 +273,15 @@ export function resolveProfile(
     const hit = store.profiles.find((p) => p.port === port);
     if (hit !== undefined) return { profile: hit, ephemeral: false };
     if (port > 0) {
-      const linkPort = clampPort(flag("link-port"), DEFAULT_LINK_PORT);
+      const link = normalizeLink(flag("link") ?? flag("link-port"));
       // 名字裡不要放埠 —— 視窗標題與狀態列本來就會補上，會變成「臨時 :9334 :9334」。
       return {
-        profile: { ...defaultProfile("desktop"), name: "臨時", port, linkPort },
+        profile: { ...defaultProfile("desktop"), name: "臨時", port, link },
         ephemeral: true,
       };
     }
   }
 
-  const last =
-    store.lastUsedId === null ? undefined : store.profiles.find((p) => p.id === store.lastUsedId);
-  // `profiles` 保證非空（`normalizeStore` 會補一份），所以最後那個 ?? 只是給型別看的。
-  return { profile: last ?? store.profiles[0] ?? defaultProfile("desktop"), ephemeral: false };
+  // `profiles` 保證非空（`normalizeStore` 會補一份），所以那個 ?? 只是給型別看的。
+  return { profile: store.profiles[0] ?? defaultProfile("desktop"), ephemeral: false };
 }

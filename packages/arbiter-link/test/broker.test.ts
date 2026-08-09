@@ -53,7 +53,7 @@ function client(port: number, room: string, prefs = DEFAULT_PREFS): Spy {
     forced: [],
   };
   spy.client = new LinkClient({
-    url: `ws://127.0.0.1:${port}`,
+    endpoint: `ws://127.0.0.1:${port}`,
     room,
     prefs,
     onBothReady: () => spy.bothReady++,
@@ -129,9 +129,10 @@ describe("誰當中間人", () => {
   it("第一個開的當中間人，第二個開的當客戶端，兩邊照樣配對得起來", async () => {
     // 挑一個不太可能被真的在跑的插件佔走的埠。
     const port = 9377;
-    const first = await LinkNode.start({ port, room: "room-1", prefs: DEFAULT_PREFS });
+    const target = { kind: "local", port } as const;
+    const first = await LinkNode.start({ target, room: "room-1", prefs: DEFAULT_PREFS });
     cleanups.push(() => first.close());
-    const second = await LinkNode.start({ port, room: "room-1", prefs: DEFAULT_PREFS });
+    const second = await LinkNode.start({ target, room: "room-1", prefs: DEFAULT_PREFS });
     cleanups.push(() => second.close());
 
     expect(first.hosting).toBe(true);

@@ -28,6 +28,11 @@
       "@ulr/cost-engine": ["packages/cost-engine/src/index.ts"],
       "@ulr/cdp-adapter": ["packages/cdp-adapter/src/index.ts"],
       "@ulr/arbiter-link": ["packages/arbiter-link/src/index.ts"],
+      // 子路徑：**只有純函式的那兩支**。雲端中間人（apps/link-worker）走這裡，
+      // 不走根匯出 —— 根匯出會把 broker.ts 一起拉進來，而那支 import 了 `ws`
+      // （Node 的東西），在 Cloudflare 的 runtime 裡打包不起來。
+      "@ulr/arbiter-link/protocol": ["packages/arbiter-link/src/protocol.ts"],
+      "@ulr/arbiter-link/rooms": ["packages/arbiter-link/src/rooms.ts"],
       "@ulr/arbiter-engine": ["packages/arbiter-engine/src/index.ts"]
     }
   },
@@ -39,5 +44,9 @@
     "apps/*/test/**/*",
     "*.ts"
   ],
-  "exclude": ["node_modules", "**/dist"]
+  // ⚠ `apps/link-worker` 不在這裡。它跑在 Cloudflare 的 runtime 上，全域是
+  // `WebSocketPair`／`DurableObject` 而不是 Node 的那一套（上面 `types: ["node"]`）。
+  // 混在同一份 tsconfig 裡的話兩邊都會滿江紅。它有自己的 tsconfig，
+  // 由 `npm run typecheck:worker` 檢查（`npm run verify` 兩個都跑）。
+  "exclude": ["node_modules", "**/dist", "apps/link-worker"]
 }

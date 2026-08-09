@@ -194,3 +194,45 @@ describe("強制提早結束", () => {
     expect(rooms.handle("a", { t: "force-end", reason: "agreed-cap" })).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 還原（雲端版的 hibernation 用）
+// ---------------------------------------------------------------------------
+describe("還原", () => {
+  it("⚠ 還原一個人**不送任何訊息** —— 對手不該看到約定秒數閃一下", () => {
+    const rooms = new RoomRegistry();
+    // `restore()` 沒有回傳值就是這條規則的形狀：它連「要送什麼」都不產生。
+    rooms.restore({ id: "a", room: ROOM, prefs: prefs({ phaseSeconds: 12 }), ready: false });
+    expect(rooms.membersOf(ROOM)).toHaveLength(1);
+    expect(rooms.memberOf("a")?.prefs.phaseSeconds).toBe(12);
+  });
+
+  it("⚠ ready 要一起還原 —— 掉了的話玩家剛按下的 OK 會被默默取消", () => {
+    // 雲端版：兩個人都按了 OK、正在等對方，這時中間人被移出記憶體。醒來後
+    // 若 ready 變回 false，兩邊會一路等到硬底線才各自送出。
+    const rooms = new RoomRegistry();
+    rooms.restore({ id: "a", room: ROOM, prefs: prefs(), ready: true });
+    rooms.restore({ id: "b", room: ROOM, prefs: prefs(), ready: false });
+    expect(rooms.memberOf("a")?.ready).toBe(true);
+
+    // 還原之後 b 按下 OK，兩邊就該同時收到 both-ready。
+    expect(types(rooms.handle("b", { t: "ready", ready: true })).sort()).toEqual([
+      "a:both-ready",
+      "b:both-ready",
+    ]);
+  });
+
+  it("還原進來的人跟一般成員一樣會被協商到", () => {
+    const rooms = new RoomRegistry();
+    rooms.restore({ id: "a", room: ROOM, prefs: prefs({ phaseSeconds: 25 }), ready: false });
+    const out = rooms.join("b", hello(ROOM, { phaseSeconds: 10 }));
+    // 取比較長的那個 —— 25，不是 10。
+    for (const message of [...to(out, "a"), ...to(out, "b")]) {
+      expect(message).toMatchObject({ paired: true, agreed: { phaseSeconds: 25 } });
+    }
+  });
+
+  it("memberOf：沒這個人就是 null", () => {
+    expect(new RoomRegistry().memberOf("nobody")).toBeNull();
+  });
+});
