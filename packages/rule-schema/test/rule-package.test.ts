@@ -27,9 +27,44 @@ describe("規則包 .ulrcost.json", () => {
     expect(shortHash(a.contentHash)).toBe(shortHash(b.contentHash));
   });
 
-  it("有人手改 JSON 卻沒重算 Hash → 拒絕載入", () => {
+  /**
+   * ⚠ 這一則以前的期望是相反的（「拒絕載入」）。改掉的理由寫在
+   * `rule-package.ts` 的 `loadRulePackage` 註解裡：玩家 fork 規則的方式
+   * 就是直接改包，硬擋只會讓檔案變成死檔，而且擋不住任何真的想動手腳的人。
+   */
+  it("直接改包 → 照載，Hash 重算，而且要講出來", () => {
     const pkg = createRulePackage(rule());
-    pkg.rule.characters["WOLAND_L4"] = 15; // 偷改成本
+    const before = pkg.contentHash;
+    pkg.rule.characters["WOLAND_L4"] = 15; // 直接改數字，contentHash 沒動
+
+    const r = roundTrip(pkg);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+
+    // 內容照收
+    expect(r.value.pkg.rule.characters["WOLAND_L4"]).toBe(15);
+    // 碼跟著內容走，不是檔案裡宣稱的那個
+    expect(r.value.contentHash).not.toBe(before);
+    expect(r.value.short).toBe(shortHash(r.value.contentHash));
+    // 而且回傳的 pkg 已經自洽 —— 寫回檔案就是一份正常的包
+    expect(r.value.pkg.contentHash).toBe(r.value.contentHash);
+    // 呼叫端要有辦法提醒「對手手上那份的碼不一樣了」
+    expect(r.value.staleHash).not.toBeNull();
+    expect(r.value.staleHash?.claimed).toBe(before);
+  });
+
+  it("沒改過的包不會被誤報成改過", () => {
+    const r = roundTrip(createRulePackage(rule()));
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.staleHash).toBeNull();
+  });
+
+  /**
+   * 重算是 private-test 專屬的。帶簽章的發布版一旦重算，簽章就等於被繞過。
+   */
+  it("非 private-test 的包 Hash 對不上 → 仍然拒絕載入", () => {
+    const pkg = { ...createRulePackage(rule()), visibility: "published" as never };
+    pkg.rule.characters["WOLAND_L4"] = 15;
     const r = roundTrip(pkg);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.code).toBe("hash.mismatch");

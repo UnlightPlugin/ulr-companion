@@ -49,7 +49,10 @@ export function hashEquals(a: string, b: string): boolean {
 
 /**
  * 驗證內容確實對應到宣稱的 Hash。
- * §9 Rule Client 驗收要點：「內容不符 Hash 時拒絕載入」。
+ *
+ * ⚠ **private-test 的規則包不走這支。** 那條路是「Hash 從內容重算」，理由
+ * 見 `rule-package.ts` 的 `loadRulePackage`。這支留給真的需要驗證宣稱值的
+ * 場合 —— 帶簽章的發布版，以及對照測試向量。
  */
 export function verifyContentHash(value: unknown, expected: string): boolean {
   return hashEquals(contentHash(value), expected);

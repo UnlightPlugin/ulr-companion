@@ -151,6 +151,14 @@ describe("validateCostRule", () => {
     r.teamCostLimit = -1;
     const found = codes(r);
     expect(found).toContain("publisher.mismatch");
-    expect(found).toContain("teamCostLimit.nonPositive");
+    expect(found).toContain("teamCostLimit.negative");
+  });
+
+  it("上限 0 是合法的 —— 代表這份規則不管上限", () => {
+    // 原版 COST 表就是這種：只定義價格與壓 C，上限由伺服器按頻道下發。
+    const r = sample();
+    r.teamCostLimit = 0;
+    expect(codes(r)).not.toContain("teamCostLimit.negative");
+    expect(validateCostRule(r).valid).toBe(true);
   });
 });

@@ -27,11 +27,39 @@ export {
   SHORT_HASH_LENGTH,
 } from "./hash.js";
 
-export { validateCostRule, assertCostRule, costRuleSchema, SCHEMA_PATH } from "./validate.js";
+export {
+  equipmentKey,
+  eventCardKey,
+  parseEquipmentKey,
+  parseEventCardKey,
+  toIndexTable,
+  EQUIPMENT_KEY_PREFIX,
+  EVENT_CARD_KEY_PREFIX,
+  CARD_INDEX_PAD,
+} from "./card-key.js";
+
+export { buildCatalog, catalogSize, parseCatalog, slotLabel, CATALOG_VERSION } from "./catalog.js";
+export type {
+  CardCatalog,
+  CatalogCard,
+  CatalogEquipmentGroup,
+  CatalogEventGroup,
+  CatalogGroup,
+  CatalogItem,
+  CatalogSource,
+} from "./catalog.js";
+
+export { validateCostRule, assertCostRule, costRuleSchema } from "./validate.js";
 export type { ValidationIssue, ValidationResult } from "./validate.js";
 
 export { createRulePackage, loadRulePackage, RULE_PACKAGE_EXTENSION } from "./rule-package.js";
-export type { RulePackage, LoadedRulePackage, LoadResult, LoadErrorCode } from "./rule-package.js";
+export type {
+  RulePackage,
+  LoadedRulePackage,
+  LoadResult,
+  LoadErrorCode,
+  StaleHash,
+} from "./rule-package.js";
 
 export type {
   CostRule,

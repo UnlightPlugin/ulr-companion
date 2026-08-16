@@ -64,16 +64,26 @@
     },
     "teamCostLimit": {
       "$ref": "#/$defs/cost",
-      "description": "隊伍 COST 上限"
+      "description": "隊伍 COST 上限。0 代表不設限 —— UNLIGHT 的上限是伺服器按頻道下發的，客戶端沒有這個常數。負數由 validate.ts 擋掉。"
     },
     "characters": {
       "type": "object",
       "minProperties": 1,
       "$ref": "#/$defs/costTable",
-      "description": "角色 → COST。鍵的格式見 docs/open-questions.md 的『角色 ID 用什麼』。"
+      "description": "角色 → COST。鍵是 cc_asset.frames[].filename，例 cc078_04。見 docs/open-questions.md 的『角色 ID 用什麼』。"
     },
-    "equipment": { "$ref": "#/$defs/costTable" },
-    "eventCards": { "$ref": "#/$defs/costTable" },
+    "monsters": {
+      "$ref": "#/$defs/costTable",
+      "description": "怪物卡 → COST。鍵是 mc_asset.frames[].filename，例 mc001_01。⚠ 怪物與角色共用同樣三個槽位，照樣參與壓 C。"
+    },
+    "equipment": {
+      "$ref": "#/$defs/costTable",
+      "description": "裝備 → COST。鍵是 wp + 補零 3 位的 avatar_item.weapon[] 索引，例 wp001。計入總和但不參與壓 C。"
+    },
+    "eventCards": {
+      "$ref": "#/$defs/costTable",
+      "description": "事件卡 → COST。鍵是 ev + 補零 3 位的 event_info.frames[] 索引，例 ev091（聖水）。計入總和但不參與壓 C。"
+    },
     "compressionRule": {
       "description": "壓 C 規則。type 是白名單列舉，不接受任意字串（§12）。",
       "oneOf": [

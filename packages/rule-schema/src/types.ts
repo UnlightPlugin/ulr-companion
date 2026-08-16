@@ -62,7 +62,13 @@ export interface Restriction {
   note?: string;
 }
 
-/** ID → COST 的對照表 */
+/**
+ * ID → COST 的對照表。
+ *
+ * 鍵的正規形式因表而異，見 {@link CostRule} 各欄位的說明與
+ * [card-key.ts](./card-key.ts)。四張表的鍵**永遠不會互撞**（`cc` / `mc` /
+ * `wp` / `ev` 四個前綴），所以明細與 `unknownIds` 可以只帶鍵不帶表名。
+ */
 export type CostTable = Record<string, number>;
 
 /**
@@ -80,13 +86,43 @@ export interface CostRule {
   /** 這份 COST 表對應的遊戲版本，例如 "2026.07" */
   gameVersion: string;
   appliesTo?: AppliesTo;
-  /** 隊伍 COST 上限 */
+  /**
+   * 隊伍 COST 上限。**0 代表不設限。**
+   *
+   * UNLIGHT 的上限是伺服器按頻道下發的（Match 場景收到的 `channels[].cost`），
+   * 客戶端裡沒有這個常數，所以「只定義價格與壓 C、不管上限」是合法且常見的
+   * 規則形態 —— 原版 COST 表就是這樣。
+   */
   teamCostLimit: number;
-  /** 角色 → COST */
+  /**
+   * 角色 → COST。鍵是 `cc_asset.frames[].filename`，例如 `cc078_04`（L4）、
+   * `cc078_r04`（R4）。**不能用「角色 + 等級」組**：L4 與 R4 的 `level` 都是
+   * 4，只有 filename 分得開（見 docs/open-questions.md 第 1 題）。
+   */
   characters: CostTable;
-  /** 武器／裝備 → COST，選填 */
+  /**
+   * 怪物卡 → COST，選填。鍵是 `mc_asset.frames[].filename`，例如 `mc001_01`。
+   *
+   * ⚠⚠ **怪物卡不是第四種加總項目，它跟角色共用同樣那三個槽位** ——
+   * 客戶端的 `Chara.getAsset()` 是照 `deck.chara[n]` 的前綴分流的
+   * （`cc` → `cc_asset`、`mc` → `mc_asset`），兩者走進 `costcheck()` 的
+   * 同一個 `deckArray`。所以**怪物照樣參與壓 C**，武器與事件卡才不參與。
+   */
+  monsters?: CostTable;
+  /**
+   * 武器／裝備 → COST，選填。鍵是 `wp` + 補零到 3 位的
+   * `avatar_item.weapon[]` 陣列索引，例如 `wp001`。
+   *
+   * 客戶端沒有給裝備任何名字（`AvatarItem.get('weapon', index)` 直接吃索引），
+   * 所以只能用索引 —— 為什麼那是可接受的，見 [card-key.ts](./card-key.ts)。
+   */
   equipment?: CostTable;
-  /** 事件卡 → COST，選填 */
+  /**
+   * 事件卡 → COST，選填。鍵是 `ev` + 補零到 3 位的 `event_info.frames[]`
+   * 陣列索引，例如 `ev091`（聖水）。理由同 `equipment`。
+   *
+   * ⚠ 快取鍵是 `event_info` 不是 `event_asset` —— 後者是**材質**的鍵。
+   */
   eventCards?: CostTable;
   compressionRule?: CompressionRule;
   restrictions?: Restriction[];

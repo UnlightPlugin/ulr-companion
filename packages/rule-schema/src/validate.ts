@@ -10,11 +10,11 @@
  * 回傳結構化的錯誤清單，呼叫端自己決定要顯示還是拒絕載入。
  */
 
-import { readFileSync } from "node:fs";
 import Ajv2020Module from "ajv/dist/2020.js";
 import type { ValidateFunction } from "ajv";
 import { COST_DECIMAL_PLACES, isValidCost } from "./cost-number.js";
 import type { CostRule, GapBand } from "./types.js";
+import schemaJson from "../schema/cost-rule.schema.json" with { type: "json" };
 
 /**
  * ajv 是 CJS 套件。在 ESM + NodeNext 下：
@@ -29,10 +29,29 @@ type AjvConstructor = new (options?: Record<string, unknown>) => {
 const Ajv2020 = ((Ajv2020Module as unknown as { default?: unknown }).default ??
   Ajv2020Module) as unknown as AjvConstructor;
 
-export const SCHEMA_PATH = new URL("../schema/cost-rule.schema.json", import.meta.url);
-
-/** 原始 JSON Schema 物件。ULGG 端要拿去做伺服器側驗證的話用這個。 */
-export const costRuleSchema: object = JSON.parse(readFileSync(SCHEMA_PATH, "utf8")) as object;
+/**
+ * 原始 JSON Schema 物件。ULGG 端要拿去做伺服器側驗證的話用這個。
+ *
+ * ⚠⚠ **一定要用 import，不能在載入時讀檔。**
+ *
+ * 這裡原本是
+ *
+ *     export const SCHEMA_PATH = new URL("../schema/…json", import.meta.url);
+ *     JSON.parse(readFileSync(SCHEMA_PATH, "utf8"))
+ *
+ * 而托盤是打包成 **CJS** 出貨的 —— esbuild 會把 CJS 裡的 `import.meta` 換成
+ * 空物件，`.url` 於是是 `undefined`，`new URL(path, undefined)` 在**主程序
+ * 載入時**就丟 `TypeError: Invalid URL`，玩家看到的是一個 JS 錯誤對話框、
+ * 插件完全打不開。2026-08-09 這件事已經發到 GitHub Release 才被抓到一次
+ * （`scripts/build-tray.mjs` 的檢查就是那次的產物），2026-08-15 托盤要做
+ * Cost 頁面而必須 import 這支時又撞到第二次。
+ *
+ * ⚠ 單元測試**照不到這裡** —— vitest 跑的是 ESM 原始碼，出貨的是 CJS bundle。
+ * 唯一擋得住的是 `npm run tray:build` 的那道掃描。
+ *
+ * 用 import 之後 schema 會被打包器直接內嵌，兩種模組格式都不必碰檔案系統。
+ */
+export const costRuleSchema: object = schemaJson as object;
 
 export interface ValidationIssue {
   /** JSON Pointer 風格的位置，例如 "/characters/WOLAND_L4" */
@@ -100,7 +119,7 @@ function costPrecisionIssues(rule: CostRule): ValidationIssue[] {
 
   check(rule.teamCostLimit, "/teamCostLimit");
 
-  for (const table of ["characters", "equipment", "eventCards"] as const) {
+  for (const table of ["characters", "monsters", "equipment", "eventCards"] as const) {
     const entries = rule[table];
     if (!entries) continue;
     for (const [id, cost] of Object.entries(entries)) check(cost, `/${table}/${id}`);
@@ -132,11 +151,15 @@ function crossFieldIssues(rule: CostRule): ValidationIssue[] {
     });
   }
 
-  if (rule.teamCostLimit <= 0) {
+  // 0 是合法的，代表「這份規則不管上限」。UNLIGHT 的 COST 上限是伺服器按頻道
+  // 下發的（Match 的 `channels[].cost`），客戶端裡根本沒有這個常數 ——
+  // 原版 COST 表這種「只定義價格與壓 C」的規則本來就沒有上限可填。
+  // 負數則一定是寫錯：沒有任何隊伍能滿足它。
+  if (rule.teamCostLimit < 0) {
     issues.push({
       path: "/teamCostLimit",
-      message: "隊伍 COST 上限必須大於 0",
-      code: "teamCostLimit.nonPositive",
+      message: "隊伍 COST 上限不能是負數（0 代表不設限）",
+      code: "teamCostLimit.negative",
     });
   }
 
