@@ -369,7 +369,198 @@ describe("狀態機：同一份規則（快路）", () => {
     await link.room("對方的房");
     // ⚠ 密碼就是配對 token
     expect(join).toHaveBeenCalledWith("對方的房", "PASS1234");
+    // 進房成功 = 任務結束。留在 ready 的話托盤不會放掉 pairing 物件，
+    // 玩家打完這一場想再排一次只會收到「已經在配對中了」。
+    expect(p.status.phase).toBe("idle");
+    expect(p.status.message).toContain("已進房");
+    expect(link.stopped).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * 配對任務的終點。
+ *
+ * ⚠ 這一組釘的是「打完了要自己停」。2026-08-16 實測：host 開完房就永遠停在
+ * `ready` —— 佇列連線還掛著（會被配給第三個人）、`pairing` 物件還活著，而那時
+ * 那一場其實已經打完了，玩家得手動按停止才回得去。
+ */
+describe("狀態機：對戰開始就結束任務", () => {
+  /** 開好房、對手還沒進來的那一間。房名與房主要跟 `ctx()` 對得上才找得到。 */
+  const empty: RoomEntry = {
+    roomId: "我的房",
+    name: "請多關照",
+    playerAName: "燈皇",
+    playerBName: null,
+    pass: true,
+    deckA: null,
+    deckB: null,
+  };
+
+  /**
+   * 一個會照真實順序變化的假遊戲：開房前清單是空的（否則 preflight 會判定
+   * 「你已經有一間自己開的房」），開房後才有那間房。
+   */
+  function hostDriver(over: { occupied?: () => boolean; vanished?: () => boolean } = {}) {
+    let opened = false;
+    const cancel = vi.fn(async () => {
+      opened = false;
+      return "ok";
+    });
+    return {
+      cancel,
+      driver: {
+        cancelRoom: cancel,
+        createRoom: async () => {
+          opened = true;
+          return { ok: true as const, roomId: null };
+        },
+        roomSnapshot: async () => {
+          if (!opened) return { seq: 1, live: true, rooms: [] };
+          if (over.vanished?.() === true) return { seq: 2, live: true, rooms: [] };
+          const room = over.occupied?.() === true ? { ...empty, playerBName: "對手" } : empty;
+          return { seq: 1, live: true, rooms: [room] };
+        },
+      } satisfies Partial<MatchDriver>,
+    };
+  }
+
+  it("host：對手進房了就結束，而且**不收房**（房裡有人）", async () => {
+    let occupied = false;
+    const { cancel, driver } = hostDriver({ occupied: () => occupied });
+    const { p, link } = pairing({ handoffPollMs: 5 }, driver);
+    await p.start();
+    await link.matched("host", link.tag);
     expect(p.status.phase).toBe("ready");
+
+    occupied = true;
+    await new Promise((r) => setTimeout(r, 60));
+    expect(p.status.phase).toBe("idle");
+    expect(p.status.message).toContain("對戰");
+    // ⚠ 收房就是把剛進來的對手踢出去
+    expect(cancel).not.toHaveBeenCalled();
+    expect(link.stopped).toBeGreaterThan(0);
+  });
+
+  it("host：房從清單上消失（已經開打）也算結束", async () => {
+    let vanished = false;
+    const { driver } = hostDriver({ vanished: () => vanished });
+    const { p, link } = pairing({ handoffPollMs: 5 }, driver);
+    await p.start();
+    await link.matched("host", link.tag);
+
+    vanished = true;
+    await new Promise((r) => setTimeout(r, 60));
+    expect(p.status.phase).toBe("idle");
+  });
+
+  it("⚠ 對手離開佇列（q-cancel）不代表他跑了 —— 房號交出去之後要看房間，不看佇列", async () => {
+    const { cancel, driver } = hostDriver();
+    const { p, link } = pairing({ handoffPollMs: 5 }, driver);
+    await p.start();
+    await link.matched("host", link.tag);
+
+    // 對手一進房就會離開佇列，而那在佇列眼裡就是 q-cancel
+    await link.dropped("cancel");
+    expect(cancel).not.toHaveBeenCalled();
+    expect(p.status.phase).toBe("ready");
+    await p.stop();
+  });
+
+  it("斷線（gone）仍然是真的跑掉 —— 收房、退回排隊", async () => {
+    const { cancel, driver } = hostDriver();
+    const { p, link } = pairing({ handoffPollMs: 5 }, driver);
+    await p.start();
+    await link.matched("host", link.tag);
+
+    await link.dropped("gone");
+    expect(cancel).toHaveBeenCalled();
+    expect(p.status.phase).toBe("queued");
+  });
+
+  it("host：等不到人就收房並停止 —— 不能留一間永遠沒人進的空房", async () => {
+    const { cancel, driver } = hostDriver();
+    const { p, link } = pairing({ handoffPollMs: 5, handoffTimeoutMs: 10 }, driver);
+    await p.start();
+    await link.matched("host", link.tag);
+
+    await new Promise((r) => setTimeout(r, 80));
+    expect(cancel).toHaveBeenCalled();
+    expect(p.status.phase).toBe("idle");
+    expect(p.status.message).toContain("等不到");
+  });
+
+  it("⚠ 清單還不知道有沒有房（seq 0、沒有 live）時不能當成已經開打", async () => {
+    let opened = false;
+    // 房開好、交出去了，然後清單變成「還不知道」（重連、剛切頻道…）。
+    let unknown = false;
+    const { p, link } = pairing(
+      { handoffPollMs: 5 },
+      {
+        createRoom: async () => {
+          opened = true;
+          return { ok: true as const, roomId: null };
+        },
+        roomSnapshot: async () => {
+          if (!opened) return { seq: 1, live: true, rooms: [] };
+          if (unknown) return { seq: 0, live: false, rooms: [] };
+          return { seq: 1, live: true, rooms: [empty] };
+        },
+      },
+    );
+    await p.start();
+    await link.matched("host", link.tag);
+    expect(p.status.phase).toBe("ready");
+
+    unknown = true;
+    await new Promise((r) => setTimeout(r, 40));
+    // 空的清單 + 不知道 = 不能推論。仍然在等對手。
+    expect(p.status.phase).toBe("ready");
+    await p.stop();
+  });
+});
+
+describe("狀態機：開始配對時先收掉自己開著的房", () => {
+  const own: RoomEntry = {
+    roomId: "上一輪留下的",
+    name: "請多關照",
+    playerAName: "燈皇",
+    playerBName: null,
+    pass: true,
+    deckA: null,
+    deckB: null,
+  };
+
+  it("有自己的房就先收掉再排，不是擋下來叫玩家自己去收", async () => {
+    let cleared = false;
+    const cancel = vi.fn(async () => {
+      cleared = true;
+      return "ok";
+    });
+    const { p, link } = pairing(
+      {},
+      {
+        cancelRoom: cancel,
+        roomSnapshot: async () => ({ seq: 1, live: true, rooms: cleared ? [] : [own] }),
+      },
+    );
+    await p.start();
+
+    expect(cancel).toHaveBeenCalled();
+    expect(p.status.phase).toBe("queued");
+    expect(link.key).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  it("收了還在（收不掉）就照樣擋下來，不能硬排下去", async () => {
+    const { p } = pairing(
+      {},
+      {
+        cancelRoom: async () => "ok",
+        roomSnapshot: async () => ({ seq: 1, live: true, rooms: [own] }),
+      },
+    );
+    await p.start();
+    expect(p.status.phase).toBe("blocked");
+    expect(p.status.message).toContain("自己開的房");
   });
 });
 

@@ -1380,10 +1380,13 @@ app.whenReady().then(() => {
       driver,
       onStatus: (s) => {
         pairingStatus = s;
-        // ⚠ 停在 blocked 就把物件放掉。留著的話玩家改好牌組再按「開始配對」
-        // 只會收到「已經在配對中了」，而畫面上明明寫著已停止 —— 那是最讓人
-        // 以為插件壞掉的一種狀態。
-        if (s.phase === "blocked") pairing = null;
+        // ⚠ 停下來就把物件放掉。留著的話玩家再按「開始配對」只會收到
+        // 「已經在配對中了」，而畫面上明明寫著已停止 —— 那是最讓人以為插件
+        // 壞掉的一種狀態。
+        //
+        // `idle` 跟 `blocked` 都要放：配對成功走到底（對手進房、對戰開始）
+        // 之後狀態機會自己回到 idle，而那正是玩家最可能馬上想再排一次的時候。
+        if (s.phase === "blocked" || s.phase === "idle") pairing = null;
         // ⚠ 配對頁是**自己輪詢**的（見 `MatchPageState` 的說明），所以這裡
         // 不 pushState —— 那會把整份 Snapshot 推給畫面，而配對狀態不在裡面。
       },

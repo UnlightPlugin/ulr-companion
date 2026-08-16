@@ -62,8 +62,11 @@ import type {
   QueueStatus,
 } from "@ulr/arbiter-link";
 import { DEFAULT_ROOM_NAME } from "@ulr/cdp-adapter";
-import type { MatchDriver, Sleep } from "./match-session.js";
+import type { MatchDriver, PreflightResult, Sleep } from "./match-session.js";
 import { guestJoinRoom, hostOpenRoom, preflight } from "./match-session.js";
+
+/** 沒給 `sleep` 時用的那支。測試一律自己塞一個立刻回來的。 */
+const defaultSleep: Sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * 等對手回話的上限。
@@ -73,6 +76,25 @@ import { guestJoinRoom, hostOpenRoom, preflight } from "./match-session.js";
  * 12 秒是「人類會開始懷疑」之前的長度，而正常的一次往返是毫秒級。
  */
 export const PEER_REPLY_TIMEOUT_MS = 12_000;
+
+/**
+ * host 開好房之後，多久看一次「對手進來了沒」。
+ *
+ * ⚠ 這一段是**配對任務的終點**，不是附加功能。少了它，host 開完房就永遠停在
+ * 「等對手進來」：佇列連線還掛著（會被配給第三個人）、`pairing` 物件還活著
+ * （玩家按「開始自動配對」只會收到「已經在配對中了」），而那時他其實已經
+ * 打完一場了。2026-08-16 實測就是這樣，要手動按停止才回得去。
+ */
+export const HANDOFF_POLL_MS = 2_000;
+
+/**
+ * 等對手進房的上限。
+ *
+ * 到了還沒人來就把房收掉並停止 —— 留著的話清單上是一間永遠沒人進的空房，
+ * 而下一次配對會被 preflight 擋住。90 秒是「對手的插件正常走完進房流程」
+ * （幾秒）的十倍以上餘裕。
+ */
+export const HANDOFF_TIMEOUT_MS = 90_000;
 
 // ---------------------------------------------------------------------------
 // 兩邊交換的東西（純函式，可完整測試）
@@ -251,6 +273,9 @@ export interface PairingOptions {
   /** 測試用。 */
   sleep?: Sleep;
   timeoutMs?: number;
+  /** host 等對手進房的輪詢間隔與上限。測試會塞很小的值。 */
+  handoffPollMs?: number;
+  handoffTimeoutMs?: number;
   /** 測試用：換掉中間人的連線。預設是真的 `MatchQueueClient`。 */
   link?: (options: MatchQueueClientOptions) => QueueLink;
 }
@@ -290,6 +315,18 @@ export class MatchPairing {
   #pendingRoomId: string | null = null;
   /** host 已經真的開了一間房。對手跑掉時要收掉它。 */
   #openedRoom = false;
+  /** host 自己那間房的 room_id。等對手進來要靠它在清單裡認人。 */
+  #myRoomId: string | null = null;
+  /**
+   * host 已經把房號交出去了。
+   *
+   * ⚠ 這之後收到的 `q-dropped(cancel)` **多半是對手進房成功**：他的插件一進去
+   * 就會離開佇列，而離開佇列送的正是 `q-cancel`。照原本的處理（收房 + 退回排隊）
+   * 等於在對手剛進門的瞬間把房拆了，而畫面上寫「對手取消了，繼續排隊」。
+   */
+  #handedOff = false;
+  /** 等對手進房的輪詢。跟 `#timer`（等對手回話）是兩件事，不能共用一個。 */
+  #watch: ReturnType<typeof setTimeout> | null = null;
   #skipped = 0;
   #timer: ReturnType<typeof setTimeout> | null = null;
   /** 已經在跑開房／進房了，不要重入。 */
@@ -316,7 +353,7 @@ export class MatchPairing {
   async start(): Promise<void> {
     if (this.#client !== null) return;
 
-    const pre = await preflight(this.#options.driver, { expectChannel: this.#options.channel });
+    const pre = await this.#preflight();
     if (!pre.ok) {
       this.#block(pre.block.message);
       return;
@@ -378,6 +415,32 @@ export class MatchPairing {
   }
 
   /**
+   * 開房／進房前的檢查，**而且會自己把擋路的舊房收掉**。
+   *
+   * preflight 本身是唯讀的（那是對的，它也給手動那條路用）。但自動配對的
+   * 情況不一樣：玩家按下「開始自動配對」，而畫面上跳一句「你已經有一間自己
+   * 開的房，請先去遊戲裡收掉」對他沒有意義 —— 那間房**多半就是插件上一輪
+   * 自己開的**（對手沒進來、或上一場打完了）。所以這裡直接收掉再檢查一次。
+   *
+   * ⚠ `delete_room` 是**頻道層級**的：它會把玩家在這個頻道的房**全部**收掉，
+   * 包含他自己手動開的那間。所以這件事一定要寫進記錄檔 —— 玩家要知道剛剛
+   * 那間房是被誰收的（見 match-session.ts 的檔頭）。
+   */
+  async #preflight(): Promise<PreflightResult> {
+    const first = await preflight(this.#options.driver, { expectChannel: this.#options.channel });
+    if (first.ok) return first;
+    if (first.block.code !== "has-own-room" && first.block.code !== "already-matching") {
+      return first;
+    }
+
+    this.#log("· 你在這個頻道已經有一間開著的房，先收掉再排隊（收的是整個頻道的房）");
+    await this.#options.driver.cancelRoom().catch(() => "");
+    // 收房之後清單要一點時間才更新。等一拍再問，否則會讀到剛剛那間還在。
+    await (this.#options.sleep ?? defaultSleep)(1_000);
+    return await preflight(this.#options.driver, { expectChannel: this.#options.channel });
+  }
+
+  /**
    * 停止配對。
    *
    * ⚠ **開過房就要收掉。** 留著的話清單上會有一間永遠不會有人進來的空房，
@@ -385,6 +448,7 @@ export class MatchPairing {
    */
   async stop(reason = "已停止配對。"): Promise<void> {
     this.#clearTimer();
+    this.#clearWatch();
     this.#client?.stop();
     this.#client = null;
     if (this.#openedRoom) {
@@ -394,6 +458,28 @@ export class MatchPairing {
     this.#resetPair();
     this.#skipped = 0;
     this.#patch({ ...IDLE, message: reason });
+  }
+
+  /**
+   * **配對成功地結束了** —— 對戰已經開始，這個任務沒事做了。
+   *
+   * 跟 `stop()` 的差別只有一個，但那一個很重要：**不收房**。房裡有人了，
+   * 收掉就是把對手踢出去。所以先把 `#openedRoom` 清掉再走同一條收尾路徑。
+   *
+   * ⚠ 一定要回到 `idle`。留在 `ready` 的話托盤那邊的 `pairing` 物件不會被
+   * 放掉，玩家打完這一場想再排一次只會收到「已經在配對中了」。
+   */
+  #finish(message: string): void {
+    this.#clearTimer();
+    this.#clearWatch();
+    this.#openedRoom = false;
+    this.#handedOff = false;
+    this.#client?.stop();
+    this.#client = null;
+    this.#resetPair();
+    this.#skipped = 0;
+    this.#log(`· ${message}`);
+    this.#patch({ ...IDLE, message });
   }
 
   // -------------------------------------------------------------------------
@@ -571,7 +657,9 @@ export class MatchPairing {
     const token = this.#token;
     if (token === null) return;
 
-    const pre = await preflight(this.#options.driver, { expectChannel: this.#options.channel });
+    // ⚠ 這裡也要走會收舊房的那支。配到人之後才被「你已經有一間房」擋下來的話，
+    // 對手已經在等我開房了 —— 而擋住我們的那間房多半是上一輪自己留下的。
+    const pre = await this.#preflight();
     if (!pre.ok || pre.context.playerName === null) {
       await this.stop(pre.ok ? "讀不到玩家名稱。" : pre.block.message);
       return;
@@ -601,8 +689,63 @@ export class MatchPairing {
     }
 
     this.#openedRoom = true;
+    this.#myRoomId = result.roomId;
     this.#client?.sendRoom(result.roomId);
+    this.#handedOff = true;
     this.#patch({ phase: "ready", message: "房開好了，等對手進來。" });
+    // 從這裡開始，判斷「成了沒」的依據是**遊戲**而不是佇列 —— 對手的插件
+    // 進了房就會離開佇列，那在佇列眼裡跟「他取消了」長得一模一樣。
+    this.#watchHandoff(result.roomId);
+  }
+
+  /**
+   * host：等對手真的進來，然後結束這個配對任務。
+   *
+   * 判準是房間清單（遊戲自己的狀態，不是佇列的）：
+   *
+   * | 看到什麼                     | 意思                             |
+   * | ---------------------------- | -------------------------------- |
+   * | 我那間房多了 playerB         | 對手進來了                       |
+   * | 我那間房從清單上消失         | 已經開打（對戰中的房不在清單上） |
+   * | 逾時還是只有我               | 沒人來 —— 收房、停止             |
+   *
+   * ⚠ 清單「空的」與「還不知道」要分開。剛連上時 `seq === 0` 且沒有 live 快照，
+   * 那時什麼都不能推論 —— 把它當成「房不見了」會在對手還沒進來時就宣告開打。
+   */
+  #watchHandoff(roomId: string): void {
+    const pollMs = this.#options.handoffPollMs ?? HANDOFF_POLL_MS;
+    const deadline = Date.now() + (this.#options.handoffTimeoutMs ?? HANDOFF_TIMEOUT_MS);
+
+    const poll = async (): Promise<void> => {
+      this.#watch = null;
+      // 中途被停掉／被拆對了就不要再看下去。
+      if (!this.#handedOff || this.#myRoomId !== roomId) return;
+
+      let joined = false;
+      let gone = false;
+      try {
+        const snapshot = await this.#options.driver.roomSnapshot();
+        const mine = snapshot.rooms.find((r) => r.roomId === roomId);
+        if (mine === undefined) gone = snapshot.live || snapshot.seq > 0;
+        else joined = mine.playerBName !== null;
+      } catch {
+        // 讀不到就當這一輪沒看到，下一輪再問。連線斷了的話 stop() 會收掉這個迴圈。
+      }
+      if (!this.#handedOff || this.#myRoomId !== roomId) return;
+
+      if (joined || gone) {
+        this.#finish(joined ? "對手進房了，對戰開始 —— 配對結束。" : "房間已經開打，配對結束。");
+        return;
+      }
+      if (Date.now() >= deadline) {
+        await this.stop("等不到對手進房，已經把房收掉。要再排一次請按「開始自動配對」。");
+        return;
+      }
+      this.#watch = setTimeout(() => void poll(), pollMs);
+    };
+
+    this.#clearWatch();
+    this.#watch = setTimeout(() => void poll(), pollMs);
   }
 
   async #onRoom(roomId: string): Promise<void> {
@@ -636,10 +779,9 @@ export class MatchPairing {
       await this.stop(`進房失敗：${result.reason}`);
       return;
     }
-    this.#patch({ phase: "ready", message: "已進房，準備開打。" });
-    // 進房成功 = 這次配對的任務結束。留在佇列上只會被配給下一個人。
-    this.#client?.stop();
-    this.#client = null;
+    // 進房成功 = 這次配對的任務結束。留在佇列上只會被配給下一個人，而留在
+    // `ready` 會讓玩家打完之後按不了「開始自動配對」。
+    this.#finish("已進房，對戰開始 —— 配對結束。");
   }
 
   // -------------------------------------------------------------------------
@@ -647,7 +789,23 @@ export class MatchPairing {
   // -------------------------------------------------------------------------
 
   async #onDropped(reason: DropReason): Promise<void> {
+    // ⚠⚠ **房號已經交出去、而對手是「取消」的話，那多半是他進房成功了。**
+    //
+    // 對手的插件一進房就會離開佇列，而離開佇列送的正是 `q-cancel` —— 在佇列
+    // 眼裡跟玩家自己按停止一模一樣。照下面那段處理（收房 + 退回排隊）等於在
+    // 對手剛進門的瞬間把房拆掉，然後去排下一個人，而畫面上寫「對手取消了」。
+    // 2026-08-16 實測：host 那邊確實就是這句話，而那一場其實已經打起來了。
+    //
+    // `gone`（連線斷了）不一樣 —— 那是真的走了，照舊收房退回佇列。
+    // 分不出「他取消了」與「他進去了」的那個灰區交給 `#watchHandoff` 用**遊戲
+    // 的狀態**判：房裡有沒有人，那是唯一的事實來源。
+    if (this.#handedOff && reason === "cancel") {
+      this.#log("· 對手離開佇列了（多半是進房成功）—— 看房間裡有沒有人再決定");
+      return;
+    }
+
     this.#clearTimer();
+    this.#clearWatch();
     // ⚠ 對手在我開好房之後跑掉 —— 房要收掉，否則會留一間空房，而且下一次
     // 配對會被 preflight 擋住。
     if (this.#openedRoom) {
@@ -722,6 +880,13 @@ export class MatchPairing {
     this.#timer = null;
   }
 
+  /** 停掉「等對手進房」的輪詢。⚠ 每一條收尾路徑都要叫，否則它會繼續看一間 */
+  /** 已經不屬於這次配對的房。 */
+  #clearWatch(): void {
+    if (this.#watch !== null) clearTimeout(this.#watch);
+    this.#watch = null;
+  }
+
   #resetPair(): void {
     this.#role = null;
     this.#token = null;
@@ -736,12 +901,16 @@ export class MatchPairing {
     this.#compatibility = null;
     this.#pendingRoomId = null;
     this.#openedRoom = false;
+    this.#myRoomId = null;
+    this.#handedOff = false;
+    this.#clearWatch();
   }
 
   #block(message: string): void {
     this.#client?.stop();
     this.#client = null;
     this.#clearTimer();
+    this.#clearWatch();
     this.#patch({ phase: "blocked", role: null, compatibility: null, message });
   }
 
