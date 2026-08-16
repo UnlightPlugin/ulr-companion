@@ -19,8 +19,14 @@ import { app } from "electron";
 import type { Profile, ProfileStore } from "./profiles-core.js";
 import { addTo, emptyStore, normalizeStore, removeFrom, updateIn } from "./profiles-core.js";
 
-export type { ClientKind, Profile, ProfileStore } from "./profiles-core.js";
-export { defaultPortFor, resolveProfile, userDataDirFor } from "./profiles-core.js";
+export type { ClientKind, MatchPrefs, Profile, ProfileStore } from "./profiles-core.js";
+export {
+  DEFAULT_MATCH_PREFS,
+  defaultPortFor,
+  normalizeMatchPrefs,
+  resolveProfile,
+  userDataDirFor,
+} from "./profiles-core.js";
 
 /**
  * 配置清單存在哪。

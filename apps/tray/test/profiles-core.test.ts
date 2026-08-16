@@ -7,6 +7,8 @@ import {
   defaultPortFor,
   defaultProfile,
   emptyStore,
+  DEFAULT_MATCH_PREFS,
+  normalizeMatchPrefs,
   normalizeProfile,
   normalizeStore,
   removeFrom,
@@ -244,5 +246,44 @@ describe("這個實例要用哪一份", () => {
 
   it("記在配置裡才活得過遊戲重載 —— 存了要讀得回來", () => {
     expect(normalizeProfile({ id: "x", port: 59222, hiddenStages: true })?.hiddenStages).toBe(true);
+  });
+  // --- 自動配對的開房設定 ---------------------------------------------------
+
+  it("舊設定檔沒有 match 這一欄 → 拿到一份可用的預設", () => {
+    expect(normalizeProfile({ id: "x", port: 59222 })?.match).toEqual(DEFAULT_MATCH_PREFS);
+  });
+
+  it("房名要記得住 —— 那是玩家對外的招牌，不是一次性的值", () => {
+    const p = normalizeProfile({ id: "x", port: 59222, match: { roomName: "  蕭恩的房  " } });
+    expect(p?.match.roomName).toBe("蕭恩的房");
+  });
+
+  /**
+   * ⚠ `multi` 用 `!== false`，其餘的旗標用 `=== true`。理由不對稱是刻意的：
+   * 3vs3 是預設的對戰規則（舊設定檔沒有這一欄時該是它），而 ±N 與約定上限
+   * 預設都是關的 —— 插件不該替玩家憑空約定一個上限。
+   */
+  it("multi 預設 true，兩個開關預設 false", () => {
+    expect(normalizeMatchPrefs({}).multi).toBe(true);
+    expect(normalizeMatchPrefs({ multi: false }).multi).toBe(false);
+    expect(normalizeMatchPrefs({}).bandOn).toBe(false);
+    expect(normalizeMatchPrefs({}).limitOn).toBe(false);
+  });
+
+  it("地點只收三位數字，其餘退回官方預設的 000", () => {
+    expect(normalizeMatchPrefs({ stage: "013" }).stage).toBe("013");
+    expect(normalizeMatchPrefs({ stage: "13" }).stage).toBe("000");
+    expect(normalizeMatchPrefs({ stage: 13 }).stage).toBe("000");
+    expect(normalizeMatchPrefs({ stage: "../etc" }).stage).toBe("000");
+  });
+
+  /**
+   * ⚠ 約定上限**進配對鍵**，而配對鍵是 `toFixed(2)` 算的。多一位小數的話
+   * 「畫面上寫 62.005」與「實際比的 62.01」會是兩個數字，症狀是配不到人。
+   */
+  it("約定上限夾到兩位小數，壞值退回預設", () => {
+    expect(normalizeMatchPrefs({ limit: 62.005 }).limit).toBe(62.01);
+    expect(normalizeMatchPrefs({ limit: -1 }).limit).toBe(DEFAULT_MATCH_PREFS.limit);
+    expect(normalizeMatchPrefs({ limit: "五十七" }).limit).toBe(DEFAULT_MATCH_PREFS.limit);
   });
 });

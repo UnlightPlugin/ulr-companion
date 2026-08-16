@@ -27,6 +27,75 @@ import {
 /** 客戶端種類。只影響提示文字與預設埠，不影響接線方式（兩邊都是 CDP）。 */
 export type ClientKind = "desktop" | "web";
 
+/**
+ * 自動配對開房時要用的設定。
+ *
+ * ⚠ **一定要記在設定檔裡。** 這些是玩家的偏好（房名、常打的地點、約定的上限），
+ * 而自動配對是「按一顆按鈕就開打」的功能 —— 每次重開插件都要重填一輪的話，
+ * 那顆按鈕就不是一顆按鈕了。房名尤其明顯：它是玩家對外的招牌，不是一次性的值。
+ *
+ * ⚠ 這裡**不記官方的 COST 檔位**（57/66/78 那幾顆），它們每週二會變，插件每次
+ * 都現讀。記的是玩家自己填的那個數字 —— 那是他的約定，不是遊戲的狀態。
+ */
+export interface MatchPrefs {
+  /** 開房用的房名。空字串 = 用官方預設（客戶端的 `DEFAULT_NAMES.tcn`）。 */
+  roomName: string;
+  /**
+   * 想打的地點（`000`~`014`）。
+   *
+   * ⚠ 這是**偏好不是決定** —— 雙方選不一樣時由插件協商（見
+   * `@ulr/arbiter-engine` 的 `negotiateStage`）。
+   */
+  stage: string;
+  /** 3vs3（true）還是 1vs1。**進配對鍵**，兩邊要一樣才配得到。 */
+  multi: boolean;
+  /** 要不要設遊戲自己的「牌組Cost限制 ±N」。伺服器用**原版 COST** 判。 */
+  bandOn: boolean;
+  band: number;
+  /** 要不要設約定的自訂 COST 上限。**進配對鍵**，由插件自己檢查。 */
+  limitOn: boolean;
+  limit: number;
+}
+
+/** 官方對話框打開時就是這兩個值：000 雷德貝魯格城、3vs3。 */
+export const DEFAULT_MATCH_PREFS: MatchPrefs = {
+  roomName: "",
+  stage: "000",
+  multi: true,
+  bandOn: false,
+  band: 5,
+  limitOn: false,
+  limit: 62,
+};
+
+/** 地點代號長這樣（`000`~`014`）。認不得的一律回預設 —— 不讓一格壞值擋住開房。 */
+function normalizeStage(raw: unknown): string {
+  return typeof raw === "string" && /^\d{3}$/.test(raw) ? raw : DEFAULT_MATCH_PREFS.stage;
+}
+
+function normalizeNumber(raw: unknown, fallback: number, max: number): number {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n) || n < 0 || n > max) return fallback;
+  // ⚠ 夾到兩位小數：約定上限**進配對鍵**（`matchCriteriaString` 用 toFixed(2)），
+  // 三位小數會讓「畫面上的數字」跟「實際比的數字」不一樣。
+  return Math.round(n * 100) / 100;
+}
+
+export function normalizeMatchPrefs(raw: unknown): MatchPrefs {
+  if (typeof raw !== "object" || raw === null) return { ...DEFAULT_MATCH_PREFS };
+  const r = raw as Record<string, unknown>;
+  return {
+    roomName: typeof r["roomName"] === "string" ? r["roomName"].slice(0, 20).trim() : "",
+    stage: normalizeStage(r["stage"]),
+    // ⚠ `!== false` 而不是 `=== true`：舊設定檔沒有這一欄，而預設是 3vs3。
+    multi: r["multi"] !== false,
+    bandOn: r["bandOn"] === true,
+    band: normalizeNumber(r["band"], DEFAULT_MATCH_PREFS.band, 99),
+    limitOn: r["limitOn"] === true,
+    limit: normalizeNumber(r["limit"], DEFAULT_MATCH_PREFS.limit, 999),
+  };
+}
+
 export interface Profile {
   /** 穩定識別。改名不會換 id —— 命令列參數帶的是它。 */
   id: string;
@@ -73,6 +142,14 @@ export interface Profile {
    * 客戶端可以一個開一個關。
    */
   hiddenStages: boolean;
+  /**
+   * 自動配對的開房設定（房名、地點、上限…）。
+   *
+   * ⚠ 跟 `prefs`（會送給對手協商的那些）分開放：這裡的東西**只影響我這一邊
+   * 怎麼開房**，對手看到的是開好的房。地點是唯一會被協商的，而協商發生在
+   * 配對成立之後，不是在這裡。
+   */
+  match: MatchPrefs;
 }
 
 export interface ProfileStore {
@@ -176,6 +253,7 @@ export function normalizeProfile(raw: unknown): Profile | null {
     // ⚠ `=== true` 而不是「有值就算」：舊設定檔沒有這一欄，那時候的預設就該是
     // 關閉。插件裝上去不該改變玩家在遊戲裡看到的選單。
     hiddenStages: r["hiddenStages"] === true,
+    match: normalizeMatchPrefs(r["match"]),
   };
 }
 
@@ -200,6 +278,7 @@ export function defaultProfile(kind: ClientKind = "desktop"): Profile {
     costRulePath: null,
     // 同理，預設不動遊戲的開房選單。
     hiddenStages: false,
+    match: { ...DEFAULT_MATCH_PREFS },
   };
 }
 
