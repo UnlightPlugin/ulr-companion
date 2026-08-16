@@ -20,7 +20,7 @@ import type { Profile, ProfileStore } from "./profiles-core.js";
 import { addTo, emptyStore, normalizeStore, removeFrom, updateIn } from "./profiles-core.js";
 
 export type { ClientKind, Profile, ProfileStore } from "./profiles-core.js";
-export { defaultPortFor, resolveProfile } from "./profiles-core.js";
+export { defaultPortFor, resolveProfile, userDataDirFor } from "./profiles-core.js";
 
 /**
  * 配置清單存在哪。

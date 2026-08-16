@@ -16,7 +16,13 @@
 
 import type { LinkPrefs } from "@ulr/arbiter-link";
 import { DEFAULT_LINK_TARGET, normalizePrefs } from "@ulr/arbiter-link";
-import { DEFAULT_DEBUG_PORT, normalizeTint } from "@ulr/cdp-adapter";
+import {
+  BROWSER_DEBUG_PORT,
+  DEFAULT_BROWSER_PROFILE_DIR,
+  DEFAULT_DEBUG_PORT,
+  desktopUserDataDir,
+  normalizeTint,
+} from "@ulr/cdp-adapter";
 
 /** 客戶端種類。只影響提示文字與預設埠，不影響接線方式（兩邊都是 CDP）。 */
 export type ClientKind = "desktop" | "web";
@@ -45,6 +51,28 @@ export interface Profile {
    * 的話，改個顏色就會觸發一次協商廣播。
    */
   readyTint: number | null;
+  /**
+   * 自訂 COST 規則檔的路徑。`null` = 不套用（原版數字）。
+   *
+   * ⚠ 存**路徑**而不是規則內容。理由有兩個：規則檔有 700 個鍵，塞進設定檔
+   * 會讓它膨脹到幾十 KB 且每次存檔都重寫；而且玩家在外面改了那個檔之後，
+   * 存路徑的話重開就是新的，存內容的話會安靜地跑舊規則。
+   *
+   * 代價是檔案被刪或搬走時要處理 —— `main.ts` 載入失敗時會清成 `null`
+   * 並在記錄裡講一句，不是安靜地當作沒選。
+   */
+  costRulePath: string | null;
+  /**
+   * 把隱藏地圖（010~013）加進遊戲自己的開房選單。預設**關閉**。
+   *
+   * ⚠ 一定要記在配置裡。補丁是 `Runtime.evaluate` 裝的，**遊戲一重載就沒了**
+   * —— 不記的話玩家隔天開遊戲會發現選單又只剩官方那 11 項，而他不會把這件事
+   * 跟「重載過」連在一起，只會覺得功能壞了。
+   *
+   * ⚠ 這是**每一份配置各自的**，跟 `launchAtLogin` 那種全域選項不同：兩個
+   * 客戶端可以一個開一個關。
+   */
+  hiddenStages: boolean;
 }
 
 export interface ProfileStore {
@@ -74,11 +102,28 @@ export interface ProfileStore {
 }
 
 const DESKTOP_PORT = DEFAULT_DEBUG_PORT;
-/** 網頁版的預設埠。`docs/launching.md`：`companion web` 開的瀏覽器就用這個。 */
-const WEB_PORT = 9334;
+/**
+ * 網頁版的預設埠 —— 桌面版 +1，一眼看得出是一對。
+ *
+ * ⚠ 這兩個值都是**首選**，不是「一定會用這個」。連不上時引擎會去讀客戶端自己
+ * 寫的 `DevToolsActivePort`（見 `cdp-adapter/debug-port.ts`），所以玩家看到的
+ * 埠與實際接上的埠有可能不同 —— UI 要顯示的是**實際**那個。
+ */
+const WEB_PORT = BROWSER_DEBUG_PORT;
 
 export function defaultPortFor(kind: ClientKind): number {
   return kind === "web" ? WEB_PORT : DESKTOP_PORT;
+}
+
+/**
+ * 這種客戶端把 `DevToolsActivePort` 寫在哪裡。
+ *
+ * ⚠ **這是「埠變了還找得回來」的唯一依據，也是唯一防止接錯客戶端的東西。**
+ * 兩種客戶端各有各的 user-data-dir，所以各有各的檔案；拿桌面版的目錄去救網頁版
+ * 的連線，救回來的會是另一個帳號的遊戲。所以它跟著 `kind` 走，不是一個全域常數。
+ */
+export function userDataDirFor(kind: ClientKind): string {
+  return kind === "web" ? DEFAULT_BROWSER_PROFILE_DIR : desktopUserDataDir();
 }
 
 let counter = 0;
@@ -127,7 +172,18 @@ export function normalizeProfile(raw: unknown): Profile | null {
     kind,
     prefs: normalizePrefs(r["prefs"] as Partial<LinkPrefs> | undefined),
     readyTint: normalizeTint(typeof r["readyTint"] === "number" ? r["readyTint"] : null),
+    costRulePath: normalizeCostRulePath(r["costRulePath"]),
+    // ⚠ `=== true` 而不是「有值就算」：舊設定檔沒有這一欄，那時候的預設就該是
+    // 關閉。插件裝上去不該改變玩家在遊戲裡看到的選單。
+    hiddenStages: r["hiddenStages"] === true,
   };
+}
+
+/** 空字串一律當成「沒選」，避免 UI 出現一個看不見的假選擇。 */
+function normalizeCostRulePath(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  return trimmed === "" ? null : trimmed;
 }
 
 export function defaultProfile(kind: ClientKind = "desktop"): Profile {
@@ -140,6 +196,10 @@ export function defaultProfile(kind: ClientKind = "desktop"): Profile {
     prefs: normalizePrefs(undefined),
     // 預設不染色 —— 玩家指定「官方原本的白色」是預設值。
     readyTint: null,
+    // 預設不套用自訂 COST。插件裝上去不該改變玩家看到的數字。
+    costRulePath: null,
+    // 同理，預設不動遊戲的開房選單。
+    hiddenStages: false,
   };
 }
 
@@ -242,13 +302,13 @@ export function updateIn(
  * ⚠ **不看「上次用的那份」。** 那個行為在多開的人身上很方便，但在其他人身上
  * 是「我只是想開插件，它卻綁到我上次測試用的網頁版」—— 而畫面上只寫「等遊戲…」，
  * 完全看不出來是綁錯了客戶端。不帶參數的啟動要是**可預測的**：
- * 清單第一份（新安裝就是桌面版 :9333）。
+ * 清單第一份（新安裝就是桌面版 :59222）。
  *
  * 要開別份的人本來就有明確的入口 —— 托盤的「開新實例」帶的是 `--profile <id>`，
  * 不受這條影響。`lastUsedId` 仍然記著（`profiles.json` 裡看得到最後開的是哪一份，
  * 玩家回報問題時有用），只是不再拿來決定啟動。
  *
- * ⚠ `--port` 那條是為了**相容舊的用法**（`npm run tray -- --port 9333`）。
+ * ⚠ `--port` 那條是為了**相容舊的用法**（`npm run tray -- --port 59222`）。
  * 對不上任何配置時不要當作錯誤：那多半是玩家在試一個新埠，直接臨時建一份
  * 不落地的配置給他用，比拒絕啟動有用得多。
  */

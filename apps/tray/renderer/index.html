@@ -338,6 +338,225 @@
         color: #7a1f26;
       }
 
+      /* =================================================================
+         編輯 COST
+         =================================================================
+         ⚠ **這一頁不准出現卡片編號。** `cc001_01` 對玩家沒有意義，名冊
+         （catalog）存在的唯一理由就是把它換成「艾伯李斯特 L1」。編號只留在
+         `data-k`（給程式用）與 title（滑過去才看得到，用來回報問題）。 */
+
+      /* 四張表的分頁。做成遊戲那排紅色頁籤的縮小版。 */
+      .etabs {
+        display: flex;
+        gap: 2px;
+        margin-bottom: 9px;
+      }
+      .etabs button {
+        appearance: none;
+        flex: 1;
+        padding: 5px 4px;
+        border: 1px solid var(--line);
+        border-bottom: none;
+        border-radius: 2px 2px 0 0;
+        background: linear-gradient(180deg, var(--tab-off), var(--tab-off-lo));
+        color: var(--ink-off);
+        font-family: var(--serif);
+        font-size: 12.5px;
+        letter-spacing: 0.08em;
+        cursor: pointer;
+      }
+      .etabs button:hover {
+        background: var(--tab-hover);
+        color: #fff;
+      }
+      .etabs button[aria-selected="true"] {
+        background: linear-gradient(180deg, var(--tab-on), var(--tab-on-lo));
+        color: var(--ink-on);
+      }
+      .etabs .n {
+        margin-left: 5px;
+        font-size: 10.5px;
+        opacity: 0.7;
+      }
+
+      /* 一排卡：左邊是**名字**，右邊是那一排的格子。 */
+      .erow {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 2px 0;
+      }
+      .erow + .erow {
+        border-top: 1px solid rgba(67, 74, 96, 0.35);
+      }
+      .ename {
+        flex: none;
+        width: 6.6em;
+        font-family: var(--serif);
+        font-size: 12px;
+        letter-spacing: 0.03em;
+        color: var(--text);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      /* 欄頭（L1 L2 … R5）。**只印一次**，不要每一排都重複 —— 70 排的話那會
+         變成畫面上最吵的東西，而它其實是固定不變的。 */
+      .ehead {
+        display: flex;
+        align-items: flex-end;
+        gap: 8px;
+        position: sticky;
+        top: -14px;
+        z-index: 2;
+        padding: 4px 0 3px;
+        margin-bottom: 2px;
+        background: var(--panel);
+        border-bottom: 1px solid var(--rule);
+      }
+      .ehead .ename {
+        color: var(--dim);
+        font-size: 11px;
+      }
+      .egrid {
+        flex: 1;
+        display: grid;
+        gap: 3px;
+        min-width: 0;
+      }
+      .egrid.c10 {
+        grid-template-columns: repeat(10, minmax(0, 1fr));
+      }
+      .egrid.c9 {
+        grid-template-columns: repeat(9, minmax(0, 1fr));
+      }
+      .egrid.c5 {
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+      }
+      .egrid.c3 {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+      .egrid .slot {
+        font-size: 10px;
+        color: var(--dim);
+        text-align: center;
+        letter-spacing: 0.04em;
+      }
+
+      /* 一格 = 名字（索引型的表才有）＋ 數字欄位 */
+      .ecell {
+        min-width: 0;
+      }
+      .ecell .cn {
+        display: block;
+        font-size: 10px;
+        line-height: 1.25;
+        height: 2.5em;
+        color: var(--dim);
+        overflow: hidden;
+        margin-bottom: 2px;
+      }
+      .ecell input {
+        width: 100%;
+        padding: 2px 3px;
+        font-size: 11.5px;
+        text-align: center;
+        font-variant-numeric: tabular-nums;
+        background: #12151f;
+        border: 1px solid var(--line);
+        border-radius: 2px;
+        color: var(--text);
+      }
+      /* 改過的格子要一眼看得出來 —— 存檔前玩家要知道自己動了哪些。 */
+      .ecell input.dirty {
+        border-color: var(--amber);
+        color: var(--amber);
+        background: rgba(255, 194, 71, 0.08);
+      }
+      .ecell input:focus {
+        outline: 1px solid var(--red);
+      }
+
+      /* 怪物：一排放三種，每種自己一小塊（M1~M3） */
+      .mrow {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+        padding: 3px 0;
+      }
+      .mrow + .mrow {
+        border-top: 1px solid rgba(67, 74, 96, 0.35);
+      }
+      .mblock .mname {
+        font-family: var(--serif);
+        font-size: 11.5px;
+        color: var(--text);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        margin-bottom: 2px;
+      }
+
+      /* 群組標題：裝備的「這是誰的專武」、事件卡的族群 */
+      .egroup {
+        margin: 12px 0 5px;
+        font-family: var(--serif);
+        font-size: 12px;
+        letter-spacing: 0.06em;
+        color: var(--amber);
+        border-bottom: 1px solid rgba(255, 194, 71, 0.22);
+        padding-bottom: 2px;
+      }
+      .egroup .sub {
+        color: var(--dim);
+        font-size: 11px;
+        letter-spacing: 0;
+        margin-left: 6px;
+      }
+
+      /* 官方 COST 檔位的快速鍵。刻意做小 —— 它們是捷徑，不是主要的輸入方式，
+         真正的值在旁邊那個數字欄位裡（自訂 COST 想填幾就填幾）。 */
+      button.tier {
+        appearance: none;
+        margin-left: 4px;
+        padding: 3px 8px;
+        border: 1px solid var(--line);
+        border-radius: 2px;
+        background: #12151f;
+        color: var(--dim);
+        font: 11.5px var(--sans);
+        cursor: pointer;
+      }
+      button.tier:hover {
+        border-color: var(--red);
+        color: var(--text);
+      }
+
+      /* --- 編輯規則：一段壓 C 區間一排 --- */
+      .bandrow {
+        display: grid;
+        grid-template-columns: 1.8em 2.6em 5.5em 1.2em 5.5em 2.6em 5.5em 1fr;
+        align-items: center;
+        gap: 6px;
+        margin-top: 5px;
+      }
+      .bandrow input {
+        width: 100%;
+        padding: 3px 4px;
+        font-size: 12px;
+        text-align: center;
+        font-variant-numeric: tabular-nums;
+      }
+      .bandrow .lbl {
+        font-size: 11px;
+        color: var(--dim);
+        text-align: center;
+      }
+      .bandrow button {
+        justify-self: start;
+        padding: 1px 7px;
+      }
+
       .presets {
         display: flex;
         gap: 6px;
@@ -572,12 +791,38 @@
             { id: "seconds", label: "秒數上限" },
             // ⚠ 加速的引擎與協商都做好了，**刻意不開放**。理由見 battle/speed
             // 那一頁：它動的是節奏，而節奏牽涉公平性，還沒驗夠。
-            { id: "speed", label: "加速", todo: true },
+            {
+              id: "speed",
+              label: "加速",
+              todo: true,
+              why: "引擎與協商都做好了，刻意還沒開放。",
+              items: [
+                "它動的是<b>對戰節奏</b>，而節奏牽涉公平性 —— 還沒驗夠。",
+                "⚠ 而且效果有限：<b>戰鬥長度是伺服器排程的</b>，加速客戶端動畫改不動伺服器那一端的節拍。",
+                "開放的前提是兩邊協商一致，單邊加速沒有意義。",
+              ],
+            },
             { id: "count", label: "記牌", todo: true },
             { id: "replay", label: "牌譜", todo: true },
           ],
         },
-        { id: "deck", label: "牌組", subs: [{ id: "cost", label: "Cost 表", todo: true }] },
+        {
+          id: "deck",
+          label: "牌組",
+          subs: [
+            { id: "cost", label: "Cost 表" },
+            // ⚠ 排在「Cost 表」與「配對」中間是玩家指定的順序，也是實際的
+            // 動線：先選一份規則（Cost 表）→ 改它（編輯 COST／編輯規則）
+            // → 拿去約戰（配對）。
+            //
+            // ⚠ 「編輯 COST」與「編輯規則」是**同一個檔案的兩半**，分頁是因為
+            // 它們的形狀差太多：一邊是 1186 個數字格，一邊是十幾段區間。
+            { id: "costedit", label: "編輯 COST" },
+            { id: "ruleedit", label: "編輯規則" },
+            { id: "match", label: "配對" },
+            { id: "hidden", label: "隱藏地圖" },
+          ],
+        },
         {
           id: "vortex",
           label: "渦",
@@ -692,13 +937,23 @@
       function renderFooter() {
         const st = snap?.status;
         const p = snap?.profile;
-        // ⚠ 埠號只在多開時出現。沒開多開的人只有一個客戶端，兩個數字對他而言
-        // 是「我是不是該去設定什麼」的焦慮來源，不是資訊。
+        /**
+         * ⚠ **右上角只寫「這個視窗是誰」，不寫埠、不寫中間人。**
+         *
+         * 那兩個東西以前掛在這裡，但它們回答的不是玩家會問的問題。埠是實例身分
+         * （玩家現在一律用 `--remote-debugging-port=0`，那個數字根本沒有人在聽），
+         * 中間人是預設值就會動的東西 —— 兩個都只會讓人停下來想「我是不是漏設了
+         * 什麼」。要查的人在 設置 › 連線 找得到。
+         *
+         * 配置名稱**也只在多開打開時**才有意義：只有一個客戶端的人，那就是一個
+         * 他沒取過的名字。
+         */
         const multi = snap?.store?.multiProfile === true;
         $("ver").textContent = snap?.version ? `v${snap.version}` : "";
-        $("who").textContent =
-          p && multi ? `${p.name}　遊戲 :${p.port}　中間人 ${esc(p.link)}` : "";
-        $("fProfile").textContent = p ? (multi ? `${p.name} :${p.port}` : p.name) : "—";
+        $("who").textContent = p && multi ? p.name : "";
+        // 只有一份實例時這一格留空 —— 旁邊那顆燈就是全部的資訊，
+        // 補一個玩家沒取過的名字只是讓狀態列多一個要解讀的東西。
+        $("fProfile").textContent = p && multi ? p.name : "";
         $("dot").className =
           "dot " + (!st || !st.connected ? "" : st.link === "paired" ? "paired" : "solo");
         $("fGame").textContent = !st
@@ -725,9 +980,51 @@
       // =====================================================================
       const PAGES = {};
 
+      /** 這一格在 TABS 裡的定義。找不到回 null。 */
+      function subDef(tabId, subId) {
+        const t = TABS.find((x) => x.id === tabId);
+        return t?.subs.find((s) => s.id === subId) ?? null;
+      }
+
+      /**
+       * 沒有對應 PAGES 條目時畫什麼。
+       *
+       * ⚠ **絕對不要退回空字串。** 空白頁不會報錯、不會出現在 log 裡，看起來
+       * 就只是「這個功能壞了」—— 配置頁與五個預告頁就是這樣安靜地消失了很久
+       * （分頁註冊了、CSS 與事件都在，只有 render 函式沒寫）。
+       */
+      function missingPage(tabId, subId) {
+        const def = subDef(tabId, subId);
+        const label = def?.label ?? subId;
+        if (def?.todo) {
+          // 知道卡在哪就講明白（見 todoPage 的註解：不要只寫「敬請期待」）。
+          return todoPage(
+            label,
+            def.why ?? "這個功能還沒做。",
+            def.items ?? [
+              "分頁先放著是為了讓你知道規劃了什麼，不是它壞了。",
+              "做好之後這一頁會換成真正的內容。",
+            ],
+          );
+        }
+        // 不是預告卻沒有頁面 —— 那是真的漏了，要講出來而不是裝沒事。
+        return (
+          head(label, "", "缺頁") +
+          `<div class="card"><div class="hint warn" style="margin-top:0">
+             ⚠ 這一頁還沒接上（<code>${esc(tabId)}/${esc(subId)}</code> 沒有對應的畫面）。
+             這是插件的問題，不是你的操作。
+           </div></div>`
+        );
+      }
+
       function renderBody() {
         const fn = PAGES[`${tab}/${sub}`];
-        $("content").innerHTML = fn ? fn() : "";
+        $("content").innerHTML = fn ? fn() : missingPage(tab, sub);
+        // 配對頁與隱藏地圖頁的資料不在 snapshot 裡，開著的時候才輪詢。
+        if (onMatchPage()) startMatchPolling();
+        else stopMatchPolling();
+        if (onStagePage()) startStagePolling();
+        else stopStagePolling();
       }
 
       function head(title, lede, badge) {
@@ -791,8 +1088,7 @@
                  <div class="hint">
                    再按一次可以取消，對手一動也會解除。<br />
                    ⚠ <b>只在跟真人對戰、而且兩邊都握手成功時生效。</b>
-                   打任務、打渦（對手是 NPC）以及對手沒裝插件時完全不介入 ——
-                   單方面壓著自己的 OK 只會讓自己更早承諾。
+                   打任務、打渦以及對手沒裝插件時完全不介入。
                  </div>
                </span>
              </label>
@@ -811,7 +1107,7 @@
                  <div class="hint">
                    準備中（壓著 OK 沒送出）時把按鈕染成這個顏色。<br />
                    ⚠ 選「官方原本」＝完全不改遊戲畫面，代價是少了「插件正在管這個階段」的視覺提示 ——
-                   那時要改看系統匣圖示。
+                   那時要改看系統圖示（見下方）。
                  </div>
                </span>
              </label>
@@ -864,111 +1160,1430 @@
                砍到 4~5 秒連把牌拖到場上都來不及，而時間到是把<b>當下的場面</b>
                送出去，不是空手。
              </div>
-           </div>
-             <div class="hint">
-               ⚠ <b>改埠要重開那個實例才生效</b> —— 引擎綁在啟動時的埠上。<br />
-               ⚠ 兩份配置<b>不能用同一個遊戲埠</b>；撞到的話第二份會開不起來（Windows 的目錄鎖擋掉）。<br />
-               <b>狀態</b>只說那個埠上<b>有沒有遊戲在回話</b>。別份配置看不到「插件有沒有在管它」——
-               一個視窗只管一個客戶端。<br />
-               中間人<b>不用改</b>：預設就是雲端那一個，跟所有玩家共用。<br />
-               　留空＝雲端（預設）　<b>local</b>＝同一台電腦上的另一個插件（開發用）
+           </div>`
+        );
+      };
+
+      // --- 牌組 › Cost 表 ---------------------------------------------------
+      /**
+       * 自訂 COST。
+       *
+       * ⚠ 這一頁最重要的一件事是**講清楚「選了規則」跟「畫面上真的變了」是
+       * 兩回事**。注入走 `addScriptToEvaluateOnNewDocument`，只對之後載入的
+       * document 生效 —— 玩家選完規則盯著牌組畫面看不到變化是**正常的**，
+       * 而如果 UI 只寫「已啟用」，他會以為插件壞了然後去重裝。
+       */
+      const COST_PHASE_TEXT = {
+        off: "未啟用（顯示原版數字）",
+        pending: "已裝上，等遊戲重新載入才會變",
+        applied: "生效中",
+        error: "注入失敗",
+      };
+
+      /**
+       * 罰則的狀態跟價格分開。
+       *
+       * ⚠ 這不是多此一舉：罰則走 `Deck.prototype.getCost`，<b>立刻生效</b>；
+       * 價格走載入時的資料改寫，要重載。合成一句話一定會對其中一邊說謊。
+       */
+      const COST_PENALTY_TEXT = {
+        off: "用遊戲原本的（7~13 罰 5、14 以上罰 10）",
+        applied: "生效中",
+        error: "注入失敗",
+      };
+
+      /** 壓 C 區間寫成人話：`7 ~ 13 → +5`、`14 以上 → +10`。 */
+      function bandText(b) {
+        const range =
+          b.maxGap === null
+            ? `${b.minGap} 以上`
+            : b.minGap === b.maxGap
+              ? `${b.minGap}`
+              : `${b.minGap} ~ ${b.maxGap}`;
+        return `差距 ${range} → +${b.extraCost}`;
+      }
+
+      PAGES["deck/cost"] = () => {
+        const st = snap?.status;
+        const rule = snap?.costRule ?? null;
+        const failure = snap?.costRuleError ?? null;
+        const cost = st?.cost ?? {
+          phase: "off",
+          applied: null,
+          unknownKeys: 0,
+          penalty: "off",
+          penaltyEverywhere: false,
+          bands: null,
+          error: null,
+        };
+
+        const chosen = rule
+          ? `<div class="card">
+               <div class="row"><span class="dim">規則</span><span><b>${esc(rule.name)}</b> ${esc(rule.version)}</span></div>
+               <div class="row"><span class="dim">作者</span><span>${esc(rule.publisher)}</span></div>
+               ${
+                 // 四張表分開列。一個總數看不出「這份規則管不管裝備」，而那是
+                 // 拿到別人的規則檔時第一個要知道的事。0 筆＝那種卡用原版價格。
+                 [
+                   ["角色", rule.tableEntries.characters],
+                   ["怪物卡", rule.tableEntries.monsters],
+                   ["裝備", rule.tableEntries.equipment],
+                   ["事件卡", rule.tableEntries.eventCards],
+                 ]
+                   .map(
+                     ([label, n]) =>
+                       `<div class="row"><span class="dim">${label}</span><span>${
+                         n === 0 ? '<span class="dim">沒定價，用原版</span>' : `${n} 筆`
+                       }</span></div>`,
+                   )
+                   .join("")
+               }
+               <div class="row"><span class="dim">遊戲版本</span><span>${esc(rule.gameVersion)}</span></div>
+               <div class="row"><span class="dim">核對碼</span><span>${
+                 rule.shortHash
+                   ? `<code>${esc(rule.shortHash)}</code>`
+                   : '<span class="dim">裸規則，沒有核對碼</span>'
+               }</span></div>
+               <div class="row"><span class="dim">檔案</span><span>${esc(rule.fileName)}</span></div>
+               ${
+                 rule.shortHash
+                   ? `<div class="hint">跟對手約戰時核對這 8 碼 —— 一樣才代表兩邊算的是同一份規則。
+                        這個碼是<b>照檔案內容算出來的</b>，改一個數字它就會變。</div>`
+                   : `<div class="hint warn">⚠ 這是裸規則檔，沒有內容雜湊，不能拿去跟對手核對。要分享請先跑 <code>companion pack</code>。</div>`
+               }
+               ${
+                 rule.rehashedFrom
+                   ? // 直接改包是支援的做法，所以這不是錯誤 —— 但一定要說，
+                     // 否則玩家會拿著新數字去跟對手核對舊的碼。
+                     `<div class="hint warn">⚠ 這個檔案被直接編輯過，核對碼已重算：
+                        <code>${esc(rule.rehashedFrom)}</code> → <code>${esc(rule.shortHash ?? "")}</code><br />
+                        對手手上那份還是舊的 —— <b>把這個檔案傳給他</b>，兩邊的碼才會一樣。</div>`
+                   : ""
+               }
+             </div>`
+          : failure
+            ? // ⚠ 這張卡片是「選了沒反應」的解藥。載入失敗時 costRule 是 null，
+              // 沒有它的話這一頁只會說「還沒選規則」—— 跟根本沒按過一模一樣。
+              `<div class="card">
+               <div class="row"><span class="dim">規則</span><span class="bad"><b>載入失敗，沒有套用</b></span></div>
+               <div class="row"><span class="dim">檔案</span><span>${esc(failure.fileName)}</span></div>
+               <div class="hint warn">⚠ ${esc(failure.message)}</div>
+               ${
+                 failure.hint
+                   ? `<div class="hint">${esc(failure.hint).replace(/\n/g, "<br />")}</div>`
+                   : ""
+               }
+               <div class="hint">遊戲顯示的仍然是原版 COST。修好之後再選一次。</div>
+             </div>`
+            : `<div class="card">
+               <div class="hint">還沒選規則。遊戲顯示的是原版 COST。</div>
+             </div>`;
+
+        const state = `<div class="card">
+             <div class="row"><span class="dim">卡片價格</span><span>${
+               COST_PHASE_TEXT[cost.phase] ?? cost.phase
+             }</span></div>
+             <div class="row"><span class="dim">壓 C 罰則</span><span>${
+               cost.penalty === "applied"
+                 ? cost.penaltyEverywhere
+                   ? "生效中（立即，全遊戲）"
+                   : "生效中（⚠ 目前只有牌組畫面）"
+                 : (COST_PENALTY_TEXT[cost.penalty] ?? cost.penalty)
+             }</span></div>
+             ${
+               cost.applied !== null
+                 ? `<div class="row"><span class="dim">已改寫</span><span>${cost.applied} 張卡</span></div>`
+                 : ""
+             }
+             ${
+               cost.unknownKeys > 0
+                 ? `<div class="hint warn">⚠ 規則有 ${cost.unknownKeys} 個鍵這個客戶端沒有。規則可能是給別的遊戲版本用的 —— 那些卡會被當成 99C。</div>`
+                 : ""
+             }
+             ${cost.error ? `<div class="hint warn">⚠ ${esc(cost.error)}</div>` : ""}
+             ${
+               cost.phase === "pending"
+                 ? `<div class="hint">⚠ 這兩件事的生效時機<b>不一樣</b>。<br />
+                      <b>壓 C 罰則</b>改的是遊戲的計算函式，<b>已經生效</b>了 ——
+                      牌組畫面的罰則與總和現在就是規則裡的。<br />
+                      <b>卡片價格</b>改的是載入時的資料，只對<b>之後載入</b>的畫面生效，
+                      要按下面的重載或自己重開遊戲。</div>`
+                 : ""
+             }
+           </div>`;
+
+        const bands = rule
+          ? rule.bands === null
+            ? `<div class="card"><div class="hint">這份規則不壓 C。</div></div>`
+            : `<div class="card">
+                 <div class="row"><span class="dim">壓 C</span><span>${rule.bands.length} 段</span></div>
+                 ${rule.bands
+                   .map(
+                     (b) =>
+                       `<div class="row"><span class="dim">·</span><span>${esc(bandText(b))}</span></div>`,
+                   )
+                   .join("")}
+                 <div class="hint">壓 C 是<b>隊內每一對出戰卡</b>各判一次，三張就是三對。
+                   <b>怪物卡也算</b> —— 它跟角色共用同樣那三個槽位；
+                   裝備與事件卡計入總和但<b>不</b>參與壓 C。<br />
+                   遊戲畫面上的 <code>+N</code> 徽章與總和都會照這張表重算。<br />
+                   ⚠ 對戰大廳的 <code>cost:</code> 是<b>進場時跟伺服器要的</b>，
+                   換規則後要離開再進去一次才會重新抓。<br />
+                   ⚠ 存牌組時送上伺服器的仍然是<b>原版數字</b> —— 插件不改變伺服器的判定。</div>
+               </div>`
+          : "";
+
+        return (
+          head(
+            "Cost 表",
+            "套用自訂 COST —— 角色、怪物、裝備、事件卡四張表。只改本機顯示，不會改變伺服器的判定。",
+          ) +
+          chosen +
+          state +
+          bands +
+          `<div class="card">
+             <div class="presets">
+               <button id="costPick">選規則檔…</button>
+               ${rule ? `<button id="costClear">停用</button>` : ""}
+               ${rule && st?.connected ? `<button id="costReload">重載遊戲讓它生效</button>` : ""}
              </div>
-           </div>` +
-          (snap.ephemeral
-            ? `<div class="card"><div class="hint warn" style="margin-top:0">
-                 這個視窗是用命令列的 <b>--port ${snap.profile.port}</b> 開的臨時配置，不在清單裡。
-                 改它的設定不會存下來。要留著就在上面「新增配置」。
-               </div></div>`
-            : "")
+             <div class="hint">
+               ⚠ 重載會<b>打斷正在進行的對戰</b>。
+               ${st?.connected ? "" : "現在還沒接上遊戲，接上之後才按得到。"}
+             </div>
+           </div>
+           <div class="card">
+             <div class="hint">
+               規則檔怎麼來：<code>companion official-rule</code> 匯出一份原版表
+               （四張表一次全帶），<b>直接改裡面的數字</b>就是你的版本了 ——
+               核對碼會在載入時自動重算，不用先解包。改完把檔案傳給對手，
+               兩邊的碼一樣就是同一份規則。<br />
+               四張表的鍵：角色 <code>cc078_04</code>、怪物 <code>mc001_01</code>、
+               裝備 <code>wp001</code>、事件卡 <code>ev091</code>。
+               後兩者的數字是<b>補零到三位的卡片編號</b>，寫成 <code>wp1</code> 不算數。
+             </div>
+           </div>`
         );
       };
 
       // --- 設置 › 連線 ------------------------------------------------------
       /**
-       * 「怎麼讓插件接得到遊戲」。
+       * 「怎麼讓插件接得到遊戲」——**一行字加一顆複製按鈕，就這樣。**
        *
-       * ⚠ **這一段必須留在畫面上，不能只寫在 docs 裡。** CDP 的
-       * `--remote-debugging-port` **只能在啟動時指定**，沒辦法對已經在跑的遊戲
-       * 補掛 —— 所以在托盤還沒有「幫你開遊戲」那個功能之前，玩家一定得自己去
-       * Steam 設一次。而會需要這段話的人，正是那個對著「等遊戲…」不知道下一步
-       * 要做什麼的人：他不會去翻 GitHub 上的文件。
+       * ⚠ **這一段以前有 5 個步驟加 4 條警告，那是寫給我自己看的，不是寫給玩家的。**
+       * 玩家要的不是理解 CDP，是知道下一步按哪裡。那 4 條警告全部是「填固定埠時
+       * 才會出事」的排錯知識 —— 改成叫大家填 `0` 之後，那些情況一個都不會發生，
+       * 於是整段可以刪掉，而不是折疊起來。**指示變短的正確方式是讓它變得不必要。**
        *
-       * 桌面版與網頁版**設定的地方完全不同**，所以分開講 —— 混在一起的話，
-       * 網頁版的玩家會去改一個對他毫無作用的欄位，然後以為插件壞了。
+       * 剩下的排錯（埠被保留、被別的程式佔走、asar 是網頁版）由
+       * `explainDebugPort()` 在真的出事時講一句，而且是講**那一次**的原因 ——
+       * 比預先把四種可能都攤在玩家面前準。
+       *
+       * ⚠ **網頁版沒有這一段。** 那條路要自己改 `app.asar`，玩家做不到 ——
+       * 對他講等於叫他去撞牆。（我自己也不需要：我知道那支 cmd 在哪。）
        */
       function howToConnect(p) {
-        const port = p?.port ?? 9333;
-        if (p?.kind === "web") {
-          return `<div class="card">
-             <div class="row"><span><b>接不上？網頁版的埠不在 Steam 設</b></span></div>
-             <div class="hint">
-               網頁版的遊戲外殼只做一件事：拿 Steam 票券 → 開瀏覽器 → <b>自己關掉</b>。
-               所以能掛 CDP 的是<b>那個瀏覽器</b>，不是遊戲程序。
-             </div>
-             <ol class="steps">
-               <li>找到遊戲開瀏覽器用的那支 <code>launch-chrome.cmd</code></li>
-               <li>把裡面的 <code>--remote-debugging-port=…</code> 改成
-                   <code>${port}</code>（<b>檢查埠的那一行也要一起改</b>）</li>
-               <li><b>把 Chrome 完全關掉</b>，再從遊戲開一次</li>
-             </ol>
-             <div class="hint">
-               ⚠ <b>Steam 的啟動選項要清空</b> —— 網頁版的外殼不吃那個參數。<br />
-               ⚠ <b>Chrome 一定要先全部關掉。</b> 同一個 <code>--user-data-dir</code>
-               已經有實例在跑時，新的那次只會開一個分頁，
-               <b>debug port 參數會被整個忽略</b>，埠停在舊的值 —— 而畫面上沒有任何錯誤。
-             </div>
-           </div>`;
-        }
+        if (p?.kind === "web") return "";
         return `<div class="card">
-           <div class="row"><span><b>接不上？在 Steam 設一次就好</b></span></div>
-           <div class="hint">
-             CDP 的 <b>debug port 只能在啟動時指定</b>，沒辦法對已經在跑的遊戲補掛。
-             插件<b>不會替你關掉正在打的遊戲</b>，所以這件事要你自己做一次。
-           </div>
-           <ol class="steps">
-             <li>Steam 遊戲庫 → 對 <b>UNLIGHT:Revive</b> 按右鍵 → <b>內容…</b></li>
-             <li>在「一般」分頁裡找到 <b>啟動選項</b></li>
-             <li>填入這一行（<b>整行就這樣，前後不要加別的</b>）：<br />
-                 <code>--remote-debugging-port=${port}</code></li>
-             <li>關掉那個視窗（Steam 會自己存）</li>
-             <li><b>把遊戲完全關掉，再從 Steam 開一次</b></li>
-           </ol>
-           <div class="hint">
-             ⚠ 這裡的數字要跟上面那個<b>遊戲 CDP 埠</b>一樣。改了一邊就要改另一邊。<br />
-             ⚠ <b>遊戲一開就自己關掉？</b>那不是失敗，是<b>網頁版</b>的
-             <code>app.asar</code> 正在生效（約 153 KB）。它的工作就是開瀏覽器然後退出。
-             要用桌面版就得換回視窗版那份（約 404 MB）。<br />
-             ⚠ <b>從 VS Code 的終端機開遊戲會 exit 9</b>（<code>ELECTRON_RUN_AS_NODE</code>
-             被繼承，Electron 被當成純 Node 跑）。從 Steam 開不會有這個問題。
+           <div class="row"><span><b>接不上遊戲？</b></span></div>
+           <div class="hint">在 Steam 的啟動選項填這一行，然後重開遊戲：</div>
+           <div class="row">
+             <code>${esc(snap?.debugFlag ?? "")}</code>
+             <button id="copyFlag">複製</button>
            </div>
          </div>`;
       }
 
+      // --- 牌組 › 編輯 COST -------------------------------------------------
+      //
+      // 這一頁存在的理由只有一句：**規則檔裡是 `cc001_01`，玩家看得懂的是
+      // 「艾伯李斯特 L1」。** 中間那份對照叫名冊（catalog），從玩家自己跑著的
+      // 客戶端讀出來，存在家目錄重複使用。
+      //
+      // ⚠ 這一頁的資料**不在 snapshot 裡**：四張表加起來 1186 筆，而快照每次
+      // 狀態變動都整份重送。開頁時用 `editor.load()` 拉一次就好。
+
+      /** 編輯器的全部狀態。`null` = 還沒載入。 */
+      let ed = null;
+      /** 四張表哪一張開著。 */
+      let edTab = "characters";
+      /** 名字的篩選字串。700 位角色，沒有它找不到人。 */
+      let edFilter = "";
+      /** 上一次存檔的結果，畫在按鈕旁邊。 */
+      let edMsg = null;
+      /** 正在載入中，避免重複發 IPC。 */
+      let edLoading = false;
+
+      const onEditPage = () => tab === "deck" && sub === "costedit";
+
+      const ED_TABS = [
+        { id: "characters", label: "角色卡" },
+        { id: "eventCards", label: "事件卡" },
+        { id: "equipment", label: "裝備卡" },
+        { id: "monsters", label: "怪物卡" },
+      ];
+
+      function edLoad(force) {
+        if (edLoading) return;
+        if (ed !== null && !force) return;
+        edLoading = true;
+        window.ulr.editor.load().then((payload) => {
+          edLoading = false;
+          ed = decorate(payload);
+          if (onEditPage()) renderBody();
+        });
+      }
+
+      /**
+       * 把 IPC 送來的東西整理成畫面直接可用的樣子。
+       *
+       * 兩件事：
+       * 1. **原價索引**（`base`）—— 每一格都要知道「原本是多少」，才畫得出
+       *    「改過了」與「改回原價」。
+       * 2. **草稿**（`draft`）—— 規則裡沒有的鍵先用原價填。那正是「舊規則只有
+       *    角色表」的升級路徑：打開編輯器、按存檔，四張表就補齊了。
+       */
+      function decorate(payload) {
+        const base = {};
+        const draft = {};
+        for (const t of ED_TABS) {
+          base[t.id] = {};
+          draft[t.id] = {};
+        }
+        const cat = payload.catalog;
+        if (cat) {
+          for (const g of cat.characters)
+            for (const c of g.cards) base.characters[c.key] = c.baseCost;
+          for (const g of cat.monsters) for (const c of g.cards) base.monsters[c.key] = c.baseCost;
+          for (const g of cat.equipment)
+            for (const i of g.items) base.equipment[i.key] = i.baseCost;
+          for (const g of cat.eventCards)
+            for (const i of g.items) base.eventCards[i.key] = i.baseCost;
+        }
+        for (const t of ED_TABS) {
+          const fromRule = payload.tables?.[t.id] ?? {};
+          for (const k of Object.keys(base[t.id])) draft[t.id][k] = base[t.id][k];
+          // 規則寫了什麼就蓋上去。⚠ 規則有、名冊沒有的鍵也要留著 —— 那是
+          // 「規則比客戶端新（或舊）」的訊號，默默丟掉等於偷改別人的規則。
+          for (const k of Object.keys(fromRule)) draft[t.id][k] = fromRule[k];
+        }
+        // 載入當下的樣子。**跟 base 是兩回事**，見 edUnsaved()。
+        const saved = JSON.parse(JSON.stringify(draft));
+        return { ...payload, base, draft, saved };
+      }
+
+      /**
+       * 這一格跟**遊戲原價**不一樣嗎 —— 決定要不要標成琥珀色。
+       *
+       * 名冊沒有原價時（規則比客戶端新）一律當成沒改：我們不知道原價是多少，
+       * 標成「改過了」是在講一件自己也不確定的事。
+       */
+      function edChanged(tableId, key) {
+        const b = ed?.base[tableId]?.[key];
+        if (b === undefined) return false;
+        return ed.draft[tableId][key] !== b;
+      }
+
+      /**
+       * 這一格跟**檔案裡存著的值**不一樣嗎 —— 決定存檔鈕與「未存檔」計數。
+       *
+       * ⚠ **這兩件事一定要分開。** 一份自訂規則本來就有一堆格子跟原價不同
+       * （夾擠式那份就有兩格），拿「跟原價不同」當存檔鈕的條件的話，存完檔
+       * 按鈕仍然亮著、上面還寫著「改動 4 格」—— 玩家會一直以為自己有東西沒存。
+       */
+      function edUnsaved(tableId, key) {
+        return ed.draft[tableId][key] !== ed.saved[tableId][key];
+      }
+
+      function edUnsavedCount() {
+        if (ed === null) return 0;
+        let n = 0;
+        for (const t of ED_TABS)
+          for (const k of Object.keys(ed.draft[t.id])) if (edUnsaved(t.id, k)) n++;
+        return n;
+      }
+
+      /** 跟原版不一樣的格數 —— 「這份規則到底動了多少東西」。 */
+      function edCustomCount() {
+        if (ed === null) return 0;
+        let n = 0;
+        for (const t of ED_TABS)
+          for (const k of Object.keys(ed.draft[t.id])) if (edChanged(t.id, k)) n++;
+        return n;
+      }
+
+      /** 篩選：名字對得上就留。空字串代表全部。 */
+      function edMatch(name) {
+        if (edFilter === "") return true;
+        return name.toLowerCase().includes(edFilter.toLowerCase());
+      }
+
+      /**
+       * 一個數字格。
+       *
+       * `data-k` 帶的是規則鍵（`cc001_01`）—— 程式要靠它定位，但**它不顯示**。
+       * `title` 也帶著，是為了玩家回報問題時說得出是哪一張。
+       */
+      function edInput(tableId, key, label) {
+        const v = ed.draft[tableId][key];
+        const cls = edChanged(tableId, key) ? "dirty" : "";
+        return (
+          `<input type="number" step="0.01" class="${cls}" value="${v}" ` +
+          `data-t="${tableId}" data-k="${esc(key)}" title="${esc(label)}（${esc(key)}）" />`
+        );
+      }
+
+      /** 角色：一位一排，L1~L5 R1~R5。欄頭只印一次。 */
+      function edCharacters(cat) {
+        const groups = cat.characters.filter((g) => edMatch(g.name));
+        if (groups.length === 0)
+          return `<div class="hint">沒有名字對得上「${esc(edFilter)}」。</div>`;
+        const slots = groups[0].cards.map((c) => `<div class="slot">${esc(c.slot)}</div>`).join("");
+        const head = `<div class="ehead"><div class="ename">角色</div><div class="egrid c10">${slots}</div></div>`;
+        const rows = groups
+          .map(
+            (g) =>
+              `<div class="erow"><div class="ename" title="${esc(g.name)}">${esc(g.name)}</div>` +
+              `<div class="egrid c10">${g.cards
+                .map(
+                  (c) =>
+                    `<div class="ecell">${edInput("characters", c.key, `${g.name} ${c.slot}`)}</div>`,
+                )
+                .join("")}</div></div>`,
+          )
+          .join("");
+        return head + rows;
+      }
+
+      /** 怪物：M1~M3，一排放三種不同的怪物。 */
+      function edMonsters(cat) {
+        const groups = cat.monsters.filter((g) => edMatch(g.name));
+        if (groups.length === 0)
+          return `<div class="hint">沒有名字對得上「${esc(edFilter)}」。</div>`;
+        const blocks = groups.map(
+          (g) =>
+            `<div class="mblock"><div class="mname" title="${esc(g.name)}">${esc(g.name)}</div>` +
+            `<div class="egrid c3">${g.cards
+              .map((c) => `<div class="slot">${esc(c.slot)}</div>`)
+              .join("")}</div>` +
+            `<div class="egrid c3">${g.cards
+              .map(
+                (c) =>
+                  `<div class="ecell">${edInput("monsters", c.key, `${g.name} ${c.slot}`)}</div>`,
+              )
+              .join("")}</div></div>`,
+        );
+        const rows = [];
+        for (let i = 0; i < blocks.length; i += 3) {
+          rows.push(`<div class="mrow">${blocks.slice(i, i + 3).join("")}</div>`);
+        }
+        return rows.join("");
+      }
+
+      /**
+       * 裝備：照「這是誰的專武」分組，一排 5 件。
+       *
+       * ⚠ 角色限制一定要標出來 —— 一件只有某位角色帶得動的武器，跟通用武器的
+       * 定價考量完全不同。實測 238 件裡有 212 件是專武。
+       */
+      function edEquipment(cat) {
+        const groups = cat.equipment
+          .map((g) => ({ ...g, items: g.items.filter((i) => edMatch(i.name) || edMatch(g.name)) }))
+          .filter((g) => g.items.length > 0);
+        if (groups.length === 0)
+          return `<div class="hint">沒有名字對得上「${esc(edFilter)}」。</div>`;
+        return groups
+          .map(
+            (g) =>
+              `<div class="egroup">${esc(g.name)}` +
+              `<span class="sub">${g.charaId === null ? "誰都能帶" : "專武"} · ${g.items.length} 件</span></div>` +
+              `<div class="egrid c5">${g.items
+                .map(
+                  (i) =>
+                    `<div class="ecell"><span class="cn" title="${esc(i.name)}">${esc(i.name)}</span>` +
+                    `${edInput("equipment", i.key, i.name)}</div>`,
+                )
+                .join("")}</div>`,
+          )
+          .join("");
+      }
+
+      /** 事件卡：族群一塊，一排 9 張（劍1~劍9、劍3·槍1~劍5·移動1…）。 */
+      function edEvents(cat) {
+        const groups = cat.eventCards
+          .map((g) => ({ ...g, items: g.items.filter((i) => edMatch(i.name)) }))
+          .filter((g) => g.items.length > 0);
+        if (groups.length === 0)
+          return `<div class="hint">沒有名字對得上「${esc(edFilter)}」。</div>`;
+        return groups
+          .map(
+            (g) =>
+              `<div class="egroup">${esc(g.name)}<span class="sub">${g.items.length} 張</span></div>` +
+              `<div class="egrid c9">${g.items
+                .map(
+                  (i) =>
+                    `<div class="ecell"><span class="cn" title="${esc(i.name)}">${esc(i.name)}</span>` +
+                    `${edInput("eventCards", i.key, i.name)}</div>`,
+                )
+                .join("")}</div>`,
+          )
+          .join("");
+      }
+
+      /** 沒有名冊時這一頁做不了事 —— 要講清楚為什麼，以及下一步按哪裡。 */
+      function edNoCatalog() {
+        const why = ed?.catalogError
+          ? `<div class="hint warn">⚠ ${esc(ed.catalogError)}</div>`
+          : `<div class="hint">這一頁要先有一份<b>卡片名冊</b>才畫得出來 ——
+               規則檔裡是 <code>cc001_01</code>，名冊才知道那是「艾伯李斯特 L1」。
+               名冊從<b>你自己跑著的遊戲</b>讀，讀一次就會存起來，之後沒開遊戲也用得了。</div>`;
+        return `<div class="card">
+             <div class="row"><span class="dim">卡片名冊</span><span class="bad"><b>還沒有</b></span></div>
+             ${why}
+             <div class="presets" style="margin-top:8px">
+               <button id="edCatalog" ${ed?.connected ? "" : "disabled"}>從遊戲讀取名冊</button>
+             </div>
+             <div class="hint">${
+               ed?.connected
+                 ? "遊戲已接上，按下去就會讀。"
+                 : "現在還沒接上遊戲 —— 先把遊戲開起來（見「設置 › 連線」）。"
+             }</div>
+           </div>`;
+      }
+
+      PAGES["deck/costedit"] = () => {
+        const title = head(
+          "編輯 COST",
+          "改自己的規則檔。<b>看到的是卡片名稱，不是編號</b> —— 中間那份對照從你自己的遊戲讀。",
+        );
+        if (ed === null) {
+          edLoad(false);
+          return title + `<div class="card"><div class="hint">載入中…</div></div>`;
+        }
+        if (ed.rule === null) {
+          return (
+            title +
+            `<div class="card">
+               <div class="row"><span class="dim">規則</span><span class="bad"><b>還沒選</b></span></div>
+               <div class="hint">編輯 COST 是<b>改一份既有的規則檔</b>，所以要先有檔案。
+                 到「牌組 › Cost 表」選一份 —— 沒有自己的規則就先選
+                 <code>unlight-official</code>，那是原版數字的完整四張表，改它就是你的版本了。</div>
+             </div>`
+          );
+        }
+
+        const cat = ed.catalog;
+        const unsaved = edUnsavedCount();
+        const custom = edCustomCount();
+        const size = cat
+          ? {
+              characters: cat.characters.reduce((n, g) => n + g.cards.length, 0),
+              monsters: cat.monsters.reduce((n, g) => n + g.cards.length, 0),
+              equipment: cat.equipment.reduce((n, g) => n + g.items.length, 0),
+              eventCards: cat.eventCards.reduce((n, g) => n + g.items.length, 0),
+            }
+          : null;
+
+        const header = `<div class="card">
+             <div class="row"><span class="dim">正在編輯</span>
+               <span><b>${esc(ed.rule.name)}</b>
+                 <input type="text" id="edVersion" value="${esc(ed.rule.version)}" style="width:5.5em;margin-left:6px" />
+               </span></div>
+             <div class="row"><span class="dim">檔案</span><span>${esc(ed.rule.fileName)}</span></div>
+             <div class="row"><span class="dim">未存檔</span><span>${
+               unsaved === 0
+                 ? '<span class="dim">沒有，都存好了</span>'
+                 : `<b class="warn">${unsaved} 格</b>`
+             }</span></div>
+             <div class="row"><span class="dim">跟原版不同</span><span>${
+               custom === 0 ? '<span class="dim">完全照原版</span>' : `${custom} 格`
+             }</span></div>
+             <div class="presets" style="margin-top:8px">
+               <button id="edSave" ${unsaved === 0 ? "disabled" : ""}>存回這個檔</button>
+               <button id="edResetTab" class="danger">這一頁全部改回原價</button>
+             </div>
+             ${edMsg ? `<div class="hint ${edMsg.bad ? "warn" : "good"}">${esc(edMsg.text)}</div>` : ""}
+             <div class="hint">存檔會<b>就地覆寫同一個檔</b>，不會多生一份 ——
+               核對碼每次都重算。<b>要傳給對手之前記得把版本號改掉</b>（上面那格），
+               不然對手會拿舊版本號配到不同內容的規則。</div>
+           </div>`;
+
+        if (cat === null) return title + header + edNoCatalog();
+
+        const tabs =
+          `<div class="etabs">` +
+          ED_TABS.map(
+            (t) =>
+              `<button data-edtab="${t.id}" aria-selected="${t.id === edTab}">${esc(t.label)}` +
+              `<span class="n">${size[t.id]}</span></button>`,
+          ).join("") +
+          `</div>`;
+
+        const tools = `<div class="row" style="margin-bottom:8px">
+             <input type="text" id="edFilter" placeholder="打名字找卡（例：艾伯、聖水、短劍）" value="${esc(edFilter)}" style="flex:1" />
+             <span class="dim" style="font-size:11px">名冊 ${esc(cat.gameVersion)} · ${esc(
+               cat.readAt.slice(0, 10),
+             )} 讀的</span>
+             <button id="edCatalog" ${ed.connected ? "" : "disabled"}>重讀名冊</button>
+           </div>`;
+
+        const body =
+          edTab === "characters"
+            ? edCharacters(cat)
+            : edTab === "monsters"
+              ? edMonsters(cat)
+              : edTab === "equipment"
+                ? edEquipment(cat)
+                : edEvents(cat);
+
+        return title + header + tabs + tools + `<div class="card">${body}</div>`;
+      };
+
+      // --- 牌組 › 編輯規則 --------------------------------------------------
+      //
+      // 「編輯 COST」改的是**價格**（1186 個數字格），這一頁改的是**規則本身**。
+      // 目前規則裡除了價格以外唯一有行為意義的欄位就是壓 C（`compressionRule`），
+      // 所以這一頁現在只有壓 C。原版那份與自訂那份都改得動 —— 它們是同一種檔案，
+      // 差別只在裡面的數字。
+      //
+      // ⚠ 隊伍 COST 上限**刻意不在這裡**。它是<b>對戰環境</b>的屬性而不是規則的
+      // 屬性（伺服器按頻道下發，客戶端裡根本沒有這個常數），約定值填在「配對」
+      // 那一頁 —— 見 docs/official-cost-rule.md 的「上限不在規則裡」。
+
+      /** 這一頁的全部狀態。`null` = 還沒載入。 */
+      let rl = null;
+      let rlMsg = null;
+      let rlLoading = false;
+
+      const onRulePage = () => tab === "deck" && sub === "ruleedit";
+
+      /** 官方的兩段。「改回原版壓 C」那顆按的就是它。 */
+      const RL_OFFICIAL = [
+        { minGap: 7, maxGap: 13, extraCost: 5 },
+        { minGap: 14, maxGap: null, extraCost: 10 },
+      ];
+
+      function rlLoad(force) {
+        if (rlLoading) return;
+        if (rl !== null && !force) return;
+        rlLoading = true;
+        window.ulr.editor.load().then((payload) => {
+          rlLoading = false;
+          const bands = (payload.compression?.bands ?? []).map((b) => ({
+            minGap: b.minGap,
+            // ⚠ 主程序那邊「沒有上界」是**欄位不存在**，這裡一律正規化成 null。
+            // 留著 undefined 的話 `b.maxGap === null` 那些判斷會全部漏掉它。
+            maxGap: b.maxGap === undefined || b.maxGap === null ? null : b.maxGap,
+            extraCost: b.extraCost,
+          }));
+          rl = { rule: payload.rule, bands, saved: JSON.stringify(bands) };
+          if (onRulePage()) renderBody();
+        });
+      }
+
+      /** 跟檔案裡存著的不一樣嗎 —— 決定存檔鈕。 */
+      function rlDirty() {
+        return rl !== null && JSON.stringify(rl.bands) !== rl.saved;
+      }
+
+      /**
+       * 存不下去的錯。**跟主程序那邊是同一套判準**（`validateCostRule` 的
+       * `band.*`），先在畫面上擋是為了讓玩家看到是哪一段，而不是存檔時收到
+       * 一句 JSON Pointer。
+       */
+      function rlIssues(bands) {
+        const bad = [];
+        bands.forEach((b, i) => {
+          if (!Number.isFinite(b.minGap) || !Number.isFinite(b.extraCost)) {
+            bad.push(`第 ${i + 1} 段有欄位空著或不是數字。`);
+          }
+          if (b.maxGap !== null && b.maxGap < b.minGap) {
+            bad.push(`第 ${i + 1} 段的上界 ${b.maxGap} 比下界 ${b.minGap} 小。`);
+          }
+        });
+        if (bands.filter((b) => b.maxGap === null).length > 1) {
+          bad.push("只能有一段留空上界（＝無上界），否則兩段一定重疊。");
+        }
+        const sorted = bands.map((b, i) => ({ ...b, i })).sort((a, b) => a.minGap - b.minGap);
+        for (let n = 1; n < sorted.length; n++) {
+          const prev = sorted[n - 1];
+          const cur = sorted[n];
+          const end = prev.maxGap === null ? Infinity : prev.maxGap;
+          if (cur.minGap <= end) {
+            bad.push(
+              `第 ${prev.i + 1} 段與第 ${cur.i + 1} 段重疊 —— 同一個差距會對應到兩個追加值。`,
+            );
+          }
+        }
+        return bad;
+      }
+
+      /**
+       * 兩段之間的縫隙。**這是警告不是錯誤**，但它是這個表最容易踩的坑。
+       *
+       * 點狀區間（`[7,7]`、`[8,8]`…）碰到**小數差距**會整段落空：角色 COST 一旦
+       * 有小數，差距就是小數，而 7.5 在 [7,7] 與 [8,8] 之間一段都不中 →
+       * 完全不罰，而且完全沒有提示。2026-08-15 的 `shinon/squeeze-band` 就是
+       * 這樣整條曲線消失的，所以規則檔的上界才寫成 x.99。
+       */
+      function rlHoles(bands) {
+        const sorted = bands
+          .filter((b) => Number.isFinite(b.minGap))
+          .map((b, i) => ({ ...b, i }))
+          .sort((a, b) => a.minGap - b.minGap);
+        const holes = [];
+        for (let n = 1; n < sorted.length; n++) {
+          const prev = sorted[n - 1];
+          const cur = sorted[n];
+          if (prev.maxGap === null) continue;
+          if (cur.minGap > prev.maxGap) holes.push([prev.maxGap, cur.minGap]);
+        }
+        return holes;
+      }
+
+      /** 一個差距落在哪一段 → 追加多少。跟引擎同一套語義（照陣列順序取第一個命中的）。 */
+      function rlExtraFor(bands, gap) {
+        for (const b of bands) {
+          if (!Number.isFinite(b.minGap)) continue;
+          if (gap < b.minGap) continue;
+          if (b.maxGap !== null && gap > b.maxGap) continue;
+          return b.extraCost;
+        }
+        return 0;
+      }
+
+      function rlNum(v) {
+        return v === null || v === undefined || Number.isNaN(v) ? "" : String(v);
+      }
+
+      /** 警告區塊的內容（重疊、縫隙）。改一格數字要立刻跟著變。 */
+      function rlWarnHtml(bands) {
+        const issues = rlIssues(bands);
+        const holes = rlHoles(bands);
+        return (
+          (issues.length > 0
+            ? `<div class="hint warn">⚠ ${issues.map(esc).join("<br />⚠ ")}</div>`
+            : "") +
+          (holes.length > 0
+            ? `<div class="hint warn">⚠ 這幾段之間有縫隙：${holes
+                .map(([a, b]) => `${a} ~ ${b}`)
+                .join("、")}。<br />
+                 整數差距不會掉進去，但<b>小數會</b> —— 角色 COST 只要有一個 13.2，
+                 差距就是小數，落在縫隙裡就是<b>完全不罰</b>，而且沒有任何提示。
+                 按上面那顆會把每一段的上界頂到下一段起點的前 0.01。</div>`
+            : "")
+        );
+      }
+
+      /** 試算表：差距 0~29 各追加多少。 */
+      function rlPreviewHtml(bands) {
+        return (
+          `<div class="egrid c10" style="margin-top:6px">
+             ${Array.from({ length: 30 }, (_, g) => `<div class="slot">${g}</div>`).join("")}
+           </div>` +
+          `<div class="egrid c10">
+             ${Array.from({ length: 30 }, (_, g) => {
+               const x = rlExtraFor(bands, g);
+               return `<div class="ecell"><input type="text" readonly class="${
+                 x > 0 ? "dirty" : ""
+               }" value="${x === 0 ? "" : `+${x}`}" /></div>`;
+             }).join("")}
+           </div>`
+        );
+      }
+
+      /**
+       * 改一格數字之後把**衍生的那幾塊**重畫。
+       *
+       * ⚠ **不能整頁重畫。** `renderBody()` 是換掉 `#content` 的 innerHTML，
+       * 玩家正在打字的那個輸入框會連同焦點一起消失 —— 每按一個鍵就要重新點一次。
+       * 編輯 COST 那一頁踩過同一件事（700 個欄位），這裡只是欄位少而已。
+       */
+      function rlRefresh() {
+        if (rl === null) return;
+        const warn = $("rlWarn");
+        if (warn) warn.innerHTML = rlWarnHtml(rl.bands);
+        const preview = $("rlPreview");
+        if (preview) preview.innerHTML = rlPreviewHtml(rl.bands);
+        const dirty = rlDirty();
+        const save = $("rlSave");
+        if (save) save.disabled = !dirty || rlIssues(rl.bands).length > 0;
+        const cell = $("rlDirtyCell");
+        if (cell) {
+          cell.innerHTML = dirty
+            ? '<b class="warn">有改動</b>'
+            : '<span class="dim">沒有，都存好了</span>';
+        }
+      }
+
+      PAGES["deck/ruleedit"] = () => {
+        const title = head(
+          "編輯規則",
+          "改規則檔裡<b>不是價格</b>的那一半。目前是壓 C —— 差距多少罰多少，一段一排。",
+        );
+        if (rl === null) {
+          rlLoad(false);
+          return title + `<div class="card"><div class="hint">載入中…</div></div>`;
+        }
+        if (rl.rule === null) {
+          return (
+            title +
+            `<div class="card">
+               <div class="row"><span class="dim">規則</span><span class="bad"><b>還沒選</b></span></div>
+               <div class="hint">編輯規則是<b>改一份既有的規則檔</b>，所以要先有檔案。
+                 到「牌組 › Cost 表」選一份 —— 沒有自己的規則就先選
+                 <code>unlight-official</code>，那份的壓 C 就是原版的兩段。</div>
+             </div>`
+          );
+        }
+
+        const bands = rl.bands;
+        const issues = rlIssues(bands);
+        const dirty = rlDirty();
+
+        const header = `<div class="card">
+             <div class="row"><span class="dim">正在編輯</span>
+               <span><b>${esc(rl.rule.name)}</b>
+                 <input type="text" id="rlVersion" value="${esc(rl.rule.version)}" style="width:5.5em;margin-left:6px" />
+               </span></div>
+             <div class="row"><span class="dim">檔案</span><span>${esc(rl.rule.fileName)}</span></div>
+             <div class="row"><span class="dim">壓 C</span><span>${
+               bands.length === 0 ? '<span class="dim">這份規則不壓 C</span>' : `${bands.length} 段`
+             }</span></div>
+             <div class="row"><span class="dim">未存檔</span><span id="rlDirtyCell">${
+               dirty ? '<b class="warn">有改動</b>' : '<span class="dim">沒有，都存好了</span>'
+             }</span></div>
+             <div class="presets" style="margin-top:8px">
+               <button id="rlSave" ${dirty && issues.length === 0 ? "" : "disabled"}>存回這個檔</button>
+               <button id="rlOfficial">改回原版兩段</button>
+               <button id="rlClear" class="danger">清空（不壓 C）</button>
+             </div>
+             ${rlMsg ? `<div class="hint ${rlMsg.bad ? "warn" : "good"}">${esc(rlMsg.text)}</div>` : ""}
+             <div class="hint">存檔會<b>就地覆寫同一個檔</b>，核對碼重算 ——
+               跟「編輯 COST」是同一個檔案的兩半，兩邊互不影響。
+               <b>要傳給對手之前記得改版本號</b>（上面那格）。<br />
+               ⚠ 壓 C 改完<b>立刻生效</b>，不用重載遊戲（它攔的是遊戲的計算函式）；
+               價格才要重載。</div>
+           </div>`;
+
+        const rows = bands
+          .map(
+            (b, i) => `<div class="bandrow">
+               <span class="lbl">${i + 1}.</span>
+               <span class="lbl">差距</span>
+               <input type="number" step="0.01" data-rb="${i}" data-rf="minGap" value="${esc(rlNum(b.minGap))}" />
+               <span class="lbl">～</span>
+               <input type="number" step="0.01" data-rb="${i}" data-rf="maxGap" value="${esc(rlNum(b.maxGap))}" placeholder="無上界" />
+               <span class="lbl">追加</span>
+               <input type="number" step="0.01" data-rb="${i}" data-rf="extraCost" value="${esc(rlNum(b.extraCost))}" />
+               <button data-rbdel="${i}" title="刪掉這一段">✕</button>
+             </div>`,
+          )
+          .join("");
+
+        const table = `<div class="card">
+             <div class="row"><span class="dim">壓 C 區間</span>
+               <span class="dim">上界留空＝無上界</span></div>
+             ${
+               bands.length === 0
+                 ? `<div class="hint">一段都沒有 —— 這份規則<b>完全不壓 C</b>。
+                      那跟「用原版」是兩回事：原版是 7~13 罰 5、14 以上罰 10。</div>`
+                 : rows
+             }
+             <div class="presets">
+               <button id="rlAdd">新增一段</button>
+               <button id="rlSort">照差距排序</button>
+               <button id="rlSnap">把上界頂到下一段（補小數縫隙）</button>
+             </div>
+             <div id="rlWarn">${rlWarnHtml(bands)}</div>
+             <div class="hint">壓 C 是<b>隊內每一對出戰卡</b>各判一次，三張就是三對。
+               <b>怪物卡也算</b>（它跟角色共用那三個槽位）；裝備與事件卡計入總和但不參與壓 C。<br />
+               遊戲畫面上每張卡底下的 <code>+N</code> 會貼在<b>那一對裡比較便宜的那張</b>
+               —— 壓 C 罰的就是被夾帶進來的低 C 卡。三格的和等於總罰則。</div>
+           </div>`;
+
+        // 對照表：一眼看出這條曲線長什麼樣。
+        const preview = `<div class="card">
+             <div class="row"><span class="dim">試算</span><span class="dim">差距 → 追加</span></div>
+             <div id="rlPreview">${rlPreviewHtml(bands)}</div>
+             <div class="hint">上排是<b>兩張卡的 COST 差距</b>，下排是這條曲線要追加多少。
+               空白＝不罰。小數差距請看上面的縫隙警告 —— 這張表只列整數。</div>
+           </div>`;
+
+        return title + header + table + preview;
+      };
+
+      // --- 牌組 › 配對 ------------------------------------------------------
+      //
+      // ⚠ 這一頁的狀態**不在 snapshot 裡**。它要跟遊戲要（兩次 CDP 往返），
+      // 塞進 snapshot 會讓每個無關的狀態變動都去戳一次遊戲。所以這頁自己在
+      // 開著的時候輪詢，離開就停。
+      let mstate = null;
+      let matchTimer = null;
+      /** 配對頁開著沒。輪詢只在這時候跑。 */
+      const onMatchPage = () => tab === "deck" && sub === "match";
+      /** 開房成功之後要交給對手的東西。⚠ 只活在記憶體，不落地、不進記錄檔。 */
+      let matchHandoff = null;
+      // ⚠ 預設值要跟官方一致：房名是客戶端的 `DEFAULT_NAMES.tcn`，地點是清單
+      // 第一項（000 雷德貝魯格城）—— 官方對話框開起來就是這兩個。
+      // **隨機是 014 不是 000**，很容易搞反。
+      const mform = {
+        roomName: null, // null = 還沒動過，用官方預設
+        stage: "000",
+        multi: true,
+        bandOn: false,
+        band: 5,
+        // ⚠ 約定 COST 上限跟上面那個 ±N **是兩回事**：這個是自訂規則算的、
+        // 插件自己檢查的；那個是伺服器用原版 COST 判的。兩個都要有，因為
+        // 遊戲那邊擋不掉的東西只有我們擋得掉。
+        limitOn: false,
+        limit: 62,
+      };
+
+      function startMatchPolling() {
+        if (matchTimer !== null) return;
+        const tick = () =>
+          window.ulr.match.state().then((s) => {
+            mstate = s;
+            if (!onMatchPage()) return;
+            // ⚠ 正在打字就不要重畫。這頁每 3 秒輪詢一次，重畫會把游標跟半個
+            // 房名一起吃掉 —— 使用者只會覺得輸入框壞了。
+            const el = document.activeElement;
+            if (el && /^(INPUT|SELECT)$/.test(el.tagName) && el.closest("#content")) return;
+            renderBody();
+          });
+        void tick();
+        // ⚠ 房間清單閒置時**約 20 秒才推一次**（2026-08-15 實測），輪詢再快也
+        // 不會更新。3 秒是為了「連上／斷線」與自己剛開的房，不是為了清單。
+        matchTimer = setInterval(tick, 3000);
+      }
+      function stopMatchPolling() {
+        if (matchTimer !== null) clearInterval(matchTimer);
+        matchTimer = null;
+      }
+
+      function channelLabel(n) {
+        if (n === null || n === undefined) return "（沒進頻道）";
+        const name = mstate?.channelNames?.[n];
+        return name ? `${n} ${name}` : String(n);
+      }
+
+      PAGES["deck/match"] = () => {
+        const s = mstate;
+        const ctx = s?.context ?? null;
+        const rule = s?.rule ?? null;
+        const ch = ctx?.channel ?? null;
+        const info = ch !== null ? (ctx?.channels?.[String(ch)] ?? null) : null;
+
+        if (!s?.connected) {
+          return (
+            head("約戰", "跟指定的對手用同一份 COST 規則開一場。") +
+            `<div class="card"><div class="hint warn">⚠ 還沒接上遊戲。請先開遊戲並確認「設置 › 連線」那邊是綠的。</div></div>`
+          );
+        }
+
+        // 現在的狀態。⚠ 每一行都要標清楚數字是誰算的 —— 伺服器算的 COST 跟
+        // 自訂規則算的不是同一個數，混在一起看會做出錯誤的判斷。
+        const state = `<div class="card">
+            <div class="row"><span class="dim">頻道</span><span>${esc(channelLabel(ch))}${
+              info?.crossplay ? ' <span class="badge">跨平台</span>' : ""
+            }${info?.type === "ranked" ? ' <span class="badge">排名</span>' : ""}</span></div>
+            <div class="row"><span class="dim">玩家</span><span>${esc(ctx?.playerName ?? "—")}</span></div>
+            <div class="row"><span class="dim">牌組</span><span>Deck${ctx?.deckNow ?? "—"}</span></div>
+            <div class="row"><span class="dim">COST（伺服器算的）</span><span>${ctx?.deckCost ?? "—"}</span></div>
+            ${
+              s.myCost === null
+                ? ""
+                : `<div class="row"><span class="dim">COST（你的規則算的）</span><span>${
+                    s.myCost.total === null
+                      ? '<span class="dim">讀不到牌組</span>'
+                      : `<b>${esc(s.myCost.total)}</b>`
+                  }${
+                    s.myCost.unknown > 0
+                      ? ` <span class="badge">${s.myCost.unknown} 張沒定價</span>`
+                      : ""
+                  }</span></div>
+                   <div class="hint">上面那個是<b>伺服器</b>用原版 COST 算的，遊戲的「牌組Cost限制 ±N」判的是它；
+                     這一個是<b>你選的規則</b>算的，約戰的約定上限判的是它。<b>兩個是不同的數字</b>。${
+                       s.myCost.unknown > 0
+                         ? " ⚠ 有卡在這份規則裡沒有定價，一律當 99 算 —— 這個總和不能當真。"
+                         : ""
+                     }</div>`
+            }
+            <div class="row"><span class="dim">配對中</span><span>${ctx?.isMatching ? "是（已經開著一間房）" : "否"}</span></div>
+            ${
+              info?.type === "ranked"
+                ? `<div class="hint warn">⚠ 這是排名頻道，有 BP 增減與伺服器 COST 上限。約戰建議用迪特赫姆（2）或布萊德克洛伊茲（4）。</div>`
+                : ""
+            }
+            ${
+              s.seq === 0
+                ? `<div class="hint warn">⚠ 還沒收到房間清單。等收到之前不能開房 —— 空的清單分不出「你沒有房」跟「還不知道」。</div>`
+                : ""
+            }
+          </div>`;
+
+        const ruleCard = `<div class="card">
+            <div class="row"><span class="dim">規則</span><span>${
+              rule
+                ? `<b>${esc(rule.name)}</b> ${esc(rule.version)}`
+                : '<span class="dim">沒選，用原版 COST</span>'
+            }</span></div>
+            ${
+              rule
+                ? `<div class="row"><span class="dim">核對碼</span><span>${
+                    rule.shortHash
+                      ? `<code>${esc(rule.shortHash)}</code>`
+                      : '<span class="dim">裸規則，沒有核對碼</span>'
+                  }</span></div>
+                   <div class="row"><span class="dim">規則族</span><span><code>${esc(rule.ruleSetId)}</code></span></div>
+                   <div class="hint">要換規則請到「牌組 › Cost 表」。<b>自動配對是照「規則族」分的，不是照核對碼</b> ——
+                     同一套規則的不同版本會排在同一條隊伍裡，配到之後插件會驗算「這一場算出來的東西一不一樣」，
+                     一樣就能打。手動開房的話還是跟對手核對這 8 碼比較快。</div>`
+                : `<div class="hint">要選規則請到「牌組 › Cost 表」。<b>自動配對一定要有規則</b> —— 沒有規則就沒有「約定」可言。</div>`
+            }
+          </div>`;
+
+        // ⚠ **兩個 COST 限制是不同的東西**，UI 上一定要分開講。混在一起會做出
+        // 「顯示有限制、實際判的是另一套數字」的狀態。
+        const K = s.statics;
+        const roomName = mform.roomName ?? K.defaultRoomName;
+        // 官方那 11 項 + 官方選單裡沒有的四張。⚠ 兩組要分開標：後者在遊戲自己的
+        // 選單上是選不到的，玩家要知道自己選的是哪一種。
+        const opt = (g) =>
+          `<option value="${esc(g.value)}"${mform.stage === g.value ? " selected" : ""}>${esc(g.value)} ${esc(g.name)}</option>`;
+        const stageOpts =
+          K.stages.map(opt).join("") +
+          `<optgroup label="隱藏地圖（官方選單沒有）">` +
+          K.hiddenStages.map(opt).join("") +
+          `</optgroup>`;
+
+        const bandOpts = K.costRanges
+          .map((n) => `<option value="${n}"${mform.band === n ? " selected" : ""}>± ${n}</option>`)
+          .join("");
+
+        // 排隊中就把「會改變配對條件」的欄位鎖起來 —— 改了也不會生效（鍵是
+        // 按下開始時算的），而一個「改了沒反應」的輸入框比鎖起來更難懂。
+        const pairing = s.pairing ?? { phase: "idle" };
+        const queueBusy = pairing.phase !== "idle" && pairing.phase !== "blocked";
+
+        // 官方的 COST 階層。⚠ **只是快速鍵** —— 自訂 COST 想約幾就填幾，這幾顆
+        // 只是省下每次自己打數字。duel 頻道自己沒有階層，借的是同一條 socket 上
+        // 那個 ranked 頻道的（主程序的 costTiersFor 處理掉了）。
+        const tiers = s.costTiers ?? null;
+        const tierButtons =
+          tiers === null || queueBusy
+            ? ""
+            : tiers.map((n) => `<button class="tier" data-tier="${n}">${n}</button>`).join("");
+        const tierHint =
+          tiers === null
+            ? ch === null
+              ? `<div class="hint">進了頻道之後，這裡會列出那個頻道的官方 COST 檔位當快速鍵。</div>`
+              : ""
+            : `<div class="hint">上面那幾顆是<b>頻道 ${esc(String(ch))} 的官方 COST 檔位</b>（${tiers.join(" / ")}），
+                 按一下就填進去 —— 平常對戰最常約的就那幾檔。${
+                   info?.type === "duel" ? "這個頻道自己沒有檔位，用的是同一組排名頻道的。" : ""
+                 }
+                 ⚠ 它們<b>每週二遊戲更新會變</b>，所以插件每次都現讀，不記在設定裡。</div>`;
+
+        const form = `<div class="card">
+            <div class="row"><span class="dim">房間名</span>
+              <span><input id="mRoomName" type="text" maxlength="20" value="${esc(roomName)}" /></span></div>
+            <div class="row"><span class="dim">對戰地點</span>
+              <span><select id="mStage">${stageOpts}</select></span></div>
+            <div class="hint">官方選單是 000～009 加上 014（隨機），中間的 010～013 整段跳過 ——
+              但那四張是<b>真的地圖</b>：客戶端的背景圖抓得到，013 甚至是動畫圖。
+              要在<b>遊戲自己的開房對話框</b>裡也選得到，去「隱藏地圖」那一頁打開。</div>
+            <div class="row"><span class="dim">對戰規則</span>
+              <span><select id="mMulti" ${queueBusy ? "disabled" : ""}>
+                <option value="1"${mform.multi ? " selected" : ""}>3vs3</option>
+                <option value="0"${mform.multi ? "" : " selected"}>1vs1</option>
+              </select></span></div>
+            <div class="row"><span class="dim">牌組Cost限制</span>
+              <span><input id="mBandOn" type="checkbox" ${mform.bandOn ? "checked" : ""} />
+                    <select id="mBand">${bandOpts}</select></span></div>
+            <div class="hint">遊戲自己的欄位，<b>伺服器用原版 COST 判</b> —— 跟你選的規則算出來的數字對不上。</div>
+            <div class="row"><span class="dim">約定 COST 上限</span>
+              <span><input id="mLimitOn" type="checkbox" ${mform.limitOn ? "checked" : ""} ${queueBusy ? "disabled" : ""} />
+                    <input id="mLimit" type="number" min="0" max="200" step="0.01" style="width:5em"
+                           value="${mform.limit}" ${queueBusy ? "disabled" : ""} />
+                    ${tierButtons}</span></div>
+            <div class="hint">用<b>你選的規則</b>算的上限，由插件檢查 —— 遊戲伺服器不認得它。
+              ⚠ 這個數字<b>進配對條件</b>：填得不一樣的人會排在不同的隊伍裡，永遠配不到。
+              雙方各自檢查自己那副牌，所以誰都看不到對方的 COST。</div>
+            ${tierHint}
+            <div class="row"><span></span><span>
+              <button id="mOpen">開房配對</button>
+              <button id="mCancel">取消配對</button>
+            </span></div>
+            <div class="hint">⚠ 開房會<b>消耗 AP</b>，而且房間會出現在公開清單上（有密碼，別人進不來）。
+              上面這兩顆是<b>手動</b>的（房號密碼自己傳給對手）；要讓插件自動找人的話用下面那張卡。</div>
+          </div>`;
+
+        // 自動配對。⚠ 這張卡**永遠不會顯示對手的任何東西** —— 跨版本驗算會
+        // 交換牌組描述子，但那只拿去算指紋，不進畫面也不進記錄（見
+        // docs/match-making.md 的「對手的牌組不會出現在畫面上」）。
+        const compatBadge = {
+          exact: '<span class="badge">同一版規則</span>',
+          compatible: '<span class="badge">版本不同，這一場等價</span>',
+          incompatible: '<span class="badge">不相容</span>',
+        };
+        const queue = !rule
+          ? `<div class="hint">自動配對要先在「牌組 › Cost 表」選一份規則 —— 沒有規則就沒有「約定」可言。</div>`
+          : `<div class="row"><span class="dim">狀態</span><span>${
+              queueBusy
+                ? "<b>" + esc(queuePhaseText(pairing)) + "</b>"
+                : esc(queuePhaseText(pairing))
+            }${pairing.compatibility ? " " + compatBadge[pairing.compatibility] : ""}</span></div>
+             ${
+               // ⚠ **「排隊中·只有你」與「根本沒連上」一定要分開講。** 兩者原本
+               // 長得一模一樣，而它們要玩家做的事完全相反：一個是等，一個是去
+               // 檢查中間人。2026-08-16 就是這樣讓兩台條件相同的客戶端各等各的
+               // ——雲端中間人那時還沒有配對佇列的路由。
+               pairing.phase === "queued" && pairing.linked === false
+                 ? `<div class="row"><span class="dim">中間人</span><span class="bad"><b>還沒連上</b></span></div>
+                    <div class="hint warn">⚠ 這不是在等對手 —— 是連不上配對佇列，插件還在重試。
+                      看「設置 › 記錄」有沒有「連不上配對佇列」那幾行，
+                      中間人的位址在「設置 › 連線」。</div>`
+                 : pairing.phase === "queued"
+                   ? `<div class="row"><span class="dim">排隊中</span><span>${
+                       pairing.waiting > 1
+                         ? `含你共 <b>${pairing.waiting}</b> 人`
+                         : "只有你 —— 對手要用同樣的條件排隊才配得到"
+                     }</span></div>`
+                   : ""
+             }
+             ${
+               pairing.skipped > 0
+                 ? `<div class="row"><span class="dim">已跳過</span><span>${pairing.skipped} 位（規則版本算出來的東西不一樣）</span></div>`
+                 : ""
+             }
+             <div class="hint">${esc(pairing.message ?? "")}</div>
+             <div class="row"><span></span><span>
+               <button id="mQueueStart" ${queueBusy ? "disabled" : ""}>開始自動配對</button>
+               <button id="mQueueStop" ${queueBusy ? "" : "disabled"}>停止</button>
+             </span></div>
+             <div class="hint">插件會去中間人那邊排隊，配到條件一樣的人就<b>自動開房／進房</b>。
+               ⚠ 配到之後會直接<b>消耗 AP</b> 並開打 —— 不想被自動拉進對戰就先按停止。
+               對手用的規則是<b>同一族的哪一版都可以</b>，只要這一場算出來的 COST 完全一樣。</div>`;
+
+        const queueCard = `<div class="card">
+            <div class="row"><span class="dim">自動配對</span><span class="dim">走中間人的佇列</span></div>
+            ${queue}
+          </div>`;
+
+        const handoff =
+          matchHandoff === null
+            ? ""
+            : `<div class="card">
+                 <div class="row"><span class="dim">房號</span><span><code>${esc(matchHandoff.roomId)}</code></span></div>
+                 <div class="row"><span class="dim">密碼</span><span><code>${esc(matchHandoff.pass)}</code></span></div>
+                 <div class="hint">把這兩個交給對手，他在下面「進房」貼上就能進來。<b>密碼不要貼在房名上</b> —— 房名是公開的。</div>
+               </div>`;
+
+        const err = matchHandoff?.error
+          ? `<div class="card"><div class="hint warn">⚠ ${esc(matchHandoff.error)}</div></div>`
+          : "";
+
+        // 「有沒有人在等人」＝ B 位是空的。⚠ 這份清單最舊可能是 20 秒前的。
+        const waiting = (s.rooms ?? []).filter((r) => r.playerBName === null);
+        const rows = (s.rooms ?? [])
+          .map(
+            (r) => `<tr>
+                <td>${r.pass ? "🔒" : ""}</td>
+                <td>${esc(r.name)}</td>
+                <td>${esc(r.playerAName ?? "—")}</td>
+                <td>${r.playerBName === null ? "<b>等人中</b>" : esc(r.playerBName)}</td>
+              </tr>`,
+          )
+          .join("");
+
+        const list = `<div class="card">
+            <div class="row"><span class="dim">這個頻道的房間</span><span>${
+              (s.rooms ?? []).length
+            } 間，其中 <b>${waiting.length}</b> 間在等人</span></div>
+            ${
+              rows
+                ? `<table><thead><tr><th></th><th>房名</th><th>房主</th><th>對手</th></tr></thead><tbody>${rows}</tbody></table>`
+                : `<div class="hint">清單是空的。</div>`
+            }
+            <div class="row"><span class="dim">進別人的房</span><span>
+              <input id="mJoinId" type="text" size="12" placeholder="房號" />
+              <input id="mJoinPass" type="text" size="9" placeholder="密碼" />
+              <button id="mJoin">進房</button>
+            </span></div>
+            <div class="hint">⚠ 清單是遊戲推播的，閒置時<b>約 20 秒才更新一次</b> —— 「等人中」可能已經是舊的了。</div>
+          </div>`;
+
+        return (
+          head("約戰", "跟指定的對手用同一份 COST 規則開一場。") +
+          state +
+          ruleCard +
+          form +
+          queueCard +
+          handoff +
+          err +
+          list
+        );
+      };
+
+      /**
+       * 配對狀態 → 一句人話。
+       *
+       * ⚠ 「配到人了」跟「開房了」要分開講：中間隔著規則驗算，而那一步是
+       * 這整個功能的重點 —— 玩家看到「配對成功」卻沒進遊戲時，得知道插件
+       * 正在做什麼，否則那看起來就是卡住了。
+       */
+      function queuePhaseText(p) {
+        switch (p.phase) {
+          case "idle":
+            return "沒在配對";
+          case "queued":
+            return "排隊中";
+          case "checking":
+            return "配到人了，正在對規則";
+          case "opening":
+            return "開房中";
+          case "joining":
+            return "進房中";
+          case "ready":
+            return p.role === "host" ? "房開好了，等對手進來" : "已進房";
+          case "blocked":
+            return "停下來了，要先處理下面那件事";
+          default:
+            return String(p.phase);
+        }
+      }
+
+      // --- 牌組 › 隱藏地圖 --------------------------------------------------
+      //
+      // ⚠ 這一頁跟配對頁一樣，狀態**不在 snapshot 裡** —— 它要跟遊戲要一次
+      // （一次 CDP 往返）。開著才輪詢，離開就停。
+      let sstate = null;
+      let stageTimer = null;
+      const onStagePage = () => tab === "deck" && sub === "hidden";
+
+      function startStagePolling() {
+        if (stageTimer !== null) return;
+        const tick = () =>
+          window.ulr.stages.state().then((s) => {
+            sstate = s;
+            if (!onStagePage()) return;
+            const el = document.activeElement;
+            if (el && /^(INPUT|SELECT)$/.test(el.tagName) && el.closest("#content")) return;
+            renderBody();
+          });
+        void tick();
+        // 3 秒：這頁唯一會自己變的是「玩家開了一次開房對話框」與「遊戲進大廳了」，
+        // 兩件事都不急，但都要在玩家切回來的時候是對的。
+        stageTimer = setInterval(tick, 3000);
+      }
+      function stopStagePolling() {
+        if (stageTimer !== null) clearInterval(stageTimer);
+        stageTimer = null;
+      }
+
+      /**
+       * 補丁現在到底怎樣，寫成一句人話。
+       *
+       * ⚠ 這一頁最重要的一件事，是**分清楚「開關打開」跟「遊戲那邊真的變了」**。
+       * 中間隔著三段：遊戲有沒有開、有沒有載到對戰大廳、玩家有沒有開過一次開房
+       * 對話框。只寫「已啟用」的話，玩家會打開遊戲、發現選單只有 11 項，然後以為
+       * 插件壞了。
+       */
+      function stageStatusText(enabled, st) {
+        if (!enabled) return "未啟用 —— 遊戲的選單維持官方那 11 項";
+        if (st === null) return "還沒接上遊戲 —— 開了遊戲就會自己裝上";
+        if (!st.installed) {
+          return st.waiting ? "等遊戲載到對戰大廳…（不用做任何事，到了就會自己補上）" : "還沒裝上";
+        }
+        if (!st.dropdownPatched) {
+          return "地圖已經加進去了，選單等你在遊戲裡開一次「創建對戰房間」";
+        }
+        return "生效中";
+      }
+
+      PAGES["deck/hidden"] = () => {
+        const s = sstate;
+        // ⚠ 第一次畫的時候還沒問到狀態。這時候**不要先畫出開關** —— 它會是沒勾的
+        // 樣子，而那對已經啟用的玩家是假的（下一輪輪詢就會跳成勾的）。
+        if (s === null) {
+          return (
+            head("隱藏地圖", "官方選單裡沒有的四張地圖，加回遊戲自己的開房選單。") +
+            `<div class="card"><div class="hint">讀取中…</div></div>`
+          );
+        }
+        const enabled = s.enabled === true;
+        const st = s.status ?? null;
+        const stages = s.stages ?? [];
+        const added = st?.added ?? [];
+
+        const toggle = `<div class="card">
+            <label class="toggle">
+              <input type="checkbox" id="stagesOn" ${enabled ? "checked" : ""} />
+              <span><b>在遊戲的開房選單裡顯示隱藏地圖</b>
+                <div class="hint">
+                  打開之後，遊戲自己的「創建對戰房間 › 對戰地點」下拉會從 11 項變成 15 項，
+                  多出來的四項在最下面。房名、對戰規則、密碼、AP <b>全部走官方流程</b> ——
+                  這裡只是把選項放回選單，開房仍然是你自己在遊戲裡按的。
+                </div>
+              </span>
+            </label>
+          </div>`;
+
+        const state = `<div class="card">
+            <div class="row"><span class="dim">狀態</span><span>${esc(stageStatusText(enabled, st))}</span></div>
+            ${
+              enabled && st?.installed
+                ? `<div class="row"><span class="dim">已加進選單</span><span>${
+                    added.length
+                  } 張${added.length ? `（${added.map(esc).join("、")}）` : ""}</span></div>`
+                : ""
+            }
+            ${
+              st?.lang
+                ? `<div class="row"><span class="dim">遊戲語言</span><span><code>${esc(st.lang)}</code></span></div>`
+                : ""
+            }
+            ${
+              enabled && st?.installed && !st.dropdownPatched
+                ? `<div class="hint">選單那一格要等對話框第一次被建出來才碰得到 ——
+                     <b>開一次就會補上，不必開兩次</b>。</div>`
+                : ""
+            }
+            ${st?.reason ? `<div class="hint warn">⚠ ${esc(st.reason)}</div>` : ""}
+            ${
+              // 頁面那支腳本已經不等了（逾時、或換過語言）——
+              // 這時候唯一能做的就是再推一次，給他一個按鈕。
+              enabled && st !== null && !st.installed && !st.waiting
+                ? `<div class="row"><span></span><span><button id="stagesRetry">再試一次</button></span></div>`
+                : ""
+            }
+          </div>`;
+
+        const rows = stages
+          .map(
+            (g) => `<tr>
+                <td><code>${esc(g.value)}</code></td>
+                <td>${esc(g.name)}</td>
+                <td>${added.includes(g.value) ? "已加入" : '<span class="dim">—</span>'}</td>
+              </tr>`,
+          )
+          .join("");
+
+        const list = `<div class="card">
+            <table><thead><tr><th>代號</th><th>地圖</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+          </div>`;
+
+        const caveat = `<div class="card">
+            <div class="hint" style="margin-top:0">
+              <b>要知道的三件事</b><br />
+              · 背景圖載得起來是<b>實測過的</b>，但還<b>沒有在這四張上打完一整場</b> ——
+                真的出事只影響你自己那一場。<br />
+              · 伺服器本來就收這四個代號（實測開房不會被拒）。插件<b>沒有</b>改變
+                任何伺服器判定，只是讓選項在選單上出得來。<br />
+              · <b>遊戲重載會把它沖掉</b>，插件會自己補回去 ——
+                但補回去的那一刻選單又要等你開一次對話框。
+            </div>
+          </div>`;
+
+        return (
+          head("隱藏地圖", "官方選單裡沒有的四張地圖，加回遊戲自己的開房選單。") +
+          toggle +
+          state +
+          list +
+          caveat
+        );
+      };
+
+      // --- 設置 › 配置 ------------------------------------------------------
+      //
+      // ⚠ 這一頁的表格、IPC（window.ulr.profiles.*）與按鈕事件本來就在了，
+      // 缺的一直是這支 render 函式 —— 分頁註冊了但 PAGES 沒有對應的鍵，
+      // renderBody() 就畫出一片空白。空白頁不會報錯，所以很難發現。
+      PAGES["settings/profiles"] = () => {
+        const list = snap?.store.profiles ?? [];
+        const meId = snap?.profile.id;
+        const ports = snap?.gamePorts ?? {};
+
+        const row = (p) => {
+          const self = p.id === meId;
+          // ⚠ 別份配置只敢說「那個埠上有沒有遊戲在回話」。一個視窗只管一個
+          // 客戶端，它沒辦法知道另一份配置的插件狀態。
+          const alive = ports[p.port];
+          const state = self
+            ? snap?.status?.connected
+              ? "這個視窗（已接上）"
+              : "這個視窗（等遊戲…）"
+            : alive === true
+              ? "遊戲開著"
+              : alive === false
+                ? "沒有回應"
+                : "—";
+          return `<tr data-id="${esc(p.id)}"${self ? ' class="self"' : ""}>
+              <td><input type="text" data-field="name" value="${esc(p.name)}" /></td>
+              <td><select data-field="kind">
+                    <option value="desktop"${p.kind === "desktop" ? " selected" : ""}>桌面版</option>
+                    <option value="web"${p.kind === "web" ? " selected" : ""}>網頁版</option>
+                  </select></td>
+              <td><input type="number" data-field="port" value="${p.port}" /></td>
+              <td><input type="text" data-field="link" value="${esc(p.link)}" placeholder="留空＝雲端" /></td>
+              <td>${esc(state)}</td>
+              <td>
+                ${self ? "" : `<button data-act="launch">開新實例</button>`}
+                <button data-act="dup">複製</button>
+                ${list.length > 1 && !self ? `<button data-act="del">刪除</button>` : ""}
+              </td>
+            </tr>`;
+        };
+
+        const table = list.length
+          ? `<table class="profiles">
+               <thead><tr><th>名稱</th><th>客戶端</th><th>遊戲埠</th><th>中間人</th><th>狀態</th><th></th></tr></thead>
+               <tbody>${list.map(row).join("")}</tbody>
+             </table>`
+          : `<div class="hint">清單是空的。按下面的「新增配置」建一份 ——
+               第一份預設是桌面版，第二份會自動變成網頁版並換一個埠。</div>`;
+
+        return (
+          head("配置", "一個視窗管一個遊戲客戶端。要同時管兩個就建兩份配置，各開一個實例。") +
+          `<div class="card">
+             ${table}
+             <div class="row"><span></span><span><button id="addProfile">新增配置…</button></span></div>
+             <!--
+               ⚠ 這裡以前有五行說明。留下的兩行是「不知道就會壞掉」的：改埠不重開
+               沒有任何反應（引擎綁在啟動時的埠上）、兩份撞同一個埠時第二份是
+               **開不起來**而不是報錯。其餘三行（狀態欄的語意、中間人留空＝雲端、
+               local 是什麼）都是「看得懂欄位就猜得到」的，刪掉不會有人卡住。
+             -->
+             <div class="hint">
+               ⚠ 改埠要<b>重開那個實例</b>才生效。<br />
+               ⚠ 兩份不能用同一個埠 —— 撞到的話第二份會<b>安靜地開不起來</b>。
+             </div>
+           </div>` +
+          (snap?.ephemeral
+            ? `<div class="card"><div class="hint warn" style="margin-top:0">
+                 這個視窗是用命令列的 <b>--port ${snap.profile.port}</b> 開的臨時配置，<b>不在清單裡</b>。
+                 改它的設定不會存下來 —— 要留著就按上面的「新增配置」。
+               </div></div>`
+            : "")
+        );
+      };
+
       PAGES["settings/link"] = () => {
         const st = snap?.status;
         const p = snap?.profile;
-        // ⚠ 中間人的那兩行只在多開時出現。目前的中間人**只聽 127.0.0.1**，
-        // 也就是只把同一台電腦上的兩份插件配成一對 —— 沒開多開的人不管把它
-        // 設成幾號都不會有任何效果，露出來只會讓他以為自己漏設了什麼。
+        /**
+         * ⚠ **埠與中間人只在「進階」打開時才出現。**
+         *
+         * 沒開進階的玩家只有一個客戶端、用的是雲端中間人的預設值，那兩個數字
+         * 他一個都不需要、也一個都不能拿去做什麼 —— 露出來只會變成「我是不是
+         * 漏設了什麼」。這一頁對他該只回答一個問題：**插件跟遊戲接上了沒。**
+         */
         const multi = snap?.store?.multiProfile === true;
         return (
-          head("連線", "這個視窗接的是哪一個客戶端。") +
+          head("連線", "插件跟遊戲接上了沒。") +
           `<div class="card">
-             <div class="row"><span class="dim">客戶端</span><span>${
-               p?.kind === "web" ? "網頁版" : "桌面版"
-             }</span></div>
-             <div class="row"><span class="dim">遊戲 CDP 埠</span><span>:${p?.port}</span></div>
-             ${
-               multi
-                 ? `<div class="row"><span class="dim">中間人</span><span>${esc(p?.link ?? "—")}</span></div>
-                    <div class="row"><span class="dim">我是中間人</span><span>${
-                      st?.hosting ? "是" : "否（連到別人開的）"
-                    }</span></div>
-                    <div class="hint">埠在「配置」那頁改。</div>`
-                 : ""
-             }
-           </div>
-           <div class="card">
              <div class="row"><span class="dim">遊戲</span><span>${
                !st ? "啟動中…" : st.connected ? "已接上" : "等遊戲…"
              }</span></div>
@@ -981,6 +2596,26 @@
              }</span></div>
              ${st?.error ? `<div class="hint warn">⚠ ${esc(st.error)}</div>` : ""}
            </div>
+           ${
+             multi
+               ? `<div class="card">
+                    <div class="row"><span class="dim">客戶端</span><span>${
+                      p?.kind === "web" ? "網頁版" : "桌面版"
+                    }</span></div>
+                    <div class="row"><span class="dim">CDP 埠</span><span>${
+                      // ⚠ 顯示**實際**接到的埠，不是設定值。用 =0 啟動時客戶端
+                      // 自己挑埠，我們從 DevToolsActivePort 讀回來 —— 顯示設定值
+                      // 的話，這個數字會是一個沒有人在聽的號碼，而它唯一的用途
+                      // 就是拿去給 CLI 用。
+                      st?.port != null ? `:${st.port}` : `—　<span class="dim">（未接上）</span>`
+                    }</span></div>
+                    <div class="row"><span class="dim">中間人</span><span>${esc(p?.link ?? "—")}</span></div>
+                    <div class="row"><span class="dim">我是中間人</span><span>${
+                      st?.hosting ? "是" : "否（連到別人開的）"
+                    }</span></div>
+                  </div>`
+               : ""
+           }
            ${howToConnect(p)}`
         );
       };
@@ -1112,6 +2747,9 @@
       // =====================================================================
       $("content").addEventListener("change", (e) => {
         const t = e.target;
+        // ⚠ 配對表單改動要**立刻**收進 mform。這頁每 3 秒重畫一次，而重畫是從
+        // mform 取值的 —— 不收的話你選好的地點會在下一次輪詢時被打回去。
+        if (MATCH_FIELDS.has(t.id)) readMatchForm();
         if (t.id === "ready") return void set({ readyEnabled: t.checked });
         if (t.id === "seconds") {
           dragging = false;
@@ -1119,6 +2757,12 @@
         }
         if (t.id === "tintPick") {
           return void window.ulr.setReadyTint(parseInt(t.value.slice(1), 16)).then(apply);
+        }
+        if (t.id === "stagesOn") {
+          return void window.ulr.stages.set(t.checked).then((s) => {
+            sstate = s;
+            renderBody();
+          });
         }
         if (t.id === "atLogin") return void options({ launchAtLogin: t.checked });
         if (t.id === "startMin") return void options({ startMinimized: t.checked });
@@ -1149,11 +2793,197 @@
         }
         // 打字時記住是誰在被編輯，重畫後要把它還原（見 renderBody 的呼叫點）
         if (t.closest("tr[data-id]")) editing = t;
+
+        // --- 編輯 COST ---
+        //
+        // ⚠ **改一格不重畫整頁。** 角色那一頁有 700 個欄位，重畫會把游標踢掉、
+        // 捲軸跳回頂端，而玩家正在一個一個調數字。只更新那一格的樣式與計數。
+        if (t.dataset.t !== undefined && t.dataset.k !== undefined) {
+          editing = t;
+          const n = Number(t.value);
+          if (t.value !== "" && Number.isFinite(n)) ed.draft[t.dataset.t][t.dataset.k] = n;
+          t.classList.toggle("dirty", edChanged(t.dataset.t, t.dataset.k));
+          edMsg = null;
+          const save = $("edSave");
+          if (save) save.disabled = edUnsavedCount() === 0;
+          return;
+        }
+        // --- 編輯規則（壓 C 區間）---
+        //
+        // 改一格就要重算重疊、縫隙與試算表 —— 但**只重畫那幾塊**（`rlRefresh`），
+        // 不整頁重畫，否則正在打字的輸入框會連焦點一起被換掉。
+        if (t.dataset.rb !== undefined && rl !== null) {
+          editing = t;
+          const band = rl.bands[Number(t.dataset.rb)];
+          if (band) {
+            const raw = t.value.trim();
+            const n = Number(raw);
+            if (t.dataset.rf === "maxGap") {
+              // ⚠ 空白＝無上界，**不是 0**。`Number("")` 是 0，那會把
+              // 「14 以上」變成「14 到 0」—— 一段不可能命中的區間。
+              band.maxGap = raw === "" ? null : Number.isFinite(n) ? n : band.maxGap;
+            } else if (raw !== "" && Number.isFinite(n)) {
+              band[t.dataset.rf] = n;
+            }
+          }
+          rlMsg = null;
+          return rlRefresh();
+        }
+        if (t.id === "rlVersion") {
+          editing = t;
+          return;
+        }
+        if (t.id === "edFilter") {
+          edFilter = t.value;
+          editing = t;
+          // 篩選要立刻反映，但只重畫清單那一塊，不動上面的表頭與輸入焦點。
+          const cat = ed?.catalog;
+          const box = $("content").querySelector(".card:last-child");
+          if (cat && box) {
+            box.innerHTML =
+              edTab === "characters"
+                ? edCharacters(cat)
+                : edTab === "monsters"
+                  ? edMonsters(cat)
+                  : edTab === "equipment"
+                    ? edEquipment(cat)
+                    : edEvents(cat);
+          }
+          return;
+        }
       });
 
       $("content").addEventListener("click", (e) => {
         const btn = e.target.closest("button");
         if (!btn) return;
+
+        // --- 編輯 COST ---
+        if (btn.dataset.edtab !== undefined) {
+          edTab = btn.dataset.edtab;
+          edFilter = "";
+          return renderBody();
+        }
+        if (btn.id === "edCatalog") {
+          btn.disabled = true;
+          btn.textContent = "讀取中…";
+          return void window.ulr.editor.refreshCatalog().then((payload) => {
+            // ⚠ 重讀名冊會換掉「原價」的基準，所以草稿要跟著重建 —— 但**玩家
+            // 已經改過的值不能丟**。decorate() 是從規則檔重建的，而規則檔就是
+            // 上一次存檔的內容，所以這裡把還沒存的改動疊回去。
+            const keep = ed?.draft ?? null;
+            ed = decorate(payload);
+            if (keep !== null) {
+              for (const t of ED_TABS)
+                for (const k of Object.keys(keep[t.id] ?? {}))
+                  if (ed.draft[t.id][k] !== undefined) ed.draft[t.id][k] = keep[t.id][k];
+            }
+            renderBody();
+          });
+        }
+        if (btn.id === "edSave") {
+          const version = $("edVersion")?.value.trim() ?? ed.rule.version;
+          // ⚠⚠ **檔名要在這裡先抓下來，不能等 then 裡面才讀 `ed.rule`。**
+          // 存檔成功會讓主程序推一份新狀態過來，而 apply() 看到核對碼變了就把
+          // `ed` 設成 null —— 那份推播**比 invoke 的回覆先到**。在 then 裡讀
+          // `ed.rule.fileName` 會拋 TypeError，而 promise 會把它吞掉：檔案存好了，
+          // 玩家卻什麼提示都沒有。2026-08-16 實測踩到，兩次都以為是時序問題。
+          const fileName = ed.rule.fileName;
+          btn.disabled = true;
+          return void window.ulr.editor.save({ tables: ed.draft, version }).then((r) => {
+            edMsg = r.ok
+              ? { text: `已存回 ${fileName}（${r.version}，核對碼 ${r.shortHash}）`, bad: false }
+              : { text: r.error ?? "存檔失敗", bad: true };
+            // ⚠ 不自己 `edLoad(true)`：狀態推播已經把 `ed` 丟掉了，重畫時
+            // 會自然重拉一次。這裡再拉一次只會兩份 payload 賽跑。
+            // 但**一定要重畫** —— 兩個 promise 的先後沒有保證，少了這一行時
+            // 訊息可能落在最後一次重畫之後，變成存了檔卻沒有任何回應。
+            renderBody();
+          });
+        }
+        if (btn.id === "edResetTab") {
+          const label = ED_TABS.find((t) => t.id === edTab)?.label ?? edTab;
+          // ⚠ 只動當前這一頁。四張表一起清掉是很難反悔的操作，而玩家按的是
+          // 「這一頁」那顆按鈕。
+          for (const k of Object.keys(ed.base[edTab])) ed.draft[edTab][k] = ed.base[edTab][k];
+          edMsg = { text: `${label}已全部改回原價（還沒存檔）`, bad: false };
+          return renderBody();
+        }
+
+        // --- 編輯規則（壓 C 區間）---
+        if (btn.dataset.rbdel !== undefined && rl !== null) {
+          rl.bands.splice(Number(btn.dataset.rbdel), 1);
+          rlMsg = null;
+          return renderBody();
+        }
+        if (btn.id === "rlAdd" && rl !== null) {
+          // 接在最後一段後面起跳，玩家少改一個欄位。最後一段沒有上界時就從
+          // 它的下界 +1 起 —— 那一定會重疊，而重疊會立刻被上面的檢查點名，
+          // 比安靜地插一段 0 進去好懂。
+          const last = rl.bands[rl.bands.length - 1];
+          const start = last ? (last.maxGap === null ? last.minGap + 1 : last.maxGap + 1) : 7;
+          rl.bands.push({ minGap: start, maxGap: null, extraCost: 0 });
+          rlMsg = null;
+          return renderBody();
+        }
+        if (btn.id === "rlSort" && rl !== null) {
+          // ⚠ 順序**有意義**：引擎取第一個命中的區間。沒重疊時排序不改變任何
+          // 結果，有重疊時排序會改變 —— 所以排完要讓玩家自己看那個警告。
+          rl.bands.sort((a, b) => a.minGap - b.minGap);
+          rlMsg = null;
+          return renderBody();
+        }
+        if (btn.id === "rlSnap" && rl !== null) {
+          // 每一段的上界頂到下一段起點的前 0.01（`shinon/squeeze-band` 的 x.99
+          // 就是這樣來的）。最後一段不動 —— 它要嘛本來就無上界，要嘛作者是
+          // 刻意讓超大差距不罰。
+          const order = rl.bands.map((b, i) => ({ b, i })).sort((x, y) => x.b.minGap - y.b.minGap);
+          for (let n = 0; n < order.length - 1; n++) {
+            const cur = order[n].b;
+            const next = order[n + 1].b;
+            if (cur.maxGap === null) continue;
+            if (next.minGap > cur.maxGap) cur.maxGap = Math.round((next.minGap - 0.01) * 100) / 100;
+          }
+          rlMsg = { text: "已把每一段的上界頂到下一段（還沒存檔）", bad: false };
+          return renderBody();
+        }
+        if (btn.id === "rlOfficial" && rl !== null) {
+          rl.bands = RL_OFFICIAL.map((b) => ({ ...b }));
+          rlMsg = { text: "已換成原版的兩段（還沒存檔）", bad: false };
+          return renderBody();
+        }
+        if (btn.id === "rlClear" && rl !== null) {
+          rl.bands = [];
+          rlMsg = { text: "已清空 —— 存檔之後這份規則完全不壓 C", bad: false };
+          return renderBody();
+        }
+        if (btn.id === "rlSave" && rl !== null) {
+          // ⚠ 檔名先抓下來。存檔會讓主程序推一份新狀態過來，而 apply() 看到
+          // 核對碼變了就把 `rl` 設成 null —— 那份推播比 invoke 的回覆先到。
+          // 編輯 COST 那邊踩過同一件事。
+          const fileName = rl.rule.fileName;
+          const version = $("rlVersion")?.value.trim() ?? rl.rule.version;
+          const bands = rl.bands.map((b) => ({
+            minGap: b.minGap,
+            // 主程序那邊 null 就是「沒有上界」（`sanitizeBand`）。
+            maxGap: b.maxGap,
+            extraCost: b.extraCost,
+          }));
+          btn.disabled = true;
+          return void window.ulr.editor
+            .save({
+              // ⚠ **不送 `tables`。** 主程序看到沒有這個欄位就沿用檔案裡的四張
+              // 表；送一份空的等於把 1186 筆價格全洗掉（而空表是合法規則，
+              // 不會報錯，只會讓每張卡變成 99C）。
+              compression: bands.length === 0 ? { type: "none" } : { type: "gap-band-v1", bands },
+              version,
+            })
+            .then((r) => {
+              rlMsg = r.ok
+                ? { text: `已存回 ${fileName}（${r.version}，核對碼 ${r.shortHash}）`, bad: false }
+                : { text: r.error ?? "存檔失敗", bad: true };
+              renderBody();
+            });
+        }
 
         if (btn.dataset.tint !== undefined) {
           const v = btn.dataset.tint === "" ? null : Number(btn.dataset.tint);
@@ -1162,6 +2992,36 @@
         if (btn.id === "addProfile") {
           return void window.ulr.profiles.add().then(apply);
         }
+        if (btn.id === "copyFlag") {
+          // 走主程序的剪貼簿（見 preload）。要玩家自己把那一行一字不差地打進
+          // Steam，就是在製造一個「打錯了但完全看不出來」的失敗。
+          return void window.ulr.copyDebugFlag().then(() => {
+            btn.textContent = "已複製";
+            setTimeout(() => (btn.textContent = "複製"), 1500);
+          });
+        }
+        if (btn.id === "mOpen") return void matchOpen();
+        if (btn.id === "mCancel") return void matchCancel();
+        if (btn.id === "mJoin") return void matchJoin();
+        if (btn.id === "mQueueStart") return void queueStart();
+        if (btn.id === "mQueueStop") return void queueStop();
+        if (btn.dataset.tier !== undefined) {
+          // 快速鍵：填數字並順手打開勾選 —— 按了檔位卻沒生效是最沒道理的狀態。
+          // ⚠ 先 readMatchForm() 把其他欄位收起來，否則重畫會把它們打回去。
+          readMatchForm();
+          mform.limit = Number(btn.dataset.tier);
+          mform.limitOn = true;
+          return void renderBody();
+        }
+        if (btn.id === "stagesRetry") {
+          return void window.ulr.stages.retry().then((s) => {
+            sstate = s;
+            renderBody();
+          });
+        }
+        if (btn.id === "costPick") return void window.ulr.cost.pick().then(apply);
+        if (btn.id === "costClear") return void window.ulr.cost.clear().then(apply);
+        if (btn.id === "costReload") return void window.ulr.cost.reload().then(apply);
         if (btn.dataset.link) {
           return void window.ulr.openExternal(btn.dataset.link);
         }
@@ -1174,6 +3034,120 @@
         if (btn.dataset.act === "del") return void window.ulr.profiles.remove(id).then(apply);
       });
 
+      // --- 配對的動作 -------------------------------------------------------
+      //
+      // ⚠ 這三支**會替玩家操作遊戲**：開房消耗 AP、進房直接開打。只能綁在
+      // 玩家按下去的按鈕上，不要放進輪詢或自動重試。
+
+      const MATCH_FIELDS = new Set([
+        "mRoomName",
+        "mStage",
+        "mMulti",
+        "mBandOn",
+        "mBand",
+        "mLimitOn",
+        "mLimit",
+      ]);
+
+      /** 把畫面上的值收回 mform。重畫是從 mform 取值的，所以按鈕按下前要先收。 */
+      function readMatchForm() {
+        const v = (id) => $(id);
+        const fallback = mstate?.statics?.defaultRoomName ?? "";
+        if (v("mRoomName")) mform.roomName = v("mRoomName").value.trim() || fallback;
+        if (v("mStage")) mform.stage = v("mStage").value;
+        if (v("mMulti")) mform.multi = v("mMulti").value === "1";
+        if (v("mBandOn")) mform.bandOn = v("mBandOn").checked;
+        if (v("mBand")) mform.band = Number(v("mBand").value);
+        if (v("mLimitOn")) mform.limitOn = v("mLimitOn").checked;
+        // ⚠ 夾到兩位小數。上限會進配對鍵（`matchCriteriaString` 用 toFixed(2)），
+        // 打三位小數的話「畫面上的數字」跟「實際比的數字」會不一樣。
+        if (v("mLimit")) {
+          const n = Number(v("mLimit").value);
+          if (Number.isFinite(n) && n >= 0) mform.limit = Math.round(n * 100) / 100;
+        }
+      }
+
+      /**
+       * 開始自動配對。
+       *
+       * ⚠ 這一支跟 matchOpen 一樣**會替玩家操作遊戲** —— 而且更進一步：配到人
+       * 之後不必再按任何東西就會開房／進房。所以按鈕的文案要講清楚，而且
+       * 「停止」永遠可以按。
+       */
+      function queueStart() {
+        readMatchForm();
+        const ch = mstate?.context?.channel;
+        if (ch === null || ch === undefined) {
+          matchHandoff = { error: "請先在遊戲裡進入一個頻道。" };
+          return renderBody();
+        }
+        matchHandoff = null;
+        return window.ulr.match.queue
+          .start({
+            channel: ch,
+            multi: mform.multi,
+            costLimit: mform.limitOn ? mform.limit : null,
+            deckCostBand: mform.bandOn ? mform.band : null,
+            roomName: mform.roomName ?? mstate?.statics?.defaultRoomName ?? "",
+            stage: mform.stage,
+          })
+          .then((r) => {
+            if (!r.ok) matchHandoff = { error: r.reason };
+            else if (mstate) mstate.pairing = r.status;
+            renderBody();
+          });
+      }
+
+      function queueStop() {
+        return window.ulr.match.queue.stop().then((r) => {
+          if (mstate && r.status) mstate.pairing = r.status;
+          renderBody();
+        });
+      }
+
+      function matchOpen() {
+        readMatchForm();
+        const ch = mstate?.context?.channel;
+        if (ch === null || ch === undefined) {
+          matchHandoff = { error: "請先在遊戲裡進入一個頻道。" };
+          return renderBody();
+        }
+        matchHandoff = null;
+        return window.ulr.match
+          .open({
+            channel: ch,
+            roomName: mform.roomName ?? mstate?.statics?.defaultRoomName ?? "",
+            stage: mform.stage,
+            multi: mform.multi,
+            // ⚠ 遊戲的「牌組Cost限制 ±N」，伺服器用原版 COST 判。
+            deckCostBand: mform.bandOn ? mform.band : null,
+          })
+          .then((r) => {
+            matchHandoff = r.ok ? { roomId: r.roomId, pass: r.pass } : { error: r.reason };
+            renderBody();
+          });
+      }
+
+      function matchCancel() {
+        return window.ulr.match.cancel().then((r) => {
+          matchHandoff = r.ok ? null : { error: r.reason };
+          renderBody();
+        });
+      }
+
+      function matchJoin() {
+        const id = $("mJoinId")?.value.trim() ?? "";
+        const pass = $("mJoinPass")?.value.trim() ?? "";
+        if (!id || !pass) {
+          matchHandoff = { error: "房號跟密碼都要填。" };
+          return renderBody();
+        }
+        return window.ulr.match.join(id, pass).then((r) => {
+          matchHandoff = r.ok ? null : { error: r.reason };
+          renderBody();
+        });
+      }
+
       function set(prefs) {
         return window.ulr.setPrefs(prefs).then(apply);
       }
@@ -1184,13 +3158,41 @@
       // =====================================================================
       // 套用一份快照
       // =====================================================================
+      /** 目前選著的規則的身分。換檔或換版本時，編輯器的草稿就作廢了。 */
+      function ruleSig(s) {
+        const r = s?.status ? s.costRule : null;
+        return `${s?.costRule?.path ?? ""}|${s?.costRule?.version ?? ""}|${s?.costRule?.shortHash ?? ""}`;
+      }
+      let lastRuleSig = null;
+
       function apply(next) {
         if (!next) return;
+        const sig = ruleSig(next);
+        // 規則換了（玩家去「Cost 表」選了別份，或我們剛存完檔）→ 手上那份草稿
+        // 的基準已經不對了，丟掉重載。
+        //
+        // ⚠ **`edMsg` 不能一起清掉。** 存檔會讓核對碼改變，於是這個判斷成立、
+        // 於是「已存回 xxx」那行字在出現的同一瞬間就被抹掉 —— 玩家按了存檔卻
+        // 什麼回應都看不到。訊息本身帶著檔名與核對碼，過期也不會誤導。
+        if (lastRuleSig !== null && sig !== lastRuleSig) {
+          ed = null;
+          rl = null;
+        }
+        lastRuleSig = sig;
         snap = next;
         renderFooter();
         // ⚠ 拖滑桿或打字時不要重畫內容區 —— 會把游標踢掉、滑桿跳回去。
         // 狀態列照更新（它跟輸入無關，而且那才是玩家在等的資訊）。
         if (dragging || (editing && document.activeElement === editing)) return;
+        // ⚠ 編輯 COST 那一頁**不跟著狀態推播重畫**。它有 700 個輸入框，而連線
+        // 心跳、對戰狀態這些跟它一點關係都沒有的變動每幾秒就來一次 —— 重畫會
+        // 把捲軸拉回頂端，而玩家正在第 40 位角色那一排調數字。
+        // 需要重畫的兩件事（換規則、存完檔）各自都有明確的呼叫點。
+        if (onEditPage() && ed !== null) return;
+        // ⚠ 編輯規則那一頁同理。欄位少得多，但玩家一樣是在輸入框裡打數字，
+        // 而連線心跳每幾秒就推一次 —— 重畫會把打到一半的數字連游標一起換掉。
+        // 換規則與存完檔都會把 `rl` 設成 null，那時這道閘自然放行。
+        if (onRulePage() && rl !== null) return;
         editing = null;
         // ⚠ 側邊那排會隨「進階：多開」增減，所以每次套用快照都要重畫，不能只在
         // 切分頁時畫。而關掉多開的那一刻若玩家正站在「配置」上，那一格已經不
