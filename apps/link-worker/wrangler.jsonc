@@ -22,7 +22,10 @@
 
   // 一個 DO 實例 = 一間房。繫結名 ROOMS 對應 `index.ts` 的 `env.ROOMS`。
   "durable_objects": {
-    "bindings": [{ "name": "ROOMS", "class_name": "LinkRoom" }],
+    "bindings": [
+      { "name": "ROOMS", "class_name": "LinkRoom" },
+      { "name": "QUEUES", "class_name": "MatchQueueRoom" },
+    ],
   },
 
   // ⚠ `new_sqlite_classes`（不是 `new_classes`）：SQLite 版的 DO 才在免費方案
@@ -31,7 +34,11 @@
   //
   // ⚠ migrations 是**只能往前加**的清單。已經部署過的 tag 不要改、不要刪，
   // 改了會讓 Cloudflare 認不出既有的 DO 類別。
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["LinkRoom"] }],
+  // ⚠ migrations 只能往前加。v1 已經部署過了，不要動它。
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["LinkRoom"] },
+    { "tag": "v2", "new_sqlite_classes": ["MatchQueueRoom"] },
+  ],
 
   // console.log 會進 Cloudflare 的觀測後台。⚠ 因此 log 一律只印截短的房號，
   // 見 `guard.ts` 的 `shortRoom()`。

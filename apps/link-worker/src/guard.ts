@@ -20,6 +20,9 @@ import { LOBBY_ROOM_KEY, ROOM_KEY_LENGTH } from "@ulr/arbiter-link/protocol";
 /** 房間的路徑前綴。`wss://……/r/<房號>` */
 export const ROOM_PATH_PREFIX = "/r/";
 
+/** 配對佇列的路徑前綴。`wss://……/q/<配對鍵>`（WP-16） */
+export const QUEUE_PATH_PREFIX = "/q/";
+
 /** 健康檢查。給 uptime 監控用的，也讓客戶端連線前問得到協定版本。 */
 export const HEALTH_PATH = "/health";
 
@@ -128,4 +131,21 @@ export const CLOSE_TOO_FAST = 4008;
  */
 export function shortRoom(room: string): string {
   return room.slice(0, 8);
+}
+
+/**
+ * 從網址路徑取出配對鍵。
+ *
+ * 驗證規則跟房號**刻意一模一樣**（16 個十六進位字元）—— `matchKey()` 與
+ * `roomKey()` 都是 SHA-256 的前 16 個字元。這也順便擋掉「把這裡當成通用
+ * 聊天中繼」的用法。
+ *
+ * ⚠ 沒有「大廳」的對應概念要擋：配對鍵一定含規則 hash，不存在一個所有人
+ * 都會算出來的預設值。
+ */
+export function parseQueuePath(pathname: string): string | null {
+  if (!pathname.startsWith(QUEUE_PATH_PREFIX)) return null;
+  const key = pathname.slice(QUEUE_PATH_PREFIX.length);
+  if (key.length !== ROOM_KEY_LENGTH) return null;
+  return /^[0-9a-f]+$/.test(key) ? key : null;
 }

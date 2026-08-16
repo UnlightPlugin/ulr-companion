@@ -24,13 +24,15 @@
  */
 
 import { LINK_PROTOCOL_VERSION } from "@ulr/arbiter-link/protocol";
-import { HEALTH_PATH, parseRoomPath, UPDATE_PATH } from "./guard.js";
+import { HEALTH_PATH, parseQueuePath, parseRoomPath, UPDATE_PATH } from "./guard.js";
 import { CURRENT_RELEASE } from "./release.js";
 
 export { LinkRoom } from "./room.js";
+export { MatchQueueRoom } from "./queue.js";
 
 interface Env {
   ROOMS: DurableObjectNamespace;
+  QUEUES: DurableObjectNamespace;
 }
 
 export default {
@@ -64,6 +66,16 @@ export default {
         // 問題：幾百個玩家每小時問一次，一天幾千個請求，免費額度的零頭。
         headers: { "cache-control": "no-store" },
       });
+    }
+
+    // 約戰配對佇列（WP-16）。跟房間走同一套驗證與同一個模式，只是換一個
+    // namespace —— 一條佇列 = 一個配對鍵 = 一個 DO 實例。
+    const queue = parseQueuePath(url.pathname);
+    if (queue !== null) {
+      if (request.headers.get("Upgrade") !== "websocket") {
+        return new Response("expected websocket", { status: 426 });
+      }
+      return env.QUEUES.getByName(queue).fetch(request);
     }
 
     const room = parseRoomPath(url.pathname);
