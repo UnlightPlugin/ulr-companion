@@ -873,6 +873,58 @@
       let editing = null;
 
       const $ = (id) => document.getElementById(id);
+
+      /**
+       * 使用者正在內容區的某個欄位裡打字／挑選項嗎。
+       *
+       * ⚠⚠ **重畫是換掉 `#content` 的 innerHTML** —— 正在打字的那個輸入框會
+       * 連同游標、選取範圍、還有打到一半的字一起消失。所以每一條會重畫的路徑
+       * 都要先問這一句。
+       *
+       * 這支存在的理由是一個實際的 bug：配對頁的輪詢有擋（它自己查
+       * `document.activeElement`），但**狀態推播那條沒有** —— 而推播是連線
+       * 心跳、對戰狀態、記錄檔每幾秒就來一次的東西。症狀是「房名打到一半游標
+       * 就不見了」，而玩家完全不會把它跟「插件在更新狀態」連在一起。
+       *
+       * ⚠ 用 `document.activeElement` 而不是自己記「誰在被編輯」（原本那個
+       * `editing` 變數）：每個頁面都要記得設它，而漏掉的頁面**看起來完全正常**
+       * 直到有人在上面打字。問瀏覽器就不會漏。
+       */
+      function isEditing() {
+        const el = document.activeElement;
+        if (!el || typeof el.closest !== "function" || !el.closest("#content")) return false;
+        return /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName) || el.isContentEditable === true;
+      }
+
+      /**
+       * 打字時錯過的重畫，等焦點離開再補一次。
+       *
+       * ⚠ 沒有這一段的話畫面會**停在玩家開始打字的那一刻** —— 配對狀態、房間
+       * 清單、連線狀態全部凍在那裡，而他完全不知道那是因為自己游標還在輸入框裡。
+       *
+       * ⚠ 只掛一個（`pendingCatchUp` 這道閘）：每打一個字掛一個 listener 的話，
+       * 打完二十個字就會連續重畫二十次。
+       */
+      let pendingCatchUp = false;
+      function scheduleCatchUp() {
+        if (pendingCatchUp) return;
+        pendingCatchUp = true;
+        document.addEventListener(
+          "focusout",
+          () => {
+            pendingCatchUp = false;
+            // ⚠ 要等一拍。`focusout` 時焦點還沒落到下一個元素上，立刻重畫的話
+            // 「從房名 tab 到地點」會被判定成沒人在編輯，於是把玩家正要用的
+            // 那個下拉選單也換掉。
+            setTimeout(() => {
+              if (isEditing() || dragging) return;
+              editing = null;
+              renderBody();
+            }, 150);
+          },
+          { once: true },
+        );
+      }
       const esc = (s) =>
         String(s).replace(
           /[&<>"']/g,
@@ -2210,17 +2262,26 @@
 
       function startMatchPolling() {
         if (matchTimer !== null) return;
-        const tick = () =>
-          window.ulr.match.state().then((s) => {
+        const tick = () => {
+          // ⚠ **正在打字就整拍跳過，連問都不要問。** 這頁每 3 秒輪詢一次，而
+          // 重畫會把游標跟半個房名一起吃掉。問了不畫也可以，但玩家在改開房設定
+          // 的時候，那兩次 CDP 往返拿回來的東西反正也用不到。
+          if (isEditing()) {
+            scheduleCatchUp();
+            return Promise.resolve();
+          }
+          return window.ulr.match.state().then((s) => {
             mstate = s;
             syncMatchForm(s);
             if (!onMatchPage()) return;
-            // ⚠ 正在打字就不要重畫。這頁每 3 秒輪詢一次，重畫會把游標跟半個
-            // 房名一起吃掉 —— 使用者只會覺得輸入框壞了。
-            const el = document.activeElement;
-            if (el && /^(INPUT|SELECT)$/.test(el.tagName) && el.closest("#content")) return;
+            // 再問一次 —— 上面那次到現在隔了一趟 IPC，玩家可能剛好點進輸入框。
+            if (isEditing()) {
+              scheduleCatchUp();
+              return;
+            }
             renderBody();
           });
+        };
         void tick();
         // ⚠ 房間清單閒置時**約 20 秒才推一次**（2026-08-15 實測），輪詢再快也
         // 不會更新。3 秒是為了「連上／斷線」與自己剛開的房，不是為了清單。
@@ -2549,8 +2610,11 @@
           window.ulr.stages.state().then((s) => {
             sstate = s;
             if (!onStagePage()) return;
-            const el = document.activeElement;
-            if (el && /^(INPUT|SELECT)$/.test(el.tagName) && el.closest("#content")) return;
+            // 同配對頁：打字時不重畫，等焦點離開再補（見 `isEditing`）。
+            if (isEditing()) {
+              scheduleCatchUp();
+              return;
+            }
             renderBody();
           });
         void tick();
@@ -3366,7 +3430,18 @@
         renderFooter();
         // ⚠ 拖滑桿或打字時不要重畫內容區 —— 會把游標踢掉、滑桿跳回去。
         // 狀態列照更新（它跟輸入無關，而且那才是玩家在等的資訊）。
-        if (dragging || (editing && document.activeElement === editing)) return;
+        //
+        // ⚠⚠ 這裡原本只擋 `editing`（各頁自己設的那個變數），而**配對頁的
+        // 開房設定從來沒設過它** —— 於是每一次狀態推播（連線心跳、對戰狀態、
+        // 記錄檔…）都會在玩家打房名打到一半時把輸入框整個換掉。現在一律問
+        // `isEditing()`，那支是問瀏覽器誰有焦點，不必每一頁記得自己登記。
+        if (dragging || isEditing() || (editing && document.activeElement === editing)) {
+          // 玩家打完字（焦點離開）時要把錯過的那些更新補畫回來，否則畫面會停在
+          // 他開始打字的那一刻。⚠ 只掛一次，而且是 `once` —— 累加的話每打一個
+          // 字就多一個 listener。
+          scheduleCatchUp();
+          return;
+        }
         // ⚠ 編輯 COST 那一頁**不跟著狀態推播重畫**。它有 700 個輸入框，而連線
         // 心跳、對戰狀態這些跟它一點關係都沒有的變動每幾秒就來一次 —— 重畫會
         // 把捲軸拉回頂端，而玩家正在第 40 位角色那一排調數字。
