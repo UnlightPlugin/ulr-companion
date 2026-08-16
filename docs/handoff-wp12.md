@@ -1,4 +1,4 @@
-# 交接：WP-12 移動階段仲裁（2026-08-03）
+﻿# 交接：WP-12 移動階段仲裁（2026-08-03）
 
 核心三層在 08-02 寫完，08-03 修掉一個玩家回報的 bug，並把**整個生命週期**
 補齊 —— 現在它是「開著它去玩」的東西，不是「進對戰之後才啟動」的東西。
@@ -8,8 +8,8 @@
 給人用的入口（會自己找客戶端，錯誤不會一閃而過）：
 
 ```powershell
-.\tools\arbiter.ps1                # 網頁版 :9334（預設）
-.\tools\arbiter.ps1 -Port 9333     # 桌面版
+.\tools\arbiter.ps1                # 網頁版 :59223（預設）
+.\tools\arbiter.ps1 -Port 59222     # 桌面版
 ```
 
 雙擊 `tools\arbiter.cmd` 也可以 —— 它會 `pause`，視窗不會帶著錯誤訊息消失。
@@ -17,7 +17,7 @@
 底下實際跑的是：
 
 ```powershell
-npx tsx apps/companion/src/index.ts arbiter --port 9334 --policy either --deadline 3
+npx tsx apps/companion/src/index.ts arbiter --port 59223 --policy either --deadline 3
 ```
 
 `npm run verify` → **286 綠**。

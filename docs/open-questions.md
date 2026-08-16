@@ -7,7 +7,72 @@
 
 ---
 
-## 1. 角色 ID 用什麼？ 🔴 擋住 WP-02
+## 1. 角色 ID 用什麼？ ✅ 已定案（2026-08-15）
+
+**結論：用 `cc_asset` 的 `filename`** —— `cc078_04`（L4）、`cc078_r04`（R4）。
+
+客戶端的原始碼直接證明了封包與 cc_asset 的關係：
+
+```ts
+Chara.getCharaAsset = function (charaIndex) {
+  return Chara.charaAsset.frames[charaIndex]; // ← 就是陣列索引
+};
+```
+
+也就是封包裡的 `charaIndex` **就是 `cc_asset.frames` 的索引**，`chara`
+（`cc078`）只用來分辨 chara／mons／boss。所以「封包 → 規則鍵」不需要任何
+對照表，讀一次 cc_asset 就同時拿到兩者（`readCharacterAssets()`）。
+
+下面原本的討論保留，因為它記錄了為什麼**不能**用「角色 + 等級」。
+
+> ⚠ 補一個當時沒寫到的關鍵理由：L4 與 R4 的 `level` **都是 4**，只有
+> `filename` 分得開，而兩者 COST 不同（實測 `cc078_04` = 19、
+> `cc078_r04` = 21）。用 level 當鍵會讓所有覺醒卡撞號。
+
+### 另外三張表 ✅ 已定案（2026-08-16）
+
+一副牌組是四張表組合出來的。四種卡的正規鍵：
+
+| 卡種 | 客戶端資料             | 規則鍵                              |
+| ---- | ---------------------- | ----------------------------------- |
+| 角色 | `cc_asset.frames`      | `filename` —— `cc078_04`            |
+| 怪物 | `mc_asset.frames`      | `filename` —— `mc001_01`            |
+| 裝備 | `avatar_item.weapon[]` | `wp` + 補零到 3 位的索引 —— `wp001` |
+| 事件 | `event_info.frames[]`  | `ev` + 補零到 3 位的索引 —— `ev091` |
+
+**怪物用 filename** 的理由跟角色一樣（資料形狀完全相同）。⚠ 更重要的是：
+怪物**跟角色共用同樣那三個槽位、照樣參與壓 C**，那是客戶端
+`Chara.getCharaType()` 照 `cc` / `mc` 前綴分流出來的，不是我們的分類。
+
+**裝備與事件卡只能用索引**，因為客戶端沒有給它們任何名字：
+
+```js
+EventData.get = function (index) {
+  return EventData.eventJSON.frames[index] ?? null;
+};
+AvatarItem.get = function (type, index) {
+  return AvatarItem.itemJSON[type][index];
+};
+```
+
+名稱不能當鍵（實測 `name_tcn` 不唯一：武器 233/238、事件卡 106/110，而且會隨
+在地化與改版變動）。索引之所以可接受，是它**同時是材質的 frame 名** ——
+`event_info` 110 筆對上 `event_asset` 材質 110 格，`weapon[i].frame === i`
+全部 238 筆一致。官方要插一張卡就得連美術一起重編號。
+
+補零到 3 位而不是裸數字：四張表共用一個扁平的命名空間，明細與 `unknownIds`
+才能只帶鍵不帶表名。`wp1`（沒補零）**不接受** —— 一張卡兩種寫法會讓同一份規則
+裡出現兩個鍵，誰蓋掉誰取決於物件的鍵順序。實作與完整推導見
+`packages/rule-schema/src/card-key.ts`。
+
+`schema/cost-rule.schema.json` 的 `entityId` 仍然維持寬鬆的
+`^[A-Za-z0-9_.-]{1,48}$`。**刻意不收緊**：鍵寫錯的偵測交給
+`patch-cost` 的 `unknownKeys`（規則裡有、客戶端沒有的鍵都會被列出來並警告），
+那條路涵蓋得更廣 —— 它同時抓得到格式正確但根本不存在的 `wp999`。
+
+---
+
+## 1a. 原本的討論（留檔）
 
 規格書自己前後不一致：
 
@@ -47,21 +112,31 @@ cc078_L4
 
 ---
 
-## 2. 壓 C 的「差距」是誰跟誰的差距？ 🔴 擋住 WP-02
+## 2. 壓 C 的「差距」是誰跟誰的差距？ ✅ 已定案（2026-08-15）
 
-燈皇的規則是「差距 7~13C → +5C，差距 6C → +1C」。但「差距」的定義沒寫清楚：
+**結論：(d) 隊內每一對角色之間的差距，每一對各罰一次。**
 
-- (a) 我方隊伍總 COST 與對方隊伍總 COST 的差距？
-- (b) 隊內最高 COST 角色與最低 COST 角色的差距？
-- (c) 隊伍總 COST 與上限的差距？
+原本列的三個選項全錯：
 
-(a) 的話插件必須先知道對方的牌組，那要嘛靠雙方回報、要嘛靠封包
-—— 但**對手牌組是隱藏資訊，§12 明訂不得使用**。所以如果是 (a)，
-就只能在雙方都回報給 ULGG 之後才算得出來，Cost Engine 不能是純函式，
-整個設計會不一樣。
+- ~~(a) 我方隊伍總 COST 與對方隊伍總 COST~~ —— 不是。**這題最重要的收穫**：
+  壓 C 是純粹的隊內計算，`calculateTeamCost` 可以是純函式，不必碰對手資訊，
+  §12 的隱藏資訊問題根本不存在。整個 Cost Engine 的設計因此不用改。
+- ~~(b) 隊內最高與最低~~ —— 只算最高最低這一對會漏掉中間那些。
+  `9 / 13 / 20` 實際罰 10C（`13↔20` 與 `9↔20` 各一次），只看 `9↔20` 只會得到 5C。
+- ~~(c) 隊伍總 COST 與上限~~ —— 不是，而且客戶端裡根本沒有上限這個常數。
 
-`GapBand` 的型別已經定好（`minGap`／`maxGap`／`extraCost`），
-但**這題沒答案之前 `calculateTeamCost` 寫不出來**。
+官方的兩個區間是 **7\~13 → +5、14 以上 → +10**（沒有燈皇提到的「差距 6C → +1C」，
+那是他想追加的，不是原版）。
+
+`GapBand` 的型別不用改，官方規則就是兩個 band 表達得完的。
+`calculateTeamCost` 已經實作完成，`packages/cost-engine/test/official-rule.test.ts`
+用窮舉證明與客戶端等價。
+
+**完整推導、原始碼出處與五個實機對照例子見
+[official-cost-rule.md](official-cost-rule.md)。**
+
+> 順帶一提：遊戲畫面上的 `+5` 標記**會貼在錯的卡底下**（槽位索引與排序索引
+> 搞混了）。插件不要照抄那個顯示，用 `CostCalculation.compression` 的逐對明細。
 
 ---
 
@@ -234,7 +309,7 @@ goToBochi → okVisibleB → timerResume
 只能退回第一期的行為。不需要額外的偵測或自律機制。
 
 > **雙開讓第二期提前可做。** 原本第二期卡在「要先有 ULGG 側通道」，
-> 但兩個客戶端跑在同一台機器時（UL 視窗版 :9333 + Chrome 網頁版 :1221），
+> 但兩個客戶端跑在同一台機器時（UL 視窗版 :59222 + Chrome 網頁版 :1221），
 > 插件可以直接用 localhost 串起來，把整套握手協定驗完，之後再把傳輸層
 > 換成 ULGG 或 P2P。協定本身不用重寫。
 >
@@ -265,3 +340,5 @@ goToBochi → okVisibleB → timerResume
 | 壓 C 用區間表不用條件式                | 第一版不做條件引擎，否則 Client 與網站對接複雜度暴增                                     | `CompressionRule` |
 | contentHash 不放在規則內容裡           | 會變成雞生蛋。Hash 住在外層的 `.ulrcost.json` 信封                                       | `rule-package.ts` |
 | 壓 C 區間不得重疊                      | 重疊會讓同一差距對應兩個追加值，違反 §9「確定性結果」                                    | `validate.ts`     |
+| `teamCostLimit: 0` 代表不設限          | 上限是伺服器按頻道下發的，客戶端沒有這個常數；原版表這種規則沒有上限可填                 | `validate.ts`     |
+| 規則沒定價 → 當 99 並列入 `unknownIds` | 對齊客戶端的 `UNKNOWN_COST = 99`，總和才跟玩家畫面一致；當 0 會讓超標隊伍看起來合法      | `cost-engine`     |

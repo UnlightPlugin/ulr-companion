@@ -15,7 +15,7 @@ CDP 的 `--remote-debugging-port` **只能在啟動時指定**，沒辦法對已
 >
 > ```
 > Steam 遊戲庫 → UNLIGHT:Revive 按右鍵 → 內容… → 一般 → 啟動選項
-> --remote-debugging-port=9333
+> --remote-debugging-port=59222
 > ```
 >
 > 這段教學**寫在托盤的「設置 › 連線」頁裡**，不是只寫在這裡 —— 需要它的人
@@ -29,7 +29,7 @@ CDP 的 `--remote-debugging-port` **只能在啟動時指定**，沒辦法對已
 ## 桌面版：直接執行 exe 就可以
 
 ```
-<遊戲目錄>\UNLIGHTRevive.exe --remote-debugging-port=9333
+<遊戲目錄>\UNLIGHTRevive.exe --remote-debugging-port=59222
 ```
 
 實測撐過 45 秒正常運作，debug port 第 1 秒就通，且
@@ -61,7 +61,7 @@ CDP 的 `--remote-debugging-port` **只能在啟動時指定**，沒辦法對已
 2. 檢查 Steam 客戶端在跑
 3. 檢查 `app.asar` 是視窗版（見下面的陷阱 2）
 4. 清掉 `ELECTRON_RUN_AS_NODE`（見陷阱 1）後啟動
-5. 輪詢 `http://127.0.0.1:9333/json/version` 直到通
+5. 輪詢 `http://127.0.0.1:59222/json/version` 直到通
 6. 保留玩家原本的偏好（例如 `--force-device-scale-factor=1.5`）做成設定項
 
 參考實作：`Desktop\Unlight\launch.py`。
@@ -76,7 +76,7 @@ CDP 的 `--remote-debugging-port` **只能在啟動時指定**，沒辦法對已
 ### 陷阱 1：`ELECTRON_RUN_AS_NODE`
 
 ```
-UNLIGHTRevive.exe: bad option: --remote-debugging-port=9333
+UNLIGHTRevive.exe: bad option: --remote-debugging-port=59222
 exit code 9
 ```
 
@@ -118,7 +118,7 @@ Chromium 的參數變成無法辨識的 Node 選項，直接 exit 9。
 Chrome、Edge、Brave 都是 Chromium，都吃 `--remote-debugging-port`。
 
 ```
-chrome.exe --remote-debugging-port=9334 --user-data-dir=<插件自己的 profile>
+chrome.exe --remote-debugging-port=59223 --user-data-dir=<插件自己的 profile>
 ```
 
 **已實作**：`cdp-adapter` 的 `ensureBrowser()`（`src/browser.ts`）。
@@ -126,10 +126,21 @@ chrome.exe --remote-debugging-port=9334 --user-data-dir=<插件自己的 profile
 
 ```
 npx tsx apps/companion/src/index.ts web --steamid <SteamID64>
-    [--port 9334] [--profile <目錄>] [--browser <chrome.exe>]
+    [--port 59223] [--profile <目錄>] [--browser <chrome.exe>]
 ```
 
 預設 profile 是 `%USERPROFILE%\ulr-cdp-profile`。
+
+### ⚠ 埠是首選，不是保證（2026-08-16）
+
+`ensureBrowser()` **啟動前會先試綁一次那個埠**，綁不上就改用
+`--remote-debugging-port=0`，讓 Chromium 自己挑，再從
+`<user-data-dir>\DevToolsActivePort` 把實際的埠讀回來（第一行是埠，
+第二行是 browser ws path）。所以 `result.port` 有可能不等於你要的那個
+—— CLI 會印出來，之後的指令要帶那一個。
+
+為什麼要這樣做，而不是「換一個好一點的埠號」：見
+[埠被 Windows 保留](#埠被-windows-保留吃掉整段)。
 
 ### 這條路完全不經過 Steam
 
@@ -178,10 +189,74 @@ UI 要講清楚，不然會以為壞掉。
 
 ---
 
+## 埠被 Windows 保留（吃掉整段）
+
+**這是這個專案踩過兩次、每次都花掉一小時的坑。** 症狀在外觀上跟「參數被忽略」
+一模一樣：客戶端照常啟動、`--remote-debugging-port` 也確實在它的命令列上
+（工作管理員看得到），但**沒有人在聽那個埠，`DevToolsActivePort` 也不會產生**。
+
+| 日期       | 埠   | 被誰吃掉           |
+| ---------- | ---- | ------------------ |
+| 2026-07-30 | 1221 | 保留範圍 1196–1295 |
+| 2026-08-16 | 9334 | 保留範圍 9277–9876 |
+
+### 為什麼會這樣
+
+Hyper-V／WSL／Docker 會從**動態埠範圍**裡切走 100 埠一段拿去用，而那個範圍
+本身是可以被改的：
+
+```
+netsh interface ipv4 show excludedportrange protocol=tcp   ← 現在被保留了哪些
+netsh interface ipv4 show dynamicport tcp                  ← 保留是從這裡切的
+```
+
+- Windows 預設的動態範圍是 **49152–65535** → 高位埠有風險
+- 被改過的機器（開發機是 **1024–15000**）→ 低位埠有風險
+
+兩種設定的危險區剛好相反，**所以沒有任何常數在兩邊都安全**。挑埠號等於在賭
+玩家的機器是哪一種，而且保留範圍是**動態的** —— 重開機、起一次 Docker 都可能
+改變，「本來好好的，今天突然連不上」就是這麼來的。
+
+### 所以插件不靠埠號，靠偵測
+
+`packages/cdp-adapter/src/debug-port.ts`：
+
+| 時機         | 做什麼                                                                    |
+| ------------ | ------------------------------------------------------------------------- |
+| 啟動瀏覽器前 | `probePortState()` 試綁一次。`blocked` 就改用 `--remote-debugging-port=0` |
+| 連線時       | 首選埠沒回應 → 讀 `<user-data-dir>\DevToolsActivePort` 找回實際的埠       |
+| 連不上時     | `explainDebugPort()` 分辨「沒開遊戲」與「這個埠根本綁不上」               |
+
+`--remote-debugging-port=0` 的 0 **不是位址**，是「Chromium 你自己挑一個」。
+`127.0.0.1:0` 永遠不會有人聽 —— 挑到什麼只寫在 `DevToolsActivePort` 的第一行。
+
+⚠ **所以 0 只能出現在命令列上，不能存進設定。** 托盤是拿埠當實例身分的
+（`main.ts` 的 userData 分離、兩份配置不得重複），存 0 會讓兩份配置撞在一起。
+
+⚠ **回退範圍必須限定在同一種客戶端。** 兩種客戶端各有各的 user-data-dir：
+
+```
+桌面版  %APPDATA%\UNLIGHT-Revive
+網頁版  %USERPROFILE%\ulr-cdp-profile
+```
+
+不分種類地亂找，症狀會是「我開的是網頁版的插件，它卻接到桌面版的遊戲去」。
+所以 `userDataDirFor(kind)` 跟著配置的 `kind` 走，而且**不給就不回退** ——
+寧可連不上，也不要接錯客戶端。
+
+> 這個病不只咬客戶端。`arbiter-link` 的 broker 測試本來寫死 9377，
+> 2026-08-16 那天整個測試跟著掛掉，而失敗訊息（「第一個開的沒有當中間人」）
+> 完全看不出跟埠有關。任何需要固定埠的地方都該跟作業系統借，不要寫死。
+
+---
+
 ## 已經啟動的程序能不能補 debug port？
 
 **不能。** DevTools 的 HTTP/WebSocket 伺服器是 Chromium 在**啟動過程中**
 建立的，之後沒有任何 API、訊號或 IPC 可以叫它補開。
+
+（這也是 `--remote-debugging-port=0` 值得推薦給玩家的理由：既然只有啟動時
+設得了，那就設一個**永遠不會綁不上**的值，剩下的交給插件去查。）
 
 理論上還有一條路（Node 對執行中程序啟用 inspector，再從 Electron 主程序
 摸到 `webContents`），**但不要走**：那是對別人的程序做注入，防毒與
@@ -204,7 +279,7 @@ SmartScreen 幾乎一定會有意見，各 Electron 版本行為又不一致。
 命令列，可以用自己的執行檔把遊戲包起來：
 
 ```
-"%LOCALAPPDATA%\Programs\ULR Companion\ULRCompanion.exe" %command% --remote-debugging-port=9333
+"%LOCALAPPDATA%\Programs\ULR Companion\ULRCompanion.exe" %command% --remote-debugging-port=59222
 ```
 
 代價：要玩家自己貼一次，而且**每個 Steam 帳號各設一份** ——

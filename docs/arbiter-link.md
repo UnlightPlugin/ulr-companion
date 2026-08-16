@@ -314,7 +314,7 @@ hazard 判成 false（不縮短），方向是安全的。
 ```powershell
 npm run tray                      # 上次用的那份配置
 npm run tray -- --profile <id>    # 指定配置
-npm run tray -- --port 9333       # 相容用法
+npm run tray -- --port 59222       # 相容用法
 ```
 
 兩份同時開，各管一個客戶端。托盤圖示的顏色**就是狀態**，跟遊戲裡 OK 鈕的
@@ -403,7 +403,7 @@ TypeError: Cannot read properties of undefined (reading 'setPath')
 
 ## 2026-08-06 實測驗到什麼、還沒驗到什麼
 
-✅ 已驗（桌面版 :9333 + 網頁版 :1221，同一場對戰）
+✅ 已驗（桌面版 :59222 + 網頁版 :1221，同一場對戰）
 
 | 驗的東西                 | 怎麼看                                            |
 | ------------------------ | ------------------------------------------------- |
@@ -412,7 +412,7 @@ TypeError: Cannot read properties of undefined (reading 'setPath')
 | 兩邊算出同一個房號並配對 | 第三個客戶端連進同一房 → `room-full`              |
 | 房號沒有洩漏原始 room id | 雜湊 `e4064638…`，原始值不離開本機                |
 | 讀秒顯示真的跟著改       | 真實 `timelimit=30` → 畫面 `12`，一路數到 0       |
-| 座位兩邊都對             | :9333 = B、:1221 = A                              |
+| 座位兩邊都對             | :59222 = B、:1221 = A                             |
 | patch 掉了會自己重裝     | 網頁版重載後空了半場 → 修掉，重啟後兩邊都 armed   |
 
 ⬜ 還沒驗

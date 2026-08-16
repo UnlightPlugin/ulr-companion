@@ -22,15 +22,31 @@ description: 對著跑著的 UNLIGHT:Revive 客戶端查東西 —— 場景物�
 ## 先確認有東西在跑
 
 ```powershell
-npx tsx apps/companion/src/index.ts probe --port 9334
+npx tsx apps/companion/src/index.ts probe --port 59223
 ```
 
 連不上就是沒開。開法看 [docs/launching.md](../../../docs/launching.md)：
 
-| 客戶端 | port | 怎麼開                                          |
-| ------ | ---- | ----------------------------------------------- |
-| 桌面版 | 9333 | Steam 啟動選項加 `--remote-debugging-port=9333` |
-| 網頁版 | 9334 | `tools/open-game.ps1`，或 `companion web`       |
+| 客戶端 | port  | 怎麼開                                           |
+| ------ | ----- | ------------------------------------------------ |
+| 桌面版 | 59222 | Steam 啟動選項加 `--remote-debugging-port=59222` |
+| 網頁版 | 59223 | `tools/open-game.ps1`，或 `companion web`        |
+
+⚠ **那兩個埠是首選，不是保證。** 綁不上時（Windows 會動態保留整段埠，
+2026-07-30 與 08-16 各發生一次）客戶端會自己挑一個，實際的埠寫在它的
+`DevToolsActivePort` 第一行：
+
+```powershell
+Get-Content "$env:APPDATA\UNLIGHT-Revive\DevToolsActivePort"   # 桌面版
+Get-Content "$env:USERPROFILE\ulr-cdp-profile\DevToolsActivePort"  # 網頁版
+```
+
+「明明遊戲開著卻連不上」先看這個檔，不要先懷疑腳本。
+沒有那個檔就代表 debug port 根本沒開起來 —— 試綁一次就知道是不是埠被保留了：
+
+```powershell
+netsh interface ipv4 show excludedportrange protocol=tcp
+```
 
 雙開可以同時接兩個 —— **有些東西單邊看不出來**（見下面「座位」）。
 
@@ -41,7 +57,7 @@ npx tsx apps/companion/src/index.ts probe --port 9334
 ```ts
 import { createCdpAdapter } from "@ulr/cdp-adapter";
 
-const adapter = createCdpAdapter({ port: Number(process.argv[2] ?? 9334) });
+const adapter = createCdpAdapter({ port: Number(process.argv[2] ?? 59223) });
 try {
   await adapter.connect();
   await adapter.waitForGame();
@@ -57,7 +73,7 @@ try {
 }
 ```
 
-跑：`npx tsx <路徑>.mts 9334`
+跑：`npx tsx <路徑>.mts 59223`
 
 **注入的程式碼一定要包 try/catch 並回傳字串。** 例外會變成一句沒有上下文的
 「注入的程式在遊戲裡拋例外」，什麼都查不到。回傳字串而不是物件，是因為序列化
@@ -105,8 +121,42 @@ sc.children.list
 String(window.game.scene.keys.MainA.constructor.toString());
 ```
 
+⚠ `constructor.toString()` **只給 constructor**，方法要一個一個拿
+（`String(sc.edit_reflesh.toString())`）。先用
+`Object.getOwnPropertyNames(Object.getPrototypeOf(sc))` 列出有哪些方法。
+
 拿到之後 `indexOf("pointerover")` 之類的往前後切一段來看。
 OK 鈕那組 hover handler 就是這樣挖出來的。
+
+**⭐ 更好的辦法：直接抓 bundle，裡面有未壓縮的原始碼。**
+
+場景類別只看得到自己，跨模組的東西（`a.E.refresh_penalties(this)` 那種）
+在場景裡找不到定義。而且 bundle 是 webpack `eval` + sourcesContent 打包的，
+**原始 TS 編譯結果連註解與變數名都在**，比看壓縮過的類別好懂太多。
+
+在頁面裡 fetch 回來自己 grep，只把命中的那一段帶回 Node：
+
+```js
+var srcs = performance
+  .getEntriesByType("resource")
+  .map(function (e) {
+    return e.name;
+  })
+  .filter(function (u) {
+    return /\.js(\?|$)/.test(u) && u.indexOf("chrome-extension") !== 0;
+  });
+// 逐個 fetch → txt.indexOf(NEEDLE) → 回傳 txt.slice(at - 400, at + 3000)
+```
+
+⚠ **不要用 `document.scripts`。** webpack 動態載入的 chunk 載完會把
+`<script>` 拆掉，`document.scripts` 只看得到最初那三支
+（`runtime` / `unlight-common` / `main`）—— 場景與遊戲邏輯全都不在裡面。
+`performance.getEntriesByType("resource")` 才抓得到全部（實測 30+ 支）。
+
+⚠ **回傳前先切片。** 單一 bundle 好幾 MB，整份搬回 Node 會炸掉。
+
+原版壓 C 規則（`src/deck/cost-check.ts` 的 `costcheck()`）就是這樣挖出來的，
+見 [docs/official-cost-rule.md](../../../docs/official-cost-rule.md)。
 
 **我注入的東西現在是什麼狀態** —— 改前端的功能一定要有這一步：
 
@@ -158,7 +208,7 @@ var A = window.__ulrArbiter;
 ## 錄一整場而不是問一個瞬間
 
 ```powershell
-npx tsx apps/companion/src/index.ts watch --port 9334 --seconds 300
+npx tsx apps/companion/src/index.ts watch --port 59223 --seconds 300
 ```
 
 事件的**次數比對**通常比單次觀察有用得多 —— 上面「A/B 是座位」那條，

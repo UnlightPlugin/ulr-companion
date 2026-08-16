@@ -4,7 +4,7 @@ WP-09 的產出。用 `companion watch` 同時接兩個客戶端，錄同一場�
 再把兩份 log 對起來。
 
 ```
-網頁版 :9334（座位 A）   桌面版 :9333（座位 B）
+網頁版 :9334（座位 A）   桌面版 :59222（座位 B）
 ```
 
 **為什麼一定要雙邊錄**：單邊 log 沒辦法區分「這個事件是關於我的」還是「關於
@@ -52,7 +52,7 @@ this.PLAYER = e.side, this.OPPONENT = "A" === e.side ? "B" : "A", this.isPlayerA
 雙邊同時讀確認過（同一場對戰）：
 
 ```
-:9334 網頁版  MainA.PLAYER = "A"      :9333 桌面版  MainA.PLAYER = "B"
+:9334 網頁版  MainA.PLAYER = "A"      :59222 桌面版  MainA.PLAYER = "B"
 ```
 
 備援：看你收到的是 `okVisibleA` 還是 `okVisibleB` —— 這類事件**只發給該座位
@@ -1044,7 +1044,7 @@ GameObject 就是 EventEmitter，**不管物件可不可按**。好處是插件�
 
 ## room id 兩個客戶端完全相同（2026-08-06 雙開實測）
 
-`MainA.room` 在 :9333 與 :1221 上是同一個 32 字元字串。
+`MainA.room` 在 :59222 與 :1221 上是同一個 32 字元字串。
 
 ✅ 這回答了 [battle-features.md](battle-features.md) 動手前要 probe 的第 4 題
 （match id 可不可觀測），也就是側通道把兩個玩家配起來的依據。
