@@ -32,6 +32,9 @@ packets.log
 # 本機規則包（可能是還沒發布的私人約測規則）
 *.ulrcost.json
 !packages/rule-schema/test-vectors/**/*.ulrcost.json
+# 例外：/rules/ 是從客戶端匯出的原版 COST 表，是要給大家 fork 的參考資料，
+# 不是私人約測規則。用 `companion official-rule` 重新產生。
+!/rules/*.ulrcost.json
 
 .DS_Store
 Thumbs.db
@@ -39,3 +42,7 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 !.vscode/settings.json
+
+# unpack 的產物。⚠ 它跟 .ulrcost.json 是同一份規則的兩種包裝，兩個檔一起躺在
+# rules/ 裡會被當成「有兩份 shinon 規則」。要看內容就當場 unpack，不要留檔。
+rules/*.rule.json

@@ -18,7 +18,7 @@
  *
  * 用法：
  *
- *     npm run tray -- --port 9333                  桌面版
+ *     npm run tray -- --port 59222                  桌面版
  *     npm run tray -- --port 1221 --link-port 9350 網頁版
  *
  * 兩份可以同時開，各管一個客戶端（`apps/tray/src/main.ts` 檔頭說明了為什麼

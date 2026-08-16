@@ -18,10 +18,10 @@
 
 .EXAMPLE
   .\tools\arbiter.ps1
-  接網頁版（:9334）。
+  接網頁版（:59223）。
 
 .EXAMPLE
-  .\tools\arbiter.ps1 -Port 9333
+  .\tools\arbiter.ps1 -Port 59222
   改接桌面版。
 
 .EXAMPLE
@@ -30,8 +30,8 @@
 #>
 [CmdletBinding()]
 param(
-  # 網頁版 9334（預設）、桌面版 9333。
-  [int]$Port = 9334,
+  # 網頁版 59223（預設）、桌面版 59222。
+  [int]$Port = 59223,
   # either=雙方操作都取消 / opponent=只有對手 / never=都不取消（等同原本的鎖定）
   [ValidateSet("either", "opponent", "never")]
   [string]$Policy = "either",
@@ -80,15 +80,15 @@ function Test-DebugPort {
   }
 }
 
-$which = if ($Port -eq 9333) { "桌面版" } elseif ($Port -eq 9334) { "網頁版" } else { "自訂" }
+$which = if ($Port -eq 59222) { "桌面版" } elseif ($Port -eq 59223) { "網頁版" } else { "自訂" }
 
 # 遊戲還沒開**不是錯誤** —— companion 本來就會等。
 # 但如果要接的那個沒回應、另一個卻在跑，那多半是接錯了：講一句，不擋。
 # （關掉的埠是 connection refused，不會真的等滿 timeout。）
 if (-not (Test-DebugPort $Port)) {
-  $other = if ($Port -eq 9334) { 9333 } else { 9334 }
+  $other = if ($Port -eq 59223) { 59222 } else { 59223 }
   if (Test-DebugPort $other) {
-    $otherName = if ($other -eq 9333) { "桌面版" } else { "網頁版" }
+    $otherName = if ($other -eq 59222) { "桌面版" } else { "網頁版" }
     Write-Host ":$Port（$which）沒有回應，但 :$other（$otherName）有在跑。" -ForegroundColor Yellow
     Write-Host "要接那個的話中斷之後改用 -Port $other。" -ForegroundColor Yellow
   }

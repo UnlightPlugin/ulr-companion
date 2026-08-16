@@ -38,6 +38,7 @@
       // （Node 的東西），在 Cloudflare 的 runtime 裡打包不起來。
       "@ulr/arbiter-link/protocol": ["packages/arbiter-link/src/protocol.ts"],
       "@ulr/arbiter-link/rooms": ["packages/arbiter-link/src/rooms.ts"],
+      "@ulr/arbiter-link/match-queue": ["packages/arbiter-link/src/match-queue.ts"],
       "@ulr/arbiter-engine": ["packages/arbiter-engine/src/index.ts"]
     }
   },

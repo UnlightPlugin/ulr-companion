@@ -16,6 +16,7 @@ export default defineConfig({
       // （`@ulr/arbiter-link` 也會吃到 `@ulr/arbiter-link/rooms`），排後面的話
       // 會被改寫成 `.../src/index.ts/rooms` 這種不存在的路徑。
       "@ulr/arbiter-link/protocol": r("./packages/arbiter-link/src/protocol.ts"),
+      "@ulr/arbiter-link/match-queue": r("./packages/arbiter-link/src/match-queue.ts"),
       "@ulr/arbiter-link/rooms": r("./packages/arbiter-link/src/rooms.ts"),
       "@ulr/arbiter-link": r("./packages/arbiter-link/src/index.ts"),
       "@ulr/arbiter-engine": r("./packages/arbiter-engine/src/index.ts"),

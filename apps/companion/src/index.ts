@@ -13,14 +13,22 @@
  */
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import { API_SCHEMA_VERSION } from "@ulr/api-contract";
-import type { CostOverrides, CostPatchReport } from "@ulr/cdp-adapter";
+import type {
+  CostOverrides,
+  CostOverrideTables,
+  CostPatchReport,
+  CostTableId,
+  PenaltyBand,
+} from "@ulr/cdp-adapter";
 import {
   BROWSER_DEBUG_PORT,
   buildBookmarklet,
   buildBookmarkUrl,
   buildExtensionFiles,
+  COST_TABLE_IDS,
   createCdpAdapter,
   DEBUG_PORT_SWITCH,
   DEFAULT_BROWSER_PROFILE_DIR,
@@ -30,6 +38,7 @@ import {
   GAME_ORIGIN,
   openGameTab,
   refreshBundles,
+  toCostTable,
 } from "@ulr/cdp-adapter";
 import { ArbiterEngine, SPEED_RENEW_MS } from "@ulr/arbiter-engine";
 import {
@@ -37,7 +46,22 @@ import {
   DEFAULT_LINK_PORT,
   MOVE_PHASE_TOTAL_SECONDS,
 } from "@ulr/arbiter-link";
-import { assertCostRule, contentHash, loadRulePackage, shortHash } from "@ulr/rule-schema";
+import type { CostRule } from "@ulr/rule-schema";
+import {
+  assertCostRule,
+  buildCatalog,
+  catalogSize,
+  contentHash,
+  createRulePackage,
+  equipmentKey,
+  eventCardKey,
+  loadRulePackage,
+  parseEquipmentKey,
+  parseEventCardKey,
+  RULE_PACKAGE_EXTENSION,
+  shortHash,
+  toIndexTable,
+} from "@ulr/rule-schema";
 import {
   CACHE_PATH,
   NoBundleCacheError,
@@ -65,8 +89,16 @@ function usage(): void {
   console.log("");
   console.log("用法：");
   console.log("  probe [--port N]            連上遊戲，回報找到什麼");
-  console.log("  cost <cost.json> [--port N] [--reload]");
+  console.log("  cost <cost.json|規則檔> [--port N] [--reload]");
   console.log("                              套用自訂 COST（鍵是 cc_asset 的 filename）");
+  console.log("                              裸對照表、規則內容、規則包三種都收");
+  console.log("  official-rule [--port N] [--out <檔案>] [--game-version YYYY.MM]");
+  console.log("       [--rule-version X.Y.Z]");
+  console.log("                              把客戶端的原版 COST 表匯出成規則包");
+  console.log("                              ⚠ 要在沒套過自訂 COST 的客戶端上跑");
+  console.log("  catalog [--port N] [--out <檔案>] [--game-version YYYY.MM]");
+  console.log("                              讀卡片名冊（編號 → 中文名），給托盤的編輯 COST 用");
+  console.log("                              預設寫到 ~/.ulr-companion/catalog.json");
   console.log("  watch [--port N] [--seconds N] [--out <檔案>] [--in-only|--out-only]");
   console.log("       [--all] [--filter <字串>]");
   console.log("                              即時印出 WebSocket 事件（不會 reload，對戰中可用）");
@@ -85,6 +117,9 @@ function usage(): void {
   console.log("                              演出加速，只快動畫不動時鐘（預設 ×3）");
   console.log("                              實測約省 1 分鐘／場，伺服器排程那段動不了");
   console.log("  rule <規則檔.json>          載入並驗證規則包");
+  console.log("  unpack <規則包> [--out F]   挖出裸規則（信封少一層，好讀好 diff）");
+  console.log("  pack <規則檔> [--out F]     重算 contentHash 封成規則包給對手核對");
+  console.log("                              ⚠ 改 COST 直接改 .ulrcost.json 就行，Hash 會重算");
   console.log("");
   console.log("  web --refresh [--no-launch] 讀當前版本的 bundle 檔名（必要時自己開 Steam 版）");
   console.log("  web --steamid <id> [--port N] [--game-port N]");
@@ -117,26 +152,39 @@ function parsePort(args: string[], fallback: number = DEFAULT_DEBUG_PORT): numbe
   return value;
 }
 
+/** 四張表的中文名。CLI 與托盤各留一份是刻意的 —— 兩邊的語氣不同。 */
+const TABLE_LABEL: Readonly<Record<CostTableId, string>> = {
+  characters: "角色",
+  monsters: "怪物",
+  equipment: "裝備",
+  eventCards: "事件卡",
+};
+
 function describeReport(report: CostPatchReport): string {
   switch (report.type) {
     case "cost-patch-installed":
-      return "  ✓ hook 已掛上，等遊戲載入 cc_asset";
+      return "  ✓ hook 已掛上，等遊戲載入四張 COST 表";
     case "cost-patch": {
-      const lines = [
-        `  ✓ 改了 ${report.applied} / ${report.totalFrames} 張卡`,
-        `    charaIndex → filename 索引已取得（${report.index.length} 筆）`,
-      ];
+      const label = TABLE_LABEL[report.table];
+      const lines = [`  ✓ ${label}：改了 ${report.applied} / ${report.totalFrames} 張`];
+      if (report.index !== null) {
+        lines.push(`    charaIndex → filename 索引已取得（${report.index.length} 筆）`);
+      }
       if (report.unknownKeys.length > 0) {
         // 不能默默忽略 —— 規則裡有、客戶端沒有，代表規則跟遊戲版本對不上，
         // 而那會讓超標的隊伍看起來合法。
         const head = report.unknownKeys.slice(0, 8).join(", ");
         const tail = report.unknownKeys.length > 8 ? " …" : "";
-        lines.push(`  ⚠ 規則有 ${report.unknownKeys.length} 個鍵這個客戶端沒有：${head}${tail}`);
+        lines.push(
+          `  ⚠ ${label}有 ${report.unknownKeys.length} 個鍵這個客戶端沒有：${head}${tail}`,
+        );
       }
       return lines.join("\n");
     }
-    case "cost-patch-error":
-      return `  ✗ 注入失敗：${report.reason}`;
+    case "cost-patch-error": {
+      const where = report.table === null ? "" : `（${TABLE_LABEL[report.table]}）`;
+      return `  ✗ 注入失敗${where}：${report.reason}`;
+    }
   }
 }
 
@@ -163,12 +211,255 @@ async function cmdProbe(args: string[]): Promise<number> {
   }
 }
 
-function readCostTable(path: string): CostOverrides {
+/**
+ * 讀 COST 表。三種都收：
+ *
+ *   1. 裸的對照表      `{ "cc078_04": 30, … }`
+ *   2. 規則內容        有 `schemaVersion` 的物件 → 取它的 `characters`
+ *   3. 規則包信封      有 `packageVersion` 的物件 → 驗 Hash 後取 `characters`
+ *
+ * 2 與 3 能直接用，是因為規則的正規鍵**就是** cc_asset 的 filename，中間
+ * 不需要任何對照表（見 docs/open-questions.md 第 1 題）。
+ *
+ * ⚠ 只取 `characters` 與 `compressionRule`。武器與事件卡的 COST 改不動 ——
+ * `patch-cost` 攔的是 cc_asset，那裡面只有角色卡。
+ */
+/**
+ * 一份規則 → 注入腳本要的四張表。
+ *
+ * ⚠ 裝備與事件卡的鍵在這裡就換成**陣列索引字串**（`wp001` → `"1"`）。
+ * 注入的腳本刻意不認得 `wp` / `ev` 這套命名，見 `patch-cost.ts`。
+ * 認不得的鍵會被列出來 —— 默默丟掉等於那張卡的價格安靜地沒有生效。
+ */
+function tablesOf(rule: CostRule): { costs: CostOverrideTables; unmapped: string[] } {
+  const equipment = toIndexTable(rule.equipment, parseEquipmentKey);
+  const eventCards = toIndexTable(rule.eventCards, parseEventCardKey);
+  return {
+    costs: {
+      characters: rule.characters,
+      monsters: rule.monsters,
+      equipment: equipment.byIndex,
+      eventCards: eventCards.byIndex,
+    },
+    unmapped: [...equipment.unmapped, ...eventCards.unmapped],
+  };
+}
+
+function readCostTable(path: string): {
+  costs: CostOverrideTables;
+  bands: readonly PenaltyBand[] | null;
+  note: string;
+  unmapped: string[];
+} {
   const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     throw new Error('COST 表要是一個物件：{ "cc078_04": 30, … }');
   }
-  return raw as CostOverrides;
+
+  if ("packageVersion" in raw) {
+    const result = loadRulePackage(raw);
+    if (!result.ok) throw new Error(`規則包載入失敗 [${result.code}] ${result.message}`);
+    const { pkg, short } = result.value;
+    return {
+      ...tablesOf(pkg.rule),
+      bands: bandsOf(pkg.rule),
+      note: `規則包 ${pkg.rule.name} ${pkg.rule.version} (${short})`,
+    };
+  }
+
+  if ("schemaVersion" in raw) {
+    const rule = assertCostRule(raw);
+    return {
+      ...tablesOf(rule),
+      bands: bandsOf(rule),
+      note: `規則 ${rule.name} ${rule.version} (${shortHash(contentHash(rule))})`,
+    };
+  }
+
+  // 裸對照表沒有壓 C 資訊 —— null 代表「不要動罰則」，不是「不罰」。
+  // ⚠ 也沒有表的分野：一律當角色表，那是這個格式唯一支援過的語意。
+  return {
+    costs: { characters: raw as CostOverrides },
+    bands: null,
+    note: "裸 COST 表（只當角色表）",
+    unmapped: [],
+  };
+}
+
+function bandsOf(rule: CostRule): readonly PenaltyBand[] | null {
+  return rule.compressionRule?.type === "gap-band-v1" ? rule.compressionRule.bands : null;
+}
+
+/** 官方的壓 C 區間：差距 7~13 → +5，14 以上 → +10。出處見 docs/official-cost-rule.md。 */
+const OFFICIAL_GAP_BANDS = [
+  { minGap: 7, maxGap: 13, extraCost: 5 },
+  { minGap: 14, extraCost: 10 },
+];
+
+/**
+ * 把跑著的客戶端的原版 COST 表匯出成規則包。
+ *
+ * 這是「自訂規則」的起點 —— 玩家 fork 它，只改想改的角色，其餘保持原版。
+ * 每次遊戲改版都該重跑一次。
+ *
+ * **四張表一次讀完**：角色（`cc_asset`）、怪物（`mc_asset`）、
+ * 裝備（`avatar_item.weapon`）、事件卡（`event_info`）。一副牌組就是這四張
+ * 組合出來的，少讀一張就等於那一種卡在規則裡全部缺席 → 每張都被算成 99C。
+ */
+async function cmdOfficialRule(args: string[]): Promise<number> {
+  const out = parseFlag(args, "--out") ?? "unlight-official.ulrcost.json";
+  const version = parseFlag(args, "--rule-version") ?? "1.0.0";
+  const now = new Date();
+  const gameVersion =
+    parseFlag(args, "--game-version") ??
+    `${now.getFullYear()}.${String(now.getMonth() + 1).padStart(2, "0")}`;
+
+  const adapter = createCdpAdapter({ port: parsePort(args, BROWSER_DEBUG_PORT) });
+  try {
+    const session = await adapter.connect();
+    console.log(`✓ 接上「${session.title}」`);
+    await adapter.waitForGame();
+
+    const cc = await adapter.readCharacterAssets();
+    const characters = toCostTable(cc.assets);
+    console.log(`✓ 讀到 ${cc.assets.length} 張角色卡（cc_asset 共 ${cc.totalFrames} 格）`);
+    if (cc.placeholders > 0) {
+      console.log(`  略過 ${cc.placeholders} 個沒有 filename 的保留空位`);
+    }
+
+    const mc = await adapter.readMonsterAssets();
+    const monsters = toCostTable(mc.assets);
+    console.log(`✓ 讀到 ${mc.assets.length} 張怪物卡（mc_asset 共 ${mc.totalFrames} 格）`);
+    if (mc.placeholders > 0) {
+      console.log(`  略過 ${mc.placeholders} 個沒有 filename 的保留空位`);
+    }
+
+    // 索引型的兩張。⚠ 鍵是這裡才組出來的 —— cdp-adapter 只回傳陣列索引。
+    const weapons = await adapter.readWeaponAssets();
+    const equipment: Record<string, number> = {};
+    for (const w of weapons.cards) equipment[equipmentKey(w.index)] = w.cost;
+    console.log(`✓ 讀到 ${weapons.cards.length} 件裝備（avatar_item.weapon）`);
+
+    const events = await adapter.readEventCardAssets();
+    const eventCards: Record<string, number> = {};
+    for (const e of events.cards) eventCards[eventCardKey(e.index)] = e.cost;
+    console.log(`✓ 讀到 ${events.cards.length} 張事件卡（event_info）`);
+
+    // 客戶端的 UNKNOWN_COST 也是 99，兩者長得一樣。這裡只是提醒操作者去確認，
+    // 不擋 —— 真的有卡就叫 99 是可能的。
+    const suspicious = [...cc.assets, ...mc.assets].filter((a) => a.cost === 99);
+    if (suspicious.length > 0) {
+      console.log(
+        `  ⚠ 有 ${suspicious.length} 張的 cost 剛好是 99（${suspicious
+          .slice(0, 6)
+          .map((a) => a.filename)
+          .join(", ")}）。` +
+          "\n    99 是客戶端查不到資料時的預設值，也可能是這個客戶端已經套過自訂 COST。" +
+          "\n    請確認是在**沒有套過**的客戶端上讀的。",
+      );
+    }
+
+    const rule = assertCostRule({
+      schemaVersion: 1,
+      ruleSetId: "unlight/official",
+      version,
+      name: "UNLIGHT 原版 COST",
+      description:
+        "從客戶端直接讀出的原版 COST：角色（cc_asset）、怪物（mc_asset）、" +
+        "裝備（avatar_item.weapon）、事件卡（event_info），加上官方的壓 C 規則" +
+        "（差距 7~13 罰 5C、14 以上罰 10C，隊內每一對各罰一次）。" +
+        "⚠ 怪物與角色共用同樣三個槽位，照樣參與壓 C；裝備與事件卡計入總和但不參與。" +
+        "teamCostLimit 是 0＝不設限：上限由伺服器按頻道下發，不是規則的一部分。",
+      publisher: { id: "unlight", name: "UNLIGHT:Revive" },
+      gameVersion,
+      appliesTo: "any",
+      teamCostLimit: 0,
+      characters,
+      monsters,
+      equipment,
+      eventCards,
+      compressionRule: { type: "gap-band-v1", bands: OFFICIAL_GAP_BANDS },
+      changelog:
+        `以 ${gameVersion} 的客戶端為準：角色 ${cc.assets.length}、` +
+        `怪物 ${mc.assets.length}、裝備 ${weapons.cards.length}、` +
+        `事件卡 ${events.cards.length}。`,
+    });
+
+    const pkg = createRulePackage(rule, { exportedBy: "ulr-companion official-rule" });
+    writeFileSync(out, `${JSON.stringify(pkg, null, 2)}\n`, "utf8");
+    console.log(`✓ 寫入 ${out}`);
+    console.log(`  contentHash ${shortHash(pkg.contentHash)}`);
+    console.log(`  遊戲版本    ${gameVersion}（--game-version 可覆寫）`);
+    return 0;
+  } finally {
+    await adapter.disconnect();
+  }
+}
+
+/**
+ * 讀一份卡片名冊（編號 → 中文名 + 原價）給托盤的「編輯 COST」用。
+ *
+ * 托盤自己也有一顆按鈕做同一件事；留一個 CLI 入口是為了在沒開 GUI 時
+ * 也能重讀（改版之後最常做的就是這件事）。
+ *
+ * ⚠ 跟 `official-rule` 一樣**要在沒套過自訂 COST 的客戶端上跑** —— 名冊裡的
+ * 「原價」是編輯器「改回原價」的基準，讀到改過的數字會讓玩家改回一個他從來
+ * 沒設過的值。
+ */
+async function cmdCatalog(args: string[]): Promise<number> {
+  const out = parseFlag(args, "--out") ?? join(homedir(), ".ulr-companion", "catalog.json");
+  const now = new Date();
+  const gameVersion =
+    parseFlag(args, "--game-version") ??
+    `${now.getFullYear()}.${String(now.getMonth() + 1).padStart(2, "0")}`;
+
+  const adapter = createCdpAdapter({ port: parsePort(args, BROWSER_DEBUG_PORT) });
+  try {
+    const session = await adapter.connect();
+    console.log(`✓ 接上「${session.title}」`);
+    await adapter.waitForGame();
+
+    const [cc, mc, weapons, events, profiles] = [
+      await adapter.readCharacterAssets(),
+      await adapter.readMonsterAssets(),
+      await adapter.readWeaponAssets(),
+      await adapter.readEventCardAssets(),
+      await adapter.readProfiles(),
+    ];
+    const catalog = buildCatalog({
+      gameVersion,
+      characters: cc.assets,
+      monsters: mc.assets,
+      equipment: weapons.cards,
+      eventCards: events.cards,
+      profiles,
+    });
+
+    mkdirSync(dirname(out), { recursive: true });
+    writeFileSync(out, `${JSON.stringify(catalog, null, 2)}\n`, "utf8");
+
+    const n = catalogSize(catalog);
+    console.log(`✓ 寫入 ${out}`);
+    console.log(`  角色   ${catalog.characters.length} 位 / ${n.characters} 張`);
+    console.log(`  怪物   ${catalog.monsters.length} 種 / ${n.monsters} 張`);
+    console.log(`  裝備   ${n.equipment} 件（${catalog.equipment.length} 組，含通用）`);
+    console.log(`  事件卡 ${n.eventCards} 張（${catalog.eventCards.length} 族）`);
+    // 讀不到名字的會退回代號，那正是「玩家又看到編號了」的情況，要點出來。
+    const nameless = [
+      ...catalog.characters.filter((g) => g.name === g.id).map((g) => g.id),
+      ...catalog.monsters.filter((g) => g.name === g.id).map((g) => g.id),
+    ];
+    if (nameless.length > 0) {
+      console.log(
+        `  ⚠ 有 ${nameless.length} 組查不到名字，畫面上會顯示代號：${nameless
+          .slice(0, 8)
+          .join(", ")}`,
+      );
+    }
+    return 0;
+  } finally {
+    await adapter.disconnect();
+  }
 }
 
 async function cmdCost(args: string[]): Promise<number> {
@@ -178,19 +469,55 @@ async function cmdCost(args: string[]): Promise<number> {
     return 1;
   }
 
-  const costs = readCostTable(path);
+  const { costs, bands, note, unmapped } = readCostTable(path);
   const adapter = createCdpAdapter({ port: parsePort(args) });
   adapter.onCostPatchReport((r) => console.log(describeReport(r)));
+  adapter.onPenaltyPatchReport((r) => {
+    console.log(
+      r.type === "penalty-patch-error"
+        ? `  ✗ 罰則注入失敗：${r.reason}`
+        : `  ✓ 壓 C 罰則已改寫（${r.bands} 段區間` +
+            `${r.badgesPatched ? "，徽章也已改寫" : "，⚠ 徽章沒改到，只有總和會對"}` +
+            `${r.socketPatched ? "，全遊戲生效" : "，⚠ 只有牌組畫面生效"}）` +
+            (r.sample === null
+              ? ""
+              : `
+    目前牌組 ${JSON.stringify(r.sample.cards)} → 罰 ` +
+                `${JSON.stringify(r.sample.penalties)}  總 ${r.sample.total}`),
+    );
+  });
 
   try {
     const session = await adapter.connect();
-    console.log(`✓ 接上「${session.title}」，套用 ${Object.keys(costs).length} 筆自訂 COST`);
+    console.log(`✓ 接上「${session.title}」，來源：${note}`);
+    const counts = COST_TABLE_IDS.map((id) => {
+      const n = Object.keys(costs[id] ?? {}).length;
+      return n === 0 ? null : `${TABLE_LABEL[id]} ${n}`;
+    }).filter((s): s is string => s !== null);
+    console.log(`  套用自訂 COST：${counts.length === 0 ? "（空的）" : counts.join("、")}`);
+    if (unmapped.length > 0) {
+      // 鍵格式不對就等於那張卡的價格安靜地沒生效。`wp1`（沒補零）最常見。
+      console.log(
+        `  ⚠ 有 ${unmapped.length} 個裝備／事件卡的鍵格式不對，已略過：` +
+          `${unmapped.slice(0, 8).join(", ")}${unmapped.length > 8 ? " …" : ""}` +
+          "\n    正確格式是 wp001 / ev091（前綴 + 補零到 3 位的索引）。",
+      );
+    }
     await adapter.installCostOverrides(costs);
+
+    // ⚠ 罰則跟價格是兩回事，而且生效時機不同。
+    // 價格改的是 cc_asset 資料（要重載）；罰則改的是 Deck.prototype.getCost
+    // （立刻生效）。只做前者的話，規則的 compressionRule 對畫面毫無作用。
+    if (bands !== null) {
+      await adapter.waitForGame();
+      await adapter.installPenaltyOverrides(bands);
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+    }
 
     // 注入只對「之後載入的 document」生效。要不要重載是玩家的決定 ——
     // 他可能正在對戰中，插件不該替他做關閉的決定。
     if (!args.includes("--reload")) {
-      console.log("  ⚠ 要等遊戲下一次載入才會生效。加 --reload 立刻重載（會打斷對戰）。");
+      console.log("  ⚠ 卡片價格要等遊戲下一次載入才會生效。加 --reload 立刻重載（會打斷對戰）。");
       return 0;
     }
 
@@ -211,7 +538,16 @@ async function cmdCost(args: string[]): Promise<number> {
  * 的 `GAME_EXECUTABLE`），不需要重建外殼。
  */
 async function cmdWeb(args: string[]): Promise<number> {
-  const port = parsePort(args, BROWSER_DEBUG_PORT);
+  const requestedPort = parsePort(args, BROWSER_DEBUG_PORT);
+  /**
+   * **實際**接得上的埠。
+   *
+   * ⚠ 不能整支都用 `requestedPort`：那個埠綁不上時（Windows 保留範圍）
+   * `ensureBrowser()` 會退回讓瀏覽器自己挑，挑到的埠只有它知道。後面的
+   * `refreshBundles` 與 `openGameTab` 都要接**那一個**，不然瀏覽器好好地開著、
+   * 這裡卻一路等到逾時。
+   */
+  let port = requestedPort;
 
   /**
    * 確保有一個帶 debug port 的瀏覽器在跑。
@@ -224,10 +560,12 @@ async function cmdWeb(args: string[]): Promise<number> {
     const profileDir = parseFlag(args, "--profile");
     const browserPath = parseFlag(args, "--browser");
     const result = await ensureBrowser({
-      port,
+      port: requestedPort,
       ...(profileDir !== undefined ? { profileDir } : {}),
       ...(browserPath !== undefined ? { browserPath } : {}),
+      onNotice: (m) => console.log(`  ${m}`),
     });
+    port = result.port;
     if (result.launched) {
       console.log(`  已開 ${result.browser.name}（profile：${result.profileDir}）`);
     }
@@ -342,6 +680,7 @@ async function cmdBrowser(args: string[]): Promise<number> {
     port: parsePort(args, BROWSER_DEBUG_PORT),
     ...(profileDir !== undefined ? { profileDir } : {}),
     ...(browserPath !== undefined ? { browserPath } : {}),
+    onNotice: (m) => console.log(`  ${m}`),
   });
 
   console.log(
@@ -349,6 +688,9 @@ async function cmdBrowser(args: string[]): Promise<number> {
       ? `✓ 已開 ${result.browser.name}，debug port ${result.port}`
       : `✓ debug port ${result.port} 本來就有人在聽，沿用既有的瀏覽器`,
   );
+  if (result.port !== result.requestedPort) {
+    console.log(`  ⚠ 不是你要的 :${result.requestedPort} —— 之後的指令要帶 --port ${result.port}`);
+  }
   console.log(`  profile：${result.profileDir}`);
   console.log("  進去之後點書籤開遊戲即可。接事件：companion watch --port " + result.port);
   return 0;
@@ -716,16 +1058,108 @@ function cmdRule(args: string[]): number {
       console.error(`✗ 載入失敗 [${result.code}] ${result.message}`);
       return 1;
     }
-    const { pkg, short } = result.value;
+    const { pkg, short, staleHash } = result.value;
     console.log(`✓ ${pkg.rule.name} ${pkg.rule.version}  (${short})`);
     console.log(`  發布者   ${pkg.rule.publisher.name}`);
     console.log(`  上限     ${pkg.rule.teamCostLimit}`);
-    console.log(`  角色     ${Object.keys(pkg.rule.characters).length} 筆`);
+    // 四張表分開列。一個總數看不出「這份規則管不管裝備」，而那是拿到別人的
+    // 規則檔時第一個要知道的事。
+    for (const [label, table] of [
+      ["角色  ", pkg.rule.characters],
+      ["怪物  ", pkg.rule.monsters],
+      ["裝備  ", pkg.rule.equipment],
+      ["事件卡", pkg.rule.eventCards],
+    ] as const) {
+      const n = Object.keys(table ?? {}).length;
+      console.log(`  ${label}   ${n === 0 ? "沒定價，用原版" : `${n} 筆`}`);
+    }
+    if (staleHash !== null) {
+      // 核對碼是拿來跟對手比的，變了就一定要說 —— 不然兩邊會比到不同的東西。
+      console.log(`  ⚠ 這個檔案被直接改過，核對碼已重算：${staleHash.claimedShort} → ${short}`);
+      console.log("    對手手上那份是舊的，把這個檔案傳給他。");
+    }
     return 0;
   }
 
   const rule = assertCostRule(raw);
   console.log(`✓ ${rule.name} ${rule.version}  (${shortHash(contentHash(rule))})`);
+  return 0;
+}
+
+/**
+ * 從檔案取出規則內容。裸規則與規則包都收。
+ *
+ * 規則包一律走 `loadRulePackage` —— 它會驗**內容**（schema），Hash 則是
+ * 從內容重算的。所以直接編輯過的包在這裡是正常輸入，只是會多印一行提醒
+ * 說核對碼變了（對手手上那份的碼已經不一樣了，要重傳）。
+ */
+function extractRule(path: string): CostRule {
+  const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
+
+  if (typeof raw === "object" && raw !== null && "packageVersion" in raw) {
+    const result = loadRulePackage(raw);
+    if (!result.ok) throw new Error(`[${result.code}] ${result.message}`);
+    const { staleHash, short } = result.value;
+    if (staleHash !== null) {
+      console.error(`⚠ 這個包被直接編輯過，核對碼已重算：${staleHash.claimedShort} → ${short}`);
+      console.error("  對手手上那份的碼是舊的，改完記得把新檔案傳給他。");
+    }
+    return result.value.pkg.rule;
+  }
+  return assertCostRule(raw);
+}
+
+/** `<名字>.ulrcost.json`；已經是的話就原樣。 */
+function packageFileName(rule: CostRule): string {
+  const slug = rule.ruleSetId.replace("/", "-");
+  return `${slug}-${rule.version}${RULE_PACKAGE_EXTENSION}`;
+}
+
+/**
+ * 規則 → 封好 Hash 的規則包。裸規則與（改過的）規則包都收。
+ *
+ * 這是「自訂完之後要給對手」的最後一步 —— Hash 一律重算，所以
+ * **直接拿改過的 `.ulrcost.json` 進來就對了**，不必先 unpack。
+ */
+function cmdPack(args: string[]): number {
+  const path = args[1];
+  if (path === undefined || path.startsWith("--")) {
+    console.error("要給一個規則檔（裸規則或規則包都可以）。");
+    return 1;
+  }
+
+  const rule = extractRule(path);
+  const pkg = createRulePackage(rule, { exportedBy: "ulr-companion pack" });
+  const out = parseFlag(args, "--out") ?? packageFileName(rule);
+
+  writeFileSync(out, `${JSON.stringify(pkg, null, 2)}\n`, "utf8");
+  console.log(`✓ ${rule.name} ${rule.version} → ${out}`);
+  console.log(`  contentHash ${shortHash(pkg.contentHash)}`);
+  console.log("  ⚠ 對手載入時要核對的就是這 8 碼。改了任何一個字都要重新 pack。");
+  return 0;
+}
+
+/**
+ * 規則包 → 裸規則，方便編輯。
+ *
+ * ⚠ **這已經不是改 COST 的必要步驟了。** Hash 會在載入與 pack 時重算，所以
+ * 直接編輯 `.ulrcost.json` 是支援的做法。留著 unpack 是因為裸規則少一層
+ * 信封、比較好讀，diff 起來也乾淨。
+ */
+function cmdUnpack(args: string[]): number {
+  const path = args[1];
+  if (path === undefined || path.startsWith("--")) {
+    console.error("要給一個規則包。");
+    return 1;
+  }
+
+  const rule = extractRule(path);
+  const out = parseFlag(args, "--out") ?? `${rule.ruleSetId.replace("/", "-")}.rule.json`;
+
+  writeFileSync(out, `${JSON.stringify(rule, null, 2)}\n`, "utf8");
+  console.log(`✓ ${rule.name} ${rule.version} → ${out}`);
+  console.log(`  角色 ${Object.keys(rule.characters).length} 筆`);
+  console.log("  改完之後跑 `companion pack` 封回去，才能給對手。");
   return 0;
 }
 
@@ -756,6 +1190,14 @@ async function main(argv: string[]): Promise<number> {
         return await cmdWeb(args);
       case "rule":
         return cmdRule(args);
+      case "catalog":
+        return await cmdCatalog(args);
+      case "official-rule":
+        return await cmdOfficialRule(args);
+      case "pack":
+        return cmdPack(args);
+      case "unpack":
+        return cmdUnpack(args);
       default:
         // 舊用法：直接給規則檔路徑
         return cmdRule(["rule", ...args]);
