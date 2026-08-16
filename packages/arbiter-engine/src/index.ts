@@ -20,10 +20,17 @@ export {
   crossEvaluate,
   encodeDeckBody,
   encodeEvalBody,
+  encodePrefBody,
+  HANDOFF_POLL_MS,
+  HANDOFF_TIMEOUT_MS,
   MatchPairing,
+  negotiateStage,
   parseDeckBody,
   parseEvalBody,
+  parsePrefBody,
   PEER_REPLY_TIMEOUT_MS,
+  RANDOM_STAGE,
+  STAGE_WAIT_MS,
 } from "./match-pairing.js";
 export type { LimitCheck, PairingOptions, PairingPhase, PairingStatus } from "./match-pairing.js";
 

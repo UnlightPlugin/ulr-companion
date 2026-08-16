@@ -16,12 +16,24 @@ import {
   crossEvaluate,
   encodeDeckBody,
   encodeEvalBody,
+  encodePrefBody,
   MatchPairing,
+  negotiateStage,
   parseDeckBody,
   parseEvalBody,
+  parsePrefBody,
+  RANDOM_STAGE,
   type PairingOptions,
   type QueueLink,
 } from "../src/match-pairing.js";
+
+/** 開房設定，只有地點會變。 */
+const ROOM = (stage: string): PairingOptions["room"] => ({
+  name: "請多關照",
+  stage,
+  friend: false,
+  deckCostBand: null,
+});
 import type { MatchDriver } from "../src/match-session.js";
 
 function rule(over: Partial<CostRule> = {}): CostRule {
@@ -152,7 +164,12 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
 
 /** 假的中間人連線。把 callback 留下來，測試自己扮演對手。 */
 function fakeLink() {
-  const sent = { deck: [] as string[], eval: [] as string[], room: [] as string[] };
+  const sent = {
+    deck: [] as string[],
+    eval: [] as string[],
+    pref: [] as string[],
+    room: [] as string[],
+  };
   let rejected = 0;
   let stopped = 0;
   let handlers: MatchQueueClientOptions | null = null;
@@ -165,6 +182,7 @@ function fakeLink() {
       reject: () => void rejected++,
       sendDeck: (b) => void sent.deck.push(b),
       sendEval: (b) => void sent.eval.push(b),
+      sendPref: (b) => void sent.pref.push(b),
       sendRoom: (r) => void sent.room.push(r),
     };
   };
@@ -194,6 +212,11 @@ function fakeLink() {
     },
     peerEval: (body: string) => {
       handlers?.onPeerEval?.(body);
+      return flush();
+    },
+    /** 對手回報他想打的地點。 */
+    peerPref: (body: string) => {
+      handlers?.onPeerPref?.(body);
       return flush();
     },
     room: (roomId: string) => {
@@ -270,6 +293,9 @@ function pairing(opts: Partial<PairingOptions> = {}, driverOver: Partial<MatchDr
     driver,
     link: link.factory,
     sleep: nosleep,
+    // ⚠ 預設不等對手回報地點。要測協商的 case 自己把它調大 —— 不然每一個
+    // host 的 case 都要多等一拍事件迴圈，而它們測的不是地點。
+    stageWaitMs: 0,
     ...opts,
   });
   return { p, link, driver };
@@ -516,6 +542,148 @@ describe("狀態機：對戰開始就結束任務", () => {
     // 空的清單 + 不知道 = 不能推論。仍然在等對手。
     expect(p.status.phase).toBe("ready");
     await p.stop();
+  });
+});
+
+/**
+ * 對戰地點的協商。
+ *
+ * 開房的只有 host，所以「地點」原本就是他一個人說了算 —— 而那對另一邊是
+ * 沒得商量的。這一組把規則釘住：一樣就用那個、有人選隨機就隨機、不一樣就從
+ * **這兩個**裡面抽（不是從 15 張地圖裡抽）。
+ */
+describe("對戰地點：negotiateStage", () => {
+  const always = (n: number) => () => n;
+
+  it("兩邊一樣就用那個", () => {
+    expect(negotiateStage("007", "007", always(0.9))).toBe("007");
+  });
+
+  it("對手沒說（舊版插件／中間人不轉發）就用我的", () => {
+    expect(negotiateStage("007", null, always(0.9))).toBe("007");
+    expect(negotiateStage("007", "", always(0.9))).toBe("007");
+  });
+
+  it("⚠ 有一邊選隨機就強制隨機 —— 選隨機的人已經說了「哪裡都行」", () => {
+    expect(negotiateStage(RANDOM_STAGE, "007", always(0))).toBe(RANDOM_STAGE);
+    expect(negotiateStage("007", RANDOM_STAGE, always(0))).toBe(RANDOM_STAGE);
+    expect(negotiateStage(RANDOM_STAGE, RANDOM_STAGE, always(0))).toBe(RANDOM_STAGE);
+  });
+
+  it("不一樣就從這兩個裡面抽一個，各一半", () => {
+    expect(negotiateStage("003", "011", always(0.2))).toBe("003");
+    expect(negotiateStage("003", "011", always(0.8))).toBe("011");
+  });
+
+  it("⚠ 抽的只會是雙方選過的其中一個 —— 不會抽到誰都沒選的地圖", () => {
+    for (const r of [0, 0.25, 0.499, 0.5, 0.75, 0.999]) {
+      expect(["003", "011"]).toContain(negotiateStage("003", "011", always(r)));
+    }
+  });
+
+  it("body 壞掉一律當成「他沒說」", () => {
+    expect(parsePrefBody("不是 JSON")).toBeNull();
+    expect(parsePrefBody(JSON.stringify({ s: "abc" }))).toBeNull();
+    expect(parsePrefBody(JSON.stringify({ s: 7 }))).toBeNull();
+    expect(parsePrefBody(encodePrefBody({ stage: "013" }))).toEqual({ stage: "013" });
+  });
+});
+
+describe("狀態機：地點協商走到開房", () => {
+  it("配到人就先把自己的地點送出去（EXACT 快路也要送）", async () => {
+    const { p, link } = pairing({ room: ROOM("009") });
+    await p.start();
+    await link.matched("host", link.tag);
+    expect(link.sent.pref.map(parsePrefBody)).toEqual([{ stage: "009" }]);
+  });
+
+  /** 開得起來的假遊戲：開房之後清單上就有那間房（否則 host 會找不到 room_id）。 */
+  function openable() {
+    let opened = false;
+    const create = vi.fn(async () => {
+      opened = true;
+      return { ok: true as const, roomId: null };
+    });
+    const room: RoomEntry = {
+      roomId: "我的房",
+      name: "請多關照",
+      playerAName: "燈皇",
+      playerBName: null,
+      pass: true,
+      deckA: null,
+      deckB: null,
+    };
+    return {
+      create,
+      driver: {
+        createRoom: create,
+        roomSnapshot: async () => ({ seq: 1, live: true, rooms: opened ? [room] : [] }),
+      } satisfies Partial<MatchDriver>,
+    };
+  }
+
+  it("對手的地點到了 → 用協商的結果開房", async () => {
+    const { create, driver } = openable();
+    // 我 003、對手 011，抽到後者
+    const { p, link } = pairing(
+      { room: ROOM("003"), stageWaitMs: 200, roll: () => 0.9, handoffPollMs: 10_000 },
+      driver,
+    );
+    await p.start();
+    await link.matched("host", link.tag); // 卡在等對手的地點
+    expect(create).not.toHaveBeenCalled();
+
+    await link.peerPref(encodePrefBody({ stage: "011" }));
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ stage: "011" }));
+    expect(p.status.stage).toBe("011");
+    await p.stop();
+  });
+
+  it("⚠ 等不到對手的地點就用自己的開下去 —— 協商是加分，不是開打的前提", async () => {
+    const { create, driver } = openable();
+    const { p, link } = pairing(
+      { room: ROOM("005"), stageWaitMs: 10, handoffPollMs: 10_000 },
+      driver,
+    );
+    await p.start();
+    await link.matched("host", link.tag);
+
+    await new Promise((r) => setTimeout(r, 40));
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ stage: "005" }));
+    expect(p.status.stage).toBe("005");
+    await p.stop();
+  });
+
+  it("對手選隨機 → 開隨機房，忽略我指定的那張", async () => {
+    const create = vi.fn(async () => ({ ok: true as const, roomId: null }));
+    const { p, link } = pairing(
+      { room: ROOM("003"), stageWaitMs: 200, roll: () => 0 },
+      { createRoom: create },
+    );
+    await p.start();
+    await link.matched("host", link.tag);
+    await link.peerPref(encodePrefBody({ stage: RANDOM_STAGE }));
+
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ stage: RANDOM_STAGE }));
+  });
+
+  it("⚠ 換下一位時要忘記上一位的地點", async () => {
+    const create = vi.fn(async () => ({ ok: true as const, roomId: null }));
+    const { p, link } = pairing(
+      { room: ROOM("003"), stageWaitMs: 10, roll: () => 0.9 },
+      { createRoom: create },
+    );
+    await p.start();
+    // 第一位：規則對不起來，換人
+    await link.matched("host");
+    await link.peerPref(encodePrefBody({ stage: "011" }));
+    await link.peerDeck("這不是 JSON");
+    expect(p.status.phase).toBe("queued");
+
+    // 第二位什麼都沒說 → 要用我自己的 003，不是上一位的 011
+    await link.matched("host", link.tag);
+    await new Promise((r) => setTimeout(r, 40));
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ stage: "003" }));
   });
 });
 

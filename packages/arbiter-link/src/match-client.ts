@@ -106,9 +106,10 @@ export interface MatchQueueClientOptions {
   onStatus?: (status: QueueStatus, waiting: number) => void;
   /** 湊成一對了。**這裡不會自動做任何事**，由呼叫端決定下一步。 */
   onMatched?: (info: { role: QueueRole; token: string; peerTag: string }) => void;
-  /** 對手的牌組描述子／指紋。內容這支不解讀。 */
+  /** 對手的牌組描述子／指紋／開房偏好。內容這支不解讀。 */
   onPeerDeck?: (body: string) => void;
   onPeerEval?: (body: string) => void;
+  onPeerPref?: (body: string) => void;
   /** host 的房開好了（只有 guest 會收到）。 */
   onRoom?: (roomId: string) => void;
   /** 配對對象沒了 —— 取消、斷線、或規則對不起來。 */
@@ -192,6 +193,11 @@ export class MatchQueueClient {
   /** 把我算出來的兩個指紋送給對手。 */
   sendEval(body: string): void {
     this.#send({ t: "q-eval", body });
+  }
+
+  /** 把我的開房偏好（地點）送給對手。 */
+  sendPref(body: string): void {
+    this.#send({ t: "q-pref", body });
   }
 
   /** host 專用：把開好的房號轉給對手。 */
@@ -333,6 +339,9 @@ export class MatchQueueClient {
         return;
       case "q-eval":
         this.#options.onPeerEval?.(message.body);
+        return;
+      case "q-pref":
+        this.#options.onPeerPref?.(message.body);
         return;
       case "q-room":
         this.#options.onRoom?.(message.roomId);

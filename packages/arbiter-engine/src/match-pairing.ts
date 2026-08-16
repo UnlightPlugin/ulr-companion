@@ -96,6 +96,68 @@ export const HANDOFF_POLL_MS = 2_000;
  */
 export const HANDOFF_TIMEOUT_MS = 90_000;
 
+/**
+ * host 開房前等對手回報地點的上限。
+ *
+ * ⚠ 等不到就用**自己的**地點開下去，不是停下來 —— 對手可能是舊版插件、
+ * 或中間人還沒有 `q-pref` 那條轉發。地點協商是加分，不是開打的前提。
+ */
+export const STAGE_WAIT_MS = 3_000;
+
+/**
+ * 官方的「隨機」地點。選它等於把地點交給伺服器。
+ *
+ * ⚠ 這個值是**遊戲自己的**（`STAGES` 的最後一項），不是我們定的代號。
+ */
+export const RANDOM_STAGE = "014";
+
+/**
+ * 兩邊各選了一個地點，這一場要開在哪。
+ *
+ * | 情況               | 結果                 | 為什麼                                     |
+ * | ------------------ | -------------------- | ------------------------------------------ |
+ * | 兩邊一樣           | 那一個               | 沒有分歧                                   |
+ * | 有一邊選「隨機」   | **隨機**             | 選隨機的人已經表示「哪裡都行」，那就別指定 |
+ * | 兩邊指定了不同地點 | 從**這兩個**裡面抽一 | 各有一半機會，而且不會抽到誰都沒選的地圖   |
+ * | 對手沒說           | 我的                 | 舊版插件或中間人不轉發 —— 不能因此不開房   |
+ *
+ * ⚠ **抽的是「這兩個」而不是全部 15 張地圖。** 抽全部的話兩個人都會被丟到
+ * 一個誰都沒選的地方，那比直接用其中一邊的更難接受。
+ *
+ * 純函式（亂數從外面餵）——「隨機」這種東西寫在狀態機裡就永遠測不到了。
+ */
+export function negotiateStage(
+  mine: string,
+  theirs: string | null,
+  roll: () => number = Math.random,
+): string {
+  if (theirs === null || theirs === "" || theirs === mine) return mine;
+  if (mine === RANDOM_STAGE || theirs === RANDOM_STAGE) return RANDOM_STAGE;
+  return roll() < 0.5 ? mine : theirs;
+}
+
+/** `q-pref` 的內容。**只有開房偏好**，沒有身分、沒有牌組、沒有規則。 */
+export function encodePrefBody(pref: { stage: string }): string {
+  return JSON.stringify({ s: pref.stage });
+}
+
+/**
+ * 解析對手的 `q-pref`。壞掉一律 `null` —— 那等同「他沒說」，用我自己的地點。
+ *
+ * ⚠ 要驗格式。這個字串會被拿去當開房參數，而開房參數是送進遊戲封包的東西。
+ */
+export function parsePrefBody(body: string): { stage: string } | null {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const stage = (parsed as Record<string, unknown>)["s"];
+    if (typeof stage !== "string" || !/^\d{3}$/.test(stage)) return null;
+    return { stage };
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 兩邊交換的東西（純函式，可完整測試）
 // ---------------------------------------------------------------------------
@@ -236,6 +298,12 @@ export interface PairingStatus {
   overLimit: boolean;
   /** 規則版本對不起來、換下一個對手的次數。 */
   skipped: number;
+  /**
+   * 這一場協商出來的對戰地點。還沒協商是 `null`。
+   *
+   * ⚠ 只有 host 會有值 —— 開房的是他。guest 看到的是開好的房。
+   */
+  stage: string | null;
   /** 直接顯示給玩家的一句話。 */
   message: string;
 }
@@ -253,6 +321,7 @@ export interface QueueLink {
   reject(): void;
   sendDeck(body: string): void;
   sendEval(body: string): void;
+  sendPref(body: string): void;
   sendRoom(roomId: string): void;
 }
 
@@ -265,7 +334,13 @@ export interface PairingOptions {
   multi: boolean;
   /** 約定的隊伍 COST 上限（用這份規則算）。`null` = 不設限。 */
   costLimit: number | null;
-  /** 開房用的欄位。guest 端不會用到，但兩邊的設定要一致才配得到。 */
+  /**
+   * 開房用的欄位。
+   *
+   * ⚠ 只有配到人之後**當上 host 的那一邊**會真的用到它們（房名、地點、
+   * 遊戲自己的 ±N）。guest 這邊只有 `stage` 有意義 —— 它會被送給對手參與
+   * 地點協商（見 `negotiateStage`）。
+   */
   room: { name: string; stage: string; friend: boolean; deckCostBand: number | null };
   driver: MatchDriver;
   onStatus?: (status: PairingStatus) => void;
@@ -276,6 +351,10 @@ export interface PairingOptions {
   /** host 等對手進房的輪詢間隔與上限。測試會塞很小的值。 */
   handoffPollMs?: number;
   handoffTimeoutMs?: number;
+  /** host 等對手回報地點的上限。 */
+  stageWaitMs?: number;
+  /** 地點抽籤用的亂數。⚠ 測試一定要塞確定性的，不然那條分支測不了。 */
+  roll?: () => number;
   /** 測試用：換掉中間人的連線。預設是真的 `MatchQueueClient`。 */
   link?: (options: MatchQueueClientOptions) => QueueLink;
 }
@@ -289,6 +368,7 @@ const IDLE: PairingStatus = {
   myTotal: null,
   overLimit: false,
   skipped: 0,
+  stage: null,
   message: "沒在配對。",
 };
 
@@ -327,6 +407,10 @@ export class MatchPairing {
   #handedOff = false;
   /** 等對手進房的輪詢。跟 `#timer`（等對手回話）是兩件事，不能共用一個。 */
   #watch: ReturnType<typeof setTimeout> | null = null;
+  /** 對手想打的地點。`null` = 還沒說（或他那版沒有這個功能）。 */
+  #peerStage: string | null = null;
+  /** 收到對手地點時要叫醒誰（host 在開房前等它）。 */
+  #stageWaiter: (() => void) | null = null;
   #skipped = 0;
   #timer: ReturnType<typeof setTimeout> | null = null;
   /** 已經在跑開房／進房了，不要重入。 */
@@ -400,6 +484,7 @@ export class MatchPairing {
       onMatched: (info) => void this.#onMatched(info),
       onPeerDeck: (body) => void this.#onPeerDeck(body),
       onPeerEval: (body) => void this.#onPeerEval(body),
+      onPeerPref: (body) => this.#onPeerPref(body),
       onRoom: (roomId) => void this.#onRoom(roomId),
       onDropped: (reason) => void this.#onDropped(reason),
       ...(this.#options.onLog === undefined ? {} : { onLog: this.#options.onLog }),
@@ -530,6 +615,11 @@ export class MatchPairing {
     this.#role = info.role;
     this.#token = info.token;
 
+    // ⚠ **兩邊都要送，而且要在最前面送。** 開房的是 host，但誰是 host 是中間人
+    // 剛剛才決定的 —— guest 不送的話，host 永遠只看得到自己那個地點。
+    // 這一則在 EXACT 快路上也要送（那條路連牌組都不交換）。
+    this.#client?.sendPref(encodePrefBody({ stage: this.#options.room.stage }));
+
     // 每一次配對都重讀牌組 —— 玩家在排隊時換牌組是很正常的事。
     const deck = await this.#readOwnDeck();
     if (deck === null) return;
@@ -589,6 +679,21 @@ export class MatchPairing {
     }
     this.#peerDeck = peer;
     await this.#tryCross();
+  }
+
+  /**
+   * 對手說了他想打哪裡。
+   *
+   * ⚠ 看不懂就當他沒說（`#peerStage` 保持 `null` → 用我自己的地點）。這一則
+   * 壞掉不該影響開房 —— 地點協商是加分，不是開打的前提。
+   */
+  #onPeerPref(body: string): void {
+    const pref = parsePrefBody(body);
+    if (pref !== null) this.#peerStage = pref.stage;
+    // host 可能正卡在 `#resolveStage()` 上等這一則。
+    const wake = this.#stageWaiter;
+    this.#stageWaiter = null;
+    wake?.();
   }
 
   async #onPeerEval(body: string): Promise<void> {
@@ -665,12 +770,14 @@ export class MatchPairing {
       return;
     }
 
-    this.#patch({ phase: "opening", message: "開房中…" });
+    // ⚠ 地點要在開房**之前**談完 —— 房一開出去就改不了了。
+    const stage = await this.#resolveStage();
+    this.#patch({ phase: "opening", stage, message: "開房中…" });
     const result = await hostOpenRoom(this.#options.driver, {
       playerName: pre.context.playerName,
       room: {
         name: this.#options.room.name === "" ? DEFAULT_ROOM_NAME : this.#options.room.name,
-        stage: this.#options.room.stage,
+        stage,
         multi: this.#options.multi,
         friend: this.#options.room.friend,
         // ⚠ 房間密碼就是配對 token。**房名絕對不能帶它**，房名是公開的。
@@ -696,6 +803,45 @@ export class MatchPairing {
     // 從這裡開始，判斷「成了沒」的依據是**遊戲**而不是佇列 —— 對手的插件
     // 進了房就會離開佇列，那在佇列眼裡跟「他取消了」長得一模一樣。
     this.#watchHandoff(result.roomId);
+  }
+
+  /**
+   * host：這一場開在哪。等對手回報他的地點（最多 `STAGE_WAIT_MS`），然後協商。
+   *
+   * ⚠ **等不到就用自己的，不是停下來。** 對手可能是舊版插件，或中間人還沒有
+   * `q-pref` 那條轉發 —— 那時協商不成立，但這一場照樣要打得起來。
+   */
+  async #resolveStage(): Promise<string> {
+    const mine = this.#options.room.stage;
+    const wait = this.#options.stageWaitMs ?? STAGE_WAIT_MS;
+    // ⚠ `wait <= 0` 要**完全不等**，不是等 0 毫秒。等 0 仍然是一個 macrotask，
+    // 而那會讓「配到人」到「開房」之間多一次事件迴圈 —— 測試裡看得到，真的
+    // 跑起來也只是白等一拍。
+    if (this.#peerStage === null && wait > 0) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => {
+          this.#stageWaiter = null;
+          resolve();
+        }, wait);
+        this.#stageWaiter = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+      });
+    }
+
+    const theirs = this.#peerStage;
+    const stage = negotiateStage(mine, theirs, this.#options.roll ?? Math.random);
+    if (theirs === null) {
+      this.#log(`· 對手沒有回報地點（舊版插件？），用我選的 ${mine}`);
+    } else if (theirs === mine) {
+      this.#log(`· 雙方都選 ${mine}，就開這裡`);
+    } else if (stage === RANDOM_STAGE) {
+      this.#log(`· 有一邊選了隨機（我 ${mine} / 對手 ${theirs}）→ 開隨機房`);
+    } else {
+      this.#log(`· 地點不同（我 ${mine} / 對手 ${theirs}）→ 抽到 ${stage}`);
+    }
+    return stage;
   }
 
   /**
@@ -903,6 +1049,14 @@ export class MatchPairing {
     this.#openedRoom = false;
     this.#myRoomId = null;
     this.#handedOff = false;
+    // ⚠ 對手的地點也要清掉 —— 留著上一位的偏好，下一場會用一個從來沒有人
+    // 在這一對裡說過的地點開房。
+    this.#peerStage = null;
+    // 卡在等地點的那個 await 要放掉，否則它會等到逾時才醒（而那時這一對
+    // 早就換人了）。
+    const wake = this.#stageWaiter;
+    this.#stageWaiter = null;
+    wake?.();
     this.#clearWatch();
   }
 

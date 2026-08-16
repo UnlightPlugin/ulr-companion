@@ -180,7 +180,7 @@ describe("湊對", () => {
 });
 
 describe("轉發牌組與指紋", () => {
-  it.each(["q-deck", "q-eval"] as const)("%s 原封不動轉給對手，內容不被解讀", (t) => {
+  it.each(["q-deck", "q-eval", "q-pref"] as const)("%s 原封不動轉給對手，內容不被解讀", (t) => {
     const q = queue();
     q.join("a", hello);
     q.join("b", hello);
@@ -210,6 +210,19 @@ describe("轉發牌組與指紋", () => {
       t: "q-deck",
       body: "x",
     });
+  });
+
+  /**
+   * ⚠ `q-pref`（開房偏好）跟另外兩則走**完全一樣**的路：不解讀、只轉給對手、
+   * 同一個長度上限。中間人多認得一個欄位就是多一個要跟著發版的理由，而它是
+   * 所有人共用的那一台。
+   */
+  it("q-pref 兩個方向都解析得出來，長度上限一樣", () => {
+    const body = JSON.stringify({ s: "014" });
+    expect(decodeQueue(JSON.stringify({ t: "q-pref", body }))).toEqual({ t: "q-pref", body });
+    expect(decodeQueueServer(JSON.stringify({ t: "q-pref", body }))).toEqual({ t: "q-pref", body });
+    const long = "x".repeat(MAX_RELAY_BODY_LENGTH + 1);
+    expect(decodeQueue(JSON.stringify({ t: "q-pref", body: long }))).toBeNull();
   });
 });
 

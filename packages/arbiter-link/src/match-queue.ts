@@ -107,6 +107,14 @@ export type QueueClientMessage =
   | { t: "q-deck"; body: string }
   /** 我用自己那份規則算出來的兩個指紋。同樣不被解讀。 */
   | { t: "q-eval"; body: string }
+  /**
+   * 我的開房偏好（目前只有對戰地點）。同樣是不透明的 `body`。
+   *
+   * ⚠ 這則是**插件與插件之間**的約定：雙方選不同地點時要協商出一個
+   * （見 `@ulr/arbiter-engine` 的 `negotiateStage`），而開房的只有 host ——
+   * 他需要知道對手想打哪裡。佇列照樣一個字都不解讀。
+   */
+  | { t: "q-pref"; body: string }
   /** host 建好房了，把 room_id 轉給對手。 */
   | { t: "q-room"; roomId: string }
   /**
@@ -128,9 +136,10 @@ export type QueueServerMessage =
    * `peerTag` 跟自己的一樣就是同一份規則（`exact`），可以跳過整段語義驗算。
    */
   | { t: "q-matched"; role: QueueRole; token: string; peerTag: string }
-  /** 對手的牌組描述子／指紋，原封不動。 */
+  /** 對手的牌組描述子／指紋／開房偏好，原封不動。 */
   | { t: "q-deck"; body: string }
   | { t: "q-eval"; body: string }
+  | { t: "q-pref"; body: string }
   /** host 的房開好了（只有 guest 會收到）。 */
   | { t: "q-room"; roomId: string }
   /** 配對對象跑掉了 —— 取消、關掉插件、連線斷了、或規則對不起來。要退回排隊。 */
@@ -392,11 +401,12 @@ export class MatchQueue {
         return [{ to: partner.id, message: { t: "q-room", roomId: message.roomId } }];
       }
 
-      // 牌組描述子與指紋：**只轉給自己的對手，內容一個字都不解讀**。
+      // 牌組描述子、指紋與開房偏好：**只轉給自己的對手，內容一個字都不解讀**。
       // ⚠ 還沒配到人就送 = 沒有對手可以轉，直接丟掉（不是錯誤：連線競態下
       // 對手可能剛好在同一刻斷線）。
       case "q-deck":
-      case "q-eval": {
+      case "q-eval":
+      case "q-pref": {
         if (me.partner === null) return [];
         const partner = this.#waiters.get(me.partner);
         if (partner === undefined) return [];
@@ -572,7 +582,8 @@ export function decodeQueue(raw: string): QueueClientMessage | null {
       if (typeof m["tag"] !== "string" || m["tag"].length > 64) return null;
       return { t: "q-hello", v: m["v"], key: m["key"], tag: m["tag"] };
     case "q-deck":
-    case "q-eval": {
+    case "q-eval":
+    case "q-pref": {
       const body = m["body"];
       if (typeof body !== "string" || body.length === 0) return null;
       if (body.length > MAX_RELAY_BODY_LENGTH) return null;
@@ -619,7 +630,8 @@ export function decodeQueueServer(raw: string): QueueServerMessage | null {
       return { t: "q-matched", role, token: m["token"], peerTag: m["peerTag"] };
     }
     case "q-deck":
-    case "q-eval": {
+    case "q-eval":
+    case "q-pref": {
       const body = m["body"];
       if (typeof body !== "string" || body.length === 0) return null;
       if (body.length > MAX_RELAY_BODY_LENGTH) return null;
