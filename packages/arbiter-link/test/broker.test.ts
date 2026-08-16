@@ -6,6 +6,7 @@
  * 兩個 `LinkNode` 誰當中間人。純函式測試對這些一個都看不到。
  */
 
+import { createServer } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { AddressInUseError, LinkBroker } from "../src/broker.js";
 import { LinkClient } from "../src/link-client.js";
@@ -125,10 +126,39 @@ describe("接上真的 socket", () => {
   });
 });
 
+/**
+ * 借一個現在確定綁得上的埠。
+ *
+ * ⚠ **不要寫死埠號。** 這裡本來寫死 9377，2026-08-16 整個測試就掛了 ——
+ * Windows 把 9377–9476 整段保留了（Hyper-V／WSL／Docker 會從動態埠範圍切走
+ * 100 埠一段），`LinkBroker.listen()` 綁不上，於是「第一個開的當中間人」變成
+ * false。失敗訊息完全看不出跟埠有關，而且換一台機器就好了。
+ *
+ * 保留範圍是動態的，所以沒有哪個常數是安全的 —— 只能現場問作業系統要一個。
+ * 這跟 `cdp-adapter/debug-port.ts` 對遊戲客戶端做的事是同一件。
+ */
+async function borrowPort(): Promise<number> {
+  const server = createServer();
+  const port = await new Promise<number>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (address === null || typeof address === "string") {
+        reject(new Error("拿不到埠"));
+        return;
+      }
+      resolve(address.port);
+    });
+  });
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return port;
+}
+
 describe("誰當中間人", () => {
   it("第一個開的當中間人，第二個開的當客戶端，兩邊照樣配對得起來", async () => {
-    // 挑一個不太可能被真的在跑的插件佔走的埠。
-    const port = 9377;
+    // 這個 case 需要一個**固定**的埠（第二個 node 要撞上第一個），但不需要是
+    // 寫死的埠 —— 跟作業系統借一個，見 borrowPort()。
+    const port = await borrowPort();
     const target = { kind: "local", port } as const;
     const first = await LinkNode.start({ target, room: "room-1", prefs: DEFAULT_PREFS });
     cleanups.push(() => first.close());

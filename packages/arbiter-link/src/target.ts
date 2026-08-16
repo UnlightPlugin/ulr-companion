@@ -4,7 +4,7 @@
  * 階段 3 的核心：玩家設定裡的「中間人」從**一個埠號**變成**一個字串**，
  * 因為它現在有兩種可能 ——
  *
- *   本機：同一台電腦上的另一個插件（雙開、測試）→ `ws://127.0.0.1:9350`
+ *   本機：同一台電腦上的另一個插件（雙開、測試）→ `ws://127.0.0.1:59224`
  *   雲端：Cloudflare 上的 `apps/link-worker`      → `wss://….workers.dev`
  *
  * 這兩件事在使用者眼裡是同一格設定，所以解析要寬鬆到讓他怎麼填都對：
@@ -15,8 +15,18 @@
  * 同一條原則。
  */
 
-/** 本機中間人的預設埠。避開 CDP 的 9333／9334 與遊戲自己的那幾條。 */
-export const DEFAULT_LINK_PORT = 9350;
+/**
+ * 本機中間人的預設埠。避開 CDP 的 59222／59223 與遊戲自己的那幾條。
+ *
+ * ⚠ **2026-08-16 從 9350 換過來。** 舊值落在 Windows 動態保留的 9277–9876 裡，
+ * broker 綁不上 —— 而症狀是「兩份插件都說自己不是中間人、也配不到對」，完全
+ * 看不出跟埠有關。同一天 CDP 的 9334 與 broker 測試寫死的 9377 一起中招。
+ *
+ * 換到 59222 那一帶不是因為那裡「安全」（見 `cdp-adapter/debug-port.ts`：
+ * 沒有哪個常數在所有機器上都安全），而是因為**三個埠放在一起，下次再被整段
+ * 吃掉時會一起壞，比散在各處一次壞一個容易認**。
+ */
+export const DEFAULT_LINK_PORT = 59224;
 
 export type LinkTarget =
   /** 同一台電腦。**要先搶著當中間人**（見 `node.ts`）。 */
@@ -87,7 +97,7 @@ function clampPort(value: number): number {
  * | 玩家填的                       | 結果                                |
  * | ------------------------------ | ----------------------------------- |
  * | 空白                           | **雲端（預設）**                    |
- * | `local`                        | 本機 :9350（開發者用）              |
+ * | `local`                        | 本機 :59224（開發者用）             |
  * | `9351` / `local:9351`          | 本機 :9351（開發者用）              |
  * | `wss://x.workers.dev`          | 雲端，照用                          |
  * | `https://x.workers.dev`        | 雲端，自動換成 `wss://`             |
@@ -147,6 +157,16 @@ export function endpointOf(target: LinkTarget): string {
  */
 export function roomUrl(endpoint: string, room: string): string {
   return `${endpoint}/r/${room}`;
+}
+
+/**
+ * 某一條配對佇列的完整網址（WP-16）。
+ *
+ * 跟 `roomUrl()` 同一個道理，只是換一個前綴：一個配對鍵 = 一條佇列 =
+ * 一個 Durable Object。**兩者共用同一台中間人**，玩家設定裡只有一格。
+ */
+export function queueUrl(endpoint: string, key: string): string {
+  return `${endpoint}/q/${key}`;
 }
 
 /** 給 UI 顯示用的一行字。 */

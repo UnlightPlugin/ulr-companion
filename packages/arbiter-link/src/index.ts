@@ -83,6 +83,7 @@ export {
   describeTarget,
   endpointOf,
   parseLinkTarget,
+  queueUrl,
   roomUrl,
   SERVICE_ORIGIN,
 } from "./target.js";
@@ -90,3 +91,34 @@ export type { LinkTarget } from "./target.js";
 
 export { LinkNode } from "./node.js";
 export type { LinkNodeOptions } from "./node.js";
+
+export {
+  decodeQueue,
+  decodeQueueServer,
+  defaultTokenSource,
+  encodeQueue,
+  firstPairing,
+  isQueueCompatible,
+  matchCriteriaString,
+  matchKey,
+  MatchQueue,
+  MATCH_KEY_LENGTH,
+  MATCH_TOKEN_ALPHABET,
+  MATCH_TOKEN_LENGTH,
+  MAX_RELAY_BODY_LENGTH,
+  ruleTag,
+} from "./match-queue.js";
+export type {
+  DropReason,
+  MatchCriteria,
+  QueueClientMessage,
+  QueueMessage,
+  QueueOutgoing,
+  QueueRole,
+  QueueServerMessage,
+  TokenSource,
+  Waiter,
+} from "./match-queue.js";
+
+export { MatchQueueClient, QUEUE_RECONNECT_MS } from "./match-client.js";
+export type { MatchQueueClientOptions, QueueStatus } from "./match-client.js";

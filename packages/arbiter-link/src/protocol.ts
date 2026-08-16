@@ -288,7 +288,7 @@ export const ROOM_KEY_LENGTH = 16;
  * 中間人要回答的問題只有「這兩個人在不在同一場」，那用雜湊就夠了。
  *
  * 兩邊算出來的值相同，是因為 room id 兩邊本來就一樣 —— 2026-08-06 雙開實測：
- * `MainA.room` 在 :9333 與 :1221 上是同一個字串。這也順帶回答了
+ * `MainA.room` 在 :59222 與 :1221 上是同一個字串。這也順帶回答了
  * `battle-features.md` 那四個 probe 問題的第 4 條（match id 可不可觀測）。
  */
 export function roomKey(roomId: string): string {
