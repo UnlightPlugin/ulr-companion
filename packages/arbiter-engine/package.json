@@ -11,6 +11,8 @@
   },
   "dependencies": {
     "@ulr/arbiter-link": "*",
-    "@ulr/cdp-adapter": "*"
+    "@ulr/cdp-adapter": "*",
+    "@ulr/cost-engine": "*",
+    "@ulr/rule-schema": "*"
   }
 }

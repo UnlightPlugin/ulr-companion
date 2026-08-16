@@ -13,4 +13,29 @@ export {
   DEFAULT_DEADLINE_SECONDS,
   SPEED_RENEW_MS,
 } from "./engine.js";
-export type { EngineOptions, EngineStatus } from "./engine.js";
+export type { CostPhase, CostState, EngineOptions, EngineStatus } from "./engine.js";
+
+export {
+  checkOwnDeck,
+  crossEvaluate,
+  encodeDeckBody,
+  encodeEvalBody,
+  MatchPairing,
+  parseDeckBody,
+  parseEvalBody,
+  PEER_REPLY_TIMEOUT_MS,
+} from "./match-pairing.js";
+export type { LimitCheck, PairingOptions, PairingPhase, PairingStatus } from "./match-pairing.js";
+
+export { channelsAgree, guestJoinRoom, hostOpenRoom, preflight } from "./match-session.js";
+export type {
+  GuestOptions,
+  GuestResult,
+  HostOptions,
+  HostResult,
+  MatchDriver,
+  PreflightBlock,
+  PreflightOptions,
+  PreflightResult,
+  Sleep,
+} from "./match-session.js";

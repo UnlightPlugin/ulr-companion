@@ -30,9 +30,11 @@
  * | **對手還沒開**   | 側通道是 solo → 秒數自動退回滿版 30 秒        |
  */
 
+import type { MatchDriver } from "./match-session.js";
 import type { AgreedSettings, ForceReason, LinkPrefs, LinkStatus } from "@ulr/arbiter-link";
 import {
   effectiveCapSeconds,
+  endpointOf,
   LinkNode,
   MIN_SPEED_FACTOR,
   MOVE_PHASE_TOTAL_SECONDS,
@@ -41,13 +43,29 @@ import {
   roomKey,
   soloSettings,
 } from "@ulr/arbiter-link";
-import type { CancelPolicy, OkPatchReport, Seat } from "@ulr/cdp-adapter";
+import type {
+  CancelPolicy,
+  CostOverrideTables,
+  CostPatchReport,
+  CostTableId,
+  HiddenStageStatus,
+  OkPatchReport,
+  PenaltyBand,
+  PenaltyPatchReport,
+  Seat,
+} from "@ulr/cdp-adapter";
+import type { CardCatalog } from "@ulr/rule-schema";
+import { buildCatalog } from "@ulr/rule-schema";
 import {
   ArbiterRunner,
+  COST_TABLE_IDS,
   createCdpAdapter,
   DEFAULT_DEBUG_PORT,
   DEFAULT_SPEED_LEASE_MS,
+  explainDebugPort,
+  HIDDEN_STAGES,
   normalizeTint,
+  resolveDebugPort,
 } from "@ulr/cdp-adapter";
 
 /** 連不上就每隔這麼久再試一次。玩家不會為了插件而先開遊戲。 */
@@ -74,8 +92,23 @@ export const REINSTALL_COOLDOWN_MS = 3_000;
 export const SPEED_RENEW_MS = Math.floor(DEFAULT_SPEED_LEASE_MS / 3);
 
 export interface EngineOptions {
-  /** 遊戲的 CDP 埠。桌面版 9333、網頁版看你怎麼開。 */
+  /**
+   * 遊戲的 CDP 埠。桌面版 59222、網頁版 59223（都是**首選**，不是保證）。
+   *
+   * 連不上時引擎會去讀 `userDataDir` 裡的 `DevToolsActivePort` 找回實際的埠，
+   * 所以這個值錯了不見得會失敗 —— 但**它仍然是實例的身分**（托盤拿它分 userData、
+   * 兩份配置不得重複），所以不可以填 0。理由見 `cdp-adapter/debug-port.ts`。
+   */
   port?: number;
+  /**
+   * 這個客戶端的 user-data-dir。給了才有「埠變了也找得回來」這件事。
+   *
+   * ⚠ **一定要跟這份配置的客戶端種類一致。** 桌面版是
+   * `%APPDATA%\UNLIGHT-Revive`、網頁版是瀏覽器 profile 目錄。給錯的症狀是
+   * 「我開的是網頁版的插件，它卻接到桌面版的遊戲去」—— 不給比給錯好，
+   * 不給只是少一層保險。
+   */
+  userDataDir?: string;
   /**
    * 中間人在哪。**兩個插件要指到同一個**，預設值就是為了不用設定。
    *
@@ -101,6 +134,79 @@ export interface EngineOptions {
   onStatus?: (status: EngineStatus) => void;
 }
 
+/**
+ * 自訂 COST 目前走到哪一步。
+ *
+ * - `off`      沒有選規則
+ * - `pending`  腳本裝上去了，但要等遊戲下一次載入才會改到畫面
+ * - `applied`  頁面回報已經改寫了 cc_asset，畫面上的數字就是規則裡的
+ * - `error`    注入失敗
+ */
+export type CostPhase = "off" | "pending" | "applied" | "error";
+
+export interface CostState {
+  /** **卡片價格**的狀態。要重載遊戲才會變。 */
+  phase: CostPhase;
+  /** 規則裡有幾個角色鍵。`null` = 沒選規則。 */
+  entries: number | null;
+  /** 實際改到幾張卡。只有 `applied` 之後才有值。 */
+  applied: number | null;
+  /**
+   * 規則有、但這個客戶端的 cc_asset 沒有的鍵數。
+   *
+   * ⚠ 不是零就要顯示 —— 那代表規則跟遊戲版本對不上，而少掉的那些卡會被
+   * 算成 `UNKNOWN_COST` 99，讓超標的隊伍看起來合法。
+   */
+  unknownKeys: number;
+  /**
+   * **壓 C 罰則**的狀態。
+   *
+   * ⚠ 跟 `phase` 分開，因為兩者的生效時機不同：價格走
+   * `addScriptToEvaluateOnNewDocument`（要重載），罰則走 `Runtime.evaluate`
+   * 攔 `Deck.prototype.getCost`（**立刻生效**，還會順手把牌組畫面重畫）。
+   * 混成一個狀態的話，UI 一定會對其中一邊說謊。
+   */
+  penalty: "off" | "applied" | "error";
+  /**
+   * 罰則是不是**整個遊戲**都生效。
+   *
+   * `false` = 只有牌組編輯畫面 —— 對戰大廳那類畫面顯示的是伺服器存的 cost，
+   * 要攔 WSClient 的 `db_deck{n}` 回應才會跟著變。遊戲還在載入時會是 false。
+   */
+  penaltyEverywhere: boolean;
+  /** 罰則區間數。`null` = 這份規則不壓 C 或沒選規則。 */
+  bands: number | null;
+  /** 出錯時的原因。 */
+  error: string | null;
+}
+
+const COST_OFF: CostState = {
+  phase: "off",
+  entries: null,
+  applied: null,
+  unknownKeys: 0,
+  penalty: "off",
+  penaltyEverywhere: false,
+  bands: null,
+  error: null,
+};
+
+/** 四張表的中文名。log 與 UI 都用它 —— 玩家看不懂 `eventCards`。 */
+const COST_TABLE_LABEL: Readonly<Record<CostTableId, string>> = {
+  characters: "角色",
+  monsters: "怪物",
+  equipment: "裝備",
+  eventCards: "事件卡",
+};
+
+/** 四張表加起來幾筆。沒選規則是 `null`（跟「選了但是空的」要分得出來）。 */
+function countEntries(tables: CostOverrideTables | null): number | null {
+  if (tables === null) return null;
+  let n = 0;
+  for (const id of COST_TABLE_IDS) n += Object.keys(tables[id] ?? {}).length;
+  return n;
+}
+
 /** UI 要畫的東西。**每次變動都會整份重發**，畫的人不必自己合併。 */
 export interface EngineStatus {
   /** CDP 接上了沒。 */
@@ -111,6 +217,14 @@ export interface EngineStatus {
   seat: Seat | null;
   /** 頁面上的攔截真的掛在 socket 上了。還在大廳時是 false。 */
   armed: boolean;
+  /**
+   * **實際**接上的 CDP 埠。`null` = 還沒接上。
+   *
+   * ⚠ 這跟設定裡那個埠有可能不一樣（首選埠綁不上時，客戶端會挑別的，我們從
+   * `DevToolsActivePort` 讀回來）。UI 要顯示**這個** —— 顯示設定值的話，玩家
+   * 會拿一個沒有人在聽的埠去 CLI 或 arbiter 上用，然後以為那些工具壞了。
+   */
+  port: number | null;
   /** 側通道狀態。 */
   link: LinkStatus;
   /** 我是不是那個中間人。行為上沒差別，只是給玩家看。 */
@@ -141,6 +255,15 @@ export interface EngineStatus {
    * UI 只顯示 `agreed` 的話，玩家會看到「已生效」但畫面沒變。
    */
   speedApplied: number | null;
+  /**
+   * 自訂 COST 在頁面上的狀態。
+   *
+   * ⚠ 跟「有沒有選規則」是兩回事。`installCostOverrides` 走的是
+   * `addScriptToEvaluateOnNewDocument`，**只對之後載入的 document 生效** ——
+   * 選好規則到玩家重載遊戲之間，這裡會是 `"pending"`。UI 一定要把這段講出來，
+   * 否則玩家會看到「已選規則」但畫面上的數字沒變，然後以為插件壞了。
+   */
+  cost: CostState;
   /** 最後一個錯誤。修好之後會被清成 null。 */
   error: string | null;
 }
@@ -154,6 +277,33 @@ export class ArbiterEngine {
   #runner: ArbiterRunner | null = null;
   /** 這一輪連線用的 adapter。加速要在協商變動時重下，所以得留著。 */
   #adapter: ReturnType<typeof createCdpAdapter> | null = null;
+  /** 目前選的自訂 COST 表（四張）。`null` = 沒選。重連時要重裝，所以留著。 */
+  #costs: CostOverrideTables | null = null;
+  /**
+   * 頁面上那支 COST 注入腳本的 identifier。
+   *
+   * ⚠ **換規則一定要先把舊的拆掉。** `addScriptToEvaluateOnNewDocument` 是
+   * 累加的，而 `patch-cost` 的 `__ulrCostPatch` 閘只讓**第一支**跑成功 ——
+   * 不拆就直接裝新的，下次載入生效的會是**舊規則**，而且完全沒有錯誤訊息。
+   */
+  #costScriptId: string | null = null;
+  /**
+   * 每張表最後一次回報的結果。
+   *
+   * ⚠ **換規則或重載時要清掉。** 不清的話，新規則沒有的那張表會留著舊數字，
+   * UI 顯示的「已改寫 N 張」就會包含一張根本沒再套用的表。
+   */
+  #costReports = new Map<CostTableId, { applied: number; unknownKeys: number }>();
+  /** 目前的壓 C 區間表。`null` = 不改罰則（用遊戲原本的算法）。 */
+  #bands: readonly PenaltyBand[] | null = null;
+  /**
+   * 隱藏地圖開著沒。
+   *
+   * ⚠ 補丁是 `Runtime.evaluate` 裝的，**遊戲重載就沒了** —— 所以這個布林值要
+   * 留著，接上／重裝時才補得回去。不留的話症狀是「昨天開的，今天打開遊戲選單
+   * 又只剩 11 項」，而玩家不會把它跟重載連在一起。
+   */
+  #hiddenStages = false;
   #stopping = false;
   #loop: Promise<void> | null = null;
   #resolveStop: (() => void) | null = null;
@@ -168,6 +318,7 @@ export class ArbiterEngine {
       title: null,
       seat: null,
       armed: false,
+      port: null,
       // 還沒進對戰 —— 這不是「連不上」，是「還不需要連」。
       link: "idle",
       hosting: false,
@@ -180,6 +331,7 @@ export class ArbiterEngine {
       capSeconds: null,
       lastSend: null,
       speedApplied: null,
+      cost: COST_OFF,
       error: null,
     };
   }
@@ -205,6 +357,331 @@ export class ArbiterEngine {
     void this.#adapter?.setReadyTint(this.#readyTint).catch(() => {
       // 還沒接上或正在重連。下次 installOkPatch 會帶著新值上去。
     });
+  }
+
+  /**
+   * 換一份自訂 COST 規則（`null` = 不套用）。
+   *
+   * `characters` 的鍵必須是 cc_asset 的 `filename`（`cc078_04`）—— 規則檔的
+   * `characters` 可以直接丟進來，那正是同一種鍵。
+   *
+   * 兩件事的生效時機**不一樣**，這是 UI 一定要講清楚的：
+   *
+   * | 改什麼   | 怎麼裝                              | 何時生效       |
+   * | -------- | ----------------------------------- | -------------- |
+   * | 卡片價格 | addScriptToEvaluateOnNewDocument    | **下次載入**   |
+   * | 壓 C 罰則 | evaluate 攔 Deck.prototype.getCost | **立刻**       |
+   *
+   * **不會自己重載遊戲。** 玩家可能正在對戰中，什麼時候重載是他的決定。
+   */
+  setCostRule(rule: (CostOverrideTables & { bands: readonly PenaltyBand[] | null }) | null): void {
+    this.#costs =
+      rule === null
+        ? null
+        : {
+            characters: rule.characters,
+            monsters: rule.monsters,
+            equipment: rule.equipment,
+            eventCards: rule.eventCards,
+          };
+    this.#bands = rule === null ? null : rule.bands;
+    this.#emit({
+      cost:
+        rule === null
+          ? COST_OFF
+          : {
+              phase: "pending",
+              entries: countEntries(this.#costs),
+              applied: null,
+              unknownKeys: 0,
+              penalty: "off",
+              penaltyEverywhere: false,
+              bands: rule.bands === null ? null : rule.bands.length,
+              error: null,
+            },
+    });
+    void this.#syncCosts();
+    void this.#syncPenalty();
+  }
+
+  /** 目前選的四張表。托盤重畫時要對照。 */
+  get costOverrides(): CostOverrideTables | null {
+    return this.#costs;
+  }
+
+  /**
+   * 請遊戲重新載入，讓 `addScriptToEvaluateOnNewDocument` 那些注入生效。
+   *
+   * ⚠ **會打斷正在進行的對戰。** 引擎自己絕對不會呼叫它 —— 只有玩家按了
+   * 按鈕才會走到這裡。
+   */
+  /**
+   * 配對用的驅動。沒連上遊戲時是 `null`。
+   *
+   * ⚠ **每次取用都重裝一次 `__ulrMatch`。** 注入的東西在遊戲重載之後就沒了，
+   * 而配對是玩家按下去才跑的 —— 不能假設上次裝的還在。重裝很便宜（只換函式，
+   * 不重掛 listener，也不動已經收到的房間清單）。
+   */
+  async matchDriver(): Promise<MatchDriver | null> {
+    const adapter = this.#adapter;
+    if (adapter === null) return null;
+    await adapter.installMatchRoom();
+    return adapter;
+  }
+
+  /**
+   * 中間人的連線位址（不含路徑）。配對佇列跟側通道**共用同一台**。
+   *
+   * ⚠ 讀的是玩家設定的那個字串，不是 `LinkNode` 當下連著的那條 —— 佇列可以
+   * 在側通道還沒連上時就用（那時玩家還在大廳，本來就沒有側通道）。
+   *
+   * ⚠ 玩家把中間人設成 `local` 時，這裡回的是本機 broker 的位址；而本機
+   * broker（`broker.ts`）**只認得房間協定、沒有佇列**。那個組合是雙開測試用的，
+   * 自動配對在那底下連不上是預期行為，不是壞掉。
+   */
+  get linkEndpoint(): string {
+    return endpointOf(parseLinkTarget(this.#options.link));
+  }
+
+  // -------------------------------------------------------------------------
+  // 隱藏地圖
+  //
+  // ⚠ 這一組跟 COST 那一組不一樣：**它不改任何數字，只是把官方選單裡沒有的
+  // 四張地圖放回下拉選單**。開房仍然是玩家自己在遊戲的對話框上按的，送出去的
+  // 封包也是遊戲自己送的。
+  // -------------------------------------------------------------------------
+
+  get hiddenStages(): boolean {
+    return this.#hiddenStages;
+  }
+
+  /**
+   * 開關隱藏地圖。**立刻生效**（攔的是活著的類別），不必重載遊戲。
+   *
+   * 關掉會把選單還原成官方的 11 項 —— 同樣立刻生效。
+   */
+  setHiddenStages(on: boolean): void {
+    this.#hiddenStages = on;
+    void this.#syncHiddenStages();
+  }
+
+  /**
+   * 把目前的設定再推一次。
+   *
+   * 給 UI 的「重試」用。頁面那支腳本自己會等大廳出現（見 `patch-stage.ts`），
+   * 所以正常情況下不必叫這支 —— 它是給「等太久放棄了」與「玩家換了遊戲語言」
+   * 那兩種收尾狀態的。
+   */
+  async applyHiddenStages(): Promise<void> {
+    await this.#syncHiddenStages();
+  }
+
+  /**
+   * 隱藏地圖現在在頁面上的狀態。沒接上遊戲時是 `null`。
+   *
+   * ⚠ UI 要**問這個**而不是問 `hiddenStages` —— 後者只是「玩家想不想要」，
+   * 前者才是「遊戲那邊真的怎樣」。兩者會不一樣的時機很常見：玩家開著開關但
+   * 遊戲還沒開、剛重載完還沒補上、還沒開過一次開房對話框。
+   */
+  async hiddenStageStatus(): Promise<HiddenStageStatus | null> {
+    const adapter = this.#adapter;
+    if (adapter === null) return null;
+    try {
+      return await adapter.hiddenStageStatus();
+    } catch {
+      // 連線正在死。下一輪重連會重裝，這裡不必吵。
+      return null;
+    }
+  }
+
+  async reloadGame(): Promise<void> {
+    const adapter = this.#adapter;
+    if (adapter === null) throw new Error("還沒接上遊戲");
+    await adapter.reloadGame();
+  }
+
+  /**
+   * 從跑著的客戶端讀一份**卡片名冊**（四張表的原價 + 中文名）。
+   *
+   * 編輯 COST 的介面靠它把 `cc001_01` 顯示成「艾伯李斯特 L1」。呼叫端負責
+   * 把結果存起來重複使用 —— 玩家調表時多半沒開遊戲。
+   *
+   * ⚠ **要在沒有套自訂 COST 的客戶端上讀。** `baseCost` 讀的是 Phaser 快取裡
+   * 的值，而 `patch-cost` 正是就地改寫那份資料 —— 套過之後讀回來的「原價」
+   * 會是被改過的數字，於是編輯器的「改回原價」會把玩家改回**上一份規則**。
+   * 這裡檢查不出來，所以由呼叫端在還沒套用時抓（見托盤的 `#refreshCatalog`）。
+   */
+  async readCardCatalog(gameVersion: string): Promise<CardCatalog> {
+    const adapter = this.#adapter;
+    if (adapter === null) throw new Error("還沒接上遊戲");
+    // 五次 evaluate，各自只帶需要的欄位回來（§9.1「不搬大物件」）。
+    const [characters, monsters, equipment, eventCards, profiles] = [
+      await adapter.readCharacterAssets(),
+      await adapter.readMonsterAssets(),
+      await adapter.readWeaponAssets(),
+      await adapter.readEventCardAssets(),
+      await adapter.readProfiles(),
+    ];
+    return buildCatalog({
+      gameVersion,
+      characters: characters.assets,
+      monsters: monsters.assets,
+      equipment: equipment.cards,
+      eventCards: eventCards.cards,
+      profiles,
+    });
+  }
+
+  /**
+   * 把 `#costs` 推到頁面上。連上、換規則、重連都會走這裡。
+   *
+   * 先拆後裝的理由見 `#costScriptId`。
+   */
+  async #syncCosts(): Promise<void> {
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+
+    try {
+      // 舊規則的每表統計不能留 —— 見 `#costReports`。
+      this.#costReports.clear();
+      if (this.#costScriptId !== null) {
+        await adapter.removeCostOverrides(this.#costScriptId);
+        this.#costScriptId = null;
+      }
+      if (this.#costs === null) return;
+
+      const { scriptIdentifier } = await adapter.installCostOverrides(this.#costs);
+      this.#costScriptId = scriptIdentifier;
+    } catch (err) {
+      // 連線多半正在死 —— 重連時會再走一次 #syncCosts，不必在這裡吵。
+      this.#emit({
+        cost: { ...this.#status.cost, phase: "error", error: `注入失敗：${describe(err)}` },
+      });
+    }
+  }
+
+  /**
+   * 把 `#bands` 推到頁面上。
+   *
+   * ⚠ 跟 `#syncCosts` 不同，這支**立刻生效**（攔的是活著的 `Deck` 類別），
+   * 所以連上遊戲之後就該叫一次，換規則時也要叫。頁面端會從**原始**的
+   * `getCost` 重新包，不會疊補丁。
+   */
+  async #syncPenalty(): Promise<void> {
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+
+    try {
+      if (this.#bands === null) {
+        await adapter.uninstallPenaltyOverrides();
+        this.#emit({
+          cost: { ...this.#status.cost, penalty: "off", penaltyEverywhere: false, bands: null },
+        });
+        return;
+      }
+      await adapter.installPenaltyOverrides(this.#bands);
+      // 真正的 applied 由頁面回報帶回來（#onPenaltyReport），這裡不先報成功。
+    } catch (err) {
+      this.#emit({
+        cost: { ...this.#status.cost, penalty: "error", error: `罰則注入失敗：${describe(err)}` },
+      });
+    }
+  }
+
+  /**
+   * 把 `#hiddenStages` 推到頁面上。
+   *
+   * ⚠ 跟 `#syncPenalty` 一樣是 `evaluate` 裝的，**重載會被沖掉** —— 接上與重裝
+   * 兩條路都要叫。
+   */
+  async #syncHiddenStages(): Promise<void> {
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+
+    try {
+      if (!this.#hiddenStages) {
+        await adapter.uninstallHiddenStages();
+        return;
+      }
+      const status = await adapter.installHiddenStages(HIDDEN_STAGES);
+      if (!status.installed) {
+        // ⚠ 這通常不是壞掉，是**遊戲還沒載到對戰大廳那一段**。講出來，但不要
+        // 講成錯誤 —— 玩家去大廳晃一圈再回來按一次就好。
+        this.#log(`· 隱藏地圖還沒裝上：${status.reason ?? "原因不明"}`);
+      }
+    } catch (err) {
+      this.#log(`✗ 隱藏地圖注入失敗：${describe(err)}`);
+    }
+  }
+
+  /** 頁面回報罰則補丁的結果。 */
+  #onPenaltyReport(report: PenaltyPatchReport): void {
+    if (report.type === "penalty-patch-error") {
+      this.#emit({ cost: { ...this.#status.cost, penalty: "error", error: report.reason } });
+      return;
+    }
+    this.#emit({
+      cost: {
+        ...this.#status.cost,
+        penalty: "applied",
+        penaltyEverywhere: report.socketPatched,
+        bands: report.bands,
+        error: null,
+      },
+    });
+    this.#log(
+      `✓ 壓 C 罰則已改寫（${report.bands} 段區間，立即生效` +
+        `${report.socketPatched ? "，全遊戲" : "，⚠ 目前只有牌組畫面"}）`,
+    );
+  }
+
+  /**
+   * 頁面回報 COST 改寫的結果。
+   *
+   * ⚠ **四張表各發一則**（它們是四個獨立的 `load.json`，完成時間不同），所以
+   * 這裡要**累加**而不是覆寫。直接覆寫的話 UI 上的「已改寫 N 張卡」會是最後
+   * 抵達的那張表的數字，而那通常是最小的一張。
+   */
+  #onCostReport(report: CostPatchReport): void {
+    if (report.type === "cost-patch-error") {
+      const where = report.table === null ? "" : `（${COST_TABLE_LABEL[report.table]}）`;
+      this.#emit({
+        cost: { ...this.#status.cost, phase: "error", error: `${report.reason}${where}` },
+      });
+      return;
+    }
+    if (report.type === "cost-patch-installed") return; // hook 掛好了，還沒攔到任何一張表
+
+    this.#costReports.set(report.table, {
+      applied: report.applied,
+      unknownKeys: report.unknownKeys.length,
+    });
+    let applied = 0;
+    let unknownKeys = 0;
+    for (const r of this.#costReports.values()) {
+      applied += r.applied;
+      unknownKeys += r.unknownKeys;
+    }
+
+    this.#emit({
+      cost: {
+        ...this.#status.cost,
+        phase: "applied",
+        entries: countEntries(this.#costs),
+        applied,
+        unknownKeys,
+        error: null,
+      },
+    });
+    this.#log(
+      `✓ 自訂 COST 已套用（${COST_TABLE_LABEL[report.table]}）：` +
+        `改了 ${report.applied} / ${report.totalFrames} 張`,
+    );
+    if (report.unknownKeys.length > 0) {
+      this.#log(
+        `⚠ ${COST_TABLE_LABEL[report.table]}有 ${report.unknownKeys.length} 個鍵這個客戶端沒有 —— 規則可能對不上遊戲版本`,
+      );
+    }
   }
 
   /**
@@ -371,17 +848,30 @@ export class ArbiterEngine {
     for (let attach = 1; !this.#stopping; attach++) {
       // ⚠ 每次都用**全新的** adapter。重連是新的 target、新的 execution
       // context，沿用舊實例只會把上一條連線的殘留狀態帶進來。
-      const adapter = createCdpAdapter({ port: this.#options.port ?? DEFAULT_DEBUG_PORT });
+      // 埠也一樣每次重新解析 —— 玩家關掉遊戲再開時，客戶端可能挑到另一個埠。
+      const opened = await this.#openWhenReady();
+      if (opened === null) break;
+      const { adapter, title, port } = opened;
       this.#adapter = adapter;
 
       try {
-        const title = await this.#connectWhenReady(adapter);
-        if (title === null) break;
-        this.#emit({ connected: true, title, error: null });
+        this.#emit({ connected: true, title, port, error: null });
         this.#log(attach === 1 ? `✓ 接上「${title}」` : `✓ 重新接上「${title}」`);
 
         const lost = new Promise<string>((resolve) => adapter.onDisconnect(resolve));
         adapter.onOkPatchReport((r) => this.#onPageReport(r));
+        adapter.onCostPatchReport((r) => this.#onCostReport(r));
+        adapter.onPenaltyPatchReport((r) => this.#onPenaltyReport(r));
+
+        // ⚠ 新的 target = 頁面上一支腳本都沒有。舊的 identifier 屬於上一條
+        // 連線，留著會讓 #syncCosts 去拆一個不存在的東西。
+        this.#costScriptId = null;
+        await this.#syncCosts();
+        // 罰則補丁是 evaluate 裝的，重載會被沖掉 —— 每次接上都要重裝。
+        await this.#syncPenalty();
+        // 隱藏地圖同理。⚠ 這時候遊戲多半還在標題畫面，Match 類別還沒載進來，
+        // 所以裝不上很正常 —— 玩家進大廳後由配對頁那邊補裝（見 main.ts）。
+        await this.#syncHiddenStages();
 
         // ⚠ 不必等到進對戰。沒有 socket 也裝得上（回 waiting），頁面每 200ms
         // 自己補掛 —— 「先開插件再開遊戲」才是玩家實際的順序。
@@ -451,6 +941,8 @@ export class ArbiterEngine {
           speedApplied: null,
           pvp: false,
           rule: null,
+          // 埠也要清掉：關掉遊戲再開有可能換一個，留著舊的會讓玩家拿它去 CLI 用。
+          port: null,
         });
 
         if (reason !== null) {
@@ -498,9 +990,14 @@ export class ArbiterEngine {
       });
       this.#log(`⟳ 遊戲重載過，攔截已重新裝上（${status}）`);
       this.#emit({ error: null });
+      // ⚠ 重載把罰則補丁也沖掉了（它是 evaluate 裝的）。不補的話症狀是
+      // 「牌組畫面的罰 C 突然變回原版」，而玩家不會把它跟重載連在一起。
+      await this.#syncPenalty();
       // ⚠ 重載把加速也沖掉了。不補的話症狀是「打到一半突然變回原速」，
       // 而玩家完全不會把它跟「剛剛重載過」連在一起。
       await this.#syncSpeed();
+      // ⚠ 隱藏地圖也是。症狀是「開房選單又只剩官方那 11 項」。
+      await this.#syncHiddenStages();
     } catch (err) {
       // 連線多半也快死了 —— 那條路會走重連，這裡安靜退場就好。
       this.#emit({ error: `重裝攔截失敗：${describe(err)}` });
@@ -541,16 +1038,57 @@ export class ArbiterEngine {
    * ⚠ 沒有次數上限是刻意的：玩家什麼時候開遊戲、開幾次、中途關掉再開，
    * 都不該讓插件自己結束。
    */
-  async #connectWhenReady(adapter: ReturnType<typeof createCdpAdapter>): Promise<string | null> {
+  async #openWhenReady(): Promise<{
+    adapter: ReturnType<typeof createCdpAdapter>;
+    title: string;
+    port: number;
+  } | null> {
+    const preferred = this.#options.port ?? DEFAULT_DEBUG_PORT;
+    const userDataDir = this.#options.userDataDir;
+
     for (let attempt = 1; !this.#stopping; attempt++) {
+      // ⚠ **解析要在迴圈裡面。** 玩家的順序常常是「先開插件、再開遊戲」，
+      // 而遊戲挑到哪個埠是它啟動時才決定的 —— 在迴圈外面解析一次，就等於
+      // 用「遊戲還沒開」那一刻的答案connect一輩子。
+      const resolved = await resolveDebugPort({ port: preferred, userDataDir });
+      const port = resolved?.port ?? preferred;
+      const adapter = createCdpAdapter({ port });
+
       try {
         const session = await adapter.connect();
         await adapter.waitForGame();
-        return session.title;
+        if (port !== preferred) {
+          // 這件事一定要講。玩家設定裡看到的是 preferred，而之後所有指令
+          // （CLI 的 --port、arbiter、probe）要接的是這一個。
+          this.#log(
+            `ℹ :${preferred} 沒有回應，改用客戶端自己記下的 :${port}（DevToolsActivePort）`,
+          );
+        }
+        return { adapter, title: session.title, port };
       } catch (err) {
+        // 連不上就把這一輪的 adapter 收乾淨，不要留著等 GC。
+        await adapter.disconnect().catch(() => {});
         // ⚠ 不能安靜地等。埠打錯的症狀會是「跑起來之後什麼都沒發生」，
         // 而真正的原因只在第一行閃過去。
         if (attempt === 1) this.#emit({ connected: false, error: `等遊戲…（${describe(err)}）` });
+
+        // 「沒人在聽」「這個埠根本綁不上」「被別的程式佔走了」在原始錯誤訊息裡
+        // 長得一模一樣，但玩家要做的事完全不同（等 / 換埠 / 關掉那支程式）。
+        //
+        // ⚠ **算出來的話要放進 `error`，不能只寫進記錄。** 玩家看的是狀態列上
+        // 那句話；只寫記錄等於沒講 —— 會去翻記錄的人本來就查得出來。
+        //
+        // 每 30 次（約一分鐘）重算一次而不是只算一次：埠的狀況會變（別的程式
+        // 剛好在這段時間起來或關掉），而停在一句過期的診斷比不講更誤導。
+        if (attempt === 1 || attempt % 30 === 0) {
+          void explainDebugPort({ port: preferred, userDataDir })
+            .then((hint) => {
+              if (this.#status.connected) return; // 這幾毫秒內接上了，別蓋掉。
+              this.#log(`ℹ ${hint}`);
+              this.#emit({ error: hint });
+            })
+            .catch(() => {});
+        }
         await sleep(CONNECT_RETRY_MS);
       }
     }
