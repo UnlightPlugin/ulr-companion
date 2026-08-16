@@ -45,7 +45,6 @@ import {
   MIN_PHASE_SECONDS,
   MIN_SPEED_FACTOR,
   MOVE_PHASE_TOTAL_SECONDS,
-  defaultTokenSource,
 } from "@ulr/arbiter-link";
 import {
   CHANNEL_NAMES,
@@ -58,13 +57,7 @@ import {
   STAGES,
 } from "@ulr/cdp-adapter";
 import type { HiddenStageStatus, MatchContext, RoomEntry } from "@ulr/cdp-adapter";
-import {
-  checkOwnDeck,
-  guestJoinRoom,
-  hostOpenRoom,
-  MatchPairing,
-  preflight,
-} from "@ulr/arbiter-engine";
+import { checkOwnDeck, MatchPairing } from "@ulr/arbiter-engine";
 import type { PairingStatus } from "@ulr/arbiter-engine";
 import { deckFromKeys } from "@ulr/cost-engine";
 import type { CardCatalog, CompressionRule, CostRule, GapBand } from "@ulr/rule-schema";
@@ -83,12 +76,13 @@ import { trayIconPng } from "./icon.js";
 import type { IconState } from "./icon.js";
 import { launchAtLoginEnabled, launchInstance, setLaunchAtLogin } from "./launch.js";
 import { openLogFile } from "./log-file.js";
-import type { ClientKind, Profile, ProfileStore } from "./profiles.js";
+import type { ClientKind, MatchPrefs, Profile, ProfileStore } from "./profiles.js";
 import {
   addProfile,
   defaultPortFor,
   loadStore,
   markUsed,
+  normalizeMatchPrefs,
   removeProfile,
   resolveProfile,
   updateOptions,
@@ -443,6 +437,13 @@ interface MatchPageState {
   costTiers: number[] | null;
   /** 自動配對的狀態。沒在配對時 phase 是 `idle`。 */
   pairing: PairingStatus;
+  /**
+   * 玩家記在配置裡的開房設定（房名、地點、上限…）。
+   *
+   * ⚠ 畫面**從這裡取初始值**，不要自己留一份預設 —— 兩份預設一定會漂，
+   * 而漂掉的症狀是「我明明改過房名，重開又變回請多關照」。
+   */
+  match: MatchPrefs;
   /** 頻道編號 → 顯示名稱。遊戲的 `channels` 物件裡沒有名稱。 */
   channelNames: Readonly<Record<number, string>>;
   /** 官方的對戰地點清單、官方選單沒有的那四張、Cost 限制檔位、預設房名。 */
@@ -491,33 +492,16 @@ async function stageStatus(): Promise<HiddenStageStatus | null> {
 /**
  * 「開始自動配對」帶的東西。
  *
- * ⚠ **前四個欄位進配對鍵**（`matchKey`），也就是說：兩邊填得不一樣就物理上
- * 配不到對方。房名與地圖不進 —— 那是 host 自己的事，guest 進去就是了。
+ * ⚠ `channel` 與**設定裡的 multi / costLimit** 進配對鍵（`matchKey`），也就是
+ * 說：兩邊填得不一樣就物理上配不到對方。房名不進 —— 那是 host 自己的事。
+ * 地點也不進，它是配對成立**之後**才協商的（`negotiateStage`）。
+ *
+ * ⚠ 開房要用的那幾格（房名、地點、±N、約定上限）**不從這裡送** —— 它們記在
+ * 配置裡（`profile.match`），主程序自己讀。畫面送過來的話會有兩份真相，而
+ * 「我改了房名但開出來的是舊的」這種 bug 完全看不出來。
  */
 interface MatchQueueOptions {
   channel: number;
-  multi: boolean;
-  /** 約定的隊伍 COST 上限，用**自訂規則**算。`null` = 不設限。 */
-  costLimit: number | null;
-  /** 遊戲自己的「牌組Cost限制 ±N」。⚠ 伺服器用原版 COST 判，是另一回事。 */
-  deckCostBand: number | null;
-  roomName: string;
-  stage: string;
-}
-
-interface MatchOpenOptions {
-  /** 約定的頻道。preflight 會確認玩家真的在這裡。 */
-  channel: number;
-  roomName: string;
-  /** 地圖代號，3 位數字串。 */
-  stage: string;
-  multi: boolean;
-  /**
-   * 遊戲的「牌組Cost限制 ±N」。`null` = 不限制。
-   *
-   * ⚠ 伺服器用**原版 COST** 判這個，跟自訂規則的總和對不上。
-   */
-  deckCostBand: number | null;
 }
 
 function matchRuleInfo(): MatchRuleInfo | null {
@@ -545,6 +529,7 @@ let pairingStatus: PairingStatus = {
   myTotal: null,
   overLimit: false,
   skipped: 0,
+  stage: null,
   message: "沒在配對。",
 };
 
@@ -563,16 +548,6 @@ function myDeckCost(context: MatchContext | null): MyDeckCost | null {
   if (deck.characters.length === 0) return { total: null, unknown: 0 };
   const check = checkOwnDeck(costRuleFull, deck, null);
   return { total: check.total, unknown: check.unknown.length };
-}
-
-/**
- * 房間密碼。
- *
- * ⚠ 用 `defaultTokenSource()` 而不是自己 `Math.random()` —— 這串就是密碼，
- * 猜得到等於別人可以插進你的約戰房。理由見 `match-queue.ts` 那支的註解。
- */
-function matchPassword(): string {
-  return defaultTokenSource();
 }
 
 function snapshot(): Snapshot {
@@ -795,6 +770,28 @@ interface EditorTables {
   eventCards: Record<string, number>;
 }
 
+/**
+ * 規則裡**不是 COST 也不是壓 C** 的那些欄位。「編輯描述」那一頁在改的東西。
+ *
+ * ⚠ `restrictions`（限制條款）不在這裡：schemaVersion 1 的它是
+ * `enforcement: "agreement-only"` 的自由文字，**引擎永遠不解析**（§12），
+ * 而做一個編輯器給一個沒有任何行為的欄位，只會讓人以為插件會強制它。
+ * 要它有意義得先有結構化的條件型別（schemaVersion 2）。
+ */
+export interface RuleMeta {
+  ruleSetId: string;
+  version: string;
+  name: string;
+  description: string;
+  publisherId: string;
+  publisherName: string;
+  publisherContact: string;
+  gameVersion: string;
+  appliesTo: "duel" | "quest" | "any";
+  teamCostLimit: number;
+  changelog: string;
+}
+
 export interface EditorPayload {
   /** 正在編哪份規則。沒選規則時是 `null`，編輯頁會請玩家先去選。 */
   rule: {
@@ -815,6 +812,13 @@ export interface EditorPayload {
    * 一頁根本不存在 —— 規則載進來了就一定有一個確定的壓 C 狀態。
    */
   compression: { type: CompressionRule["type"]; bands: GapBand[] } | null;
+  /**
+   * 規則的「描述」那一半 —— 名稱、作者、版本、適用範圍、更新說明。
+   *
+   * ⚠ 這些欄位**每一個都會進 contentHash**（整個 rule 物件就是雜湊的對象），
+   * 所以改個作者名字核對碼就會變。介面要講出來，否則玩家會以為只有數字算數。
+   */
+  meta: RuleMeta | null;
   catalog: CardCatalog | null;
   /** 讀名冊失敗的原因。成功或還沒讀過是 `null`。 */
   catalogError: string | null;
@@ -858,6 +862,22 @@ function editorPayload(): EditorPayload {
         : rule.compressionRule?.type === "gap-band-v1"
           ? { type: "gap-band-v1", bands: rule.compressionRule.bands.map((b) => ({ ...b })) }
           : { type: "none", bands: [] },
+    meta:
+      rule === null
+        ? null
+        : {
+            ruleSetId: rule.ruleSetId,
+            version: rule.version,
+            name: rule.name,
+            description: rule.description ?? "",
+            publisherId: rule.publisher.id,
+            publisherName: rule.publisher.name,
+            publisherContact: rule.publisher.contact ?? "",
+            gameVersion: rule.gameVersion,
+            appliesTo: rule.appliesTo ?? "duel",
+            teamCostLimit: rule.teamCostLimit,
+            changelog: rule.changelog ?? "",
+          },
     catalog,
     catalogError: null,
     connected: latest?.connected ?? false,
@@ -911,6 +931,70 @@ function sanitizeCompression(value: unknown): CompressionRule | null {
 }
 
 /**
+ * 「編輯描述」送來的那一包。**認不得的形狀一律回 `null`**（＝沿用原本的）。
+ *
+ * ⚠ 這裡只做「整理成規則該有的形狀」，**不做驗證** —— 格式（ruleSetId 的
+ * pattern、SemVer、gameVersion 的 `2026.08`、publisher.id 要等於 ruleSetId 的
+ * 前半段）全部交給 `assertCostRule`，那才是唯一的判準。在這裡再寫一份會漂移，
+ * 而漂移的症狀是「介面說可以，存檔卻失敗」。
+ *
+ * ⚠ 空字串的選填欄位要**整個拿掉**而不是留空字串：`description: ""` 與沒有
+ * `description` 是兩份不同的 JSON，也就是兩個不同的 contentHash。
+ */
+function applyMeta(current: CostRule, value: unknown): CostRule {
+  if (typeof value !== "object" || value === null) return current;
+  const m = value as Record<string, unknown>;
+  /** 有送這個欄位、而且是字串才算數。沒送的一律沿用原本的。 */
+  const str = (key: string): string | null => {
+    const v = m[key];
+    return typeof v === "string" ? v.trim() : null;
+  };
+
+  const next: CostRule = { ...current, publisher: { ...current.publisher } };
+
+  const scalars = [
+    ["ruleSetId", "ruleSetId"],
+    ["version", "version"],
+    ["name", "name"],
+    ["gameVersion", "gameVersion"],
+  ] as const;
+  for (const [field, key] of scalars) {
+    const v = str(key);
+    // 空字串不當成「清空」—— 那幾個欄位是必填的，清空只會讓存檔失敗。
+    if (v !== null && v !== "") next[field] = v;
+  }
+
+  const appliesTo = str("appliesTo");
+  if (appliesTo === "duel" || appliesTo === "quest" || appliesTo === "any") {
+    next.appliesTo = appliesTo;
+  }
+
+  const limit = m["teamCostLimit"];
+  if (typeof limit === "number" && Number.isFinite(limit)) next.teamCostLimit = limit;
+
+  // ⚠ 選填的長文字：空的要**整個刪掉欄位**，不是留一個空字串。
+  // `description: ""` 與沒有 `description` 是兩份不同的 JSON，也就是兩個
+  // 不同的 contentHash —— 而玩家清空一個欄位的意思是「這份規則沒有這一項」。
+  for (const field of ["description", "changelog"] as const) {
+    const v = str(field);
+    if (v === null) continue;
+    if (v === "") delete next[field];
+    else next[field] = v;
+  }
+
+  const pubId = str("publisherId");
+  const pubName = str("publisherName");
+  if (pubId !== null && pubId !== "") next.publisher.id = pubId;
+  if (pubName !== null && pubName !== "") next.publisher.name = pubName;
+  const contact = str("publisherContact");
+  if (contact !== null) {
+    if (contact === "") delete next.publisher.contact;
+    else next.publisher.contact = contact;
+  }
+  return next;
+}
+
+/**
  * 把編輯結果寫回規則檔。
  *
  * ⚠ **一定要過 `assertCostRule`。** 渲染層送來的是外部輸入，直接寫進檔案等於
@@ -937,9 +1021,11 @@ function saveEditedRule(
     tables === null ? (fallback ?? {}) : sanitizeTable(t[id]);
 
   const compression = sanitizeCompression(p["compression"]);
+  // 「編輯描述」那一頁送的東西。沒送就是原封不動。
+  const base = applyMeta(current, p["meta"]);
 
   const next = assertCostRule({
-    ...current,
+    ...base,
     version,
     characters: table("characters", current.characters),
     monsters: table("monsters", current.monsters),
@@ -954,7 +1040,12 @@ function saveEditedRule(
   });
 
   const pkg = createRulePackage(next, {
-    exportedBy: compression === null ? "ulr-companion 編輯 COST" : "ulr-companion 編輯規則",
+    exportedBy:
+      p["meta"] !== undefined
+        ? "ulr-companion 編輯描述"
+        : compression !== null
+          ? "ulr-companion 編輯規則"
+          : "ulr-companion 編輯 COST",
   });
   writeFileSync(path, `${JSON.stringify(pkg, null, 2)}\n`, "utf8");
   const short = shortHash(pkg.contentHash);
@@ -1320,6 +1411,7 @@ app.whenReady().then(() => {
       pairing: pairingStatus,
       channelNames: CHANNEL_NAMES,
       statics: MATCH_STATICS,
+      match: profile.match,
     };
     const off = {
       connected: false as const,
@@ -1365,17 +1457,20 @@ app.whenReady().then(() => {
     const driver = await engine?.matchDriver().catch(() => null);
     if (!driver) return { ok: false as const, reason: "還沒連上遊戲" };
 
+    // ⚠ 開房設定**從配置讀**，不從畫面收。畫面送過來的話會有兩份真相，而
+    // 「我改了房名但開出來的是舊的」這種 bug 完全看不出來。
+    const m = profile.match;
     const p = new MatchPairing({
       endpoint: engine?.linkEndpoint ?? "",
       rule: costRuleFull,
       channel: options.channel,
-      multi: options.multi,
-      costLimit: options.costLimit,
+      multi: m.multi,
+      costLimit: m.limitOn ? m.limit : null,
       room: {
-        name: options.roomName,
-        stage: options.stage,
+        name: m.roomName,
+        stage: m.stage,
         friend: false,
-        deckCostBand: options.deckCostBand,
+        deckCostBand: m.bandOn ? m.band : null,
       },
       driver,
       onStatus: (s) => {
@@ -1406,59 +1501,21 @@ app.whenReady().then(() => {
     return { ok: true as const, status: pairingStatus };
   });
 
-  ipcMain.handle("ulr:match-open", async (_event, options: MatchOpenOptions) => {
-    const driver = await engine?.matchDriver().catch(() => null);
-    if (!driver) return { ok: false as const, reason: "還沒連上遊戲" };
-
-    const pre = await preflight(driver, { expectChannel: options.channel });
-    if (!pre.ok) {
-      log(`✗ 配對前檢查沒過：${pre.block.message}`);
-      return { ok: false as const, reason: pre.block.message };
-    }
-    if (pre.context.playerName === null) return { ok: false as const, reason: "讀不到玩家名稱" };
-
-    const pass = matchPassword();
-    const result = await hostOpenRoom(driver, {
-      playerName: pre.context.playerName,
-      room: {
-        name: options.roomName,
-        stage: options.stage,
-        multi: options.multi,
-        friend: false,
-        // ⚠ 這是遊戲的「牌組Cost限制 ±N」，伺服器用**原版 COST** 判。
-        // 跟約定的自訂 COST 上限是兩回事，不要在這裡混用。
-        pass,
-        cost: options.deckCostBand,
-      },
-    });
-
-    if (!result.ok) {
-      if (result.needsCancel) {
-        // 房開起來了但沒拿到 room_id。留著就是清單上一間永遠沒人進的空房。
-        await driver.cancelRoom().catch(() => "");
-      }
-      log(`✗ 開房失敗：${result.reason}`);
-      return { ok: false as const, reason: result.reason };
-    }
-    log(`✓ 已開房「${options.roomName}」，等對手進來`);
-    // ⚠ 密碼要回給畫面 —— 那是玩家要交給對手的東西。它不落地、不進記錄檔。
-    return { ok: true as const, roomId: result.roomId, pass };
-  });
-
-  ipcMain.handle("ulr:match-join", async (_event, roomId: string, pass: string) => {
-    const driver = await engine?.matchDriver().catch(() => null);
-    if (!driver) return { ok: false as const, reason: "還沒連上遊戲" };
-    const result = await guestJoinRoom(driver, { roomId, pass });
-    log(result.ok ? "✓ 已進房，準備開打" : `✗ 進房失敗：${result.reason}`);
-    return result;
-  });
-
-  ipcMain.handle("ulr:match-cancel", async () => {
-    const driver = await engine?.matchDriver().catch(() => null);
-    if (!driver) return { ok: false as const, reason: "還沒連上遊戲" };
-    const r = await driver.cancelRoom();
-    log(r === "ok" ? "✓ 已取消配對，房間收掉了" : `✗ 取消失敗：${r}`);
-    return r === "ok" ? { ok: true as const } : { ok: false as const, reason: r };
+  /**
+   * 改開房設定（房名、地點、±N、約定上限）並**記進配置**。
+   *
+   * ⚠ 這一支跟上面兩支不一樣：它**不碰遊戲**，只是存偏好。所以畫面可以在
+   * 每一次輸入之後就叫它，不必等玩家按什麼按鈕。
+   *
+   * ⚠ 走 `profile = {...}` 而不是 `editProfile`：臨時配置（`--port` 對不上
+   * 任何一份時建的）不在清單裡，`editProfile` 對它是完全的空操作 —— 症狀是
+   * 「改了房名，下一次重畫又跳回去」。跟 `ulr:set-tint` 同一招。
+   */
+  ipcMain.handle("ulr:match-prefs", (_event, patch: unknown): MatchPrefs => {
+    const next = normalizeMatchPrefs({ ...profile.match, ...(patch as object) });
+    profile = { ...profile, match: next };
+    if (!ephemeral) store = updateProfile(profile.id, { match: next });
+    return next;
   });
 
   // -------------------------------------------------------------------------

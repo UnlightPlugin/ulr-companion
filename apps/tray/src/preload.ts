@@ -60,31 +60,39 @@ contextBridge.exposeInMainWorld("ulr", {
    * 整份重送**。塞進去的話，光是連線心跳就會在 IPC 上搬一份 COST 表。
    */
   editor: {
-    /** 目前規則的四張表 + 卡片名冊。開編輯頁時叫一次。 */
+    /** 目前規則的四張表 + 壓 C + 描述欄位 + 卡片名冊。開編輯頁時叫一次。 */
     load: () => ipcRenderer.invoke("ulr:editor-load"),
-    /** 存回目前的規則檔。`tables` 是四張表，`version` 可以順便改。 */
+    /**
+     * 存回目前的規則檔。三頁共用這一支：`tables`（編輯 COST）、
+     * `compression`（編輯規則）、`meta`（編輯描述）。
+     *
+     * ⚠ **沒送到的部分會沿用檔案裡原本那份** —— 一頁存檔不該把另一頁的東西
+     * 洗掉。少送 `tables` 不是「清空四張表」。
+     */
     save: (payload: Record<string, unknown>) => ipcRenderer.invoke("ulr:editor-save", payload),
     /** 從跑著的遊戲重讀一份名冊（中文名 + 原價）。 */
     refreshCatalog: () => ipcRenderer.invoke("ulr:editor-catalog"),
   },
 
   /**
-   * 配對。
+   * 自動配對。
    *
-   * ⚠ `open` / `join` / `cancel` **會替玩家操作遊戲** —— 開房消耗 AP、進房直接
-   * 開打。畫面上只能綁在玩家按下去的按鈕，不能放進任何自動流程或重試。
-   * `state` 是唯讀的，配對頁開著時輪詢它就好。
+   * ⚠ **插件不再提供手動開房。** `open` / `join` / `cancel` 三支拿掉了：
+   * 手動開房遊戲自己就做得很好，而插件多一條路只是多一個會跟自動配對搶房間
+   * 的東西（`delete_room` 是頻道層級的，兩間房會一起被收掉）。房名、地點、
+   * COST 限制那些設定現在**只服務自動配對**。
+   *
+   * `state` 與 `prefs` 是安全的（唯讀 / 只寫設定檔）；`queue.start` **會替
+   * 玩家操作遊戲** —— 開房消耗 AP、進房直接開打，只能綁在玩家按下去的按鈕上。
    */
   match: {
     state: () => ipcRenderer.invoke("ulr:match-state"),
-    open: (options: Record<string, unknown>) => ipcRenderer.invoke("ulr:match-open", options),
-    join: (roomId: string, pass: string) => ipcRenderer.invoke("ulr:match-join", roomId, pass),
-    cancel: () => ipcRenderer.invoke("ulr:match-cancel"),
+    /** 改開房設定並記進配置。不碰遊戲，所以可以邊打字邊叫。 */
+    prefs: (patch: Record<string, unknown>) => ipcRenderer.invoke("ulr:match-prefs", patch),
     /**
-     * 自動配對（走中間人的佇列）。
+     * 走中間人的佇列。
      *
-     * ⚠ `start` 會一路走到開房或進房 —— 跟 `open` 一樣是「替玩家操作遊戲」的
-     * 東西，只能綁在玩家按下去的按鈕上。`stop` 會順手收掉開了一半的房。
+     * ⚠ `start` 會一路走到開房或進房。`stop` 會順手收掉開了一半的房。
      */
     queue: {
       start: (options: Record<string, unknown>) =>

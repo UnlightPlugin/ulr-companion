@@ -810,16 +810,18 @@
           id: "deck",
           label: "牌組",
           subs: [
+            // ⚠ **自動配對排第一。** 它是玩家最常用的功能 —— 規則選一次就不太
+            // 會再動，配對是每天要按的。放在編輯那幾頁後面等於天天多繞一格。
+            { id: "match", label: "自動配對" },
             { id: "cost", label: "Cost 表" },
-            // ⚠ 排在「Cost 表」與「配對」中間是玩家指定的順序，也是實際的
-            // 動線：先選一份規則（Cost 表）→ 改它（編輯 COST／編輯規則）
-            // → 拿去約戰（配對）。
+            // 編輯的三頁排在 Cost 表後面，那是實際的動線：先選一份規則
+            // （Cost 表）→ 改它 → 拿去配對。
             //
-            // ⚠ 「編輯 COST」與「編輯規則」是**同一個檔案的兩半**，分頁是因為
-            // 它們的形狀差太多：一邊是 1186 個數字格，一邊是十幾段區間。
+            // ⚠ 三頁改的是**同一個檔案的三半**，分開是因為形狀差太多：
+            // 1186 個數字格 / 十幾段區間 / 一疊文字欄位。
             { id: "costedit", label: "編輯 COST" },
             { id: "ruleedit", label: "編輯規則" },
-            { id: "match", label: "配對" },
+            { id: "ruledesc", label: "編輯描述" },
             { id: "hidden", label: "隱藏地圖" },
           ],
         },
@@ -2013,38 +2015,205 @@
         return title + header + table + preview;
       };
 
-      // --- 牌組 › 配對 ------------------------------------------------------
+      // --- 牌組 › 編輯描述 --------------------------------------------------
+      //
+      // 規則檔的第三半：不是價格、也不是壓 C 的那些欄位 —— 名字、作者、版本、
+      // 適用範圍、更新說明。
+      //
+      // ⚠ **每一個欄位都會進 contentHash。** 整個 rule 物件就是雜湊的對象，所以
+      // 改個作者名字核對碼就會變，而核對碼正是玩家拿去跟對手核對的東西。這件事
+      // 一定要寫在畫面上，否則會有人以為「只有數字算數」。
+      //
+      // ⚠ `restrictions`（限制條款）**不在這裡**：schemaVersion 1 的它是
+      // `agreement-only` 的自由文字，引擎永遠不解析（§12）。做一個編輯器給一個
+      // 沒有任何行為的欄位，只會讓人以為插件會強制它。
+
+      let rd = null;
+      let rdMsg = null;
+      let rdLoading = false;
+      const onDescPage = () => tab === "deck" && sub === "ruledesc";
+
+      const RD_FIELDS = [
+        {
+          key: "name",
+          label: "名稱",
+          hint: "玩家在「Cost 表」那一頁看到的名字。",
+          max: 80,
+        },
+        {
+          key: "version",
+          label: "版本",
+          hint: "SemVer（<code>1.2.0</code>）。⚠ <b>發出去過的版本號不要重用</b> —— 對手手上那份會頂著同樣的號碼、不同的內容。",
+          max: 20,
+        },
+        {
+          key: "ruleSetId",
+          label: "規則族",
+          hint: "<code>作者代號/規則代號</code>，只能小寫英數與連字號。⚠ <b>自動配對是照這個分隊的</b>：改了它，你就跟原本那條隊伍上的所有人分開了。",
+          max: 79,
+        },
+        {
+          key: "publisherId",
+          label: "作者代號",
+          hint: "⚠ 必須跟「規則族」的<b>前半段一模一樣</b>，不然存不進去（那是作者歸屬的依據）。",
+          max: 39,
+        },
+        { key: "publisherName", label: "作者名稱", hint: "顯示用的名字，中文可以。", max: 60 },
+        {
+          key: "publisherContact",
+          label: "聯絡方式",
+          hint: "選填。Discord 之類，讓拿到規則的人找得到你。",
+          max: 120,
+        },
+        {
+          key: "gameVersion",
+          label: "遊戲版本",
+          hint: "這份表是照哪一版的遊戲做的，格式 <code>2026.08</code>。",
+          max: 7,
+        },
+      ];
+
+      function rdLoad(force) {
+        if (rdLoading) return;
+        if (rd !== null && !force) return;
+        rdLoading = true;
+        window.ulr.editor.load().then((payload) => {
+          rdLoading = false;
+          rd = {
+            rule: payload.rule,
+            meta: payload.meta ? { ...payload.meta } : null,
+            saved: payload.meta ? JSON.stringify(payload.meta) : null,
+          };
+          if (onDescPage()) renderBody();
+        });
+      }
+
+      function rdDirty() {
+        return rd?.meta !== null && JSON.stringify(rd?.meta) !== rd?.saved;
+      }
+
+      PAGES["deck/ruledesc"] = () => {
+        const title = head(
+          "編輯描述",
+          "規則檔裡<b>不是數字</b>的那些欄位 —— 名字、作者、版本、說明。",
+        );
+        if (rd === null) {
+          rdLoad(false);
+          return title + `<div class="card"><div class="hint">載入中…</div></div>`;
+        }
+        if (rd.meta === null) {
+          return (
+            title +
+            `<div class="card">
+               <div class="row"><span class="dim">規則</span><span class="bad"><b>還沒選</b></span></div>
+               <div class="hint">要先有檔案才改得動。到「牌組 › Cost 表」選一份 ——
+                 沒有自己的規則就先選 <code>unlight-official</code>，改完它就是你的版本了。</div>
+             </div>`
+          );
+        }
+
+        const m = rd.meta;
+        const dirty = rdDirty();
+
+        const rows = RD_FIELDS.map(
+          (fd) => `<div class="row"><span class="dim">${esc(fd.label)}</span>
+               <span><input type="text" data-rd="${fd.key}" maxlength="${fd.max}"
+                      value="${esc(m[fd.key] ?? "")}" style="width:16em" /></span></div>
+             <div class="hint">${fd.hint}</div>`,
+        ).join("");
+
+        const appliesOpts = [
+          ["duel", "duel（約戰）"],
+          ["quest", "quest（任務）"],
+          ["any", "any（都可以）"],
+        ]
+          .map(
+            ([v, label]) =>
+              `<option value="${v}"${m.appliesTo === v ? " selected" : ""}>${esc(label)}</option>`,
+          )
+          .join("");
+
+        return (
+          title +
+          `<div class="card">
+             <div class="row"><span class="dim">檔案</span><span>${esc(rd.rule.fileName)}</span></div>
+             <div class="row"><span class="dim">目前核對碼</span><span>${
+               rd.rule.shortHash
+                 ? `<code>${esc(rd.rule.shortHash)}</code>`
+                 : '<span class="dim">裸規則，沒有核對碼</span>'
+             }</span></div>
+             <div class="row"><span class="dim">未存檔</span><span id="rdDirtyCell">${
+               dirty ? '<b class="warn">有改動</b>' : '<span class="dim">沒有，都存好了</span>'
+             }</span></div>
+             <div class="presets" style="margin-top:8px">
+               <button id="rdSave" ${dirty ? "" : "disabled"}>存回這個檔</button>
+             </div>
+             ${rdMsg ? `<div class="hint ${rdMsg.bad ? "warn" : "good"}">${esc(rdMsg.text)}</div>` : ""}
+             <div class="hint">⚠ <b>這一頁的每個欄位都會改變核對碼</b> ——
+               整份規則（含名字與作者）就是雜湊的對象。改完記得把檔案傳給對手，
+               不然兩邊核對碼對不起來。</div>
+           </div>
+           <div class="card">
+             ${rows}
+             <div class="row"><span class="dim">適用範圍</span>
+               <span><select data-rd="appliesTo">${appliesOpts}</select></span></div>
+             <div class="hint">給人看的宣告，引擎不會拿它擋任何事。</div>
+             <div class="row"><span class="dim">隊伍 COST 上限</span>
+               <span><input type="number" step="0.01" min="0" data-rd="teamCostLimit"
+                      value="${esc(String(m.teamCostLimit))}" style="width:6em" /></span></div>
+             <div class="hint"><b>0 = 不設限</b>，而那是正常的 —— UNLIGHT 的 COST 上限是
+               <b>伺服器按頻道下發</b>的，客戶端裡根本沒有這個常數。約戰要約幾 C
+               請在「自動配對」那一頁填，那個才是插件會檢查的。</div>
+           </div>
+           <div class="card">
+             <div class="row"><span class="dim">說明</span></div>
+             <textarea data-rd="description" rows="4" maxlength="2000"
+               style="width:100%">${esc(m.description ?? "")}</textarea>
+             <div class="hint">這份規則想解決什麼問題。清空就是「沒有說明」。</div>
+             <div class="row" style="margin-top:10px"><span class="dim">更新說明</span></div>
+             <textarea data-rd="changelog" rows="4" maxlength="2000"
+               style="width:100%">${esc(m.changelog ?? "")}</textarea>
+             <div class="hint">這一版改了什麼。拿到規則的人靠它知道要不要跟著更新。</div>
+           </div>`
+        );
+      };
+
+      // --- 牌組 › 自動配對 --------------------------------------------------
       //
       // ⚠ 這一頁的狀態**不在 snapshot 裡**。它要跟遊戲要（兩次 CDP 往返），
       // 塞進 snapshot 會讓每個無關的狀態變動都去戳一次遊戲。所以這頁自己在
       // 開著的時候輪詢，離開就停。
+      //
+      // ⚠ **插件不再提供手動開房。** 手動開房遊戲自己就做得很好，而插件多一條
+      // 路只會跟自動配對搶房間（`delete_room` 是頻道層級的，兩間房會一起被收
+      // 掉）。所以房名、地點、Cost 限制那幾格現在**只服務自動配對** —— 它們是
+      // 「配到人之後要怎麼開房」。
       let mstate = null;
       let matchTimer = null;
       /** 配對頁開著沒。輪詢只在這時候跑。 */
       const onMatchPage = () => tab === "deck" && sub === "match";
-      /** 開房成功之後要交給對手的東西。⚠ 只活在記憶體，不落地、不進記錄檔。 */
-      let matchHandoff = null;
-      // ⚠ 預設值要跟官方一致：房名是客戶端的 `DEFAULT_NAMES.tcn`，地點是清單
-      // 第一項（000 雷德貝魯格城）—— 官方對話框開起來就是這兩個。
-      // **隨機是 014 不是 000**，很容易搞反。
-      const mform = {
-        roomName: null, // null = 還沒動過，用官方預設
-        stage: "000",
-        multi: true,
-        bandOn: false,
-        band: 5,
-        // ⚠ 約定 COST 上限跟上面那個 ±N **是兩回事**：這個是自訂規則算的、
-        // 插件自己檢查的；那個是伺服器用原版 COST 判的。兩個都要有，因為
-        // 遊戲那邊擋不掉的東西只有我們擋得掉。
-        limitOn: false,
-        limit: 62,
-      };
+      /** 開始配對失敗的原因（沒進頻道、沒選規則…）。只活在記憶體。 */
+      let matchError = null;
+
+      /**
+       * 開房設定的當下值。
+       *
+       * ⚠ **真實來源是主程序**（`profile.match`，記在設定檔裡）。這裡只是畫面
+       * 上那一份，每次輪詢都會被 `mstate.match` 蓋掉 —— 改動要立刻送出去
+       * （`window.ulr.match.prefs`），否則下一次輪詢就把它打回去了。
+       */
+      let mform = null;
+      /** 把主程序那份同步過來。⚠ 玩家正在打字時不要蓋。 */
+      function syncMatchForm(s) {
+        if (s?.match && mform === null) mform = { ...s.match };
+      }
 
       function startMatchPolling() {
         if (matchTimer !== null) return;
         const tick = () =>
           window.ulr.match.state().then((s) => {
             mstate = s;
+            syncMatchForm(s);
             if (!onMatchPage()) return;
             // ⚠ 正在打字就不要重畫。這頁每 3 秒輪詢一次，重畫會把游標跟半個
             // 房名一起吃掉 —— 使用者只會覺得輸入框壞了。
@@ -2147,11 +2316,14 @@
         // ⚠ **兩個 COST 限制是不同的東西**，UI 上一定要分開講。混在一起會做出
         // 「顯示有限制、實際判的是另一套數字」的狀態。
         const K = s.statics;
-        const roomName = mform.roomName ?? K.defaultRoomName;
+        // ⚠ 畫面上那份（`mform`）與設定檔那份（`s.match`）—— 開頁的第一拍還沒
+        // 同步過來時用後者。兩份都沒有是不可能的（主程序一定會給）。
+        const f = mform ?? s.match;
+        const roomName = f.roomName === "" ? K.defaultRoomName : f.roomName;
         // 官方那 11 項 + 官方選單裡沒有的四張。⚠ 兩組要分開標：後者在遊戲自己的
         // 選單上是選不到的，玩家要知道自己選的是哪一種。
         const opt = (g) =>
-          `<option value="${esc(g.value)}"${mform.stage === g.value ? " selected" : ""}>${esc(g.value)} ${esc(g.name)}</option>`;
+          `<option value="${esc(g.value)}"${f.stage === g.value ? " selected" : ""}>${esc(g.value)} ${esc(g.name)}</option>`;
         const stageOpts =
           K.stages.map(opt).join("") +
           `<optgroup label="隱藏地圖（官方選單沒有）">` +
@@ -2159,7 +2331,7 @@
           `</optgroup>`;
 
         const bandOpts = K.costRanges
-          .map((n) => `<option value="${n}"${mform.band === n ? " selected" : ""}>± ${n}</option>`)
+          .map((n) => `<option value="${n}"${f.band === n ? " selected" : ""}>± ${n}</option>`)
           .join("");
 
         // 排隊中就把「會改變配對條件」的欄位鎖起來 —— 改了也不會生效（鍵是
@@ -2186,38 +2358,46 @@
                  }
                  ⚠ 它們<b>每週二遊戲更新會變</b>，所以插件每次都現讀，不記在設定裡。</div>`;
 
+        // ── 開房設定（配到人之後要怎麼開房）──────────────────────────────
+        //
+        // ⚠ 這些**只服務自動配對**。插件不再提供手動開房 —— 遊戲自己就做得很好，
+        // 而兩邊都能開房的話「取消」會把玩家手動開的那間一起收掉（`delete_room`
+        // 是整個頻道一起收的）。
         const form = `<div class="card">
+            <div class="row"><span class="dim">開房設定</span>
+              <span class="dim">配到人之後就用這些開房</span></div>
             <div class="row"><span class="dim">房間名</span>
               <span><input id="mRoomName" type="text" maxlength="20" value="${esc(roomName)}" /></span></div>
+            <div class="hint">你當房主時清單上顯示的名字，<b>會記起來</b>。
+              ⚠ 房名是公開的，<b>不要把密碼寫進去</b> —— 密碼由插件自己產，只有配到的那個人拿得到。</div>
             <div class="row"><span class="dim">對戰地點</span>
               <span><select id="mStage">${stageOpts}</select></span></div>
-            <div class="hint">官方選單是 000～009 加上 014（隨機），中間的 010～013 整段跳過 ——
-              但那四張是<b>真的地圖</b>：客戶端的背景圖抓得到，013 甚至是動畫圖。
+            <div class="hint"><b>這是偏好，不是決定</b> —— 雙方選的不一樣時由插件協商：<br />
+              · 兩邊<b>一樣</b> → 就開那裡<br />
+              · 有一邊選<b>隨機（014）</b> → <b>強制開隨機</b>，忽略另一邊指定的那張<br />
+              · 兩邊指定<b>不同</b>地圖 → 從<b>這兩張</b>裡抽一張（各一半，不會抽到誰都沒選的）<br />
+              · 對手沒回報（舊版插件）→ 用<b>開房那一方</b>的<br />
+              官方選單是 000～009 加上 014，中間的 010～013 整段跳過 —— 但那四張是<b>真的地圖</b>。
               要在<b>遊戲自己的開房對話框</b>裡也選得到，去「隱藏地圖」那一頁打開。</div>
             <div class="row"><span class="dim">對戰規則</span>
               <span><select id="mMulti" ${queueBusy ? "disabled" : ""}>
-                <option value="1"${mform.multi ? " selected" : ""}>3vs3</option>
-                <option value="0"${mform.multi ? "" : " selected"}>1vs1</option>
+                <option value="1"${f.multi ? " selected" : ""}>3vs3</option>
+                <option value="0"${f.multi ? "" : " selected"}>1vs1</option>
               </select></span></div>
             <div class="row"><span class="dim">牌組Cost限制</span>
-              <span><input id="mBandOn" type="checkbox" ${mform.bandOn ? "checked" : ""} />
+              <span><input id="mBandOn" type="checkbox" ${f.bandOn ? "checked" : ""} />
                     <select id="mBand">${bandOpts}</select></span></div>
             <div class="hint">遊戲自己的欄位，<b>伺服器用原版 COST 判</b> —— 跟你選的規則算出來的數字對不上。</div>
             <div class="row"><span class="dim">約定 COST 上限</span>
-              <span><input id="mLimitOn" type="checkbox" ${mform.limitOn ? "checked" : ""} ${queueBusy ? "disabled" : ""} />
+              <span><input id="mLimitOn" type="checkbox" ${f.limitOn ? "checked" : ""} ${queueBusy ? "disabled" : ""} />
                     <input id="mLimit" type="number" min="0" max="200" step="0.01" style="width:5em"
-                           value="${mform.limit}" ${queueBusy ? "disabled" : ""} />
+                           value="${f.limit}" ${queueBusy ? "disabled" : ""} />
                     ${tierButtons}</span></div>
             <div class="hint">用<b>你選的規則</b>算的上限，由插件檢查 —— 遊戲伺服器不認得它。
               ⚠ 這個數字<b>進配對條件</b>：填得不一樣的人會排在不同的隊伍裡，永遠配不到。
               雙方各自檢查自己那副牌，所以誰都看不到對方的 COST。</div>
             ${tierHint}
-            <div class="row"><span></span><span>
-              <button id="mOpen">開房配對</button>
-              <button id="mCancel">取消配對</button>
-            </span></div>
-            <div class="hint">⚠ 開房會<b>消耗 AP</b>，而且房間會出現在公開清單上（有密碼，別人進不來）。
-              上面這兩顆是<b>手動</b>的（房號密碼自己傳給對手）；要讓插件自動找人的話用下面那張卡。</div>
+            <div class="hint">這幾格都<b>記在設定裡</b>，下次開插件就是這樣。</div>
           </div>`;
 
         // 自動配對。⚠ 這張卡**永遠不會顯示對手的任何東西** —— 跨版本驗算會
@@ -2229,7 +2409,8 @@
           incompatible: '<span class="badge">不相容</span>',
         };
         const queue = !rule
-          ? `<div class="hint">自動配對要先在「牌組 › Cost 表」選一份規則 —— 沒有規則就沒有「約定」可言。</div>`
+          ? `<div class="hint warn">⚠ 自動配對<b>一定要有規則</b> —— 沒有規則就沒有「約定」可言。
+               先到「牌組 › Cost 表」選一份。</div>`
           : `<div class="row"><span class="dim">狀態</span><span>${
               queueBusy
                 ? "<b>" + esc(queuePhaseText(pairing)) + "</b>"
@@ -2254,36 +2435,33 @@
                    : ""
              }
              ${
+               // 協商出來的地點。⚠ 只有 host 會有 —— 開房的是他。
+               pairing.stage
+                 ? `<div class="row"><span class="dim">這一場的地點</span><span><b>${esc(
+                     stageLabel(pairing.stage),
+                   )}</b></span></div>`
+                 : ""
+             }
+             ${
                pairing.skipped > 0
                  ? `<div class="row"><span class="dim">已跳過</span><span>${pairing.skipped} 位（規則版本算出來的東西不一樣）</span></div>`
                  : ""
              }
              <div class="hint">${esc(pairing.message ?? "")}</div>
+             ${matchError ? `<div class="hint warn">⚠ ${esc(matchError)}</div>` : ""}
              <div class="row"><span></span><span>
                <button id="mQueueStart" ${queueBusy ? "disabled" : ""}>開始自動配對</button>
                <button id="mQueueStop" ${queueBusy ? "" : "disabled"}>停止</button>
              </span></div>
-             <div class="hint">插件會去中間人那邊排隊，配到條件一樣的人就<b>自動開房／進房</b>。
-               ⚠ 配到之後會直接<b>消耗 AP</b> 並開打 —— 不想被自動拉進對戰就先按停止。
+             <div class="hint">插件會去中間人那邊排隊，配到條件一樣的人就<b>自動開房、自動進房</b>
+               （開房用下面那張卡的設定）。⚠ 配到之後會直接<b>消耗 AP</b> 並開打 ——
+               不想被自動拉進對戰就先按停止。<b>對戰一開始配對就自己結束</b>，不必手動停。<br />
                對手用的規則是<b>同一族的哪一版都可以</b>，只要這一場算出來的 COST 完全一樣。</div>`;
 
         const queueCard = `<div class="card">
             <div class="row"><span class="dim">自動配對</span><span class="dim">走中間人的佇列</span></div>
             ${queue}
           </div>`;
-
-        const handoff =
-          matchHandoff === null
-            ? ""
-            : `<div class="card">
-                 <div class="row"><span class="dim">房號</span><span><code>${esc(matchHandoff.roomId)}</code></span></div>
-                 <div class="row"><span class="dim">密碼</span><span><code>${esc(matchHandoff.pass)}</code></span></div>
-                 <div class="hint">把這兩個交給對手，他在下面「進房」貼上就能進來。<b>密碼不要貼在房名上</b> —— 房名是公開的。</div>
-               </div>`;
-
-        const err = matchHandoff?.error
-          ? `<div class="card"><div class="hint warn">⚠ ${esc(matchHandoff.error)}</div></div>`
-          : "";
 
         // 「有沒有人在等人」＝ B 位是空的。⚠ 這份清單最舊可能是 20 秒前的。
         const waiting = (s.rooms ?? []).filter((r) => r.playerBName === null);
@@ -2307,25 +2485,27 @@
                 ? `<table><thead><tr><th></th><th>房名</th><th>房主</th><th>對手</th></tr></thead><tbody>${rows}</tbody></table>`
                 : `<div class="hint">清單是空的。</div>`
             }
-            <div class="row"><span class="dim">進別人的房</span><span>
-              <input id="mJoinId" type="text" size="12" placeholder="房號" />
-              <input id="mJoinPass" type="text" size="9" placeholder="密碼" />
-              <button id="mJoin">進房</button>
-            </span></div>
-            <div class="hint">⚠ 清單是遊戲推播的，閒置時<b>約 20 秒才更新一次</b> —— 「等人中」可能已經是舊的了。</div>
+            <div class="hint">⚠ 清單是遊戲推播的，閒置時<b>約 20 秒才更新一次</b> —— 「等人中」可能已經是舊的了。
+              這裡只是給你看頻道熱不熱鬧，<b>要打就按上面的「開始自動配對」</b>。
+              手動開房請用遊戲自己的按鈕。</div>
           </div>`;
 
         return (
-          head("約戰", "跟指定的對手用同一份 COST 規則開一場。") +
-          state +
-          ruleCard +
-          form +
+          head("自動配對", "跟用同一套 COST 規則的人自動湊一場 —— 開房、進房都由插件代勞。") +
           queueCard +
-          handoff +
-          err +
+          form +
+          ruleCard +
+          state +
           list
         );
       };
+
+      /** 地點代號 → 「007 佩因霍魯姆」。認不得就原樣印出來。 */
+      function stageLabel(value) {
+        const all = [...(mstate?.statics?.stages ?? []), ...(mstate?.statics?.hiddenStages ?? [])];
+        const hit = all.find((g) => g.value === value);
+        return hit ? `${hit.value} ${hit.name}` : String(value);
+      }
 
       /**
        * 配對狀態 → 一句人話。
@@ -2833,6 +3013,25 @@
           editing = t;
           return;
         }
+        // --- 編輯描述 ---
+        //
+        // ⚠ 只更新草稿與存檔鈕，**不重畫** —— 這一頁全是輸入框，重畫會把游標
+        // 連同打到一半的字一起換掉。
+        if (t.dataset.rd !== undefined && rd?.meta) {
+          editing = t;
+          const key = t.dataset.rd;
+          rd.meta[key] = key === "teamCostLimit" ? Number(t.value) : t.value;
+          rdMsg = null;
+          const save = $("rdSave");
+          if (save) save.disabled = !rdDirty();
+          const cell = $("rdDirtyCell");
+          if (cell) {
+            cell.innerHTML = rdDirty()
+              ? '<b class="warn">有改動</b>'
+              : '<span class="dim">沒有，都存好了</span>';
+          }
+          return;
+        }
         if (t.id === "edFilter") {
           edFilter = t.value;
           editing = t;
@@ -2956,6 +3155,22 @@
           rlMsg = { text: "已清空 —— 存檔之後這份規則完全不壓 C", bad: false };
           return renderBody();
         }
+        if (btn.id === "rdSave" && rd?.meta) {
+          // ⚠ 檔名先抓下來 —— 存檔會讓主程序推一份新狀態過來，而 apply() 看到
+          // 核對碼變了就把 `rd` 設成 null（那份推播比 invoke 的回覆先到）。
+          const fileName = rd.rule.fileName;
+          btn.disabled = true;
+          return void window.ulr.editor
+            // ⚠ 只送 `meta`。少送 `tables` / `compression` 的意思是「別動它們」，
+            // 不是「清空」（主程序的 saveEditedRule 會沿用檔案裡那份）。
+            .save({ meta: rd.meta })
+            .then((r) => {
+              rdMsg = r.ok
+                ? { text: `已存回 ${fileName}（${r.version}，核對碼 ${r.shortHash}）`, bad: false }
+                : { text: r.error ?? "存檔失敗", bad: true };
+              renderBody();
+            });
+        }
         if (btn.id === "rlSave" && rl !== null) {
           // ⚠ 檔名先抓下來。存檔會讓主程序推一份新狀態過來，而 apply() 看到
           // 核對碼變了就把 `rl` 設成 null —— 那份推播比 invoke 的回覆先到。
@@ -3000,18 +3215,21 @@
             setTimeout(() => (btn.textContent = "複製"), 1500);
           });
         }
-        if (btn.id === "mOpen") return void matchOpen();
-        if (btn.id === "mCancel") return void matchCancel();
-        if (btn.id === "mJoin") return void matchJoin();
         if (btn.id === "mQueueStart") return void queueStart();
         if (btn.id === "mQueueStop") return void queueStop();
         if (btn.dataset.tier !== undefined) {
           // 快速鍵：填數字並順手打開勾選 —— 按了檔位卻沒生效是最沒道理的狀態。
-          // ⚠ 先 readMatchForm() 把其他欄位收起來，否則重畫會把它們打回去。
-          readMatchForm();
-          mform.limit = Number(btn.dataset.tier);
-          mform.limitOn = true;
-          return void renderBody();
+          // ⚠ 先 readMatchForm() 把畫面上其他欄位收起來（它同時會落地），
+          // 再改這兩格、再存一次，否則重畫會把它們打回設定檔裡那份。
+          return void readMatchForm().then(() => {
+            mform.limit = Number(btn.dataset.tier);
+            mform.limitOn = true;
+            return window.ulr.match.prefs(mform).then((saved) => {
+              mform = { ...saved };
+              if (mstate) mstate.match = saved;
+              renderBody();
+            });
+          });
         }
         if (btn.id === "stagesRetry") {
           return void window.ulr.stages.retry().then((s) => {
@@ -3034,10 +3252,13 @@
         if (btn.dataset.act === "del") return void window.ulr.profiles.remove(id).then(apply);
       });
 
-      // --- 配對的動作 -------------------------------------------------------
+      // --- 自動配對的動作 ---------------------------------------------------
       //
-      // ⚠ 這三支**會替玩家操作遊戲**：開房消耗 AP、進房直接開打。只能綁在
-      // 玩家按下去的按鈕上，不要放進輪詢或自動重試。
+      // ⚠ `queueStart` **會替玩家操作遊戲**：配到人之後不必再按任何東西就會
+      // 開房（消耗 AP）或進房（直接開打）。只能綁在玩家按下去的按鈕上，
+      // 不要放進輪詢或自動重試。
+      //
+      // ⚠ 手動開房／進房那三支拿掉了 —— 插件不再提供那條路（見這一頁的檔頭）。
 
       const MATCH_FIELDS = new Set([
         "mRoomName",
@@ -3049,11 +3270,17 @@
         "mLimit",
       ]);
 
-      /** 把畫面上的值收回 mform。重畫是從 mform 取值的，所以按鈕按下前要先收。 */
+      /**
+       * 把畫面上的值收回 `mform` **並存進設定檔**。
+       *
+       * ⚠ 一定要立刻存。這頁每 3 秒輪詢一次，而輪詢回來的 `s.match` 是設定檔
+       * 裡那份 —— 不存的話玩家改的東西會在下一拍被打回去，而畫面上看起來就是
+       * 「輸入框自己跳回舊值」。
+       */
       function readMatchForm() {
         const v = (id) => $(id);
-        const fallback = mstate?.statics?.defaultRoomName ?? "";
-        if (v("mRoomName")) mform.roomName = v("mRoomName").value.trim() || fallback;
+        if (mform === null) mform = { ...(mstate?.match ?? {}) };
+        if (v("mRoomName")) mform.roomName = v("mRoomName").value.trim();
         if (v("mStage")) mform.stage = v("mStage").value;
         if (v("mMulti")) mform.multi = v("mMulti").value === "1";
         if (v("mBandOn")) mform.bandOn = v("mBandOn").checked;
@@ -3065,34 +3292,32 @@
           const n = Number(v("mLimit").value);
           if (Number.isFinite(n) && n >= 0) mform.limit = Math.round(n * 100) / 100;
         }
+        return window.ulr.match.prefs(mform).then((saved) => {
+          // 主程序整理過的那份才是真的（房名會被 trim、數字會被夾）。
+          mform = { ...saved };
+          if (mstate) mstate.match = saved;
+        });
       }
 
       /**
        * 開始自動配對。
        *
-       * ⚠ 這一支跟 matchOpen 一樣**會替玩家操作遊戲** —— 而且更進一步：配到人
-       * 之後不必再按任何東西就會開房／進房。所以按鈕的文案要講清楚，而且
-       * 「停止」永遠可以按。
+       * ⚠ 開房設定**不從這裡送** —— 主程序自己讀設定檔（`profile.match`）。
+       * 送過去的話會有兩份真相，而「我改了房名但開出來的是舊的」看不出來。
        */
       function queueStart() {
-        readMatchForm();
         const ch = mstate?.context?.channel;
         if (ch === null || ch === undefined) {
-          matchHandoff = { error: "請先在遊戲裡進入一個頻道。" };
+          matchError = "請先在遊戲裡進入一個頻道。";
           return renderBody();
         }
-        matchHandoff = null;
-        return window.ulr.match.queue
-          .start({
-            channel: ch,
-            multi: mform.multi,
-            costLimit: mform.limitOn ? mform.limit : null,
-            deckCostBand: mform.bandOn ? mform.band : null,
-            roomName: mform.roomName ?? mstate?.statics?.defaultRoomName ?? "",
-            stage: mform.stage,
-          })
+        matchError = null;
+        // 先把畫面上還沒存的改動落地，再開始 —— 否則玩家剛打完房名就按開始，
+        // 開出來的會是上一次存的那個。
+        return readMatchForm()
+          .then(() => window.ulr.match.queue.start({ channel: ch }))
           .then((r) => {
-            if (!r.ok) matchHandoff = { error: r.reason };
+            if (!r.ok) matchError = r.reason;
             else if (mstate) mstate.pairing = r.status;
             renderBody();
           });
@@ -3101,49 +3326,6 @@
       function queueStop() {
         return window.ulr.match.queue.stop().then((r) => {
           if (mstate && r.status) mstate.pairing = r.status;
-          renderBody();
-        });
-      }
-
-      function matchOpen() {
-        readMatchForm();
-        const ch = mstate?.context?.channel;
-        if (ch === null || ch === undefined) {
-          matchHandoff = { error: "請先在遊戲裡進入一個頻道。" };
-          return renderBody();
-        }
-        matchHandoff = null;
-        return window.ulr.match
-          .open({
-            channel: ch,
-            roomName: mform.roomName ?? mstate?.statics?.defaultRoomName ?? "",
-            stage: mform.stage,
-            multi: mform.multi,
-            // ⚠ 遊戲的「牌組Cost限制 ±N」，伺服器用原版 COST 判。
-            deckCostBand: mform.bandOn ? mform.band : null,
-          })
-          .then((r) => {
-            matchHandoff = r.ok ? { roomId: r.roomId, pass: r.pass } : { error: r.reason };
-            renderBody();
-          });
-      }
-
-      function matchCancel() {
-        return window.ulr.match.cancel().then((r) => {
-          matchHandoff = r.ok ? null : { error: r.reason };
-          renderBody();
-        });
-      }
-
-      function matchJoin() {
-        const id = $("mJoinId")?.value.trim() ?? "";
-        const pass = $("mJoinPass")?.value.trim() ?? "";
-        if (!id || !pass) {
-          matchHandoff = { error: "房號跟密碼都要填。" };
-          return renderBody();
-        }
-        return window.ulr.match.join(id, pass).then((r) => {
-          matchHandoff = r.ok ? null : { error: r.reason };
           renderBody();
         });
       }
@@ -3177,6 +3359,7 @@
         if (lastRuleSig !== null && sig !== lastRuleSig) {
           ed = null;
           rl = null;
+          rd = null;
         }
         lastRuleSig = sig;
         snap = next;
@@ -3193,6 +3376,8 @@
         // 而連線心跳每幾秒就推一次 —— 重畫會把打到一半的數字連游標一起換掉。
         // 換規則與存完檔都會把 `rl` 設成 null，那時這道閘自然放行。
         if (onRulePage() && rl !== null) return;
+        // 編輯描述同理 —— 整頁都是輸入框。
+        if (onDescPage() && rd !== null) return;
         editing = null;
         // ⚠ 側邊那排會隨「進階：多開」增減，所以每次套用快照都要重畫，不能只在
         // 切分頁時畫。而關掉多開的那一刻若玩家正站在「配置」上，那一格已經不
