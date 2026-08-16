@@ -120,5 +120,11 @@ export type {
   Waiter,
 } from "./match-queue.js";
 
-export { MatchQueueClient, QUEUE_RECONNECT_MS } from "./match-client.js";
+export {
+  MatchQueueClient,
+  QUEUE_COLD_ATTEMPTS,
+  QUEUE_RECONNECT_MAX_MS,
+  QUEUE_RECONNECT_MS,
+  queueReconnectDelay,
+} from "./match-client.js";
 export type { MatchQueueClientOptions, QueueStatus } from "./match-client.js";

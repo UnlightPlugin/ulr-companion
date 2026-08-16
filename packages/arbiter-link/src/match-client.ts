@@ -28,8 +28,55 @@ import { decodeQueueServer, encodeQueue } from "./match-queue.js";
 import { LINK_PROTOCOL_VERSION } from "./protocol.js";
 import { queueUrl } from "./target.js";
 
-/** 斷線後多久重連。跟側通道同一個節奏。 */
+/** 第一次重連等多久。之後每失敗一次翻倍，見 {@link queueReconnectDelay}。 */
 export const QUEUE_RECONNECT_MS = 2_000;
+
+/**
+ * 重連間隔的上限。
+ *
+ * ⚠⚠ **固定 2 秒重試是會燒掉中間人免費額度的。** 每一次嘗試都是雲端那台的
+ * 一個 request（連不上時它回 404，成本 0.35ms —— 便宜，但仍然計次）。
+ * 2 秒一次 = 一天 43,200 次，**一個玩家、兩個視窗就吃掉免費額度 10 萬的七成**，
+ * 而且全部發生在「沒有任何人真的在配對」的狀態下。
+ *
+ * 2026-08-16 實測：雲端中間人還沒部署配對佇列（`/q` 回 404），兩個視窗排了
+ * 大約一個半小時，那天的請求數是 4,706 —— 前 15 天全部加起來才一百多。
+ *
+ * 退避到 60 秒之後，同樣卡住一整天是 1,440 次。
+ */
+export const QUEUE_RECONNECT_MAX_MS = 60_000;
+
+/**
+ * **一次都沒連上過**就放棄的次數。退避之下大約是一分鐘。
+ *
+ * 「從來沒連上過」與「連上過又斷線」要分開處理，因為它們是兩種不同的事：
+ *
+ * | 情況             | 多半是什麼            | 該怎麼辦                     |
+ * | ---------------- | --------------------- | ---------------------------- |
+ * | 一次都沒連上     | 位址錯／服務沒部署    | **停下來告訴玩家**，重試無用 |
+ * | 連上過，然後斷了 | 網路抖一下、伺服器重啟 | 繼續退避重試，玩家還在等配對 |
+ *
+ * ⚠ 前者不停下來的代價不只是流量：畫面會停在「配對中」，而玩家會一直等一條
+ * 根本不存在的隊伍。那正是這次踩到的。
+ */
+export const QUEUE_COLD_ATTEMPTS = 5;
+
+/**
+ * 第 n 次失敗之後要等多久（指數退避，夾在上限內）。
+ *
+ * 純函式，所以退避曲線可以直接測 —— 而它錯了的症狀（燒額度或反應太慢）
+ * 在真的跑起來時要好幾個小時才看得出來。
+ */
+export function queueReconnectDelay(
+  failures: number,
+  base = QUEUE_RECONNECT_MS,
+  max = QUEUE_RECONNECT_MAX_MS,
+): number {
+  const n = Math.max(1, Math.floor(failures));
+  // 2 的冪次算在指數上，不要用迴圈乘 —— failures 沒有上限（斷線一整天），
+  // 而 `base * 2 ** 40` 是 Infinity，`Math.min` 會把它夾回 max，仍然正確。
+  return Math.min(max, base * 2 ** (n - 1));
+}
 
 export type QueueStatus =
   /** 沒在排隊。**這是預設值**，而且只有玩家按下按鈕才會離開它。 */
@@ -41,7 +88,12 @@ export type QueueStatus =
   /** 配到人了，正在對規則、開房。 */
   | "matched"
   /** 中間人的協定版本不合。**不重試。** */
-  | "incompatible";
+  | "incompatible"
+  /**
+   * 一次都沒連上過就放棄了。**不重試** —— 這通常是位址錯或服務沒部署，
+   * 而那兩件事再試一萬次也一樣。呼叫端要把它變成一句給玩家看的話。
+   */
+  | "unreachable";
 
 export interface MatchQueueClientOptions {
   /** 中間人的位址（不含路徑），跟側通道同一台。 */
@@ -181,9 +233,19 @@ export class MatchQueueClient {
     try {
       socket = new WebSocket(queueUrl(this.#options.endpoint, this.#options.key));
     } catch (err) {
+      // ⚠ 這條路也要計次。原本它直接排下一次重連，於是一個連 URL 都組不出來
+      // 的設定（那是**永遠**不會好的）會用固定間隔敲到天荒地老。
+      this.#failures += 1;
       this.#options.onLog?.(
-        `✗ 連不上配對佇列：${err instanceof Error ? err.message : String(err)}`,
+        `✗ 連不上配對佇列（第 ${this.#failures} 次）：${
+          err instanceof Error ? err.message : String(err)
+        }`,
       );
+      if (!this.#welcomed && this.#failures >= QUEUE_COLD_ATTEMPTS) {
+        this.#stopped = true;
+        this.#setStatus("unreachable");
+        return;
+      }
       this.#scheduleReconnect();
       return;
     }
@@ -211,20 +273,29 @@ export class MatchQueueClient {
       if (gen !== this.#generation) return;
       this.#socket = null;
       if (this.#status !== "incompatible") this.#setStatus("connecting");
+      this.#failures += 1;
+
       // ⚠ **連不上一定要講出來。** 這支原本只在 `new WebSocket()` 當場拋例外時
       // 記一行，而那條路幾乎不會走到 —— 位址合法但對方回 404（中間人還沒部署
       // 配對佇列）、DNS 不通、被防火牆擋掉，全部都是「開了連線然後被關掉」。
-      // 於是插件安靜地每兩秒重試，而畫面上寫著「排隊中」。
-      //
-      // 只在第一次與每十次印，重試是無限的，不能把記錄檔洗掉。
-      if (!this.#welcomed) {
-        this.#failures += 1;
-        if (this.#failures === 1 || this.#failures % 10 === 0) {
-          this.#options.onLog?.(
-            `✗ 連不上配對佇列（第 ${this.#failures} 次，close=${code}）：` +
-              `${queueUrl(this.#options.endpoint, this.#options.key)} —— 還在重試。`,
-          );
-        }
+      // 於是插件安靜地重試，而畫面上寫著「排隊中」。
+      const url = queueUrl(this.#options.endpoint, this.#options.key);
+
+      // 一次都沒連上過 → 這不是網路抖一下，是位址錯或服務沒部署。停手。
+      if (!this.#welcomed && this.#failures >= QUEUE_COLD_ATTEMPTS) {
+        this.#stopped = true;
+        this.#options.onLog?.(
+          `✗ 連不上配對佇列，已停止排隊（試了 ${this.#failures} 次，close=${code}）：${url}`,
+        );
+        this.#setStatus("unreachable");
+        return;
+      }
+
+      // 只在第一次與每十次印。連上過再斷線的話重試是無限的，不能洗掉記錄檔。
+      if (this.#failures === 1 || this.#failures % 10 === 0) {
+        this.#options.onLog?.(
+          `✗ 連不上配對佇列（第 ${this.#failures} 次，close=${code}）：${url} —— 還在重試。`,
+        );
       }
       this.#scheduleReconnect();
     });
@@ -242,6 +313,8 @@ export class MatchQueueClient {
           // 前面印過「連不上」的話要收尾 —— 只有失敗的那一半會讓人以為插件壞了。
           if (this.#failures > 0) this.#options.onLog?.("✓ 配對佇列連上了，開始排隊。");
         }
+        // ⚠ 退避要歸零，否則一次長斷線之後就算恢復了，下一次抖動也要等一分鐘。
+        this.#failures = 0;
         this.#waiting = message.waiting;
         this.#setStatus("waiting");
         // 狀態沒變（本來就在 waiting）時 setStatus 不會發，但人數變了要讓 UI 知道。
@@ -284,9 +357,12 @@ export class MatchQueueClient {
 
   #scheduleReconnect(): void {
     if (this.#stopped || this.#timer !== null) return;
+    // ⚠ 指數退避。固定 2 秒的版本在中間人連不上時，一天會敲那台 43,200 次 ——
+    // 而那些請求一次都不會成功，理由見 `QUEUE_RECONNECT_MAX_MS`。
+    const delay = queueReconnectDelay(this.#failures, this.#options.reconnectMs);
     this.#timer = setTimeout(() => {
       this.#timer = null;
       this.#connect();
-    }, this.#options.reconnectMs ?? QUEUE_RECONNECT_MS);
+    }, delay);
   }
 }

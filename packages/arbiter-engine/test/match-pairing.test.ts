@@ -10,7 +10,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { CostRule } from "@ulr/rule-schema";
 import { crossVerdict, deckFromKeys, fingerprint } from "@ulr/cost-engine";
 import type { MatchContext, RoomEntry } from "@ulr/cdp-adapter";
-import type { MatchQueueClientOptions } from "@ulr/arbiter-link";
+import type { MatchQueueClientOptions, QueueStatus } from "@ulr/arbiter-link";
 import {
   checkOwnDeck,
   crossEvaluate,
@@ -204,6 +204,11 @@ function fakeLink() {
       handlers?.onDropped?.(reason);
       return flush();
     },
+    /** 連線層回報狀態（連上了、連不上放棄了…）。 */
+    queueStatus: (status: QueueStatus, waiting = 0) => {
+      handlers?.onStatus?.(status, waiting);
+      return flush();
+    },
   };
 }
 
@@ -295,6 +300,37 @@ describe("狀態機：排隊前的檢查", () => {
     await p.start();
     expect(p.status.phase).toBe("queued");
     expect(link.key).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  /**
+   * ⚠ 這一組釘的是「排隊中」不准說謊。
+   *
+   * `phase` 在按下按鈕的當下就是 `queued`，而那時 WebSocket 才剛開始連 ——
+   * 連不上跟「連上了但沒人」在畫面上原本長得一模一樣（都是「排隊中·只有你」），
+   * 而它們要玩家做的事完全相反：一個是等，一個是去檢查中間人。
+   */
+  it("剛按下去時還沒連上中間人 —— linked 是 false", async () => {
+    const { p } = pairing();
+    await p.start();
+    expect(p.status).toMatchObject({ phase: "queued", linked: false });
+    expect(p.status.message).toContain("連");
+  });
+
+  it("收到 q-welcome 才算連上", async () => {
+    const { p, link } = pairing();
+    await p.start();
+    await link.queueStatus("waiting", 1);
+    expect(p.status).toMatchObject({ phase: "queued", linked: true, waiting: 1 });
+  });
+
+  it("連不上到放棄 → 停在 blocked，而且訊息要說得出這不是沒人排隊", async () => {
+    const { p, link } = pairing();
+    await p.start();
+    await link.queueStatus("unreachable");
+    expect(p.status).toMatchObject({ phase: "blocked", linked: false });
+    expect(p.status.message).toContain("連不上");
+    // blocked 的意思是「玩家處理完可以再按一次開始」，所以連線要收掉
+    expect(link.stopped).toBeGreaterThan(0);
   });
 });
 
