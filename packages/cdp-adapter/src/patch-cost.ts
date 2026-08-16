@@ -4,15 +4,29 @@
  * 移植自 5i 的 `unlight_crawler/src/script/cdp/patch_cost.js`，機制相同：
  *
  *     hook Phaser.Loader.FileTypes.JSONFile.prototype.onProcess
- *       → 攔到 key === "cc_asset" 的載入
- *         → 就地改寫 data.frames[].cost
+ *       → 攔到我們認得的 key
+ *         → 就地改寫那份資料裡每一張卡的 cost
  *
- * 為什麼是攔載入而不是改畫面：`cc_asset` 是牌組畫面、角色資訊、隊伍總和
- * 全部共用的那份資料。改在它進 Phaser 快取之前，所有用到 COST 的地方
+ * 為什麼是攔載入而不是改畫面：這幾份 JSON 是牌組畫面、角色資訊、隊伍總和、
+ * 對戰畫面全部共用的那一份。改在它進 Phaser 快取之前，所有用到 COST 的地方
  * 一次到位，不用去追每個 UI 元件。
  *
+ * ## 四張表，一個 hook
+ *
+ * 一副牌組是四張表組合出來的，而四張都是 `Initialize.preload()` 用
+ * `this.load.json()` 載入的 —— 同一個 `JSONFile` 類別、同一個階段
+ * （見 `constants.ts` 的 `COST_ASSET_LOAD_NOTE`）。所以 hook 只要一個，
+ * 差別只在資料在哪個陣列、以及**這一筆的鍵怎麼算**：
+ *
+ * | 表   | 快取鍵        | 陣列       | 鍵                       |
+ * | ---- | ------------- | ---------- | ------------------------ |
+ * | 角色 | `cc_asset`    | `.frames`  | `filename`（`cc078_04`） |
+ * | 怪物 | `mc_asset`    | `.frames`  | `filename`（`mc001_01`） |
+ * | 裝備 | `avatar_item` | `.weapon`  | **陣列索引**             |
+ * | 事件 | `event_info`  | `.frames`  | **陣列索引**             |
+ *
  * ⚠ **必須用 `Page.addScriptToEvaluateOnNewDocument` 注入。**
- * `Runtime.evaluate` 太晚 —— 那時 `cc_asset` 早就載完，hook 掛上去也不會再被呼叫。
+ * `Runtime.evaluate` 太晚 —— 那時四份資料早就載完，hook 掛上去也不會再被呼叫。
  *
  * 四條在這裡特別要守的規則：
  *
@@ -21,33 +35,96 @@
  *    我們炸掉時遊戲的狀態仍然是完整的。
  * 2. **不得把遠端資料變成可執行邏輯**（§12）。腳本本體是這個檔案裡的常數，
  *    規則內容只以 `JSON.parse` 的**資料**進去，永遠不會被當程式碼執行。
- * 3. **不搬大物件回 Node**。回報只帶統計與 filename 索引，不帶整份 cc_asset。
+ * 3. **不搬大物件回 Node**。回報只帶統計與 filename 索引，不帶整份資料。
  * 4. **不改伺服器判定**（§12 硬規則 4）。這只改本機顯示。
  */
 
-import { CC_ASSET_KEY } from "./constants.js";
+import {
+  AVATAR_ITEM_KEY,
+  AVATAR_ITEM_WEAPON_FIELD,
+  CC_ASSET_KEY,
+  EVENT_INFO_JSON_KEY,
+  MC_ASSET_KEY,
+} from "./constants.js";
 import { embedJson } from "./embed.js";
 
 /**
- * COST 對照表：**鍵是 cc_asset 的 `filename`**，例如 `cc078_04`（L4）、
- * `cc078_r04`（R4）。
+ * 一張表的 COST 對照表。
  *
- * ⚠ 不要用「角色 + 等級」組出來的鍵（`cc078_L4` 那種）。L4 與 R4 在
- * cc_asset 裡的 `level` 都是 4，只有 `filename` 分得開，而兩者 COST 不同
- * （實測 cc078_04 = 19、cc078_r04 = 21）。用 level 當鍵會讓所有覺醒卡撞號。
- * 詳見 docs/open-questions.md 第 1 題。
+ * 鍵是什麼**因表而異**，見上面那張表：角色與怪物用資產自己的 `filename`，
+ * 裝備與事件卡用**陣列索引的十進位字串**（`"0"`、`"91"`）。
  *
- * 這裡刻意**不做**規則鍵到 filename 的轉換 —— 那題還沒定案，把未定的東西
- * 寫進來只會等著改。呼叫端負責給已經是 filename 的表。
+ * ⚠ 這裡刻意**不認得** `wp001` / `ev091` 那套規則鍵 —— 規則鍵到客戶端鍵的
+ * 轉換一律由呼叫端做完（`@ulr/rule-schema` 的 `toIndexTable()`）。同一條界線
+ * 在角色表上已經守了：`patch-cost` 不做「規則鍵 → filename」的轉換。
+ * 這樣命名規則改變時，要動的只有一個 package。
  */
 export type CostOverrides = Readonly<Record<string, number>>;
 
+/**
+ * 四張表各一份。**全部選填** —— 只想改角色價格的規則是最常見的形態。
+ *
+ * ⚠ 沒給的表**不是改成 0，是完全不碰**。遊戲會照原版的數字跑。
+ */
+export interface CostOverrideTables {
+  /** 鍵是 `cc_asset` 的 `filename`，例如 `cc078_04` */
+  characters?: CostOverrides | undefined;
+  /** 鍵是 `mc_asset` 的 `filename`，例如 `mc001_01` */
+  monsters?: CostOverrides | undefined;
+  /** 鍵是 `avatar_item.weapon` 的**陣列索引字串**，例如 `"1"` */
+  equipment?: CostOverrides | undefined;
+  /** 鍵是 `event_info.frames` 的**陣列索引字串**，例如 `"91"` */
+  eventCards?: CostOverrides | undefined;
+}
+
+/** 四張表的識別代號。回報與統計都用它。 */
+export type CostTableId = "characters" | "monsters" | "equipment" | "eventCards";
+
+export const COST_TABLE_IDS: readonly CostTableId[] = [
+  "characters",
+  "monsters",
+  "equipment",
+  "eventCards",
+];
+
+/**
+ * 每張表對應到客戶端的哪份資料、鍵怎麼算。
+ *
+ * `keyMode`：
+ *   - `filename` —— 用那一筆自己的 `filename` 欄位當鍵
+ *   - `index`    —— 用陣列索引的十進位字串當鍵
+ */
+export const COST_TABLE_TARGETS: Readonly<
+  Record<CostTableId, { assetKey: string; field: string; keyMode: "filename" | "index" }>
+> = {
+  characters: { assetKey: CC_ASSET_KEY, field: "frames", keyMode: "filename" },
+  monsters: { assetKey: MC_ASSET_KEY, field: "frames", keyMode: "filename" },
+  equipment: {
+    assetKey: AVATAR_ITEM_KEY,
+    field: AVATAR_ITEM_WEAPON_FIELD,
+    keyMode: "index",
+  },
+  eventCards: { assetKey: EVENT_INFO_JSON_KEY, field: "frames", keyMode: "index" },
+};
+
 export interface CostPatchOptions {
-  costs: CostOverrides;
+  /**
+   * 要套的表。
+   *
+   * 也接受**只有角色的舊寫法**（一個扁平的 `Record<string, number>`），
+   * 那等同 `{ characters: … }` —— 這是為了讓「只改角色」的既有呼叫端與規則檔
+   * 不必跟著改。
+   */
+  costs: CostOverrides | CostOverrideTables;
   /** 頁面呼叫這個名字把結果送回 Node。由 `Runtime.addBinding` 建立。 */
   bindingName: string;
-  /** 預設 `cc_asset`。留參數是為了遊戲改版換鍵時不用改程式。 */
+  /**
+   * 覆寫某一張表的快取鍵。留參數是為了遊戲改版換鍵時不用改程式。
+   *
+   * ⚠ 舊簽章是「`assetKey` = 角色表的鍵」，那個寫法仍然可以用。
+   */
   assetKey?: string;
+  assetKeys?: Partial<Record<CostTableId, string>>;
   /** 等 Phaser 出現的輪詢間隔。 */
   pollIntervalMs?: number;
   /** 等不到就放棄並回報。無上限的輪詢會在頂層 frame 永遠空轉。 */
@@ -61,37 +138,45 @@ export const DEFAULT_MAX_WAIT_MS = 60_000;
 // 頁面回報
 // ---------------------------------------------------------------------------
 
-/** hook 掛上去了，但還沒攔到 cc_asset。 */
+/** hook 掛上去了，但還沒攔到任何一張表。 */
 export interface CostPatchInstalled {
   type: "cost-patch-installed";
 }
 
 export interface CostPatchApplied {
   type: "cost-patch";
+  /** 這一則是哪張表的。四張表各發一則 —— 它們的載入完成時間不同。 */
+  table: CostTableId;
   assetKey: string;
-  /** cc_asset 裡的卡片總數 */
+  /** 這份資料裡的卡片總數 */
   totalFrames: number;
   /** 實際被改到的張數 */
   applied: number;
   /**
-   * 規則裡有、但這個客戶端版本的 cc_asset 沒有的鍵。
+   * 規則裡有、但這個客戶端版本沒有的鍵。
    *
    * 不能當成 0 忽略 —— 那會讓超標的隊伍看起來合法。這是「遊戲改版了，
    * 規則要跟上」的訊號，UI 要顯示出來。
+   *
+   * ⚠ 裝備與事件卡的鍵在這裡是**索引字串**（`"238"`），不是 `wp238`。
+   * 要顯示給玩家看的話由呼叫端轉回規則鍵。
    */
   unknownKeys: string[];
   /**
-   * `charaIndex`（cc_asset frames 的陣列索引）→ `filename`。
+   * `charaIndex`（陣列索引）→ `filename`。**只有 filename 型的表會有**，
+   * 裝備與事件卡是 `null`（它們的鍵本來就是索引，不需要對照）。
    *
    * 封包裡的 `charaIndex` 就是這個索引。有了它就能把封包直接對到規則的鍵，
    * 而且這份索引是從**玩家自己的客戶端**讀出來的，永遠跟他跑的版本一致 ——
    * 不需要在插件裡塞一份會過期的對照表。
    */
-  index: string[];
+  index: string[] | null;
 }
 
 export interface CostPatchError {
   type: "cost-patch-error";
+  /** 哪張表出的事。還沒走到分表就出事的話是 `null`。 */
+  table: CostTableId | null;
   reason: string;
 }
 
@@ -119,31 +204,83 @@ export class InvalidCostOverrideError extends Error {
   }
 }
 
-function assertValidCosts(costs: CostOverrides): void {
+function assertValidCosts(table: CostTableId, costs: CostOverrides): void {
   for (const [key, value] of Object.entries(costs)) {
     if (key.length === 0) {
-      throw new InvalidCostOverrideError("(空字串)", "鍵不能是空字串");
+      throw new InvalidCostOverrideError(`${table}/(空字串)`, "鍵不能是空字串");
     }
     if (typeof value !== "number" || !Number.isFinite(value)) {
-      // NaN / Infinity 經過 JSON 會變成 null，寫進 cc.cost 之後畫面會顯示
-      // 空白或 NaN，而且看起來像是遊戲壞了。擋在這裡比較好查。
-      throw new InvalidCostOverrideError(key, `值必須是有限數字，收到 ${String(value)}`);
+      // NaN / Infinity 經過 JSON 會變成 null，寫進 cost 之後畫面會顯示空白或
+      // NaN，而且看起來像是遊戲壞了。擋在這裡比較好查。
+      throw new InvalidCostOverrideError(
+        `${table}/${key}`,
+        `值必須是有限數字，收到 ${String(value)}`,
+      );
     }
   }
+}
+
+/**
+ * 把兩種寫法都正規化成四張表。
+ *
+ * 扁平的 `Record<string, number>` 一律視為角色表 —— 那是這支唯一支援過的
+ * 形狀，換句話說既有的呼叫端與既有的規則檔語意完全不變。
+ */
+export function normalizeCostTables(
+  costs: CostOverrides | CostOverrideTables,
+): Required<Record<CostTableId, CostOverrides>> {
+  const looksTabled =
+    typeof costs === "object" &&
+    costs !== null &&
+    COST_TABLE_IDS.some((id) => {
+      const v = (costs as Record<string, unknown>)[id];
+      return typeof v === "object" && v !== null;
+    });
+
+  const tables = looksTabled
+    ? (costs as CostOverrideTables)
+    : { characters: costs as CostOverrides };
+  return {
+    characters: tables.characters ?? {},
+    monsters: tables.monsters ?? {},
+    equipment: tables.equipment ?? {},
+    eventCards: tables.eventCards ?? {},
+  };
 }
 
 /**
  * 產生要注入的 JS。純函式，沒有副作用 —— 所以可以完整測試，不需要活著的遊戲。
  */
 export function buildCostPatchScript(options: CostPatchOptions): string {
-  assertValidCosts(options.costs);
+  const tables = normalizeCostTables(options.costs);
+  for (const id of COST_TABLE_IDS) assertValidCosts(id, tables[id]);
+
+  /**
+   * 注入腳本要的形狀：快取鍵 → 這份資料怎麼處理。
+   *
+   * ⚠ 用快取鍵當索引而不是表名，是因為 hook 裡拿得到的只有 `this.key`。
+   * 沒有要改的表就不放進來 —— 那樣 hook 對它連查都不會查。
+   */
+  const targets: Record<
+    string,
+    { table: CostTableId; field: string; keyMode: "filename" | "index"; costs: CostOverrides }
+  > = {};
+  for (const id of COST_TABLE_IDS) {
+    const costs = tables[id];
+    if (Object.keys(costs).length === 0) continue;
+    const target = COST_TABLE_TARGETS[id];
+    const assetKey =
+      options.assetKeys?.[id] ??
+      (id === "characters" ? options.assetKey : undefined) ??
+      target.assetKey;
+    targets[assetKey] = { table: id, field: target.field, keyMode: target.keyMode, costs };
+  }
 
   const config = {
-    assetKey: options.assetKey ?? CC_ASSET_KEY,
     bindingName: options.bindingName,
     pollIntervalMs: options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     maxWaitMs: options.maxWaitMs ?? DEFAULT_MAX_WAIT_MS,
-    costs: options.costs,
+    targets,
   };
 
   return `(function () {
@@ -166,26 +303,44 @@ export function buildCostPatchScript(options: CostPatchOptions): string {
     }
   }
 
-  function patchCostData(data) {
-    var frames = data && data.frames;
-    if (!frames || typeof frames.length !== "number") {
-      report({ type: "cost-patch-error", reason: "cc_asset 沒有 frames 陣列" });
+  /**
+   * 改寫一份資料裡的價格。
+   *
+   * 四張表的差別只有兩個：陣列在哪個欄位（frames / weapon），以及鍵是
+   * 那一筆的 filename 還是它的陣列索引。
+   */
+  function patchCostData(assetKey, spec, data) {
+    var rows = data ? data[spec.field] : null;
+    if (!rows || typeof rows.length !== "number") {
+      report({
+        type: "cost-patch-error",
+        table: spec.table,
+        reason: assetKey + " 沒有 " + spec.field + " 陣列"
+      });
       return;
     }
 
-    var costs = CFG.costs;
-    var index = [];
+    var costs = spec.costs;
+    var byFilename = spec.keyMode === "filename";
+    var index = byFilename ? [] : null;
     var seen = Object.create(null);
     var applied = 0;
 
-    for (var i = 0; i < frames.length; i++) {
-      var frame = frames[i];
-      var name = frame && typeof frame.filename === "string" ? frame.filename : "";
-      index.push(name);
-      if (name === "") continue;
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      var name;
+      if (byFilename) {
+        // 保留空位（沒有 filename）照樣要佔一格 —— index 的位置就是封包裡的
+        // charaIndex，跳過一筆會讓後面全部偏移。
+        name = row && typeof row.filename === "string" ? row.filename : "";
+        index.push(name);
+        if (name === "") continue;
+      } else {
+        name = String(i);
+      }
       seen[name] = true;
-      if (!has.call(costs, name)) continue;
-      frame.cost = costs[name];
+      if (!row || !has.call(costs, name)) continue;
+      row.cost = costs[name];
       applied++;
     }
 
@@ -194,11 +349,13 @@ export function buildCostPatchScript(options: CostPatchOptions): string {
       if (has.call(costs, key) && !seen[key]) unknown.push(key);
     }
 
-    window[FLAG].applied = applied;
+    window[FLAG].applied += applied;
+    window[FLAG][spec.table] = applied;
     report({
       type: "cost-patch",
-      assetKey: CFG.assetKey,
-      totalFrames: frames.length,
+      table: spec.table,
+      assetKey: assetKey,
+      totalFrames: rows.length,
       applied: applied,
       unknownKeys: unknown,
       index: index
@@ -213,9 +370,14 @@ export function buildCostPatchScript(options: CostPatchOptions): string {
       // 遊戲該做的事已經做完了。
       original.apply(this, arguments);
       try {
-        if (this.key === CFG.assetKey) patchCostData(this.data);
+        var spec = has.call(CFG.targets, this.key) ? CFG.targets[this.key] : null;
+        if (spec !== null) patchCostData(this.key, spec, this.data);
       } catch (e) {
-        report({ type: "cost-patch-error", reason: String((e && e.message) || e) });
+        report({
+          type: "cost-patch-error",
+          table: null,
+          reason: String((e && e.message) || e)
+        });
       }
     };
     proto.__ulrPatched = true;
@@ -236,7 +398,7 @@ export function buildCostPatchScript(options: CostPatchOptions): string {
       try {
         install(proto);
       } catch (e) {
-        report({ type: "cost-patch-error", reason: String((e && e.message) || e) });
+        report({ type: "cost-patch-error", table: null, reason: String((e && e.message) || e) });
       }
       return;
     }
@@ -248,6 +410,7 @@ export function buildCostPatchScript(options: CostPatchOptions): string {
       clearInterval(timer);
       report({
         type: "cost-patch-error",
+        table: null,
         reason: "等了 " + CFG.maxWaitMs + "ms 還是找不到 Phaser.Loader.FileTypes.JSONFile"
       });
     }

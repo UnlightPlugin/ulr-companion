@@ -16,12 +16,21 @@
 // ---------------------------------------------------------------------------
 
 /**
- * 遊戲的 remote debugging port。
+ * 桌面版的 remote debugging port（**首選**，不是保證）。
  *
- * 用 9333 不是預設的 9222 —— 9222 常被 Adobe UXP（After Effects）長駐佔走，
+ * 用 59222 不是預設的 9222 —— 9222 常被 Adobe UXP（After Effects）長駐佔走，
  * 連上去會拿到 Adobe 的 debugger 而不是遊戲。
+ *
+ * ⚠ **「首選」這兩個字是認真的。** 任何寫死的埠號都可能在某台機器上綁不起來：
+ * 59222 落在 Windows **預設**的動態埠範圍（49152–65535）裡，偶爾會被一條
+ * outbound 連線先佔走；而改過動態範圍的機器（例如開發機的 1024–15000）則是
+ * 低位埠危險。兩種設定的危險區剛好相反，沒有常數能同時避開。
+ *
+ * 所以埠號本身不負責可靠性，`debug-port.ts` 才負責 —— 連不上時它會去讀客戶端
+ * 自己寫下的 `DevToolsActivePort`，綁不上時 `browser.ts` 會改用
+ * `--remote-debugging-port=0` 讓 Chromium 自己挑。
  */
-export const DEFAULT_DEBUG_PORT = 9333;
+export const DEFAULT_DEBUG_PORT = 59222;
 
 /** 只綁 loopback。§12 明訂不得暴露到區域網路或公網。 */
 export const DEBUG_HOST = "127.0.0.1";
@@ -29,11 +38,27 @@ export const DEBUG_HOST = "127.0.0.1";
 export const STEAM_APP_ID = "3247080";
 
 /**
- * 開 debug port 的命令列參數。
+ * **要給玩家的那一行。** UI 上顯示的、複製按鈕放進剪貼簿的都是它。
+ *
+ * `0` 的意思是「Chromium 你自己挑一個綁得上的埠」，挑到什麼會寫進
+ * `<user-data-dir>\DevToolsActivePort`，插件從那裡讀回來（`debug-port.ts`）。
+ *
+ * ⚠ **不要換成固定埠號。** 固定埠有兩種失敗，而且兩種的症狀都是「遊戲照常開、
+ * 參數也在命令列上，但插件永遠停在等遊戲…」：
+ *
+ *   1. 那個埠落在 Windows 的動態保留範圍裡（2026-07-30 的 1221、08-16 的 9334）
+ *   2. 那個埠被別的程式先坐走了（9222 就是被 Adobe UXP 佔走才棄用的）
+ *
+ * 填 `0` 這兩件事都不會發生。**縮短一段教學最好的方式是讓它變得不必要** ——
+ * 托盤上那四條排錯警告就是這樣消失的。
+ */
+export const DEBUG_PORT_SWITCH_AUTO = "--remote-debugging-port=0";
+
+/**
+ * 綁在**固定**埠上的版本。給命令列工具與雙開用（`--port` 要對得起來）。
  *
  * ⚠ `--remote-debugging-port` **只能在啟動時指定**，不能對已在跑的程序補掛。
- * 所以插件要自己啟動客戶端，不能叫玩家去設 Steam 啟動選項 —— 那個設定是
- * 每個 Steam 帳號各自一份，玩家用小號開遊戲就失效。詳見 docs/launching.md。
+ * ⚠ 給玩家的一律用 `DEBUG_PORT_SWITCH_AUTO`，理由見上面。
  */
 export const DEBUG_PORT_SWITCH = `--remote-debugging-port=${DEFAULT_DEBUG_PORT}`;
 
@@ -70,21 +95,27 @@ export const ENV_KEYS_TO_STRIP = ["ELECTRON_RUN_AS_NODE"] as const;
  *
  * 代價：新 profile 沒有 cookie，玩家要在裡面登入一次（之後會記住）。
  *
- * ⚠ **埠號要避開 Windows 的保留範圍。** 原本用 1221，2026-07-30 實測踩雷：
- * 這台機器（有 Hyper-V）把 **1196–1295 整段保留**了，Chrome 與 Edge 都
- * 綁不上去 —— 而且是**中途**才被保留的，症狀是「本來好好的，突然就連不上」。
+ * 埠取 `DEFAULT_DEBUG_PORT + 1`：兩個客戶端可以同時開，埠一定要不同，而相鄰
+ * 的兩個號碼一眼就看得出是一對。同樣是**首選**而非保證，理由見上面那一則。
  *
- * 保留範圍是動態的，重開機或 Hyper-V／WSL／Docker 起動都可能改變。症狀很難認：
- * Chrome 照常啟動、參數也在命令列上，但 `DevToolsActivePort` 不會產生、埠也
- * 沒人在聽，看起來像 Chrome 忽略了參數。診斷指令：
+ * ## 這個值換過兩次，兩次都是同一個病
+ *
+ * | 日期       | 埠    | 發生什麼事                                   |
+ * | ---------- | ----- | -------------------------------------------- |
+ * | 2026-07-30 | 1221  | Hyper-V 把 1196–1295 整段保留 → 綁不上       |
+ * | 2026-08-16 | 9334  | 保留範圍移動到 9277–9876 → 又綁不上          |
+ *
+ * 保留範圍是**動態的**，重開機或 Hyper-V／WSL／Docker 起動都可能改變，而且
+ * 症狀極難認：瀏覽器照常啟動、參數也在命令列上，但 `DevToolsActivePort` 不會
+ * 產生、埠也沒人在聽，看起來完全像「Chrome 忽略了參數」。診斷指令：
  *
  *     netsh interface ipv4 show excludedportrange protocol=tcp
+ *     netsh interface ipv4 show dynamicport tcp      ← 保留範圍是從這裡切的
  *
- * 想確認是不是埠的問題，用 `--remote-debugging-port=0`：Chrome 會自己挑一個
- * free port 並寫進 `DevToolsActivePort`。挑得到就代表 DevTools 沒被停用，
- * 純粹是那個埠號綁不上去。
+ * 換第三次沒有意義（第四次還是會來），所以 2026-08-16 之後改成由
+ * `debug-port.ts` 在執行期偵測與回退。
  */
-export const BROWSER_DEBUG_PORT = 9334;
+export const BROWSER_DEBUG_PORT = 59223;
 
 // ---------------------------------------------------------------------------
 // 遊戲前端（已實測）
@@ -157,6 +188,73 @@ export const GAME_CANVAS = {
  * hp/atk/def 與四個技能。改自訂 COST 就是攔它的載入、改寫 `frames[].cost`。
  */
 export const CC_ASSET_KEY = "cc_asset";
+
+/**
+ * 怪物卡資產的快取鍵。形狀跟 `cc_asset` 一樣（`frames[]` + `filename` +
+ * `cost`），2026-08-16 實測 139 格、其中 138 張有 filename。
+ *
+ * ⚠⚠ **怪物卡不是第四種加總項目，它跟角色共用同樣那三個槽位。**
+ * 客戶端的分流條件是 `deck.chara[n]` 的前綴：
+ *
+ * ```js
+ * Chara.getCharaType = function (chara, charaIndex) {
+ *   if (chara.startsWith('cc')) return 'chara';
+ *   if (chara.startsWith('mc')) return Chara.isBoss(charaIndex) ? 'boss' : 'mons';
+ * };
+ * ```
+ *
+ * 兩者都被 push 進 `costcheck()` 的同一個 `deckArray`，所以**怪物照樣參與
+ * 壓 C**。任何「只查 cc_asset」的程式碼碰到怪物牌組都會靜靜地算錯。
+ */
+export const MC_ASSET_KEY = "mc_asset";
+
+/**
+ * 首領怪物的快取鍵。**故意不列入自訂 COST 的目標。**
+ *
+ * `Chara.isBoss(charaIndex)` 是 `charaIndex >= 20000`，而這是 raid 的怪，
+ * 玩家的牌組放不進來。列進去只會多一張永遠用不到、卻要每次改版重讀的表。
+ */
+export const MC_BOSS_ASSET_KEY = "mc_boss";
+
+/**
+ * 裝備（武器）的快取鍵。**陣列不是 `frames` 而是 `weapon`** ——
+ * `avatar_item` 是一份大雜燴（avatar / quest / battle / ccoin / cmem /
+ * weapon / raid / other），我們只要 `weapon` 那一段（實測 238 筆）。
+ *
+ * ⚠ 這些項目**沒有 filename**，客戶端也是照索引查的
+ * （`AvatarItem.get('weapon', index)` → `itemJSON.weapon[index]`）。
+ * 規則鍵因此是 `wp` + 補零的索引，轉換在 `@ulr/rule-schema` 的 card-key.ts。
+ */
+export const AVATAR_ITEM_KEY = "avatar_item";
+
+/** `avatar_item` 裡裝備那一段的欄位名。 */
+export const AVATAR_ITEM_WEAPON_FIELD = "weapon";
+
+/**
+ * 事件卡的快取鍵是 {@link EVENT_INFO_JSON_KEY}（在下面「聖水 + 麻痺」那一節）
+ * —— **同一份資料兩種用途**：那裡當行動卡定義表用，這裡當價目表用。
+ * 刻意不另外開一個常數，兩個名字指同一個鍵遲早會有人只改到其中一個。
+ *
+ * ⚠ 事件卡同樣沒有 filename，只有陣列索引（`EventData.get(index)` →
+ * `eventJSON.frames[index]`），規則鍵是 `ev` + 補零的索引。
+ */
+
+/**
+ * 四張表在 `Initialize.preload()` 裡的載入方式（2026-08-16 從 bundle 讀到的）：
+ *
+ * ```js
+ * this.load.json("avatar_item", "images/assets/data/avatar_item.json")
+ * this.load.json("cc_asset",    "images/assets/data/cc_asset.json")
+ * this.load.json("event_info",  "images/assets/data/event_asset.json")
+ * this.load.json("mc_asset",    "images/assets/data/mc_asset.json")
+ * ```
+ *
+ * 四個都是 `load.json` → 同一個 `Phaser.Loader.FileTypes.JSONFile`、同一個
+ * 載入階段。所以 `patch-cost` 只要**一個** `onProcess` hook 就全包了，
+ * 差別只在每張表的陣列在哪、鍵怎麼算。
+ */
+export const COST_ASSET_LOAD_NOTE =
+  "四張 COST 表都由 Initialize.preload() 的 load.json 載入，一個 JSONFile hook 全包。";
 
 // ---------------------------------------------------------------------------
 // WebSocket 連線埠（遊戲同時開好幾條，各管各的）

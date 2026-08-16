@@ -25,6 +25,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { BROWSER_DEBUG_PORT, ENV_KEYS_TO_STRIP } from "./constants.js";
+import { probePortState, resolveDebugPort } from "./debug-port.js";
 import { discoverDebuggerUrl } from "./transport.js";
 
 /**
@@ -89,16 +90,18 @@ export class BrowserNotFoundError extends Error {
 
 export class BrowserPortTimeoutError extends Error {
   override readonly name = "BrowserPortTimeoutError";
-  constructor(port: number, profileDir: string, seconds: number) {
+  constructor(port: number, profileDir: string, seconds: number, autoPort: boolean) {
     super(
-      `瀏覽器開起來了，但 ${seconds} 秒內沒有在 127.0.0.1:${port} 聽。\n` +
-        "  兩個最可能的原因：\n" +
-        `  1. 這個 profile 已經有另一個**沒帶 debug port** 的實例在跑，新的參數被忽略了。\n` +
-        `     關掉用 ${profileDir} 的瀏覽器視窗再試。\n` +
-        "  2. 這個埠落在 Windows 的保留範圍（Hyper-V／WSL／Docker 會動態佔走整段）。\n" +
-        "     症狀特別像「參數被忽略」—— 瀏覽器照常開，但不會產生 DevToolsActivePort。\n" +
-        "     查：netsh interface ipv4 show excludedportrange protocol=tcp\n" +
-        "     換一個埠：--port <N>",
+      `瀏覽器開起來了，但 ${seconds} 秒內接不上它的 debug port。\n` +
+        (autoPort
+          ? `  已經用 --remote-debugging-port=0 讓它自己挑埠了（因為 ${port} 綁不上），\n` +
+            `  但 ${profileDir}\\DevToolsActivePort 始終沒有出現。\n` +
+            "  剩下的可能：這個 profile 已經有另一個**沒帶 debug port** 的實例在跑\n" +
+            "  （同 profile 再啟動只會開分頁，參數整個被忽略），或 DevTools 被政策停用。\n" +
+            `  先關掉所有用 ${profileDir} 的瀏覽器視窗再試。`
+          : `  沒有人在聽 127.0.0.1:${port}，${profileDir}\\DevToolsActivePort 也沒出現。\n` +
+            "  最可能的原因：這個 profile 已經有另一個**沒帶 debug port** 的實例在跑，\n" +
+            `  新的參數被整個忽略了。關掉用 ${profileDir} 的瀏覽器視窗再試。`),
     );
   }
 }
@@ -130,6 +133,10 @@ export interface BrowserArgsOptions {
  * `Page.addScriptToEvaluateOnNewDocument`，那只對**之後**載入的 document 生效。
  * 啟動時就導過去的話，等我們連上 CDP 時頁面早就載完了，注入永遠來不及
  * （症狀是「分頁開了但停在 403」）。導向那一步交給 `openGameTab()`。
+ *
+ * `port` 允許傳 `0` —— 那是「Chromium 你自己挑一個綁得上的」，挑到什麼會寫進
+ * `<user-data-dir>\DevToolsActivePort`。⚠ 只有這裡（命令列）可以是 0，
+ * 設定檔與連線那一側都不行，理由見 `debug-port.ts` 的檔頭。
  */
 export function buildBrowserArgs(options: BrowserArgsOptions): string[] {
   return [
@@ -162,14 +169,23 @@ export interface LaunchBrowserOptions {
   extraArgs?: readonly string[];
   readyTimeoutMs?: number;
   pollIntervalMs?: number;
+  /** 首選埠綁不上時要不要退回 `--remote-debugging-port=0`。預設 true。 */
+  autoPortFallback?: boolean;
+  /** 退回自動挑埠時講一句 —— 這件事會改變之後所有指令要接的埠。 */
+  onNotice?: (message: string) => void;
 }
 
 export interface LaunchBrowserResult {
   browser: FoundBrowser;
+  /** **實際接得上的埠。** 自動挑埠時它跟 `requestedPort` 不一樣。 */
   port: number;
+  /** 呼叫端要求的埠（設定裡那個）。 */
+  requestedPort: number;
   profileDir: string;
   /** 已經在跑就沒有重開。 */
   launched: boolean;
+  /** `devtools-file` = 埠是從 `DevToolsActivePort` 讀回來的，不是要到的那個。 */
+  portSource: "configured" | "devtools-file";
 }
 
 /**
@@ -177,19 +193,31 @@ export interface LaunchBrowserResult {
  *
  * 已經在聽就**直接沿用**，不重開 —— 玩家可能正開著另一個帳號的分頁在打，
  * 或手動開了同一個 profile。插件不該替他做關閉的決定（docs/launching.md §偵測與降級）。
+ *
+ * ⚠ **啟動前會先試綁一次首選埠。** 綁不上（Windows 保留範圍）就改用
+ * `--remote-debugging-port=0`。少了這一步，Chrome 會照常開起來、什麼錯都不報，
+ * 然後我們等 30 秒逾時 —— 2026-07-30（1221）與 2026-08-16（9334）兩次都是
+ * 這樣，而且兩次都花了一小時才查出來。試綁只要幾毫秒。
  */
 export async function ensureBrowser(
   options: LaunchBrowserOptions = {},
 ): Promise<LaunchBrowserResult> {
-  const port = options.port ?? BROWSER_DEBUG_PORT;
+  const requestedPort = options.port ?? BROWSER_DEBUG_PORT;
   const profileDir = options.profileDir ?? DEFAULT_BROWSER_PROFILE_DIR;
+  const notice = options.onNotice ?? ((): void => {});
 
-  if (await isDebugPortLive(port)) {
+  const existing = await resolveDebugPort({ port: requestedPort, userDataDir: profileDir });
+  if (existing !== null) {
+    if (existing.source === "devtools-file") {
+      notice(`既有的瀏覽器聽在 :${existing.port}（不是 :${requestedPort}）—— 沿用它。`);
+    }
     return {
       browser: { path: "(已在跑)", name: "既有實例" },
-      port,
+      port: existing.port,
+      requestedPort,
       profileDir,
       launched: false,
+      portSource: existing.source,
     };
   }
 
@@ -199,6 +227,18 @@ export async function ensureBrowser(
       : findBrowser();
   if (browser === null) throw new BrowserNotFoundError();
 
+  // 綁得上就用首選埠（結果可預期，CLI 的 --port 也才對得起來）；綁不上才讓
+  // Chromium 自己挑。`in-use` 不算綁不上 —— 那多半是別的東西在聽，硬換埠反而
+  // 會讓玩家的設定與實際永遠對不起來，留給下面的逾時去報。
+  const blocked = (await probePortState(requestedPort)) === "blocked";
+  const launchPort = blocked && options.autoPortFallback !== false ? 0 : requestedPort;
+  if (launchPort === 0) {
+    notice(
+      `:${requestedPort} 綁不上（Windows 保留範圍），改用 --remote-debugging-port=0 ` +
+        "讓瀏覽器自己挑一個，接上之後會回報實際的埠。",
+    );
+  }
+
   const env: NodeJS.ProcessEnv = { ...process.env };
   // §launching 陷阱 1：companion 自己是 Electron app，`ELECTRON_RUN_AS_NODE`
   // 會傳染給子程序。Chrome 不吃這個變數，但同一份規則對所有 spawn 都適用，
@@ -206,7 +246,7 @@ export async function ensureBrowser(
   for (const key of ENV_KEYS_TO_STRIP) delete env[key];
 
   const args = buildBrowserArgs({
-    port,
+    port: launchPort,
     profileDir,
     ...(options.extraArgs !== undefined ? { extraArgs: options.extraArgs } : {}),
   });
@@ -225,10 +265,25 @@ export async function ensureBrowser(
 
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
-    if (await isDebugPortLive(port)) {
-      return { browser, port, profileDir, launched: true };
+    // 兩條都要問：首選埠可能就通了；自動挑埠時只有 DevToolsActivePort 知道答案。
+    const live = await resolveDebugPort({ port: requestedPort, userDataDir: profileDir });
+    if (live !== null) {
+      if (live.port !== requestedPort) notice(`瀏覽器挑到的埠是 :${live.port}。`);
+      return {
+        browser,
+        port: live.port,
+        requestedPort,
+        profileDir,
+        launched: true,
+        portSource: live.source,
+      };
     }
   }
 
-  throw new BrowserPortTimeoutError(port, profileDir, Math.round(timeoutMs / 1000));
+  throw new BrowserPortTimeoutError(
+    requestedPort,
+    profileDir,
+    Math.round(timeoutMs / 1000),
+    launchPort === 0,
+  );
 }

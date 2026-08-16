@@ -24,12 +24,12 @@ describe("redactUrl", () => {
 
   it("WebSocket debugger URL 的路徑本身就是憑證，整段拿掉", () => {
     const out = redactUrl(
-      "ws://127.0.0.1:9333/devtools/browser/03e850e7-8f88-4220-8f52-543f00d22d0f",
+      "ws://127.0.0.1:59222/devtools/browser/03e850e7-8f88-4220-8f52-543f00d22d0f",
     );
 
     expect(out).not.toContain("03e850e7");
     expect(out).not.toContain("devtools");
-    expect(out).toBe("ws://127.0.0.1:9333/***");
+    expect(out).toBe("ws://127.0.0.1:59222/***");
   });
 
   it("拿掉 URL 裡的帳號密碼", () => {

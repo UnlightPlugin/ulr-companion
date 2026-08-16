@@ -22,9 +22,45 @@ import {
   ExecutionContextTracker,
   findGameContext,
 } from "./game-context.js";
-import type { CostOverrides, CostPatchReport } from "./patch-cost.js";
+import type { CostOverrides, CostOverrideTables, CostPatchReport } from "./patch-cost.js";
 import { buildCostPatchScript, isCostPatchReport } from "./patch-cost.js";
+import type { PenaltyBand, PenaltyPatchReport } from "./patch-penalty.js";
+import {
+  buildPenaltyPatchScript,
+  isPenaltyPatchReport,
+  PENALTY_UNINSTALL_EXPRESSION,
+} from "./patch-penalty.js";
+import type {
+  CreateRoomOptions,
+  CreateRoomResult,
+  JoinRoomResult,
+  MatchContext,
+  RoomEntry,
+} from "./match-room.js";
+import {
+  buildCreateRoomExpression,
+  buildJoinRoomExpression,
+  MATCH_ROOM_INSTALL_EXPRESSION,
+} from "./match-room.js";
+import type { HiddenStage, HiddenStageStatus } from "./patch-stage.js";
+import {
+  buildHiddenStageScript,
+  HIDDEN_STAGE_STATUS_EXPRESSION,
+  HIDDEN_STAGE_UNINSTALL_EXPRESSION,
+  parseHiddenStageStatus,
+} from "./patch-stage.js";
 import type { CdpTransport } from "./protocol.js";
+import type { CardProfiles, CharacterAssetTable, IndexedCardTable } from "./read-card-assets.js";
+import {
+  CC_ASSET_READ_EXPRESSION,
+  EVENT_CARD_READ_EXPRESSION,
+  MC_ASSET_READ_EXPRESSION,
+  PROFILE_READ_EXPRESSION,
+  WEAPON_READ_EXPRESSION,
+  parseCharacterAssets,
+  parseIndexedCards,
+  parseProfiles,
+} from "./read-card-assets.js";
 import type { GamePageSession } from "./session.js";
 import { attachToGamePage } from "./session.js";
 import { discoverDebuggerUrl, WebSocketTransport } from "./transport.js";
@@ -100,6 +136,7 @@ export class CdpAdapter {
   #tracker: ExecutionContextTracker | null = null;
   #context: GameExecutionContext | null = null;
   #reportHandlers = new Set<(report: CostPatchReport) => void>();
+  #penaltyHandlers = new Set<(report: PenaltyPatchReport) => void>();
   #wsHandlers = new Set<(report: WsWatchReport) => void>();
   #okHandlers = new Set<(report: OkPatchReport) => void>();
   #speedHandlers = new Set<(report: SpeedPatchReport) => void>();
@@ -239,13 +276,115 @@ export class CdpAdapter {
     return parseDiscoveredBundles(raw);
   }
 
+  // -------------------------------------------------------------------------
+  // 約戰：開房 / 進房（WP-16）
+  // -------------------------------------------------------------------------
+
+  /**
+   * 裝上開房／進房的操作介面。**不需要 reload。**
+   *
+   * ⚠ 只是裝介面，本身不會動到任何東西。真正會改變遊戲狀態的是
+   * `createRoom()` / `joinRoom()`，那兩支必須由玩家明確觸發。
+   */
+  async installMatchRoom(): Promise<string> {
+    return await this.evaluate<string>(MATCH_ROOM_INSTALL_EXPRESSION);
+  }
+
+  /** 現在在哪個頻道、選了哪副牌組、叫什麼名字。 */
+  async matchContext(): Promise<MatchContext> {
+    const raw = await this.evaluate<string>("window.__ulrMatch.context()");
+    return JSON.parse(raw) as MatchContext;
+  }
+
+  /**
+   * 最後一次收到的房間清單。
+   *
+   * ⚠ 這是遊戲廣播給大廳**每一個人**的公開資料（MatchingLobby 的房間列就是
+   * 用它畫的，含雙方牌組縮圖），不是隱藏資訊。但**不得**拿來挑對手。
+   */
+  async roomSnapshot(): Promise<{ seq: number; live: boolean; rooms: RoomEntry[] }> {
+    const raw = await this.evaluate<string>("window.__ulrMatch.rooms_snapshot()");
+    return JSON.parse(raw) as { seq: number; live: boolean; rooms: RoomEntry[] };
+  }
+
+  /**
+   * 開一間房。⚠ **會消耗 AP 5**，而且會出現在公開的房間清單上。
+   */
+  async createRoom(options: CreateRoomOptions): Promise<CreateRoomResult> {
+    const raw = await this.evaluate<string>(buildCreateRoomExpression(options));
+    return JSON.parse(raw) as CreateRoomResult;
+  }
+
+  /** 進別人的房。⚠ 成功就直接進對戰了。 */
+  async joinRoom(roomId: string, pass: string): Promise<JoinRoomResult> {
+    const raw = await this.evaluate<string>(buildJoinRoomExpression(roomId, pass));
+    return JSON.parse(raw) as JoinRoomResult;
+  }
+
+  /** 收掉自己開的房。取消配對時一定要叫，否則清單上會留空房。 */
+  async cancelRoom(): Promise<string> {
+    return await this.evaluate<string>("window.__ulrMatch.cancel()");
+  }
+
+  /**
+   * 讀回這個客戶端的原版角色卡資料（`cc_asset`）。
+   *
+   * ⚠ 要在**沒有套自訂 COST**的客戶端上呼叫 —— `installCostOverrides` 是就地
+   * 改寫同一份快取資料，套過之後讀回來的是被改過的數字。詳見
+   * `read-card-assets.ts`。
+   */
+  async readCharacterAssets(): Promise<CharacterAssetTable> {
+    const raw = await this.evaluate<string>(CC_ASSET_READ_EXPRESSION);
+    return parseCharacterAssets(raw);
+  }
+
+  /**
+   * 怪物卡（`mc_asset`）。形狀跟角色一模一樣，所以共用同一個解析器。
+   *
+   * ⚠ 怪物**跟角色共用同樣那三個槽位、照樣參與壓 C** —— 它不是第四種加項。
+   */
+  async readMonsterAssets(): Promise<CharacterAssetTable> {
+    const raw = await this.evaluate<string>(MC_ASSET_READ_EXPRESSION);
+    return parseCharacterAssets(raw);
+  }
+
+  /**
+   * 裝備（`avatar_item.weapon`）。**回傳的是陣列索引，不是 `wp001`** ——
+   * 規則鍵的命名是 `@ulr/rule-schema` 的事，見 `read-card-assets.ts`。
+   */
+  async readWeaponAssets(): Promise<IndexedCardTable> {
+    const raw = await this.evaluate<string>(WEAPON_READ_EXPRESSION);
+    return parseIndexedCards(raw);
+  }
+
+  /** 事件卡（`event_info.frames`）。同樣回傳陣列索引。 */
+  async readEventCardAssets(): Promise<IndexedCardTable> {
+    const raw = await this.evaluate<string>(EVENT_CARD_READ_EXPRESSION);
+    return parseIndexedCards(raw);
+  }
+
+  /**
+   * 角色與怪物的**中文名**（`charaProfile` / `monsProfile`）。
+   *
+   * 編輯 COST 的介面靠這個活著 —— 玩家看得懂「艾伯李斯特」，看不懂 `cc001_01`。
+   */
+  async readProfiles(): Promise<CardProfiles> {
+    const raw = await this.evaluate<string>(PROFILE_READ_EXPRESSION);
+    return parseProfiles(raw);
+  }
+
   /**
    * 裝上自訂 COST。
    *
-   * 鍵必須是 cc_asset 的 `filename`（`cc078_04` / `cc078_r04`），
-   * 理由見 `patch-cost.ts` 的說明與 docs/open-questions.md 第 1 題。
+   * 吃四張表（`{ characters, monsters, equipment, eventCards }`），也吃只有
+   * 角色的舊寫法（一個扁平的 `Record<string, number>`）。
+   *
+   * 鍵：角色與怪物用資產的 `filename`（`cc078_04` / `mc001_01`），裝備與
+   * 事件卡用**陣列索引字串**。理由見 `patch-cost.ts` 與 docs/open-questions.md 第 1 題。
    */
-  async installCostOverrides(costs: CostOverrides): Promise<CostPatchInstallation> {
+  async installCostOverrides(
+    costs: CostOverrides | CostOverrideTables,
+  ): Promise<CostPatchInstallation> {
     const client = this.#client;
     const session = this.#session;
     if (client === null || session === null) throw new NotConnectedError();
@@ -306,6 +445,62 @@ export class CdpAdapter {
   onCostPatchReport(handler: (report: CostPatchReport) => void): () => void {
     this.#reportHandlers.add(handler);
     return () => this.#reportHandlers.delete(handler);
+  }
+
+  /** 訂閱壓 C 罰則補丁的回報。 */
+  onPenaltyPatchReport(handler: (report: PenaltyPatchReport) => void): () => void {
+    this.#penaltyHandlers.add(handler);
+    return () => this.#penaltyHandlers.delete(handler);
+  }
+
+  /**
+   * 改寫遊戲內顯示的壓 C 罰則。
+   *
+   * ⚠ 跟 `installCostOverrides()` 不同，這支**不需要 reload** —— `Deck` 類別
+   * 在遊戲跑起來之後一直都在，`Runtime.evaluate` 隨時掛得上去，而且會順手把
+   * 牌組畫面重畫一次。玩家改了規則就當場看到新數字。
+   *
+   * 換規則時直接再呼叫一次即可：頁面端會從**原始**的 `getCost` 重新包，
+   * 不會疊補丁。
+   */
+  async installPenaltyOverrides(bands: readonly PenaltyBand[]): Promise<void> {
+    const source = buildPenaltyPatchScript({ bands, bindingName: REPORT_BINDING_NAME });
+    await this.evaluate<unknown>(source);
+  }
+
+  /** 把罰則還原成遊戲原本的算法。 */
+  async uninstallPenaltyOverrides(): Promise<string> {
+    return await this.evaluate<string>(PENALTY_UNINSTALL_EXPRESSION);
+  }
+
+  // -------------------------------------------------------------------------
+  // 隱藏地圖
+  // -------------------------------------------------------------------------
+
+  /**
+   * 把隱藏地圖加進遊戲自己的開房對話框。
+   *
+   * ⚠ 跟 `installCostOverrides()` 不同，這支**不需要 reload**（走
+   * `Runtime.evaluate`）—— 但也因此**遊戲重載就會被沖掉**，接上時要重裝一次。
+   *
+   * ⚠ 回傳的 `dropdownPatched` 幾乎一定是 `false`：選單那個類別要等玩家第一次
+   * 開「創建對戰房間」才碰得到（見 `patch-stage.ts` 的檔頭）。那不是失敗，
+   * UI 要照實說。
+   */
+  async installHiddenStages(stages: readonly HiddenStage[]): Promise<HiddenStageStatus> {
+    const raw = await this.evaluate<string>(buildHiddenStageScript({ stages }));
+    return parseHiddenStageStatus(raw);
+  }
+
+  /** 隱藏地圖現在的狀態。頁面上沒裝（或被重載沖掉）會回 `installed: false`。 */
+  async hiddenStageStatus(): Promise<HiddenStageStatus> {
+    const raw = await this.evaluate<string>(HIDDEN_STAGE_STATUS_EXPRESSION);
+    return parseHiddenStageStatus(raw);
+  }
+
+  /** 把選單還原成官方的 11 項。 */
+  async uninstallHiddenStages(): Promise<string> {
+    return await this.evaluate<string>(HIDDEN_STAGE_UNINSTALL_EXPRESSION);
   }
 
   /**
@@ -500,6 +695,7 @@ export class CdpAdapter {
     this.#context = null;
     this.#session = null;
     this.#reportHandlers.clear();
+    this.#penaltyHandlers.clear();
     this.#wsHandlers.clear();
     this.#okHandlers.clear();
     this.#speedHandlers.clear();
@@ -525,6 +721,10 @@ export class CdpAdapter {
     // 兩種回報共用同一個 binding，用 type 分流。
     if (isCostPatchReport(parsed)) {
       dispatch(this.#reportHandlers, parsed);
+      return;
+    }
+    if (isPenaltyPatchReport(parsed)) {
+      dispatch(this.#penaltyHandlers, parsed);
       return;
     }
     if (isWsWatchReport(parsed)) {

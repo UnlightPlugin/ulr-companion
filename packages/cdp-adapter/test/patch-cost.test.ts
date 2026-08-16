@@ -11,11 +11,12 @@
 
 import vm from "node:vm";
 import { describe, expect, it } from "vitest";
-import type { CostPatchApplied, CostPatchReport } from "@ulr/cdp-adapter";
+import type { CostPatchApplied, CostPatchReport, CostTableId } from "@ulr/cdp-adapter";
 import {
   buildCostPatchScript,
   InvalidCostOverrideError,
   isCostPatchReport,
+  normalizeCostTables,
 } from "@ulr/cdp-adapter";
 
 const BINDING = "__ulrCompanionReport";
@@ -95,11 +96,15 @@ function ccAsset(): { frames: { filename: string; chara: string; level: number; 
   };
 }
 
-function appliedReport(page: FakePage): CostPatchApplied {
-  const found = page.reports.find((r): r is CostPatchApplied => r.type === "cost-patch");
+function appliedReport(page: FakePage, table: CostTableId = "characters"): CostPatchApplied {
+  const found = page.reports.find(
+    (r): r is CostPatchApplied => r.type === "cost-patch" && r.table === table,
+  );
   if (found === undefined) {
     throw new Error(
-      `沒有收到 cost-patch 回報，只有：${page.reports.map((r) => r.type).join(", ")}`,
+      `沒有收到 ${table} 的 cost-patch 回報，只有：${page.reports
+        .map((r) => (r.type === "cost-patch" ? `cost-patch:${r.table}` : r.type))
+        .join(", ")}`,
     );
   }
   return found;
@@ -284,6 +289,203 @@ describe("buildCostPatchScript", () => {
       expect(report.unknownKeys).toContain("__proto__");
       expect(data.frames[1]?.cost).toBe(30);
       expect(({} as Record<string, unknown>)["cost"]).toBeUndefined();
+    });
+  });
+
+  /**
+   * 一副牌組是四張表組合出來的。這一組釘的是「四張表一個 hook」那件事 ——
+   * 以及**它們的鍵不是同一套**：角色與怪物用 filename，裝備與事件卡用索引。
+   */
+  describe("四張表", () => {
+    const mcAsset = () => ({
+      frames: [
+        { filename: "mc001_01", chara: "mc001_01", level: 1, cost: 9 },
+        { filename: "mc001_02", chara: "mc001_02", level: 2, cost: 10 },
+      ],
+    });
+    /** ⚠ 陣列在 `weapon` 不是 `frames` —— avatar_item 是一份大雜燴。 */
+    const avatarItem = () => ({
+      avatar: [{ frame: 0, cost: 0 }],
+      weapon: [
+        { frame: 0, name_tcn: "妖魔短劍", cost: 0 },
+        { frame: 1, name_tcn: "勇者短劍", cost: 1 },
+        { frame: 2, name_tcn: "詛咒短劍", cost: 1 },
+      ],
+    });
+    const eventInfo = () => ({
+      frames: [
+        { name_tcn: "劍1卡", cost: 0 },
+        { name_tcn: "劍2卡", cost: 0 },
+        { name_tcn: "劍3卡", cost: 0 },
+        { name_tcn: "劍4卡", cost: 1 },
+      ],
+    });
+
+    it("一個 hook 認得四個快取鍵，各改各的", async () => {
+      const page = createFakePage();
+      page.installPhaser();
+      await runScript(
+        page,
+        buildCostPatchScript({
+          costs: {
+            characters: { cc078_04: 30 },
+            monsters: { mc001_02: 15 },
+            // ⚠ 索引字串，不是 wp001 —— 規則鍵的轉換是呼叫端的事
+            equipment: { "1": 5 },
+            eventCards: { "3": 7 },
+          },
+          bindingName: BINDING,
+          pollIntervalMs: 1,
+        }),
+      );
+
+      const cc = ccAsset();
+      const mc = mcAsset();
+      const item = avatarItem();
+      const ev = eventInfo();
+      page.makeFile("cc_asset", cc).onProcess();
+      page.makeFile("mc_asset", mc).onProcess();
+      page.makeFile("avatar_item", item).onProcess();
+      page.makeFile("event_info", ev).onProcess();
+
+      expect(cc.frames.map((f) => f.cost)).toEqual([8, 30, 21]);
+      expect(mc.frames.map((f) => f.cost)).toEqual([9, 15]);
+      expect(item.weapon.map((w) => w.cost)).toEqual([0, 5, 1]);
+      expect(ev.frames.map((f) => f.cost)).toEqual([0, 0, 0, 7]);
+      // 同一份 avatar_item 的其他段落一個都不能碰
+      expect(item.avatar[0]?.cost).toBe(0);
+    });
+
+    it("每張表各發一則回報 —— 它們是四個獨立的 load.json，完成時間不同", async () => {
+      const page = createFakePage();
+      page.installPhaser();
+      await runScript(
+        page,
+        buildCostPatchScript({
+          costs: { characters: { cc078_04: 30 }, eventCards: { "3": 7 } },
+          bindingName: BINDING,
+          pollIntervalMs: 1,
+        }),
+      );
+
+      page.makeFile("cc_asset", ccAsset()).onProcess();
+      page.makeFile("event_info", eventInfo()).onProcess();
+
+      expect(appliedReport(page, "characters").applied).toBe(1);
+      expect(appliedReport(page, "eventCards").applied).toBe(1);
+      // 沒給的表連查都不查
+      expect(page.reports.filter((r) => r.type === "cost-patch")).toHaveLength(2);
+    });
+
+    it("索引型的表不回傳 index 對照 —— 它的鍵本來就是索引", async () => {
+      const page = createFakePage();
+      page.installPhaser();
+      await runScript(
+        page,
+        buildCostPatchScript({
+          costs: { characters: { cc078_04: 30 }, equipment: { "1": 5 } },
+          bindingName: BINDING,
+          pollIntervalMs: 1,
+        }),
+      );
+      page.makeFile("cc_asset", ccAsset()).onProcess();
+      page.makeFile("avatar_item", avatarItem()).onProcess();
+
+      expect(appliedReport(page, "characters").index).toEqual([
+        "cc001_01",
+        "cc078_04",
+        "cc078_r04",
+      ]);
+      expect(appliedReport(page, "equipment").index).toBeNull();
+    });
+
+    it("索引超出範圍的鍵進 unknownKeys —— 改版少了一張卡要看得見", async () => {
+      const page = createFakePage();
+      page.installPhaser();
+      await runScript(
+        page,
+        buildCostPatchScript({
+          costs: { eventCards: { "3": 7, "999": 1 } },
+          bindingName: BINDING,
+          pollIntervalMs: 1,
+        }),
+      );
+      page.makeFile("event_info", eventInfo()).onProcess();
+
+      const report = appliedReport(page, "eventCards");
+      expect(report.applied).toBe(1);
+      expect(report.unknownKeys).toEqual(["999"]);
+    });
+
+    it("空的表完全不裝 —— 只改角色的規則不該去碰另外三份資料", async () => {
+      const page = createFakePage();
+      page.installPhaser();
+      await runScript(
+        page,
+        buildCostPatchScript({
+          costs: { characters: { cc078_04: 30 }, monsters: {}, equipment: {} },
+          bindingName: BINDING,
+          pollIntervalMs: 1,
+        }),
+      );
+
+      const mc = mcAsset();
+      page.makeFile("mc_asset", mc).onProcess();
+
+      expect(mc.frames.map((f) => f.cost)).toEqual([9, 10]);
+      expect(page.reports.some((r) => r.type === "cost-patch")).toBe(false);
+      expect(page.originalCalls).toEqual(["mc_asset"]); // 遊戲該做的還是做了
+    });
+
+    it("怪物與角色的鍵不會互撞 —— cc / mc 前綴分得開", async () => {
+      const page = createFakePage();
+      page.installPhaser();
+      await runScript(
+        page,
+        buildCostPatchScript({
+          costs: { characters: { cc001_01: 1 }, monsters: { mc001_01: 2 } },
+          bindingName: BINDING,
+          pollIntervalMs: 1,
+        }),
+      );
+      const cc = ccAsset();
+      const mc = mcAsset();
+      page.makeFile("cc_asset", cc).onProcess();
+      page.makeFile("mc_asset", mc).onProcess();
+
+      expect(cc.frames[0]?.cost).toBe(1);
+      expect(mc.frames[0]?.cost).toBe(2);
+      expect(appliedReport(page, "characters").unknownKeys).toEqual([]);
+      expect(appliedReport(page, "monsters").unknownKeys).toEqual([]);
+    });
+  });
+
+  describe("normalizeCostTables", () => {
+    it("扁平的表當成角色表 —— 既有的呼叫端與規則檔語意不變", () => {
+      expect(normalizeCostTables({ cc078_04: 30 })).toEqual({
+        characters: { cc078_04: 30 },
+        monsters: {},
+        equipment: {},
+        eventCards: {},
+      });
+    });
+
+    it("四張表的寫法照原樣，沒給的補空物件", () => {
+      expect(normalizeCostTables({ monsters: { mc001_01: 9 } })).toEqual({
+        characters: {},
+        monsters: { mc001_01: 9 },
+        equipment: {},
+        eventCards: {},
+      });
+    });
+
+    it("⚠ 空物件是角色表不是四張表 —— 兩種解讀的結果一樣，不能靠它分辨", () => {
+      expect(normalizeCostTables({})).toEqual({
+        characters: {},
+        monsters: {},
+        equipment: {},
+        eventCards: {},
+      });
     });
   });
 

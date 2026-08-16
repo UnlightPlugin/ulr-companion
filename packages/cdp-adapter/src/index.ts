@@ -61,19 +61,97 @@ export type { FindGameContextOptions, GameExecutionContext } from "./game-contex
 
 export {
   buildCostPatchScript,
+  COST_TABLE_IDS,
+  COST_TABLE_TARGETS,
   DEFAULT_MAX_WAIT_MS,
   DEFAULT_POLL_INTERVAL_MS,
   InvalidCostOverrideError,
   isCostPatchReport,
+  normalizeCostTables,
 } from "./patch-cost.js";
 export type {
   CostOverrides,
+  CostOverrideTables,
   CostPatchApplied,
   CostPatchError,
   CostPatchInstalled,
   CostPatchOptions,
   CostPatchReport,
+  CostTableId,
 } from "./patch-cost.js";
+
+export {
+  buildPenaltyPatchScript,
+  DEFAULT_PENALTY_MAX_WAIT_MS,
+  DEFAULT_PENALTY_POLL_MS,
+  InvalidPenaltyBandError,
+  isPenaltyPatchReport,
+  PENALTY_UNINSTALL_EXPRESSION,
+} from "./patch-penalty.js";
+export type {
+  PenaltyBand,
+  PenaltyPatchApplied,
+  PenaltyPatchError,
+  PenaltyPatchOptions,
+  PenaltyPatchReport,
+} from "./patch-penalty.js";
+
+export {
+  buildHiddenStageScript,
+  DEFAULT_STAGE_MAX_WAIT_MS,
+  DEFAULT_STAGE_POLL_MS,
+  HIDDEN_STAGE_SCRIPT_VERSION,
+  HIDDEN_STAGE_STATUS_EXPRESSION,
+  HIDDEN_STAGE_UNINSTALL_EXPRESSION,
+  InvalidHiddenStageError,
+  parseHiddenStageStatus,
+} from "./patch-stage.js";
+export type { HiddenStage, HiddenStagePatchOptions, HiddenStageStatus } from "./patch-stage.js";
+
+export {
+  buildCreateRoomExpression,
+  buildJoinRoomExpression,
+  CHANNEL_NAMES,
+  COST_RANGES,
+  costTiersFor,
+  DEFAULT_ROOM_NAME,
+  findOwnRoom,
+  HIDDEN_STAGES,
+  STAGES,
+  MATCH_ROOM_INSTALL_EXPRESSION,
+  MATCH_ROOM_UNINSTALL_EXPRESSION,
+} from "./match-room.js";
+export type {
+  ChannelInfo,
+  CreateRoomOptions,
+  CreateRoomResult,
+  JoinRoomResult,
+  MatchContext,
+  RoomDeck,
+  RoomEntry,
+} from "./match-room.js";
+
+export {
+  cardAssetReadExpression,
+  CC_ASSET_READ_EXPRESSION,
+  CcAssetReadError,
+  EVENT_CARD_READ_EXPRESSION,
+  indexedCardReadExpression,
+  MC_ASSET_READ_EXPRESSION,
+  parseCharacterAssets,
+  parseIndexedCards,
+  parseProfiles,
+  PROFILE_READ_EXPRESSION,
+  toCostTable,
+  WEAPON_READ_EXPRESSION,
+} from "./read-card-assets.js";
+export type {
+  CardProfiles,
+  CharacterAsset,
+  CharacterAssetTable,
+  IndexedCardAsset,
+  IndexedCardTable,
+} from "./read-card-assets.js";
 
 export {
   BUNDLE_DISCOVERY_EXPRESSION,
@@ -99,6 +177,21 @@ export type {
 
 export { detectGameInstall } from "./game-install.js";
 export type { ClientMode, GameInstall } from "./game-install.js";
+
+export {
+  desktopUserDataDir,
+  DEVTOOLS_ACTIVE_PORT_FILE,
+  explainDebugPort,
+  probePortState,
+  readDevToolsActivePort,
+  resolveDebugPort,
+} from "./debug-port.js";
+export type {
+  DebugPortSource,
+  PortState,
+  ResolvedDebugPort,
+  ResolveDebugPortOptions,
+} from "./debug-port.js";
 
 export {
   BrowserNotFoundError,
