@@ -184,7 +184,13 @@ export interface MatchCriteria {
   ruleSetId: string;
   /** 遊戲頻道編號。不同頻道的房間互相看不到，配在一起沒有意義。 */
   channel: number;
-  /** `3vs3` 之類。遊戲的 `multi` 旗標。 */
+  /**
+   * `3vs3` 之類。遊戲的 `multi` 旗標。
+   *
+   * ⚠ **插件現在永遠送 `true`**（3vs3，見 `@ulr/arbiter-engine` 的 `ROOM_MULTI`）
+   * —— 玩家選不到，所以實務上這一格是常數。欄位留著是因為
+   * {@link matchCriteriaString} 的格式**發布之後就不能改**。
+   */
   multi: boolean;
   /**
    * 約定的隊伍 COST 上限。`null` = 不設限。

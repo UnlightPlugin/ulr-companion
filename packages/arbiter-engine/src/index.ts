@@ -16,23 +16,41 @@ export {
 export type { CostPhase, CostState, EngineOptions, EngineStatus } from "./engine.js";
 
 export {
+  buildRoomName,
   checkOwnDeck,
+  COST_BAND_WIDTH,
+  costBand,
   crossEvaluate,
+  DEFAULT_STAGE_PICK,
   encodeDeckBody,
   encodeEvalBody,
   encodePrefBody,
+  formatBand,
+  formatCostTag,
   HANDOFF_POLL_MS,
   HANDOFF_TIMEOUT_MS,
+  LOBBY_WATCH_MS,
   MatchPairing,
   negotiateStage,
+  normalizeStagePick,
+  outOfBand,
   parseDeckBody,
   parseEvalBody,
   parsePrefBody,
   PEER_REPLY_TIMEOUT_MS,
+  pickArcadiaStage,
   RANDOM_STAGE,
+  ROOM_NAME_FALLBACK,
   STAGE_WAIT_MS,
 } from "./match-pairing.js";
-export type { LimitCheck, PairingOptions, PairingPhase, PairingStatus } from "./match-pairing.js";
+export type {
+  CostBand,
+  LimitCheck,
+  PairingOptions,
+  PairingPhase,
+  PairingStatus,
+  StagePick,
+} from "./match-pairing.js";
 
 export { channelsAgree, guestJoinRoom, hostOpenRoom, preflight } from "./match-session.js";
 export type {

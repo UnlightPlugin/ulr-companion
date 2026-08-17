@@ -204,6 +204,32 @@ export const HIDDEN_STAGES: readonly { value: string; name: string }[] = [
 ];
 
 /**
+ * 「亞城隨機」抽的那幾張 —— 官方選單的 `000`~`009` **再加上 `010`**。
+ *
+ * ⚠ `010`（魔女山谷）在官方的開房選單裡是選不到的（見 {@link HIDDEN_STAGES}），
+ * 但客戶端與伺服器都認得它，背景圖也實測抓得到。放進來是玩家指定的：
+ * 自動配對要取代亞歷山卓城的快速比賽，而那邊的隨機池就是這十一張。
+ *
+ * ⚠ **這一張還沒有在上面打完一整場。** 背景載得起來是實證，戰鬥流程不是 ——
+ * 不想碰的人在配對頁選「官方隨機」，那條路只會開 `014`。
+ *
+ * ⚠ 不含 `014`：那不是地圖，是「叫伺服器自己抽」。抽到它等於白抽一次。
+ */
+export const ARCADIA_STAGES: readonly string[] = [
+  "000",
+  "001",
+  "002",
+  "003",
+  "004",
+  "005",
+  "006",
+  "007",
+  "008",
+  "009",
+  "010",
+];
+
+/**
  * 「牌組Cost限制」可以填的值。照抄 `Match.COST_RANGES`。
  *
  * ⚠ 只有 0~5，不是任意數字。它是**容差**（房間對話框寫「± 5」），
@@ -213,6 +239,19 @@ export const COST_RANGES: readonly number[] = [0, 1, 2, 3, 4, 5];
 
 /** 官方預設房名（`Match.DEFAULT_NAMES.tcn`）。 */
 export const DEFAULT_ROOM_NAME = "請多關照";
+
+/**
+ * 房名最多幾個字。
+ *
+ * ⚠ **這是插件自己的上限，不是實測出來的伺服器上限。** 依據是官方快速比賽
+ * 開出來的房名 —— `Quickmatch [COST:57]` 剛好 20 個字，而那是遊戲自己產的，
+ * 所以 20 一定塞得下。再長會不會被截、被拒，沒有驗過。
+ *
+ * 自動配對的房名是系統組的（見 `@ulr/arbiter-engine` 的 `buildRoomName`），
+ * 組出來一定在這個長度之內 —— 而且 `[COST:57]` 那一段永遠完整，被截的
+ * 只會是前面的規則名。
+ */
+export const ROOM_NAME_MAX_LENGTH = 20;
 
 export interface ChannelInfo {
   /** `ranked` = 有 BP 排名，`duel` = 一般約戰。 */

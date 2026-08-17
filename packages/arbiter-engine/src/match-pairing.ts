@@ -5,11 +5,26 @@
  * 數」是插件自己判的**，而判準是這個檔案。
  *
  * ```
- *   排隊 ──▶ 湊成一對 ──▶ 規則對得上嗎 ──▶ 我的牌組合法嗎 ──▶ 開房 / 進房
- *                │              │ 不行            │ 不行
- *                │              ▼                 ▼
- *                └──────── 換下一個對手      停止排隊，告訴玩家哪裡要改
+ *   排隊 ──▶ 湊成一對 ──▶ 規則對得上嗎 ──▶ 我的牌組在這一檔裡嗎 ──▶ 開房 / 進房
+ *     │          │              │ 不行            │ 不行
+ *     │          │              ▼                 ▼
+ *     │          └──────── 換下一個對手      停止排隊，告訴玩家哪裡要改
+ *     │
+ *     └── 每 5 秒看一次玩家還在不在這個頻道，不在就自己停（`#watchLobby`）
  * ```
+ *
+ * ## 這是拿來取代亞歷山卓城的
+ *
+ * 官方的快速比賽只有 ranked 頻道有，而且用**原版 COST** 分檔（`[57,66,78]`）。
+ * 自訂規則的約戰只能在 duel 頻道，那裡沒有佇列 —— 這一支就是那條佇列，而它
+ * 刻意做成亞城的形狀：
+ *
+ *   · **檔位有下限**（57 檔收 56.01～57.00，見 {@link COST_BAND_WIDTH}）
+ *   · **房名系統取**，標著 `[COST:57]`（見 {@link buildRoomName}）
+ *   · **地點玩家選不到**，只有「誰來抽」（見 {@link StagePick}）
+ *
+ * 那三件事在亞城都不是選項，而它們正是「快速比賽」跟「約戰」的差別：
+ * 按一顆按鈕就該打得起來，不該先填一張表。
  *
  * ## 為什麼判斷在客戶端，而這仍然是安全的
  *
@@ -61,7 +76,8 @@ import type {
   QueueRole,
   QueueStatus,
 } from "@ulr/arbiter-link";
-import { DEFAULT_ROOM_NAME } from "@ulr/cdp-adapter";
+import { ARCADIA_STAGES, ROOM_NAME_MAX_LENGTH } from "@ulr/cdp-adapter";
+import type { MatchContext } from "@ulr/cdp-adapter";
 import type { MatchDriver, PreflightResult, Sleep } from "./match-session.js";
 import { guestJoinRoom, hostOpenRoom, preflight } from "./match-session.js";
 
@@ -105,6 +121,23 @@ export const HANDOFF_TIMEOUT_MS = 90_000;
 export const STAGE_WAIT_MS = 3_000;
 
 /**
+ * 排隊時多久看一次「玩家還在不在約定的頻道」。
+ *
+ * ⚠ **這一段不是保險，是收尾路徑之一。** 排隊是會等的，而玩家在等的時候會去
+ * 做別的事：點進別人的房、被拉進一場對戰、切去別的頻道、回標題畫面。少了它，
+ * 那條佇列連線會一直掛著，等玩家打完一場回到大廳，中間人早就把他配給某個人
+ * 了 —— 而那個人會開一間房，等一個根本沒在看畫面的對手。
+ *
+ * ⚠ **只在 `queued` 的時候看。** 對規則、開房、進房那幾段離開 Match 場景是
+ * 正常的（進房成功的下一刻就會離開），在那裡判「他不在大廳了」會把剛打起來
+ * 的一場自己收掉。
+ *
+ * 5 秒：這是一次 CDP 往返，而配對頁本身已經每 3 秒問一次了 —— 再密沒有意義，
+ * 再疏的話「按了開始就跑去打別場」會留一條佇列連線掛半分鐘。
+ */
+export const LOBBY_WATCH_MS = 5_000;
+
+/**
  * 官方的「隨機」地點。選它等於把地點交給伺服器。
  *
  * ⚠ 這個值是**遊戲自己的**（`STAGES` 的最後一項），不是我們定的代號。
@@ -112,50 +145,168 @@ export const STAGE_WAIT_MS = 3_000;
 export const RANDOM_STAGE = "014";
 
 /**
- * 兩邊各選了一個地點，這一場要開在哪。
+ * 玩家能選的地點 —— **只有兩種，沒有「指定某一張」這回事。**
  *
- * | 情況               | 結果                 | 為什麼                                     |
- * | ------------------ | -------------------- | ------------------------------------------ |
- * | 兩邊一樣           | 那一個               | 沒有分歧                                   |
- * | 有一邊選「隨機」   | **隨機**             | 選隨機的人已經表示「哪裡都行」，那就別指定 |
- * | 兩邊指定了不同地點 | 從**這兩個**裡面抽一 | 各有一半機會，而且不會抽到誰都沒選的地圖   |
- * | 對手沒說           | 我的                 | 舊版插件或中間人不轉發 —— 不能因此不開房   |
+ * 自動配對是拿來取代亞歷山卓城的快速比賽的，而那邊不讓人挑地圖。挑地圖在
+ * 這裡也沒有意義：開房的只有 host，所以「我指定 007」對 guest 而言是單方面
+ * 被決定的，而協商（從雙方選的兩張裡抽一張）只是把那個不對稱換成擲骰子。
  *
- * ⚠ **抽的是「這兩個」而不是全部 15 張地圖。** 抽全部的話兩個人都會被丟到
- * 一個誰都沒選的地方，那比直接用其中一邊的更難接受。
+ * | 值         | 誰抽             | 抽哪些                             |
+ * | ---------- | ---------------- | ---------------------------------- |
+ * | `arcadia`  | **插件**         | {@link ARCADIA_STAGES}（000~010）  |
+ * | `official` | **遊戲伺服器**   | 它自己那份（我們看不到，也管不著） |
  *
- * 純函式（亂數從外面餵）——「隨機」這種東西寫在狀態機裡就永遠測不到了。
+ * 兩者的差別**不是**「哪個比較隨機」，是抽的池子不同 —— `arcadia` 一定會抽到
+ * 那十一張裡的一張（含官方選單沒有的 010），`official` 抽的是官方那份。
  */
-export function negotiateStage(
-  mine: string,
-  theirs: string | null,
-  roll: () => number = Math.random,
-): string {
-  if (theirs === null || theirs === "" || theirs === mine) return mine;
-  if (mine === RANDOM_STAGE || theirs === RANDOM_STAGE) return RANDOM_STAGE;
-  return roll() < 0.5 ? mine : theirs;
-}
+export type StagePick = "arcadia" | "official";
 
-/** `q-pref` 的內容。**只有開房偏好**，沒有身分、沒有牌組、沒有規則。 */
-export function encodePrefBody(pref: { stage: string }): string {
-  return JSON.stringify({ s: pref.stage });
+/** 認不得的值一律回這個。取代亞城的預設就是亞城的池子。 */
+export const DEFAULT_STAGE_PICK: StagePick = "arcadia";
+
+export function normalizeStagePick(raw: unknown): StagePick {
+  return raw === "official" ? "official" : DEFAULT_STAGE_PICK;
 }
 
 /**
- * 解析對手的 `q-pref`。壞掉一律 `null` —— 那等同「他沒說」，用我自己的地點。
+ * 從「亞城池」抽一張。
  *
- * ⚠ 要驗格式。這個字串會被拿去當開房參數，而開房參數是送進遊戲封包的東西。
+ * 純函式（亂數從外面餵）——「隨機」這種東西寫在狀態機裡就永遠測不到了。
  */
-export function parsePrefBody(body: string): { stage: string } | null {
+export function pickArcadiaStage(roll: () => number = Math.random): string {
+  const i = Math.floor(roll() * ARCADIA_STAGES.length);
+  // ⚠ 要夾。`roll()` 回 1（或 1.0000001）時 `i` 會落在陣列外，而那個 undefined
+  // 會被當成開房參數送出去 —— 伺服器回 fail:20，而錯誤訊息完全看不出原因。
+  const clamped = Math.min(Math.max(i, 0), ARCADIA_STAGES.length - 1);
+  return ARCADIA_STAGES[clamped] ?? RANDOM_STAGE;
+}
+
+/**
+ * 兩邊各選了一種抽法，這一場開在哪（回傳的是**具體的地點代號**）。
+ *
+ * | 我       | 對手               | 結果                     |
+ * | -------- | ------------------ | ------------------------ |
+ * | arcadia  | arcadia            | 從 000~010 抽一張        |
+ * | arcadia  | **沒說**（舊版）   | 從 000~010 抽一張        |
+ * | arcadia  | official           | **`014`**（官方隨機）    |
+ * | official | 任何               | **`014`**                |
+ *
+ * ⚠ **只要有一邊選了「官方隨機」就走官方隨機。** 那一邊等於說了「我不要插件
+ * 替我抽」—— 而亞城池裡有一張官方選單沒有的 010（見 {@link ARCADIA_STAGES}），
+ * 硬把他丟過去是拿他沒同意的東西去改變這一場。反過來則沒有這個問題：官方隨機
+ * 抽到的一定是官方認得的地圖。
+ *
+ * ⚠ 對手沒說（舊版插件、或中間人不轉發 `q-pref`）時用**我的** —— 地點協商是
+ * 加分，不是開打的前提。
+ */
+export function negotiateStage(
+  mine: StagePick,
+  theirs: StagePick | null,
+  roll: () => number = Math.random,
+): string {
+  if (mine === "arcadia" && theirs !== "official") return pickArcadiaStage(roll);
+  return RANDOM_STAGE;
+}
+
+/**
+ * `q-pref` 的內容。**只有開房偏好**，沒有身分、沒有牌組、沒有規則。
+ *
+ * ⚠ `official` 送的是舊版認得的 `"014"` 而不是 `"official"`。舊版插件的
+ * `parsePrefBody` 只收三位數字，收到 `"official"` 會當成「他沒說」——
+ * 而 `"014"` 它讀得懂，於是舊版當 host 時也會開隨機房。`arcadia` 沒有這種
+ * 對應值（舊版沒有那個概念），送過去被當成沒說，舊版就用他自己的 —— 那是
+ * 正確的退化。
+ */
+export function encodePrefBody(pref: { stage: StagePick }): string {
+  return JSON.stringify({ s: pref.stage === "official" ? RANDOM_STAGE : "arcadia" });
+}
+
+/**
+ * 解析對手的 `q-pref`。壞掉一律 `null` —— 那等同「他沒說」，用我自己的抽法。
+ *
+ * ⚠ 要驗格式。這個值會決定開房參數，而開房參數是送進遊戲封包的東西。
+ *
+ * ⚠ **舊版送來的三位數字一律當成 `official`。** 新版沒有「指定某一張」這個
+ * 概念了，照著他指定的那張開等於讓一個舊版客戶端單方面決定地點；退回官方隨機
+ * 是雙方都沒挑的中立結果，而且他那版看得懂 `014`。
+ */
+export function parsePrefBody(body: string): { stage: StagePick } | null {
   try {
     const parsed: unknown = JSON.parse(body);
     if (typeof parsed !== "object" || parsed === null) return null;
     const stage = (parsed as Record<string, unknown>)["s"];
-    if (typeof stage !== "string" || !/^\d{3}$/.test(stage)) return null;
-    return { stage };
+    if (typeof stage !== "string") return null;
+    if (stage === "arcadia") return { stage: "arcadia" };
+    if (/^\d{3}$/.test(stage)) return { stage: "official" };
+    return null;
   } catch {
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// 房名
+// ---------------------------------------------------------------------------
+
+/**
+ * 房名的**規則那一段**塞不下時用這個。
+ *
+ * 抄的是官方快速比賽（`Quickmatch [COST:57]`）—— 自動配對就是要取代它，
+ * 大廳上看起來一樣是刻意的。
+ */
+export const ROOM_NAME_FALLBACK = "Quickmatch";
+
+/** `57` → `"57"`、`57.5` → `"57.5"`。⚠ 房名要短，`.00` 是白佔兩格。 */
+function trimCost(limit: number): string {
+  return String(Math.round(limit * 100) / 100);
+}
+
+/**
+ * 這一檔在大廳上叫什麼 —— `[COST:57]`。
+ *
+ * ⚠ 標的是**這一檔的上限**，跟亞城的 `[COST:57]` 同一個意思：那不是「剛好 57」，
+ * 是「57 這一檔」，實際收的區間見 {@link costBand}。
+ */
+export function formatCostTag(costLimit: number | null): string {
+  return costLimit === null ? "[COST:自由]" : `[COST:${trimCost(costLimit)}]`;
+}
+
+/**
+ * 自動配對開出來的房叫什麼。**玩家取不到房名，這支說了算。**
+ *
+ * ```
+ *   夾擠式罰C [COST:57]
+ *   └── 規則名 ──┘└ 這一檔 ┘
+ * ```
+ *
+ * ⚠ **`[COST:n]` 那一段永遠完整，被截的只會是前面的規則名。** 房名的功能是
+ * 讓大廳裡的人一眼看出「這是哪一檔」—— 那正是亞城的房間列在做的事，而自動
+ * 配對是要取代它。截到 COST 那一段的話這個功能就沒了。
+ *
+ * ### 為什麼是規則**名稱**而不是規則族
+ *
+ * 規則族（`tomorin/squeeze-band`）本身就 20 個字，跟 `[COST:57]` 併不進同一個
+ * 房名；截成 `squeeze-ba` 之後既不好讀、也不再是識別碼，兩邊都沒了。
+ *
+ * 而房名**本來就不是識別碼** —— 決定誰配得到誰的是配對鍵（裡面放的正是規則族），
+ * 那個玩家改不了也看不到，房名寫什麼都不會讓錯的人配進來。既然它只是給大廳
+ * 看的招牌，就該用玩家在「牌組 › Cost 表」看到的那個名字，兩邊對照得起來。
+ *
+ * ⚠ 代價講清楚：同一族的不同版本可以改名字，所以大廳上可能出現兩個標籤不同、
+ * 卻排在同一條佇列的房。那隻影響觀感，不影響配對。
+ */
+export function buildRoomName(ruleName: string, costLimit: number | null): string {
+  const tag = formatCostTag(costLimit);
+  // ⚠ 換行與連續空白要壓掉 —— 規則名是規則檔裡的自由文字，帶著換行送進房名
+  // 等於把一個沒人看得懂的東西貼在公開清單上。
+  let label = ruleName.replace(/\s+/gu, " ").trim();
+  if (label === "") label = ROOM_NAME_FALLBACK;
+
+  const budget = ROOM_NAME_MAX_LENGTH - tag.length - 1;
+  // 連一個字都放不下（上限是個超長的數字）→ 只留 COST 那一段。
+  if (budget < 1) return tag.slice(0, ROOM_NAME_MAX_LENGTH);
+  if (label.length > budget) label = `${label.slice(0, budget - 1)}…`;
+  return `${label} ${tag}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -213,17 +364,83 @@ export function crossEvaluate(
   return { host: fingerprint(rule, decks.host), guest: fingerprint(rule, decks.guest) };
 }
 
+// ---------------------------------------------------------------------------
+// COST 檔位
+// ---------------------------------------------------------------------------
+
+/**
+ * 一檔有多寬。**1.00 C。**
+ *
+ * 約定上限 57 收的不是「57 以下」，是 **56.01～57.00** —— 跟亞歷山卓城的
+ * `COST57` 是同一個意思，而自動配對就是要取代那個。
+ *
+ * ### 為什麼要有下限
+ *
+ * 沒有下限的話「57 檔」會收下 40C 的隊伍，而 40C 打 57C 不是一場比賽。
+ * 自訂 COST 規則整套東西的重點是**壓 C**（把隊伍擠到剛好卡滿那一檔），
+ * 而「壓到剛好」只有在下限存在時才是一件要花心思的事 —— 沒有下限的話
+ * 帶什麼都合法，那個設計空間整個消失。
+ *
+ * ⚠ 下限是 `上限 − 1.00 + 0.01`，不是 `上限 − 1.00`：56.00 屬於 56 那一檔，
+ * 不是 57 那一檔。兩檔不重疊，一副牌永遠只落在一檔裡。
+ */
+export const COST_BAND_WIDTH = 1;
+
+/** 一檔的上下限，單位是**整數百分之一**（`cost-number.ts` 的表示法）。 */
+export interface CostBand {
+  /** 下限，**含**。57 檔是 5601。 */
+  floor: number;
+  /** 上限，**含**。57 檔是 5700。 */
+  cap: number;
+}
+
+/**
+ * 約定上限 → 這一檔收的區間。沒有約定上限是 `null`（什麼牌組都收）。
+ *
+ * ⚠ 一律走 `toCentiCost` 轉成整數再算。`limit - 1` 那種寫法在浮點上是
+ * `56.00000000000001`，而那會讓剛好卡在下限的隊伍被判成太低 —— 那是
+ * `cost-number.ts` 整支檔案存在的理由。
+ *
+ * ⚠ 先 `toFixed(2)`：`toCentiCost` 對超過兩位小數的值會**拋例外**，而這個
+ * 數字是玩家在輸入框打的。配對鍵那邊（`matchCriteriaString`）也是 toFixed(2)，
+ * 兩處要用同一個表示法，否則「畫面上寫 57、實際比 57.001」對不起來。
+ */
+export function costBand(costLimit: number | null): CostBand | null {
+  if (costLimit === null) return null;
+  const cap = toCentiCost(Number(costLimit.toFixed(2)));
+  // ⚠ 夾到 0。上限小於一檔寬（例如 0.5）時算出來是負的，而負的下限會讓
+  // 「太低」這個判斷永遠成立不了 —— 那正是我們要的（那種上限本來就沒有下限
+  // 可言），但寫成負數會在畫面上印出 `-49.00` 這種東西。
+  return { floor: Math.max(0, cap - toCentiCost(COST_BAND_WIDTH) + 1), cap };
+}
+
+/** 這一檔在畫面上長什麼樣 —— `56.01～57.00`。沒有約定上限是 `null`。 */
+export function formatBand(costLimit: number | null): string | null {
+  const band = costBand(costLimit);
+  if (band === null) return null;
+  return `${formatCentiCost(band.floor)}～${formatCentiCost(band.cap)}`;
+}
+
 export interface LimitCheck {
   /** 這副牌在這份規則下的總和，顯示用字串。 */
   total: string;
-  /** 超過約定上限了沒。沒有約定上限時永遠 `false`。 */
+  /** 超過這一檔的上限了沒。沒有約定上限時永遠 `false`。 */
   over: boolean;
+  /** 低於這一檔的下限了沒。沒有約定上限時永遠 `false`。 */
+  under: boolean;
+  /** 這一檔收的區間，顯示用（`56.01～57.00`）。沒有約定上限是 `null`。 */
+  band: string | null;
   /** 規則裡沒有定價的鍵。不是空的就代表算出來的數字含 99 這個代替值。 */
   unknown: string[];
 }
 
+/** `over` 或 `under` —— 這副牌不在這一檔裡。 */
+export function outOfBand(check: LimitCheck): boolean {
+  return check.over || check.under;
+}
+
 /**
- * 我這副牌在約定的規則與上限下合不合法。**只看自己那副。**
+ * 我這副牌在約定的規則與檔位下合不合法。**只看自己那副。**
  *
  * ⚠ 對手那副由**對手自己**檢查。這不是偷懶，是同一條紅線：兩邊都會拒絕
  * 不合法的自己，所以不需要任何一方去審對方 —— 也就不需要把對手的總和顯示
@@ -236,16 +453,12 @@ export function checkOwnDeck(
 ): LimitCheck {
   const members = canonicalDeck(deck).characters.map((characterId) => ({ characterId }));
   const result = calculateTeamCost(rule, { members });
+  const band = costBand(costLimit);
   return {
     total: formatCentiCost(result.total),
-    // ⚠ 上限也要走 `toCentiCost` 轉成整數再比。`total / 100 > limit` 那種寫法
-    // 會讓剛好卡滿上限的隊伍被浮點尾巴判成超標 —— 那是 `cost-number.ts`
-    // 整支檔案存在的理由。
-    //
-    // ⚠ 先 `toFixed(2)`：`toCentiCost` 對超過兩位小數的值會**拋例外**，而這個
-    // 數字是玩家在輸入框打的。配對鍵那邊（`matchCriteriaString`）也是 toFixed(2)，
-    // 兩處要用同一個表示法，否則「畫面上寫 62、實際比 62.001」對不起來。
-    over: costLimit !== null && result.total > toCentiCost(Number(costLimit.toFixed(2))),
+    over: band !== null && result.total > band.cap,
+    under: band !== null && result.total < band.floor,
+    band: formatBand(costLimit),
     unknown: result.unknownIds,
   };
 }
@@ -294,8 +507,17 @@ export interface PairingStatus {
   compatibility: Compatibility | null;
   /** 我這副牌在約定規則下的總和。 */
   myTotal: string | null;
-  /** 我這副牌超過約定上限了。 */
+  /** 我這副牌超過這一檔的上限了。 */
   overLimit: boolean;
+  /**
+   * 我這副牌低於這一檔的下限了。
+   *
+   * ⚠ 跟 `overLimit` **要分開**，兩者要玩家做的事相反（一個是減、一個是加）。
+   * 併成一個 `outOfBand` 的話畫面只能說「不在這一檔」，而那句話沒有方向。
+   */
+  underLimit: boolean;
+  /** 這一檔收的區間（`56.01～57.00`）。沒有約定上限是 `null`。 */
+  band: string | null;
   /** 規則版本對不起來、換下一個對手的次數。 */
   skipped: number;
   /**
@@ -325,23 +547,56 @@ export interface QueueLink {
   sendRoom(roomId: string): void;
 }
 
+/**
+ * 插件開的房**永遠是 3vs3**。
+ *
+ * ⚠ 這曾經是玩家可以選的一格，拿掉了 —— 理由跟房名與地圖同一個：自動配對是要
+ * 取代亞歷山卓城的快速比賽，而那邊按一顆按鈕就開打，不先填一張表。多一個選項
+ * 的代價還特別高：`multi` **進配對鍵**，所以那一格會把本來就不多的人潮劈成兩半，
+ * 而排不到的那一半在畫面上看到的只有「排隊中·只有你」。
+ *
+ * ⚠ **值一定要是 `true`（3vs3），不能改。** 它進 `matchCriteriaString`，改成
+ * 別的值等於換掉整個社群的配對鍵 —— 舊版插件與新版永遠配不到，而症狀是安靜的。
+ */
+const ROOM_MULTI = true;
+
+/**
+ * 遊戲自己的「牌組Cost限制 ±N」，插件開房時**永遠不設**。
+ *
+ * ⚠ 它是**伺服器用原版 COST 判**的，而這整個功能約定的是自訂規則算出來的數字
+ * —— 兩個是不同的數字（見 docs/match-making.md 的 §「兩個 COST 限制」）。開著
+ * 它只會讓一副「照約定的規則完全合法」的牌組被官方的數字擋在門外，而玩家看到的
+ * 是進不了房，不是為什麼。約定的那一檔由**雙方各自**用約定的規則檢查
+ * （`checkOwnDeck`），那才是這裡唯一該生效的限制。
+ */
+const ROOM_DECK_COST_BAND = null;
+
 export interface PairingOptions {
   /** 中間人的位址（不含路徑）。跟側通道同一台。 */
   endpoint: string;
   /** 約定的規則。**配對一定要有規則** —— 沒有的話不知道在約定什麼。 */
   rule: CostRule;
   channel: number;
-  multi: boolean;
-  /** 約定的隊伍 COST 上限（用這份規則算）。`null` = 不設限。 */
+  /**
+   * 約定的這一檔（用這份規則算）。`null` = 不設限。
+   *
+   * ⚠ 這是**檔位的上限**，不是「小於等於它就好」—— 實際收的區間是
+   * `上限 − 0.99` 到 `上限`，見 {@link COST_BAND_WIDTH}。
+   */
   costLimit: number | null;
   /**
    * 開房用的欄位。
    *
-   * ⚠ 只有配到人之後**當上 host 的那一邊**會真的用到它們（房名、地點、
-   * 遊戲自己的 ±N）。guest 這邊只有 `stage` 有意義 —— 它會被送給對手參與
-   * 地點協商（見 `negotiateStage`）。
+   * ⚠ **房名不在這裡** —— 它是系統照規則名與檔位組出來的（`buildRoomName`），
+   * 玩家取不到。理由見那支的說明：房名要讓大廳一眼看出這是哪一檔。
+   *
+   * ⚠ 只有配到人之後**當上 host 的那一邊**會真的用到地點。guest 這邊
+   * `stage` 一樣有意義 —— 它會被送給對手參與地點協商（見 `negotiateStage`）。
+   *
+   * ⚠ 遊戲自己的「牌組Cost限制 ±N」**不在這裡**，因為插件永遠不設它
+   * （見 {@link ROOM_DECK_COST_BAND}）。3vs3 同理（{@link ROOM_MULTI}）。
    */
-  room: { name: string; stage: string; friend: boolean; deckCostBand: number | null };
+  room: { stage: StagePick; friend: boolean };
   driver: MatchDriver;
   onStatus?: (status: PairingStatus) => void;
   onLog?: (line: string) => void;
@@ -353,6 +608,8 @@ export interface PairingOptions {
   handoffTimeoutMs?: number;
   /** host 等對手回報地點的上限。 */
   stageWaitMs?: number;
+  /** 排隊時多久看一次玩家還在不在大廳。0 = 不看（測試用）。 */
+  lobbyWatchMs?: number;
   /** 地點抽籤用的亂數。⚠ 測試一定要塞確定性的，不然那條分支測不了。 */
   roll?: () => number;
   /** 測試用：換掉中間人的連線。預設是真的 `MatchQueueClient`。 */
@@ -367,6 +624,8 @@ const IDLE: PairingStatus = {
   compatibility: null,
   myTotal: null,
   overLimit: false,
+  underLimit: false,
+  band: null,
   skipped: 0,
   stage: null,
   message: "沒在配對。",
@@ -407,8 +666,10 @@ export class MatchPairing {
   #handedOff = false;
   /** 等對手進房的輪詢。跟 `#timer`（等對手回話）是兩件事，不能共用一個。 */
   #watch: ReturnType<typeof setTimeout> | null = null;
-  /** 對手想打的地點。`null` = 還沒說（或他那版沒有這個功能）。 */
-  #peerStage: string | null = null;
+  /** 排隊時盯著「玩家還在不在大廳」的輪詢。⚠ 跟上面兩個都不一樣，別共用。 */
+  #lobby: ReturnType<typeof setTimeout> | null = null;
+  /** 對手選的抽法。`null` = 還沒說（或他那版沒有這個功能）。 */
+  #peerStage: StagePick | null = null;
   /** 收到對手地點時要叫醒誰（host 在開房前等它）。 */
   #stageWaiter: (() => void) | null = null;
   #skipped = 0;
@@ -432,10 +693,24 @@ export class MatchPairing {
    * 開始排隊。
    *
    * 排隊之前先做三件事，**每一件失敗都要停在 `blocked` 而不是硬排下去**：
-   * 讀得到牌組、牌組在約定上限之內、玩家人在約定的頻道且沒有自己的房。
+   * 玩家人在約定的頻道、讀得到牌組、**牌組落在約定的那一檔裡**。
+   *
+   * ⚠ 第三件是「換牌組」等級的要求，不是警告。排下去的話配到人才發現不合法，
+   * 而那時對手已經開好房在等了 —— 他要重排一輪，而那一輪是我們害的。
    */
   async start(): Promise<void> {
     if (this.#client !== null) return;
+
+    // ⚠⚠ **第一件事就是離開 `idle`，而且要在其他任何 `#patch` 之前。**
+    //
+    // 托盤靠「狀態變成 idle／blocked」來放掉手上的這個物件（main.ts 的
+    // `onStatus`）—— 那個約定的前提是「回到 idle ＝ 這個任務結束了」。而下面
+    // 那句 `#patch({ myTotal … })` 在 phase 還停在 idle 的時候就把狀態推出去，
+    // 於是托盤在**排隊才剛要開始**的瞬間就把物件丟了：排隊照跑（客戶端還在
+    // 佇列上，配到人一樣會開房消耗 AP），但畫面上按「停止」是打在 null 上，
+    // 怎麼按都停不掉，也不能重按開始（會被「已經在配對中了」擋住）。
+    // 2026-08-16 實測踩到。測試在 match-pairing.test.ts 那條「不准推出 idle」。
+    this.#patch({ ...IDLE, phase: "queued", message: "準備中…" });
 
     const pre = await this.#preflight();
     if (!pre.ok) {
@@ -447,12 +722,14 @@ export class MatchPairing {
     if (deck === null) return;
 
     const check = checkOwnDeck(this.#options.rule, deck, this.#options.costLimit);
-    this.#patch({ myTotal: check.total, overLimit: check.over });
-    if (check.over) {
-      this.#block(
-        `你的隊伍在這份規則下是 ${check.total}，超過約定的 ${String(this.#options.costLimit)}。` +
-          `改牌組或把上限調高再排。`,
-      );
+    this.#patch({
+      myTotal: check.total,
+      overLimit: check.over,
+      underLimit: check.under,
+      band: check.band,
+    });
+    if (outOfBand(check)) {
+      this.#block(this.#bandMessage(check, "換一副牌組再按開始，或改約別的檔位。"));
       return;
     }
     if (check.unknown.length > 0) {
@@ -467,7 +744,9 @@ export class MatchPairing {
     const key = matchKey({
       ruleSetId: this.#options.rule.ruleSetId,
       channel: this.#options.channel,
-      multi: this.#options.multi,
+      // ⚠ 固定 3vs3（見 `ROOM_MULTI`）。這一格仍然在鍵裡是**刻意**的：
+      // 格式一旦發布就不能改，而拿掉它會讓舊版插件與新版算出不同的鍵。
+      multi: ROOM_MULTI,
       costLimit: this.#options.costLimit,
     });
     // ⚠ 算一次就留著。`contentHash` 要把整份規則（700 筆）正規化過一遍，
@@ -497,6 +776,116 @@ export class MatchPairing {
       linked: false,
       message: "正在連中間人…",
     });
+    this.#watchLobby();
+  }
+
+  /**
+   * 牌組不在這一檔裡要說的那句話。
+   *
+   * ⚠ **一定要分「太高」與「太低」。** 兩者要玩家做的事完全相反，而
+   * 「不符合這一檔」那種寫法會讓一個帶 40C 的人以為自己超標，然後往下改。
+   */
+  #bandMessage(check: LimitCheck, tail: string): string {
+    const tier = String(this.#options.costLimit);
+    const range = check.band ?? "";
+    return check.over
+      ? `你的隊伍在這份規則下是 ${check.total}，超過 COST ${tier} 這一檔的上限。` +
+          `這一檔收 ${range}。${tail}`
+      : `你的隊伍在這份規則下是 ${check.total}，低於 COST ${tier} 這一檔的下限。` +
+          `這一檔收 ${range} —— 要再壓高一點，或改約低一檔。${tail}`;
+  }
+
+  /**
+   * 排隊時盯著玩家還在不在約定的頻道，不在就自己停。
+   *
+   * ⚠ **只在 `queued` 的時候判。** 開房、進房那幾段離開 Match 場景是正常的
+   * （進房成功的下一刻遊戲就切到對戰畫面了），在那裡判「不在大廳」等於把剛
+   * 打起來的一場自己收掉。
+   *
+   * ⚠ **「玩家自己開了一間房」不是停止的理由。** 那是他的事，而且他多半就是
+   * 想同時碰運氣。真的配到人時會替他把那間收掉（`#clearOwnRoom`）。
+   */
+  #watchLobby(): void {
+    const every = this.#options.lobbyWatchMs ?? LOBBY_WATCH_MS;
+    this.#clearLobby();
+    if (every <= 0) return;
+
+    const tick = async (): Promise<void> => {
+      this.#lobby = null;
+      // 已經停掉、或走到開房／進房那幾段了就不看這一輪。
+      if (this.#client === null) return;
+      if (this.#status.phase === "queued") {
+        const context = await this.#options.driver.matchContext().catch(() => null);
+        // ⚠ 那一次 CDP 往返之間可能已經被停掉了。回來要重看一次，否則會在一個
+        // 已經結束的任務上呼叫 stop()，把下一次配對的狀態打回 idle。
+        if (this.#client === null) return;
+        // 讀不到就當這一輪沒看到 —— 遊戲重載中、CDP 剛斷都會這樣，而那些會自己
+        // 好。把「問不到」當成「他走了」的話，每一次重載都會靜靜地停掉配對。
+        if (context !== null) {
+          const gone = this.#lobbyExit(context);
+          if (gone !== null) {
+            await this.stop(gone);
+            return;
+          }
+          this.#currentChannel = context.channel;
+        }
+      }
+      this.#lobby = setTimeout(() => void tick(), every);
+    };
+
+    this.#lobby = setTimeout(() => void tick(), every);
+  }
+
+  /** 玩家離開了嗎。`null` = 還在，字串 = 要顯示給他的理由。 */
+  #lobbyExit(context: MatchContext): string | null {
+    if (!context.inMatch) {
+      return (
+        "你已經不在對戰大廳了（進了一場對戰？），配對自動停止 —— " +
+        "留在佇列上的話，你打完回來會發現有人開好房在等你。回大廳再按一次開始。"
+      );
+    }
+    if (context.channel === null) {
+      return "你已經退出頻道了，配對自動停止。回到頻道再按一次開始。";
+    }
+    if (context.channel !== this.#options.channel) {
+      return (
+        `你換到頻道 ${context.channel} 了，配對約定的是頻道 ${this.#options.channel} —— ` +
+        `已自動停止。房間清單是分頻道推播的，兩個人不在同一個頻道就看不到對方的房。`
+      );
+    }
+    return null;
+  }
+
+  /**
+   * 把玩家自己開的那間房收掉。**guest 這半段專用**，而且只在真的要進房前叫。
+   *
+   * host 那半段不需要它 —— `#openRoom` 的 `#preflight()` 做的就是同一件事。
+   * guest 這條路**沒有 preflight**，少了這一句，玩家人進了對手的房，自己那間
+   * 會留在清單上等一個永遠不會來的人。
+   *
+   * ⚠ 排隊途中不叫 —— 玩家開房不是停止配對的理由（他可能想兩邊碰運氣），
+   * 而在他還沒配到人的時候把房拆了，等於插件擅自取消了他的另一條路。
+   *
+   * ⚠ `delete_room` 是**頻道層級**的：收的是他在這個頻道的**所有**房。所以
+   * 一定要先確認真的有房才叫，而且一定要寫進記錄檔 —— 玩家要知道那間房是被
+   * 誰收的（見 match-session.ts 的檔頭）。
+   */
+  async #clearOwnRoom(): Promise<void> {
+    const context = await this.#options.driver.matchContext().catch(() => null);
+    if (context === null) return;
+
+    let has = context.isMatching;
+    if (!has && context.playerName !== null) {
+      const snapshot = await this.#options.driver.roomSnapshot().catch(() => null);
+      has = snapshot?.rooms.some((r) => r.playerAName === context.playerName) === true;
+    }
+    if (!has) return;
+
+    this.#log("· 配到人了 —— 先幫你收掉自己開的那間房（那個指令是整個頻道一起收的）");
+    await this.#options.driver.cancelRoom().catch(() => "");
+    // 收房之後清單要一點時間才更新。等一拍，否則接下來的 preflight 會讀到
+    // 剛剛那間還在，然後判定「你已經有一間自己開的房」。
+    await (this.#options.sleep ?? defaultSleep)(1_000);
   }
 
   /**
@@ -506,6 +895,10 @@ export class MatchPairing {
    * 情況不一樣：玩家按下「開始自動配對」，而畫面上跳一句「你已經有一間自己
    * 開的房，請先去遊戲裡收掉」對他沒有意義 —— 那間房**多半就是插件上一輪
    * 自己開的**（對手沒進來、或上一場打完了）。所以這裡直接收掉再檢查一次。
+   *
+   * ⚠ 這支同時是 host 那半段的 `#clearOwnRoom` —— 玩家在排隊途中自己開的那間
+   * 房會在 `#openRoom` 叫它的時候被收掉。guest 那半段沒有 preflight，所以要
+   * 自己叫一次 `#clearOwnRoom`。
    *
    * ⚠ `delete_room` 是**頻道層級**的：它會把玩家在這個頻道的房**全部**收掉，
    * 包含他自己手動開的那間。所以這件事一定要寫進記錄檔 —— 玩家要知道剛剛
@@ -518,7 +911,7 @@ export class MatchPairing {
       return first;
     }
 
-    this.#log("· 你在這個頻道已經有一間開著的房，先收掉再排隊（收的是整個頻道的房）");
+    this.#log("· 你在這個頻道已經有一間開著的房，先幫你收掉（收的是整個頻道的房）");
     await this.#options.driver.cancelRoom().catch(() => "");
     // 收房之後清單要一點時間才更新。等一拍再問，否則會讀到剛剛那間還在。
     await (this.#options.sleep ?? defaultSleep)(1_000);
@@ -534,6 +927,7 @@ export class MatchPairing {
   async stop(reason = "已停止配對。"): Promise<void> {
     this.#clearTimer();
     this.#clearWatch();
+    this.#clearLobby();
     this.#client?.stop();
     this.#client = null;
     if (this.#openedRoom) {
@@ -557,6 +951,7 @@ export class MatchPairing {
   #finish(message: string): void {
     this.#clearTimer();
     this.#clearWatch();
+    this.#clearLobby();
     this.#openedRoom = false;
     this.#handedOff = false;
     this.#client?.stop();
@@ -640,9 +1035,16 @@ export class MatchPairing {
     }
 
     const check = checkOwnDeck(this.#options.rule, deck, this.#options.costLimit);
-    this.#patch({ myTotal: check.total, overLimit: check.over, role: info.role });
-    if (check.over) {
-      await this.stop(`你的隊伍變成 ${check.total} 了，超過約定的上限。改好再排一次。`);
+    this.#patch({
+      myTotal: check.total,
+      overLimit: check.over,
+      underLimit: check.under,
+      band: check.band,
+      role: info.role,
+    });
+    if (outOfBand(check)) {
+      // 排隊時檢查過了，所以會走到這裡只有一種可能：玩家在等的時候換了牌組。
+      await this.stop(this.#bandMessage(check, "改好再按一次開始。"));
       return;
     }
 
@@ -682,10 +1084,10 @@ export class MatchPairing {
   }
 
   /**
-   * 對手說了他想打哪裡。
+   * 對手說了他要哪一種抽法。
    *
-   * ⚠ 看不懂就當他沒說（`#peerStage` 保持 `null` → 用我自己的地點）。這一則
-   * 壞掉不該影響開房 —— 地點協商是加分，不是開打的前提。
+   * ⚠ 看不懂就當他沒說（`#peerStage` 保持 `null` → 用我自己的）。這一則壞掉
+   * 不該影響開房 —— 地點協商是加分，不是開打的前提。
    */
   #onPeerPref(body: string): void {
     const pref = parsePrefBody(body);
@@ -762,8 +1164,9 @@ export class MatchPairing {
     const token = this.#token;
     if (token === null) return;
 
-    // ⚠ 這裡也要走會收舊房的那支。配到人之後才被「你已經有一間房」擋下來的話，
-    // 對手已經在等我開房了 —— 而擋住我們的那間房多半是上一輪自己留下的。
+    // ⚠ 這裡也要走會收舊房的那支 —— 它同時是 host 這半段的 `#clearOwnRoom`：
+    // 玩家在排隊途中自己開的那間房會被它收掉。配到人之後才被「你已經有一間房」
+    // 擋下來的話，對手已經在等我開房了。
     const pre = await this.#preflight();
     if (!pre.ok || pre.context.playerName === null) {
       await this.stop(pre.ok ? "讀不到玩家名稱。" : pre.block.message);
@@ -776,15 +1179,19 @@ export class MatchPairing {
     const result = await hostOpenRoom(this.#options.driver, {
       playerName: pre.context.playerName,
       room: {
-        name: this.#options.room.name === "" ? DEFAULT_ROOM_NAME : this.#options.room.name,
+        // ⚠ 房名是**系統組的**，玩家取不到（見 `buildRoomName`）。它同時是
+        // `hostOpenRoom` 在清單裡認出「哪一間是我剛開的」的依據之一，所以這裡
+        // 跟那邊一定要是同一個字串 —— 傳同一個表達式就不會漂。
+        name: buildRoomName(this.#options.rule.name, this.#options.costLimit),
         stage,
-        multi: this.#options.multi,
+        multi: ROOM_MULTI,
         friend: this.#options.room.friend,
         // ⚠ 房間密碼就是配對 token。**房名絕對不能帶它**，房名是公開的。
         pass: token,
-        // ⚠ 這是遊戲自己的「牌組Cost限制 ±N」，伺服器用**原版 COST** 判，
-        // 跟約定的自訂上限是兩回事 —— 那個是我們自己在上面查過的。
-        cost: this.#options.room.deckCostBand,
+        // ⚠ 遊戲自己的「牌組Cost限制 ±N」永遠不設（見 `ROOM_DECK_COST_BAND`）
+        // —— 它判的是伺服器算的原版 COST，跟約定的自訂上限是兩回事，而後者
+        // 我們自己在上面查過了。
+        cost: ROOM_DECK_COST_BAND,
       },
       ...(this.#options.sleep === undefined ? {} : { sleep: this.#options.sleep }),
     });
@@ -806,7 +1213,7 @@ export class MatchPairing {
   }
 
   /**
-   * host：這一場開在哪。等對手回報他的地點（最多 `STAGE_WAIT_MS`），然後協商。
+   * host：這一場開在哪。等對手回報他的抽法（最多 `STAGE_WAIT_MS`），然後協商。
    *
    * ⚠ **等不到就用自己的，不是停下來。** 對手可能是舊版插件，或中間人還沒有
    * `q-pref` 那條轉發 —— 那時協商不成立，但這一場照樣要打得起來。
@@ -832,15 +1239,19 @@ export class MatchPairing {
 
     const theirs = this.#peerStage;
     const stage = negotiateStage(mine, theirs, this.#options.roll ?? Math.random);
+    const label = (pick: StagePick): string => (pick === "arcadia" ? "亞城隨機" : "官方隨機");
     if (theirs === null) {
-      this.#log(`· 對手沒有回報地點（舊版插件？），用我選的 ${mine}`);
+      this.#log(`· 對手沒有回報抽法（舊版插件？），用我選的${label(mine)}`);
     } else if (theirs === mine) {
-      this.#log(`· 雙方都選 ${mine}，就開這裡`);
-    } else if (stage === RANDOM_STAGE) {
-      this.#log(`· 有一邊選了隨機（我 ${mine} / 對手 ${theirs}）→ 開隨機房`);
+      this.#log(`· 雙方都選${label(mine)}`);
     } else {
-      this.#log(`· 地點不同（我 ${mine} / 對手 ${theirs}）→ 抽到 ${stage}`);
+      this.#log(`· 抽法不同（我${label(mine)} / 對手${label(theirs)}）→ 走官方隨機`);
     }
+    this.#log(
+      stage === RANDOM_STAGE
+        ? "· 這一場的地點交給伺服器抽"
+        : `· 這一場抽到地點 ${stage}（亞城池 ${ARCADIA_STAGES.length} 張）`,
+    );
     return stage;
   }
 
@@ -915,6 +1326,11 @@ export class MatchPairing {
 
     this.#clearTimer();
     this.#patch({ phase: "joining", message: "對手的房開好了，進房中…" });
+    // ⚠ guest 這邊也要收自己的房。host 那條路是 `#preflight()` 順手收掉的，
+    // 而這條路**沒有 preflight** —— 少了這一句，玩家在排隊途中自己開的那間房
+    // 會一直留在清單上（他人已經進了對手的房，那間永遠不會有人來），而下一次
+    // 配對會被「你已經有一間自己開的房」擋住，症狀完全看不出跟這一場有關。
+    await this.#clearOwnRoom();
     const result = await guestJoinRoom(this.#options.driver, {
       roomId,
       pass: token,
@@ -1033,6 +1449,18 @@ export class MatchPairing {
     this.#watch = null;
   }
 
+  /**
+   * 停掉「玩家還在不在大廳」的輪詢。
+   *
+   * ⚠ 每一條收尾路徑都要叫。留著的話它會在任務結束之後繼續每 5 秒戳一次遊戲，
+   * 而且下一次配對開始時會有兩個迴圈在跑（第二個 `#watchLobby` 覆蓋不掉第一個
+   * 排好的 timer —— 那個 handle 已經被換掉了）。
+   */
+  #clearLobby(): void {
+    if (this.#lobby !== null) clearTimeout(this.#lobby);
+    this.#lobby = null;
+  }
+
   #resetPair(): void {
     this.#role = null;
     this.#token = null;
@@ -1065,6 +1493,7 @@ export class MatchPairing {
     this.#client = null;
     this.#clearTimer();
     this.#clearWatch();
+    this.#clearLobby();
     this.#patch({ phase: "blocked", role: null, compatibility: null, message });
   }
 

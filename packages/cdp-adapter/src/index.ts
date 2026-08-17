@@ -109,6 +109,7 @@ export {
 export type { HiddenStage, HiddenStagePatchOptions, HiddenStageStatus } from "./patch-stage.js";
 
 export {
+  ARCADIA_STAGES,
   buildCreateRoomExpression,
   buildJoinRoomExpression,
   CHANNEL_NAMES,
@@ -117,6 +118,7 @@ export {
   DEFAULT_ROOM_NAME,
   findOwnRoom,
   HIDDEN_STAGES,
+  ROOM_NAME_MAX_LENGTH,
   STAGES,
   MATCH_ROOM_INSTALL_EXPRESSION,
   MATCH_ROOM_UNINSTALL_EXPRESSION,

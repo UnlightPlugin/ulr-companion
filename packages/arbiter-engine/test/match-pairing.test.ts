@@ -9,30 +9,34 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CostRule } from "@ulr/rule-schema";
 import { crossVerdict, deckFromKeys, fingerprint } from "@ulr/cost-engine";
-import type { MatchContext, RoomEntry } from "@ulr/cdp-adapter";
+import type { CreateRoomOptions, MatchContext, RoomEntry } from "@ulr/cdp-adapter";
 import type { MatchQueueClientOptions, QueueStatus } from "@ulr/arbiter-link";
+import { ARCADIA_STAGES } from "@ulr/cdp-adapter";
 import {
+  buildRoomName,
   checkOwnDeck,
+  costBand,
   crossEvaluate,
   encodeDeckBody,
   encodeEvalBody,
   encodePrefBody,
+  formatCostTag,
   MatchPairing,
   negotiateStage,
   parseDeckBody,
   parseEvalBody,
   parsePrefBody,
+  pickArcadiaStage,
   RANDOM_STAGE,
   type PairingOptions,
   type QueueLink,
+  type StagePick,
 } from "../src/match-pairing.js";
 
-/** 開房設定，只有地點會變。 */
-const ROOM = (stage: string): PairingOptions["room"] => ({
-  name: "請多關照",
+/** 開房設定，只有抽法會變。 */
+const ROOM = (stage: StagePick): PairingOptions["room"] => ({
   stage,
   friend: false,
-  deckCostBand: null,
 });
 import type { MatchDriver } from "../src/match-session.js";
 
@@ -53,8 +57,21 @@ function rule(over: Partial<CostRule> = {}): CostRule {
 /** 只給角色的簡寫。這一份的 case 都不在乎裝備與事件卡。 */
 const slots = (...characters: string[]) => deckFromKeys({ characters });
 
+/** 22 + 17 + 18 = 57.00 —— 剛好卡滿 57 那一檔的上限。 */
 const hostDeck = slots("leon", "abel", "evarist");
 const guestDeck = slots("leon", "leon", "abel");
+
+/**
+ * 這一組 case 約的是 **COST 57 檔**，而 `hostDeck` 剛好 57.00。
+ *
+ * ⚠ 換這個數字之前先想清楚：檔位是**有下限的**（56.01～57.00），所以隨便改成
+ * 62 的話 `hostDeck` 會變成「太低」，而整組狀態機的 case 會在配到人之前就被
+ * 擋下來 —— 症狀是一堆「為什麼 phase 停在 blocked」。
+ */
+const TIER = 57;
+
+/** 自動配對開出來的房名。⚠ 系統組的，`findOwnRoom` 拿它認自己那間。 */
+const ROOM_NAME = buildRoomName(rule().name, TIER);
 
 describe("交換的東西", () => {
   it("描述子送出去再收回來是同一份", () => {
@@ -109,29 +126,69 @@ describe("交叉驗算", () => {
   });
 });
 
-describe("自己那副牌合不合法", () => {
-  it("在上限之內就過", () => {
-    // 22 + 17 + 18 = 57
-    expect(checkOwnDeck(rule(), hostDeck, 62)).toMatchObject({ total: "57.00", over: false });
+/**
+ * COST 檔位。
+ *
+ * ⚠ 這一組釘的是「**檔位有下限**」，而那是整個功能的重點：自動配對要取代
+ * 亞歷山卓城的快速比賽，而 `COST57` 在那邊的意思是 56.01～57.00，不是
+ * 「57 以下」。沒有下限的話一副 40C 的隊伍會被收進 57 檔，而 40C 打 57C
+ * 不是一場比賽 —— 壓 C 這個玩法也就整個消失了。
+ */
+describe("COST 檔位", () => {
+  it("57 檔收的是 56.01～57.00", () => {
+    expect(costBand(57)).toEqual({ floor: 5601, cap: 5700 });
+    expect(checkOwnDeck(rule(), hostDeck, 57).band).toBe("56.01～57.00");
+  });
+
+  it("⚠ 兩檔不重疊 —— 56.00 屬於 56 檔，不是 57 檔", () => {
+    const at5600 = rule({ characters: { a: 56 } });
+    expect(checkOwnDeck(at5600, slots("a"), 57).under).toBe(true);
+    expect(checkOwnDeck(at5600, slots("a"), 56).under).toBe(false);
+  });
+
+  it("剛好卡滿上限就過，兩邊都不算出界", () => {
+    expect(checkOwnDeck(rule(), hostDeck, 57)).toMatchObject({
+      total: "57.00",
+      over: false,
+      under: false,
+    });
   });
 
   it("超過就擋", () => {
-    expect(checkOwnDeck(rule(), hostDeck, 50).over).toBe(true);
+    expect(checkOwnDeck(rule(), hostDeck, 50)).toMatchObject({ over: true, under: false });
   });
 
-  it("⚠ 剛好卡滿上限**不算**超標", () => {
-    expect(checkOwnDeck(rule(), hostDeck, 57).over).toBe(false);
+  it("⚠⚠ 太低也要擋 —— 57 檔不收 40C 的隊伍", () => {
+    expect(checkOwnDeck(rule(), hostDeck, 66)).toMatchObject({ over: false, under: true });
   });
 
   it("⚠ 浮點尾巴不該讓卡滿的隊伍被判超標", () => {
     // 8.8 + 26.6 + 26.6 用 double 相加是 62.00000000000001
     const r = rule({ characters: { a: 8.8, b: 26.6, c: 26.6 } });
     const d = slots("a", "b", "c");
-    expect(checkOwnDeck(r, d, 62)).toMatchObject({ total: "62.00", over: false });
+    expect(checkOwnDeck(r, d, 62)).toMatchObject({ total: "62.00", over: false, under: false });
   });
 
-  it("不設限就永遠不超標", () => {
-    expect(checkOwnDeck(rule(), hostDeck, null).over).toBe(false);
+  it("⚠ 浮點尾巴也不該讓剛好卡在下限的隊伍被判太低", () => {
+    // 下限是 61.01，而 62 - 1 在 double 上是 60.99999999999999
+    const r = rule({ characters: { a: 20.7, b: 20.7, c: 19.61 } });
+    expect(checkOwnDeck(r, slots("a", "b", "c"), 62)).toMatchObject({
+      total: "61.01",
+      under: false,
+    });
+  });
+
+  it("不設限就什麼牌組都收", () => {
+    expect(checkOwnDeck(rule(), hostDeck, null)).toMatchObject({
+      over: false,
+      under: false,
+      band: null,
+    });
+    expect(costBand(null)).toBeNull();
+  });
+
+  it("⚠ 上限比一檔還窄時下限夾到 0，不能是負的", () => {
+    expect(costBand(0.5)).toEqual({ floor: 0, cap: 50 });
   });
 
   it("⚠ 兩位小數的上限也吃得下（`toCentiCost` 對三位小數會拋例外）", () => {
@@ -142,6 +199,53 @@ describe("自己那副牌合不合法", () => {
     const check = checkOwnDeck(rule(), slots("leon", "沒這隻"), null);
     expect(check.unknown).toEqual(["沒這隻"]);
     expect(check.total).toBe("121.00");
+  });
+});
+
+/**
+ * 房名。
+ *
+ * ⚠ 這一組釘的是「**`[COST:n]` 那一段永遠完整**」。房名的功能是讓大廳一眼
+ * 看出這是哪一檔（亞城的房間列就是這樣），截到那一段的話功能就沒了。
+ */
+describe("房名", () => {
+  it("規則名 + 檔位，像亞城那樣", () => {
+    expect(buildRoomName("亞城平衡", 57)).toBe("亞城平衡 [COST:57]");
+  });
+
+  it("⚠ 規則名太長時截前面，COST 那一段一個字都不能少", () => {
+    const name = buildRoomName("這是一個非常非常長的規則名稱", 57);
+    expect(name.endsWith("[COST:57]")).toBe(true);
+    expect(name.length).toBeLessThanOrEqual(20);
+    expect(name).toContain("…");
+  });
+
+  it("沒有規則名就退回官方快速比賽那個字", () => {
+    expect(buildRoomName("   ", 57)).toBe("Quickmatch [COST:57]");
+    // ⚠ 官方那間房剛好 20 個字，所以這個組合一定塞得下。
+    expect(buildRoomName("", 57)).toHaveLength(20);
+  });
+
+  it("換行與連續空白要壓掉 —— 規則名是規則檔裡的自由文字", () => {
+    expect(buildRoomName("亞城\n 平衡", 57)).toBe("亞城 平衡 [COST:57]");
+  });
+
+  it("沒設檔位就標「自由」，不是空的", () => {
+    expect(formatCostTag(null)).toBe("[COST:自由]");
+    expect(buildRoomName("亞城平衡", null)).toBe("亞城平衡 [COST:自由]");
+  });
+
+  it("⚠ 小數的檔位不要補 .00 —— 房名只有 20 格", () => {
+    expect(formatCostTag(57)).toBe("[COST:57]");
+    expect(formatCostTag(57.5)).toBe("[COST:57.5]");
+  });
+
+  it("⚠ 永遠不超過遊戲那 20 格", () => {
+    for (const limit of [null, 0, 57, 57.25, 199.99]) {
+      expect(buildRoomName("非常長的規則名稱一二三四五六七八", limit).length).toBeLessThanOrEqual(
+        20,
+      );
+    }
   });
 });
 
@@ -254,7 +358,7 @@ function ctx(over: Partial<MatchContext> = {}): MatchContext {
 function fakeDriver(over: Partial<MatchDriver> = {}): MatchDriver {
   const mine: RoomEntry = {
     roomId: "我的房",
-    name: "請多關照",
+    name: ROOM_NAME,
     playerAName: "燈皇",
     playerBName: null,
     pass: true,
@@ -287,15 +391,17 @@ function pairing(opts: Partial<PairingOptions> = {}, driverOver: Partial<MatchDr
     endpoint: "wss://example",
     rule: rule(),
     channel: 2,
-    multi: true,
-    costLimit: 62,
-    room: { name: "請多關照", stage: "000", friend: false, deckCostBand: null },
+    costLimit: TIER,
+    room: { stage: "arcadia", friend: false },
     driver,
     link: link.factory,
     sleep: nosleep,
-    // ⚠ 預設不等對手回報地點。要測協商的 case 自己把它調大 —— 不然每一個
+    // ⚠ 預設不等對手回報抽法。要測協商的 case 自己把它調大 —— 不然每一個
     // host 的 case 都要多等一拍事件迴圈，而它們測的不是地點。
     stageWaitMs: 0,
+    // ⚠ 預設**不盯大廳**。開著的話每個 case 結束時都會留一個 5 秒的 timer，
+    // 而那會讓 vitest 的 worker 空等到它燒完。要測的 case 自己塞小的值。
+    lobbyWatchMs: 0,
     ...opts,
   });
   return { p, link, driver };
@@ -309,10 +415,46 @@ describe("狀態機：排隊前的檢查", () => {
     expect(link.key).toBe("");
   });
 
-  it("⚠ 自己的牌組超過約定上限就不排 —— 排下去只是浪費對手的時間", async () => {
-    const { p } = pairing({ costLimit: 50 });
+  it("⚠ 自己的牌組超過這一檔就不排 —— 排下去只是浪費對手的時間", async () => {
+    const { p, link } = pairing({ costLimit: 50 });
     await p.start();
-    expect(p.status).toMatchObject({ phase: "blocked", overLimit: true, myTotal: "57.00" });
+    expect(p.status).toMatchObject({
+      phase: "blocked",
+      overLimit: true,
+      underLimit: false,
+      myTotal: "57.00",
+      band: "49.01～50.00",
+    });
+    expect(p.status.message).toContain("超過");
+    expect(link.key).toBe("");
+  });
+
+  /**
+   * ⚠⚠ 這一條釘的是「檔位有下限」。
+   *
+   * 沒有它的話 57C 的隊伍會被收進 66 檔，然後在大廳上掛一間寫著 `[COST:66]`
+   * 的房 —— 而配到的那個人是照 66 檔壓過牌組來的。那不是一場比賽。
+   */
+  it("⚠⚠ 自己的牌組低於這一檔也不排，而且訊息要說得出方向是「太低」", async () => {
+    const { p, link } = pairing({ costLimit: 66 });
+    await p.start();
+    expect(p.status).toMatchObject({
+      phase: "blocked",
+      overLimit: false,
+      underLimit: true,
+      myTotal: "57.00",
+      band: "65.01～66.00",
+    });
+    // 「不符合這一檔」那種寫法會讓玩家往錯的方向改
+    expect(p.status.message).toContain("低於");
+    expect(p.status.message).toContain("65.01～66.00");
+    expect(link.key).toBe("");
+  });
+
+  it("不設檔位就什麼牌組都排得進去", async () => {
+    const { p } = pairing({ costLimit: null });
+    await p.start();
+    expect(p.status).toMatchObject({ phase: "queued", overLimit: false, underLimit: false });
   });
 
   it("讀不到牌組也不排（絕不猜一副牌）", async () => {
@@ -326,6 +468,24 @@ describe("狀態機：排隊前的檢查", () => {
     await p.start();
     expect(p.status.phase).toBe("queued");
     expect(link.key).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  /**
+   * ⚠⚠ 這一條釘的是「按了停止要停得下來」。
+   *
+   * 托盤靠「狀態變成 idle／blocked」來放掉手上的 `MatchPairing`（main.ts 的
+   * `onStatus`）。`start()` 中途只要推出一次 phase 還是 `idle` 的狀態，托盤
+   * 就把那個物件丟了 —— 可是排隊照樣開始下去：畫面寫「排隊中」，而「停止」
+   * 打在 null 上是空操作，怎麼按都停不掉，也不能重按開始（「已經在配對中了」）。
+   * 2026-08-16 實測就是這樣卡死的，兇手是 `#patch({ myTotal … })` 那一行。
+   */
+  it("⚠ start() 期間一次都不准推出 idle —— 托盤靠它決定要不要放掉這個任務", async () => {
+    const seen: string[] = [];
+    const { p } = pairing({ onStatus: (s) => void seen.push(s.phase) });
+    await p.start();
+    expect(p.status.phase).toBe("queued");
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen).not.toContain("idle");
   });
 
   /**
@@ -414,7 +574,7 @@ describe("狀態機：對戰開始就結束任務", () => {
   /** 開好房、對手還沒進來的那一間。房名與房主要跟 `ctx()` 對得上才找得到。 */
   const empty: RoomEntry = {
     roomId: "我的房",
-    name: "請多關照",
+    name: ROOM_NAME,
     playerAName: "燈皇",
     playerBName: null,
     pass: true,
@@ -546,55 +706,75 @@ describe("狀態機：對戰開始就結束任務", () => {
 });
 
 /**
- * 對戰地點的協商。
+ * 對戰地點。
  *
- * 開房的只有 host，所以「地點」原本就是他一個人說了算 —— 而那對另一邊是
- * 沒得商量的。這一組把規則釘住：一樣就用那個、有人選隨機就隨機、不一樣就從
- * **這兩個**裡面抽（不是從 15 張地圖裡抽）。
+ * ⚠ **玩家選不到「哪一張地圖」了** —— 只選「誰來抽」。開房的只有 host，所以
+ * 指定地圖對另一邊永遠是被決定的；舊的協商（從雙方選的兩張裡抽一張）只是把
+ * 那個不對稱換成擲骰子。取代亞城的東西不該讓人先填一張表。
  */
 describe("對戰地點：negotiateStage", () => {
   const always = (n: number) => () => n;
 
-  it("兩邊一樣就用那個", () => {
-    expect(negotiateStage("007", "007", always(0.9))).toBe("007");
+  it("兩邊都要亞城池 → 從那 11 張裡抽", () => {
+    expect(ARCADIA_STAGES).toContain(negotiateStage("arcadia", "arcadia", always(0.5)));
   });
 
   it("對手沒說（舊版插件／中間人不轉發）就用我的", () => {
-    expect(negotiateStage("007", null, always(0.9))).toBe("007");
-    expect(negotiateStage("007", "", always(0.9))).toBe("007");
+    expect(ARCADIA_STAGES).toContain(negotiateStage("arcadia", null, always(0.5)));
+    expect(negotiateStage("official", null, always(0.5))).toBe(RANDOM_STAGE);
   });
 
-  it("⚠ 有一邊選隨機就強制隨機 —— 選隨機的人已經說了「哪裡都行」", () => {
-    expect(negotiateStage(RANDOM_STAGE, "007", always(0))).toBe(RANDOM_STAGE);
-    expect(negotiateStage("007", RANDOM_STAGE, always(0))).toBe(RANDOM_STAGE);
-    expect(negotiateStage(RANDOM_STAGE, RANDOM_STAGE, always(0))).toBe(RANDOM_STAGE);
+  it("⚠ 有一邊選官方隨機就走官方隨機 —— 亞城池裡有一張官方選單沒有的地圖", () => {
+    expect(negotiateStage("arcadia", "official", always(0))).toBe(RANDOM_STAGE);
+    expect(negotiateStage("official", "arcadia", always(0))).toBe(RANDOM_STAGE);
+    expect(negotiateStage("official", "official", always(0))).toBe(RANDOM_STAGE);
   });
 
-  it("不一樣就從這兩個裡面抽一個，各一半", () => {
-    expect(negotiateStage("003", "011", always(0.2))).toBe("003");
-    expect(negotiateStage("003", "011", always(0.8))).toBe("011");
-  });
-
-  it("⚠ 抽的只會是雙方選過的其中一個 —— 不會抽到誰都沒選的地圖", () => {
-    for (const r of [0, 0.25, 0.499, 0.5, 0.75, 0.999]) {
-      expect(["003", "011"]).toContain(negotiateStage("003", "011", always(r)));
+  it("⚠ 抽到的一定在亞城池裡，而且抽不到「隨機」那個代號", () => {
+    for (const r of [0, 0.1, 0.5, 0.909, 0.999, 1]) {
+      const stage = pickArcadiaStage(always(r));
+      expect(ARCADIA_STAGES).toContain(stage);
+      expect(stage).not.toBe(RANDOM_STAGE);
     }
+  });
+
+  it("亞城池就是官方那 10 張加上 010，共 11 張", () => {
+    expect(ARCADIA_STAGES).toHaveLength(11);
+    expect(ARCADIA_STAGES[0]).toBe("000");
+    expect(ARCADIA_STAGES[10]).toBe("010");
   });
 
   it("body 壞掉一律當成「他沒說」", () => {
     expect(parsePrefBody("不是 JSON")).toBeNull();
     expect(parsePrefBody(JSON.stringify({ s: "abc" }))).toBeNull();
     expect(parsePrefBody(JSON.stringify({ s: 7 }))).toBeNull();
-    expect(parsePrefBody(encodePrefBody({ stage: "013" }))).toEqual({ stage: "013" });
+  });
+
+  it("送出去再收回來是同一種抽法", () => {
+    expect(parsePrefBody(encodePrefBody({ stage: "arcadia" }))).toEqual({ stage: "arcadia" });
+    expect(parsePrefBody(encodePrefBody({ stage: "official" }))).toEqual({ stage: "official" });
+  });
+
+  /**
+   * ⚠ 舊版插件的 `parsePrefBody` 只收三位數字。`official` 送 `"014"` 而不是
+   * `"official"`，舊版才讀得懂 —— 它當 host 時也會開隨機房。
+   */
+  it("⚠ 官方隨機送的是舊版讀得懂的 014", () => {
+    expect(JSON.parse(encodePrefBody({ stage: "official" }))).toEqual({ s: RANDOM_STAGE });
+  });
+
+  it("⚠ 舊版送來的三位數字一律當官方隨機 —— 新版沒有「指定某一張」了", () => {
+    expect(parsePrefBody(JSON.stringify({ s: "007" }))).toEqual({ stage: "official" });
+    expect(parsePrefBody(JSON.stringify({ s: "014" }))).toEqual({ stage: "official" });
   });
 });
 
 describe("狀態機：地點協商走到開房", () => {
-  it("配到人就先把自己的地點送出去（EXACT 快路也要送）", async () => {
-    const { p, link } = pairing({ room: ROOM("009") });
+  it("配到人就先把自己的抽法送出去（EXACT 快路也要送）", async () => {
+    const { p, link } = pairing({ room: ROOM("arcadia") });
     await p.start();
     await link.matched("host", link.tag);
-    expect(link.sent.pref.map(parsePrefBody)).toEqual([{ stage: "009" }]);
+    expect(link.sent.pref.map(parsePrefBody)).toEqual([{ stage: "arcadia" }]);
   });
 
   /** 開得起來的假遊戲：開房之後清單上就有那間房（否則 host 會找不到 room_id）。 */
@@ -606,7 +786,7 @@ describe("狀態機：地點協商走到開房", () => {
     });
     const room: RoomEntry = {
       roomId: "我的房",
-      name: "請多關照",
+      name: ROOM_NAME,
       playerAName: "燈皇",
       playerBName: null,
       pass: true,
@@ -622,68 +802,72 @@ describe("狀態機：地點協商走到開房", () => {
     };
   }
 
-  it("對手的地點到了 → 用協商的結果開房", async () => {
+  it("對手的抽法到了 → 用協商的結果開房", async () => {
     const { create, driver } = openable();
-    // 我 003、對手 011，抽到後者
+    // 我亞城池、對手官方隨機 → 走官方隨機
     const { p, link } = pairing(
-      { room: ROOM("003"), stageWaitMs: 200, roll: () => 0.9, handoffPollMs: 10_000 },
+      { room: ROOM("arcadia"), stageWaitMs: 200, roll: () => 0, handoffPollMs: 10_000 },
       driver,
     );
     await p.start();
-    await link.matched("host", link.tag); // 卡在等對手的地點
+    await link.matched("host", link.tag); // 卡在等對手的抽法
     expect(create).not.toHaveBeenCalled();
 
-    await link.peerPref(encodePrefBody({ stage: "011" }));
-    expect(create).toHaveBeenCalledWith(expect.objectContaining({ stage: "011" }));
-    expect(p.status.stage).toBe("011");
+    await link.peerPref(encodePrefBody({ stage: "official" }));
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ stage: RANDOM_STAGE }));
+    expect(p.status.stage).toBe(RANDOM_STAGE);
     await p.stop();
   });
 
-  it("⚠ 等不到對手的地點就用自己的開下去 —— 協商是加分，不是開打的前提", async () => {
+  it("⚠ 等不到對手的抽法就用自己的開下去 —— 協商是加分，不是開打的前提", async () => {
     const { create, driver } = openable();
     const { p, link } = pairing(
-      { room: ROOM("005"), stageWaitMs: 10, handoffPollMs: 10_000 },
+      { room: ROOM("official"), stageWaitMs: 10, handoffPollMs: 10_000 },
       driver,
     );
     await p.start();
     await link.matched("host", link.tag);
 
     await new Promise((r) => setTimeout(r, 40));
-    expect(create).toHaveBeenCalledWith(expect.objectContaining({ stage: "005" }));
-    expect(p.status.stage).toBe("005");
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ stage: RANDOM_STAGE }));
+    expect(p.status.stage).toBe(RANDOM_STAGE);
     await p.stop();
   });
 
-  it("對手選隨機 → 開隨機房，忽略我指定的那張", async () => {
-    const create = vi.fn(async () => ({ ok: true as const, roomId: null }));
+  it("兩邊都要亞城池 → 開在那 11 張的其中一張", async () => {
+    const { create, driver } = openable();
     const { p, link } = pairing(
-      { room: ROOM("003"), stageWaitMs: 200, roll: () => 0 },
-      { createRoom: create },
+      { room: ROOM("arcadia"), stageWaitMs: 200, roll: () => 0.5, handoffPollMs: 10_000 },
+      driver,
     );
     await p.start();
     await link.matched("host", link.tag);
-    await link.peerPref(encodePrefBody({ stage: RANDOM_STAGE }));
+    await link.peerPref(encodePrefBody({ stage: "arcadia" }));
 
-    expect(create).toHaveBeenCalledWith(expect.objectContaining({ stage: RANDOM_STAGE }));
+    expect(ARCADIA_STAGES).toContain(p.status.stage);
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({ stage: ARCADIA_STAGES[5] as string }),
+    );
+    await p.stop();
   });
 
-  it("⚠ 換下一位時要忘記上一位的地點", async () => {
+  it("⚠ 換下一位時要忘記上一位的抽法", async () => {
     const create = vi.fn(async () => ({ ok: true as const, roomId: null }));
     const { p, link } = pairing(
-      { room: ROOM("003"), stageWaitMs: 10, roll: () => 0.9 },
+      { room: ROOM("arcadia"), stageWaitMs: 10, roll: () => 0 },
       { createRoom: create },
     );
     await p.start();
-    // 第一位：規則對不起來，換人
+    // 第一位：要官方隨機，但規則對不起來，換人
     await link.matched("host");
-    await link.peerPref(encodePrefBody({ stage: "011" }));
+    await link.peerPref(encodePrefBody({ stage: "official" }));
     await link.peerDeck("這不是 JSON");
     expect(p.status.phase).toBe("queued");
 
-    // 第二位什麼都沒說 → 要用我自己的 003，不是上一位的 011
+    // 第二位什麼都沒說 → 要用我自己的亞城池，不是上一位的官方隨機
     await link.matched("host", link.tag);
     await new Promise((r) => setTimeout(r, 40));
-    expect(create).toHaveBeenCalledWith(expect.objectContaining({ stage: "003" }));
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ stage: ARCADIA_STAGES[0] }));
   });
 });
 
@@ -729,6 +913,215 @@ describe("狀態機：開始配對時先收掉自己開著的房", () => {
     await p.start();
     expect(p.status.phase).toBe("blocked");
     expect(p.status.message).toContain("自己開的房");
+  });
+
+  /**
+   * ⚠⚠ 這一條釘的是「玩家在排隊途中自己開房」這條路。
+   *
+   * guest 那半段**沒有 preflight**（host 那半段有，順手就收了）。少了
+   * `#clearOwnRoom`，玩家人進了對手的房，而他自己那間會一直留在清單上等一個
+   * 永遠不會來的人 —— 下一次配對被「你已經有一間自己開的房」擋住時，沒有人
+   * 會把那件事跟這一場連在一起。
+   */
+  it("guest：配到人時要幫玩家收掉他在排隊途中開的那間房", async () => {
+    let ownRoom = false;
+    const cancel = vi.fn(async () => {
+      ownRoom = false;
+      return "ok";
+    });
+    const join = vi.fn(async () => ({ ok: true as const }));
+    const theirs: RoomEntry = {
+      roomId: "對方的房",
+      name: "x",
+      playerAName: "對手",
+      playerBName: null,
+      pass: true,
+      deckA: null,
+      deckB: null,
+    };
+    const { p, link } = pairing(
+      {},
+      {
+        matchContext: async () => ctx({ isMatching: ownRoom }),
+        roomSnapshot: async () => ({
+          seq: 1,
+          live: true,
+          rooms: ownRoom ? [own, theirs] : [theirs],
+        }),
+        joinRoom: join,
+        cancelRoom: cancel,
+      },
+    );
+    await p.start();
+    // 開始排隊的當下他沒有房 —— 所以這一句不是 start() 收的。
+    expect(cancel).not.toHaveBeenCalled();
+
+    ownRoom = true; // 等的時候自己去開了一間
+    await link.matched("guest", link.tag);
+    await link.room("對方的房");
+
+    expect(cancel).toHaveBeenCalled();
+    expect(join).toHaveBeenCalledWith("對方的房", "PASS1234");
+    expect(p.status.phase).toBe("idle");
+  });
+});
+
+/**
+ * 排隊時盯著大廳。
+ *
+ * ⚠ 這一組釘的是**配對的第三條收尾路徑**（另外兩條是「對戰開始」與「玩家按
+ * 停止」）。排隊是會等的，而玩家在等的時候會去做別的事 —— 點進別人的房、被拉
+ * 進一場對戰、切頻道、回標題畫面。少了這一段，那條佇列連線會一直掛著，等他
+ * 打完回到大廳，中間人早就把他配給某個人了，而那個人正開著房等一個沒在看
+ * 畫面的對手。
+ */
+describe("狀態機：排隊時盯著大廳", () => {
+  const own: RoomEntry = {
+    roomId: "玩家自己開的",
+    name: "來打啊",
+    playerAName: "燈皇",
+    playerBName: null,
+    pass: false,
+    deckA: null,
+    deckB: null,
+  };
+
+  it("⚠ 玩家跑去打別場（不在大廳了）→ 自動停止排隊", async () => {
+    let inMatch = true;
+    const { p, link } = pairing(
+      { lobbyWatchMs: 5 },
+      { matchContext: async () => ctx({ inMatch }) },
+    );
+    await p.start();
+    expect(p.status.phase).toBe("queued");
+
+    inMatch = false;
+    await new Promise((r) => setTimeout(r, 40));
+    expect(p.status.phase).toBe("idle");
+    expect(p.status.message).toContain("大廳");
+    // 佇列連線一定要收掉 —— 留著的話中間人還是會把人配給我們
+    expect(link.stopped).toBeGreaterThan(0);
+  });
+
+  it("⚠ 換頻道 → 自動停止（不必等配到人才發現）", async () => {
+    let channel: number | null = 2;
+    const { p } = pairing({ lobbyWatchMs: 5 }, { matchContext: async () => ctx({ channel }) });
+    await p.start();
+
+    channel = 4;
+    await new Promise((r) => setTimeout(r, 40));
+    expect(p.status.phase).toBe("idle");
+    expect(p.status.message).toContain("頻道 4");
+  });
+
+  it("退出頻道（回大廳清單）也算離開", async () => {
+    let channel: number | null = 2;
+    const { p } = pairing({ lobbyWatchMs: 5 }, { matchContext: async () => ctx({ channel }) });
+    await p.start();
+
+    channel = null;
+    await new Promise((r) => setTimeout(r, 40));
+    expect(p.status.phase).toBe("idle");
+    expect(p.status.message).toContain("頻道");
+  });
+
+  /**
+   * ⚠ 玩家開房**不是**離開。他可能想兩邊碰運氣，而插件在他還沒配到人的時候
+   * 把那間房拆了，等於擅自取消了他的另一條路。真的配到人時才收（見上一組）。
+   */
+  it("⚠ 玩家自己開了一間房 → 照排不誤", async () => {
+    let ownRoom = false;
+    const cancel = vi.fn(async () => "ok");
+    const { p } = pairing(
+      { lobbyWatchMs: 5 },
+      {
+        matchContext: async () => ctx({ isMatching: ownRoom }),
+        roomSnapshot: async () => ({ seq: 1, live: true, rooms: ownRoom ? [own] : [] }),
+        cancelRoom: cancel,
+      },
+    );
+    await p.start();
+
+    ownRoom = true;
+    await new Promise((r) => setTimeout(r, 40));
+    expect(p.status.phase).toBe("queued");
+    expect(cancel).not.toHaveBeenCalled();
+    await p.stop();
+  });
+
+  it("⚠ 讀不到遊戲不算離開 —— 重載中、CDP 抖一下每次都會這樣", async () => {
+    let broken = false;
+    const { p } = pairing(
+      { lobbyWatchMs: 5 },
+      {
+        matchContext: async () => {
+          if (broken) throw new Error("CDP 斷了");
+          return ctx();
+        },
+      },
+    );
+    await p.start();
+
+    broken = true;
+    await new Promise((r) => setTimeout(r, 40));
+    expect(p.status.phase).toBe("queued");
+    await p.stop();
+  });
+
+  /**
+   * ⚠⚠ 配到人之後就不看了。進房成功的下一刻遊戲就切到對戰畫面，那時
+   * `inMatch` 本來就是 false —— 在那裡判「他離開了」等於把剛打起來的一場
+   * 自己收掉，而畫面上會寫「你不在大廳了」。
+   */
+  it("⚠⚠ 開好房在等對手時不看大廳 —— 那時不在大廳是正常的", async () => {
+    let inMatch = true;
+    const { p, link } = pairing(
+      { lobbyWatchMs: 5, handoffPollMs: 10_000 },
+      { matchContext: async () => ctx({ inMatch }) },
+    );
+    await p.start();
+    await link.matched("host", link.tag);
+    expect(p.status.phase).toBe("ready");
+
+    inMatch = false;
+    await new Promise((r) => setTimeout(r, 40));
+    expect(p.status.phase).toBe("ready");
+    await p.stop();
+  });
+});
+
+/**
+ * 房名。
+ *
+ * ⚠ 開房用的房名與 `findOwnRoom` 比對用的房名**必須是同一個字串**。漂掉一個
+ * 字的症狀是「房開出來了，但插件說等不到自己那間房出現在清單裡」，然後把房
+ * 收掉、停止配對 —— 而那看起來完全像是遊戲那邊的問題。
+ */
+describe("狀態機：房名是系統取的", () => {
+  it("開房時用「規則名 + 檔位」，玩家插不了手", async () => {
+    const create = vi.fn(async () => ({ ok: true as const, roomId: null }));
+    const { p, link } = pairing({}, { createRoom: create });
+    await p.start();
+    await link.matched("host", link.tag);
+
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ name: "亞城平衡 [COST:57]" }));
+    await p.stop();
+  });
+
+  it("⚠ 房名一定不含配對 token —— 房間清單是公開的", async () => {
+    const create = vi.fn(async (_options: CreateRoomOptions) => ({
+      ok: true as const,
+      roomId: null,
+    }));
+    const { p, link } = pairing({}, { createRoom: create });
+    await p.start();
+    await link.matched("host", link.tag);
+
+    const opts = create.mock.calls[0]?.[0];
+    // 密碼就是 token，而房名是公開的 —— 它們絕對不能是同一個字串的兩半
+    expect(opts?.pass).toBe("PASS1234");
+    expect(opts?.name).not.toContain("PASS1234");
+    await p.stop();
   });
 });
 
