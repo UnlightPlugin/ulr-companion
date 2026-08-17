@@ -24,8 +24,20 @@
 
 import { equipmentKey, eventCardKey } from "./card-key.js";
 
-/** 名冊格式版本。形狀變了就加一，舊快取會被丟掉重讀。 */
-export const CATALOG_VERSION = 2;
+/**
+ * 名冊格式版本。形狀變了就加一，舊快取會被丟掉重讀。
+ *
+ * 3（2026-08-16）：事件卡多了 `info` 與 `slotType`。**一定要加**，否則舊快取
+ * 會通過 `parseCatalog` 而那兩個欄位是空的 —— 症狀是「事件卡沒有顏色也沒有
+ * 效果，而且重讀名冊也修不好」。
+ *
+ * 4（2026-08-17）：具名卡多了 `locked`（官方還沒開放）。同樣**一定要加** ——
+ * 舊快取沒有這一欄，而 `locked` 缺席會被讀成 falsy，也就是「全部都出了」。
+ * 那個方向剛好是安全的（頂多是功能沒生效），但玩家會以為插件壞了，而且
+ * 「重讀名冊」看起來沒有用。版本加一之後 `parseCatalog` 直接退掉舊快取，
+ * 編輯器會明確地要求重讀。
+ */
+export const CATALOG_VERSION = 4;
 
 /** 一張具名卡（角色或怪物）在名冊裡的樣子。 */
 export interface CatalogCard {
@@ -35,6 +47,25 @@ export interface CatalogCard {
   slot: string;
   /** 原版 COST。編輯器拿它當「改回原價」的基準。 */
   baseCost: number;
+  /**
+   * 官方還沒開放這張卡 —— 資產裡有完整資料，但**沒有任何配方做得出它**。
+   *
+   * `cc_asset` 一次就把每位角色的十張全部寫好（數值、技能、插槽都完整），
+   * 跟官方開放了沒完全無關。2026-08-17 實測 700 張裡有 69 張沒有配方，
+   * 全部是 R1~R5；`L2~L5` 一張都沒有。判準見 `@ulr/cdp-adapter` 的
+   * `cardAssetReadExpression`。
+   *
+   * ⚠ **這是給畫面用的，不是給規則用的。** 編輯器可以不畫它們，但
+   * **絕對不能把它們從草稿或存檔裡拿掉** —— 規則沒定價的卡在引擎裡算
+   * `UNKNOWN_COST`（99），而官方哪天開放了，那份規則會安靜地把它當 99C。
+   * 2026-08-17 就實測到一次：凱倫貝克 R5 在爬蟲快照裡還沒出，玩家的客戶端
+   * 已經有配方了。
+   *
+   * ⚠ 判斷不了的時候是 `false`，不是 true —— 怪物那份沒有升級圖
+   * （`hasUpgradeGraph` false），整份都會是 false。少了這個方向，
+   * 138 張怪物卡會全部被藏起來。
+   */
+  locked: boolean;
 }
 
 /** 一位角色 / 一種怪物 = 版面上的一組。 */
@@ -52,6 +83,41 @@ export interface CatalogItem {
   key: string;
   name: string;
   baseCost: number;
+  /**
+   * 效果說明。**只有事件卡有**（裝備的說明是風味文，佔位子又不幫忙定價）。
+   *
+   * 為什麼事件卡非要它不可：110 張裡有五張都叫「Hp恢復」，名字完全一樣但
+   * 一張回 1 點、一張回 3 點。編輯器要能讓人分辨自己在改哪一張。
+   */
+  info?: string;
+  /**
+   * 事件卡的插槽顏色，0~7。**只有事件卡有。**
+   *
+   * 一張事件卡只放得進角色卡上**同色**的事件插槽，`7` 例外 —— 那是萬用色，
+   * 哪一格都放得進去。客戶端的判定原文（`unlight-common` 的 `Deck.canPut`）：
+   *
+   * ```js
+   * if (eventData.type === EventCardType.ANY) return true;   // ANY 就是 7
+   * return eventData.type === slotType;                      // 其餘要同色
+   * ```
+   *
+   * 顏色是取遊戲自己的 `event_slot` 貼圖量出來的（2026-08-16）：
+   *
+   * | 值 | 顏色 | 那一族                    |
+   * | -- | ---- | ------------------------- |
+   * | 0  | 紅   | 劍                        |
+   * | 1  | 綠   | 槍                        |
+   * | 2  | 藍   | 防禦                      |
+   * | 3  | 紫   | 移動                      |
+   * | 4  | 黃   | 特殊                      |
+   * | 5  | 白   | 機會                      |
+   * | 6  | 黑   | 詛咒                      |
+   * | 7  | 灰   | 萬用（哪一格都放得進去）  |
+   *
+   * ⚠ **不要照名字推顏色。**「劍3·盾3卡」是紅的，「劍5·槍5卡」卻是萬用 ——
+   * 等級高低跟顏色沒有對應關係。
+   */
+  slotType?: number;
 }
 
 /** 裝備照「這是誰的專武」分組。 */
@@ -90,13 +156,32 @@ export interface CardCatalog {
 export interface CatalogSource {
   gameVersion: string;
   /** `cc_asset` 的卡（已濾掉保留空位）。 */
-  characters: readonly { filename: string; chara: string; cost: number }[];
+  characters: readonly {
+    filename: string;
+    chara: string;
+    cost: number;
+    /** 有配方做得出它。⚠ 只有 `hasUpgradeGraph.characters` 為 true 時才有意義。 */
+    upgradeTarget?: boolean;
+  }[];
   /** `mc_asset` 的卡。 */
-  monsters: readonly { filename: string; cost: number }[];
+  monsters: readonly { filename: string; cost: number; upgradeTarget?: boolean }[];
+  /**
+   * 那兩份資產裡有沒有升級圖。**沒有的話一張都不准判成「沒出」。**
+   *
+   * ⚠ `mc_asset` 的 `next` 全是 `ccoin`（換代幣），一個 `card` 目標都沒有 ——
+   * 少了這個旗標，138 張怪物卡會全部被判成官方還沒出。省略等於 false。
+   */
+  hasUpgradeGraph?: { characters?: boolean; monsters?: boolean };
   /** `avatar_item.weapon`，索引就是 `wp` 鍵的來源。 */
   equipment: readonly { index: number; name: string; cost: number; chara: string | null }[];
-  /** `event_info.frames`。 */
-  eventCards: readonly { index: number; name: string; cost: number }[];
+  /** `event_info.frames`。`info` 是效果說明，`slotType` 是插槽顏色（見 {@link CatalogItem}）。 */
+  eventCards: readonly {
+    index: number;
+    name: string;
+    cost: number;
+    info?: string;
+    slotType?: number | null;
+  }[];
   /** `charaProfile` / `monsProfile` 的名字。 */
   profiles: { characters: Record<string, string>; monsters: Record<string, string> };
 }
@@ -121,6 +206,35 @@ function slotOrder(filename: string): number {
   const m = /_(r?)(\d+)$/.exec(filename);
   if (m === null) return 0;
   return (m[1] === "r" ? 5 : 0) + Number(m[2]) - 1;
+}
+
+/**
+ * 這張卡是**掉落取得的基礎卡**嗎 —— 也就是 L1。
+ *
+ * ⚠ **「沒有配方指向它」的唯一合法例外。** L1 不是升級來的，所以它永遠不會
+ * 是任何 `next` 的目標；少了這一條，每一位角色的 L1 都會被判成「官方還沒出」，
+ * 而那是 70 張最基本的卡。
+ *
+ * 怪物（`mc`）不走這條 —— 它們沒有升級圖，整份都判斷不了（見 `locked`）。
+ */
+function isBaseCard(filename: string): boolean {
+  return /^cc\d+_0*1$/.test(filename);
+}
+
+/**
+ * 這張卡官方開放了沒。
+ *
+ * 判斷不了（那份資產沒有升級圖）時一律回 `false`＝「當作出了」。**方向不能
+ * 反** —— 反了會把整份怪物卡藏光，而那看起來像插件壞了，不像設定問題。
+ */
+function lockedOf(
+  filename: string,
+  upgradeTarget: boolean | undefined,
+  hasGraph: boolean,
+): boolean {
+  if (!hasGraph) return false;
+  if (upgradeTarget === true) return false;
+  return !isBaseCard(filename);
 }
 
 /** 名字的族群 = 開頭那一段非數字。`劍1卡`→`劍`、`機會卡1`→`機會卡`。 */
@@ -193,11 +307,19 @@ function chunkByFamily(items: readonly CatalogItem[]): CatalogEventGroup[] {
  * 任何執行期狀態。
  */
 export function buildCatalog(src: CatalogSource): CardCatalog {
+  const ccGraph = src.hasUpgradeGraph?.characters === true;
+  const mcGraph = src.hasUpgradeGraph?.monsters === true;
+
   // ── 角色：一位一排，L1~L5 R1~R5 ──────────────────────────────────────
   const byChara = new Map<string, CatalogCard[]>();
   for (const c of src.characters) {
     const list = byChara.get(c.chara) ?? [];
-    list.push({ key: c.filename, slot: slotLabel(c.filename), baseCost: c.cost });
+    list.push({
+      key: c.filename,
+      slot: slotLabel(c.filename),
+      baseCost: c.cost,
+      locked: lockedOf(c.filename, c.upgradeTarget, ccGraph),
+    });
     byChara.set(c.chara, list);
   }
   const characters: CatalogGroup[] = [...byChara.entries()]
@@ -214,7 +336,14 @@ export function buildCatalog(src: CatalogSource): CardCatalog {
   for (const m of src.monsters) {
     const id = m.filename.split("_")[0] ?? m.filename;
     const list = byMons.get(id) ?? [];
-    list.push({ key: m.filename, slot: slotLabel(m.filename), baseCost: m.cost });
+    list.push({
+      key: m.filename,
+      slot: slotLabel(m.filename),
+      baseCost: m.cost,
+      // 實測 `mc_asset` 沒有升級圖，所以這裡實際上永遠是 false —— 但走同一支
+      // 函式而不是寫死，官方哪天替怪物加上升級就會自己跟上。
+      locked: lockedOf(m.filename, m.upgradeTarget, mcGraph),
+    });
     byMons.set(id, list);
   }
   const monsters: CatalogGroup[] = [...byMons.entries()]
@@ -261,10 +390,14 @@ export function buildCatalog(src: CatalogSource): CardCatalog {
     });
 
   // ── 事件卡：照客戶端順序，族群變了就換一塊 ────────────────────────────
+  // 讀不到的顯示欄位就不寫進去 —— 名冊會被寫成 JSON 存起來，`undefined` 的鍵
+  // 會消失，而 `""` / `null` 會留下來假裝自己是答案。
   const eventItems: CatalogItem[] = src.eventCards.map((e) => ({
     key: eventCardKey(e.index),
     name: e.name,
     baseCost: e.cost,
+    ...(e.info !== undefined && e.info !== "" ? { info: e.info } : {}),
+    ...(typeof e.slotType === "number" ? { slotType: e.slotType } : {}),
   }));
 
   return {

@@ -26,9 +26,13 @@
  * `@ulr/rule-schema` 的事（card-key.ts），這個 package 不該知道它。同一條界線
  * 在 `patch-cost` 上也守著。
  *
+ * 除了 cost，索引那一組還帶回兩個**純顯示**的欄位：效果說明（`info`）與事件卡的
+ * 插槽顏色（`slotType`）。它們不進規則檔，只進名冊 —— 理由見 {@link IndexedCardAsset}。
+ *
  * ⚠ **要在沒有套自訂 COST 的客戶端上讀。** 這裡讀的是 Phaser 快取裡的值，
  * 而 `patch-cost` 正是就地改寫那份資料 —— 對著已經套過的客戶端讀，讀回來的
- * 會是被改過的數字。這裡檢查不出這件事，呼叫端要自己確保。
+ * 會是被改過的數字。問 {@link COST_PATCH_STATE_EXPRESSION} 就知道這一份文件
+ * 有沒有被改寫過，**讀之前一定要問**（理由見那支的說明）。
  */
 
 import {
@@ -62,12 +66,28 @@ export interface CharacterAsset {
   hp: number;
   atk: number;
   def: number;
+  /**
+   * 有配方做得出這張卡（有某張卡的 `next` 指向它）。
+   *
+   * ⚠ **只有 `CharacterAssetTable.hasUpgradeGraph` 是 true 時這一欄才有意義。**
+   * 怪物那份沒有升級圖，整份都會是 false —— 照字面解讀會得出「138 張怪物卡
+   * 官方都沒出」。判準的完整說明見 {@link cardAssetReadExpression}。
+   */
+  upgradeTarget: boolean;
 }
 
 /** 一次讀取的結果。 */
 export interface CharacterAssetTable {
   /** 真正有卡的那些，`charaIndex` 保持 `frames` 的原始索引。 */
   assets: CharacterAsset[];
+  /**
+   * 這份資產裡有升級圖（至少一筆 `next` 是 `type: "card"`）。
+   *
+   * ⚠ **false 的時候 `upgradeTarget` 一個字都不能信。** `cc_asset` 有升級圖
+   * （2026-08-17 實測 561 個目標），`mc_asset` 沒有（它的 next 全是 `ccoin`）。
+   * 呼叫端要用它決定「能不能判斷這張卡出了沒」，而不是直接讀 `upgradeTarget`。
+   */
+  hasUpgradeGraph: boolean;
   /** `frames` 的總長度，含保留空位。 */
   totalFrames: number;
   /**
@@ -84,8 +104,40 @@ export interface CharacterAssetTable {
 /**
  * 讀一份「具名」卡表的表達式。
  *
- * 只挑需要的欄位帶回來 —— cc_asset 每張卡還有四個技能物件，整份搬回 Node
- * 會是好幾 MB，而且我們一個欄位都用不到（CONTRIBUTING §9.1「不搬大物件」）。
+ * 只挑需要的欄位帶回來 —— cc_asset 每張卡還有四個技能物件（含五種語言的說明），
+ * 整份搬回 Node 會是好幾 MB，而且我們一個欄位都用不到（CONTRIBUTING §9.1
+ * 「不搬大物件」）。
+ *
+ * ## ⭐ `next` 是「這張卡官方出了沒」的唯一依據
+ *
+ * 每張卡都有一個 `next` 陣列，那是**升級圖**：
+ *
+ * ```jsonc
+ * { "type": "card", "index": 369, "require": [{ "type": "card", "index": 364, "value": 10 }] }
+ * //        ↑ 升到哪一張        ↑ cc_asset.frames 的索引
+ * ```
+ *
+ * `cc_asset` 一次就把每位角色的十張全部寫好（數值、技能、插槽都是完整的），
+ * **跟官方開放了沒完全無關** —— 2026-08-17 實測 700 張裡有 69 張沒有任何配方
+ * 指向它，全部是 R1~R5。所以判準是：
+ *
+ * > 一張卡做得出來 ⟺ 有某張卡的 `next`（`type: "card"`）指向它的索引。
+ *
+ * ⚠ **L1 是唯一的例外**，它是掉落取得的基礎卡，本來就沒有配方指向它。那一條
+ * 在 `@ulr/rule-schema` 的 `buildCatalog` 判（那裡才有 filename 的 L/R 解析）。
+ *
+ * ⚠ 這裡**只送索引集合的判定結果**（每張卡一個布林），不送 `next` 本身 ——
+ * `require` 是一串物件，700 張帶回來又大又用不到。
+ *
+ * ## ⚠⚠ `hasUpgradeGraph` 是安全閥，不是裝飾
+ *
+ * **`mc_asset`（怪物）也有 `next`，但它的 `type` 全部是 `ccoin`，一個 `card`
+ * 目標都沒有**（2026-08-17 實測：138 張全有 next、`card` 目標 0 個）。少了這個
+ * 旗標，同一支表達式套在怪物表上會把 **138 張怪物卡全部判成「官方還沒出」**，
+ * 然後編輯器把整頁藏光。
+ *
+ * 所以：**一個 `card` 目標都沒有 = 這份資產沒有升級圖 = 不能對它下任何判斷**，
+ * 呼叫端一律當成「全部都出了」。
  */
 export function cardAssetReadExpression(cacheKey: string): string {
   const key = JSON.stringify(cacheKey);
@@ -99,6 +151,21 @@ export function cardAssetReadExpression(cacheKey: string): string {
     if (!data || !data.frames || typeof data.frames.length !== "number") {
       return JSON.stringify({ error: "Phaser 快取裡沒有 " + ${key} + "，或它沒有 frames 陣列" });
     }
+
+    // 第一趟：收集「被某張卡指為升級目標」的索引。⚠ 只認 type === "card"，
+    // 怪物那份的 next 全是 "ccoin"（換代幣），那不是升級。
+    var targets = {};
+    var targetCount = 0;
+    for (var t = 0; t < data.frames.length; t++) {
+      var tf = data.frames[t];
+      if (!tf || !tf.next || tf.next.length === undefined) continue;
+      for (var n = 0; n < tf.next.length; n++) {
+        var e = tf.next[n];
+        if (!e || e.type !== "card" || typeof e.index !== "number") continue;
+        if (!targets[e.index]) { targets[e.index] = true; targetCount++; }
+      }
+    }
+
     var rows = [];
     for (var i = 0; i < data.frames.length; i++) {
       var f = data.frames[i];
@@ -112,10 +179,12 @@ export function cardAssetReadExpression(cacheKey: string): string {
         cost: f.cost,
         hp: f.hp,
         atk: f.atk,
-        def: f.def
+        def: f.def,
+        // 有配方做得出這張卡。⚠ 只有 hasUpgradeGraph 為 true 時這一欄才有意義。
+        upgradeTarget: !!targets[i]
       });
     }
-    return JSON.stringify({ rows: rows });
+    return JSON.stringify({ rows: rows, hasUpgradeGraph: targetCount > 0 });
   } catch (e) {
     return JSON.stringify({ error: String((e && e.message) || e) });
   }
@@ -124,6 +193,71 @@ export function cardAssetReadExpression(cacheKey: string): string {
 
 export const CC_ASSET_READ_EXPRESSION = cardAssetReadExpression(CC_ASSET_KEY);
 export const MC_ASSET_READ_EXPRESSION = cardAssetReadExpression(MC_ASSET_KEY);
+
+/**
+ * **這一份文件的卡表被改寫過了嗎。**
+ *
+ * ⚠⚠ 讀名冊之前一定要問這個，而且**不能改問托盤自己記的狀態**。托盤記的是
+ * 「現在選著哪份規則」，那跟「頁面上那份資料現在長什麼樣」是兩件事，而且它們
+ * 分開的時機一點都不罕見：
+ *
+ * - 按了「停用」→ 托盤記成 `off`，但頁面**要重載才會變回原版**（按鈕自己
+ *   就是這樣寫的）。這時讀名冊會把上一份規則的數字記成原價。
+ * - 換一份規則 → 托盤記成 `pending`，頁面上還是**上一份**的數字。
+ * - 托盤自己重開 → 什麼都不記得了，可是遊戲還開著、還是被改寫過的。
+ *
+ * 這三條路 2026-08-16 都真的發生過：名冊裡有三格（`cc005_05`、`cc006_04`、
+ * `cc009_04`）被記成改過的價格，於是編輯器把「跟原版比」畫成了「跟上一份
+ * 規則比」——「改回原價」會改回一個玩家從來沒設過的值，而價差色階連**方向**
+ * 都是反的（庫勒尼西 L4 原價 13、規則 14，本來是貴 1C，卻畫成便宜 5C）。
+ *
+ * 頁面上那個旗標是 `patch-cost.ts` 注入的腳本自己維護的（`applied` 是這份
+ * 文件被改寫過的卡數），重載就會消失 —— 它問的正是「**這一份文件**」，不是
+ * 「插件現在想套什麼」。
+ */
+export const COST_PATCH_STATE_EXPRESSION = `(function () {
+  try {
+    var f = window.__ulrCostPatch;
+    if (!f) return JSON.stringify({ patched: false, applied: 0 });
+    return JSON.stringify({
+      patched: typeof f.applied === "number" && f.applied > 0,
+      applied: typeof f.applied === "number" ? f.applied : 0
+    });
+  } catch (e) {
+    return JSON.stringify({ error: String((e && e.message) || e) });
+  }
+})()`;
+
+/** {@link COST_PATCH_STATE_EXPRESSION} 的結果。 */
+export interface CostPatchState {
+  /** 這份文件的卡表被改寫過了 —— 讀回來的價格**不是原價**。 */
+  patched: boolean;
+  /** 被改寫的卡數。純粹給訊息用。 */
+  applied: number;
+}
+
+/**
+ * 解析旗標。
+ *
+ * ⚠ **看不懂就當成「改寫過」**（`patched: true`）。這個判斷的兩種錯法不對稱：
+ * 誤判成乾淨會把改過的數字寫進名冊、而且從此看起來像原價（沒有任何錯誤訊息，
+ * 上面說的三格就是這樣來的）；誤判成髒只是多叫玩家重載一次遊戲。
+ */
+export function parseCostPatchState(raw: string): CostPatchState {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { patched: true, applied: 0 };
+  }
+  if (typeof parsed !== "object" || parsed === null) return { patched: true, applied: 0 };
+  const o = parsed as Record<string, unknown>;
+  if (typeof o["patched"] !== "boolean") return { patched: true, applied: 0 };
+  return {
+    patched: o["patched"],
+    applied: isFiniteNumber(o["applied"]) ? o["applied"] : 0,
+  };
+}
 
 export class CcAssetReadError extends Error {
   override readonly name = "CcAssetReadError";
@@ -150,7 +284,11 @@ export function parseCharacterAssets(raw: string): CharacterAssetTable {
   if (typeof parsed !== "object" || parsed === null) {
     throw new CcAssetReadError("頁面回傳的不是物件");
   }
-  const { error, rows } = parsed as { error?: unknown; rows?: unknown };
+  const {
+    error,
+    rows,
+    hasUpgradeGraph: graph,
+  } = parsed as { error?: unknown; rows?: unknown; hasUpgradeGraph?: unknown };
   if (typeof error === "string") throw new CcAssetReadError(error);
   if (!Array.isArray(rows)) throw new CcAssetReadError("回傳的內容沒有 rows 陣列");
 
@@ -194,11 +332,15 @@ export function parseCharacterAssets(raw: string): CharacterAssetTable {
       hp: isFiniteNumber(r["hp"]) ? r["hp"] : 0,
       atk: isFiniteNumber(r["atk"]) ? r["atk"] : 0,
       def: isFiniteNumber(r["def"]) ? r["def"] : 0,
+      upgradeTarget: r["upgradeTarget"] === true,
     });
   }
 
   if (assets.length === 0) throw new CcAssetReadError("一張卡都沒有");
-  return { assets, totalFrames: rows.length, placeholders };
+  // ⚠ **舊的頁面腳本沒有這個欄位，那時一律當成「沒有升級圖」。** 反過來
+  // 預設 true 的話，一份沒有這個欄位的回傳會讓每張卡的 `upgradeTarget`
+  // （全是 false）被當真 —— 症狀是「編輯器把整份卡表藏光」。
+  return { assets, hasUpgradeGraph: graph === true, totalFrames: rows.length, placeholders };
 }
 
 /**
@@ -232,6 +374,14 @@ export interface IndexedCardAsset {
   /** 顯示名稱（`name_tcn`，沒有就退回 `name_ja`）。**只拿來給人看**，不當鍵。 */
   name: string;
   /**
+   * 效果說明（`info_tcn`，沒有就退回 `info_ja`）。讀不到是空字串。
+   *
+   * **事件卡非要它不可**：2026-08-16 實測 110 張裡有五張都叫「Hp恢復」
+   * （索引 88/89/90/92/93），光看名字分不出哪張回 1 點哪張回 3 點。加上這一欄
+   * 與 {@link slotType} 之後 110 張才全部分得開。
+   */
+  info: string;
+  /**
    * 角色限制 —— 這件裝備是誰的專武（`cc001`）。沒有限制是 `null`。
    *
    * 2026-08-16 實測：238 件裡有 212 件綁角色。要顯示成人看得懂的名字得再查
@@ -240,6 +390,21 @@ export interface IndexedCardAsset {
    * ⚠ 只有武器有這一欄，事件卡沒有。
    */
   chara: string | null;
+  /**
+   * 事件卡的插槽顏色（資料裡的 `type`）。0~7，武器沒有這一欄 → `null`。
+   *
+   * 這是**放得進哪個插槽**的唯一依據 —— 角色卡的 `cc_asset.slot` 是同一組
+   * 數字（一位角色六格）。客戶端的判定（`unlight-common` 的 `Deck.canPut`）：
+   *
+   * ```js
+   * if (eventData.type === EventCardType.ANY) return true;   // ANY 就是 7
+   * return eventData.type === slotType;
+   * ```
+   *
+   * ⚠ **看名字猜不出來。** 「劍3·盾3卡」（索引 107）是 0（紅），而「劍5·槍5卡」
+   * （索引 98）卻是 7（萬用）—— 等級高低跟顏色沒有對應關係，只能讀這一欄。
+   */
+  slotType: number | null;
 }
 
 export interface IndexedCardTable {
@@ -277,7 +442,9 @@ export function indexedCardReadExpression(cacheKey: string, field: string): stri
         index: i,
         cost: r.cost,
         name: typeof r.name_tcn === "string" && r.name_tcn !== "" ? r.name_tcn : r.name_ja,
-        chara: typeof r.chara === "string" && r.chara !== "" ? r.chara : null
+        info: typeof r.info_tcn === "string" && r.info_tcn !== "" ? r.info_tcn : r.info_ja,
+        chara: typeof r.chara === "string" && r.chara !== "" ? r.chara : null,
+        slotType: typeof r.type === "number" ? r.type : null
       });
     }
     return JSON.stringify({ rows: out, total: rows.length });
@@ -326,11 +493,15 @@ export function parseIndexedCards(raw: string): IndexedCardTable {
     if (!isFiniteNumber(r["cost"])) {
       throw new CcAssetReadError(`索引 ${r["index"]} 的 cost 不是有限數字：${String(r["cost"])}`);
     }
+    // ⚠ `info` 與 `slotType` 讀不到**不報錯**。它們純粹是給人看的，缺了只是那一格
+    // 少一行說明；`cost` 缺了才是會產生錯規則的事（上面那兩個 throw）。
     cards.push({
       index: r["index"],
       cost: r["cost"],
       name: typeof r["name"] === "string" ? r["name"] : "",
+      info: typeof r["info"] === "string" ? r["info"] : "",
       chara: typeof r["chara"] === "string" && r["chara"] !== "" ? r["chara"] : null,
+      slotType: isFiniteNumber(r["slotType"]) ? r["slotType"] : null,
     });
   }
 

@@ -171,6 +171,39 @@ describe("事件卡：族群分塊，順序不動", () => {
   it("複合卡的族群看第一個數字前那一段（`劍3·槍1卡` → 劍）", () => {
     expect(cat.eventCards[0]!.items[0]!.name).toBe("劍1卡");
   });
+
+  it("效果與插槽顏色跟著卡走 —— 同名的卡只能靠它們分辨", () => {
+    const built = buildCatalog(
+      src({
+        eventCards: [
+          { index: 88, name: "Hp恢復", cost: 1, info: "回復1點Hp", slotType: 2 },
+          { index: 90, name: "Hp恢復", cost: 2, info: "回復3點Hp", slotType: 2 },
+          { index: 92, name: "Hp恢復", cost: 1, info: "回復1點Hp", slotType: 0 },
+        ],
+      }),
+    );
+    expect(built.eventCards.flatMap((g) => g.items)).toEqual([
+      { key: "ev088", name: "Hp恢復", baseCost: 1, info: "回復1點Hp", slotType: 2 },
+      { key: "ev090", name: "Hp恢復", baseCost: 2, info: "回復3點Hp", slotType: 2 },
+      { key: "ev092", name: "Hp恢復", baseCost: 1, info: "回復1點Hp", slotType: 0 },
+    ]);
+  });
+
+  it("slotType 0（紅）留得住，讀不到的欄位則整個不寫進去", () => {
+    // 0 是劍色。用真假值判斷會把它跟「沒讀到」混為一談，於是整族劍卡失去顏色。
+    // 反過來，讀不到的要**連鍵都沒有** —— `null` 存進 JSON 會假裝自己是答案。
+    const built = buildCatalog(
+      src({
+        eventCards: [
+          { index: 3, name: "劍4卡", cost: 1, info: "此卡當作劍4使用", slotType: 0 },
+          { index: 4, name: "劍5卡", cost: 1, slotType: null },
+        ],
+      }),
+    );
+    const [red, unknown] = built.eventCards.flatMap((g) => g.items);
+    expect(red!.slotType).toBe(0);
+    expect(Object.keys(unknown!)).toEqual(["key", "name", "baseCost"]);
+  });
 });
 
 describe("名冊本身", () => {
@@ -194,5 +227,96 @@ describe("名冊本身", () => {
     const cat = buildCatalog(src());
     const round = parseCatalog(JSON.parse(JSON.stringify(cat)));
     expect(round).toEqual(cat);
+  });
+});
+
+/**
+ * 官方還沒開放的卡
+ *
+ * ⚠ 這一組守的是**兩個方向都會爆的判斷**：
+ *
+ * - 判太鬆（漏掉 R5）→ 只是功能沒生效，看得出來
+ * - 判太嚴 → 把 70 張 L1 或 138 張怪物卡全部標成「沒出」，編輯器整頁空白，
+ *   而那看起來像插件壞了，不像資料問題
+ *
+ * 判準本身來自 `cc_asset` 的升級圖（`next`），實測見
+ * `@ulr/cdp-adapter` 的 `cardAssetReadExpression`。
+ */
+describe("locked：官方還沒開放這張卡", () => {
+  /** 把某幾張標成「有配方做得出來」，其餘沒有。 */
+  function withGraph(made: readonly string[], over: Partial<CatalogSource> = {}) {
+    const mark = <T extends { filename: string }>(c: T) => ({
+      ...c,
+      upgradeTarget: made.includes(c.filename),
+    });
+    const base = src(over);
+    return buildCatalog({
+      ...base,
+      characters: base.characters.map(mark),
+      monsters: base.monsters.map(mark),
+      hasUpgradeGraph: { characters: true, monsters: false },
+    });
+  }
+
+  /** `cc001` 那一位的十格，照 L1…R5 排好。 */
+  const cardsOf = (cat: ReturnType<typeof buildCatalog>, id: string) =>
+    cat.characters.find((g) => g.id === id)!.cards;
+
+  it("沒有配方指向的 R 卡 → locked", () => {
+    // 只有到 R4 做得出來（＝官方還沒開 R5），這正是 2026-08-17 的柯布
+    const made = [
+      "cc001_02",
+      "cc001_03",
+      "cc001_04",
+      "cc001_05",
+      "cc001_r01",
+      "cc001_r02",
+      "cc001_r03",
+      "cc001_r04",
+    ];
+    const cards = cardsOf(withGraph(made), "cc001");
+    expect(cards.filter((c) => c.locked).map((c) => c.slot)).toEqual(["R5"]);
+  });
+
+  it("⚠⚠ L1 永遠不算 locked —— 它是掉落的基礎卡，本來就沒有配方指向它", () => {
+    // 一張都做不出來的極端情況：只有 L1 該活下來
+    const cards = cardsOf(withGraph([]), "cc001");
+    expect(cards.find((c) => c.slot === "L1")!.locked).toBe(false);
+    // 其餘九張全是 locked —— L1 那條例外沒有溢出去
+    expect(cards.filter((c) => c.locked)).toHaveLength(9);
+  });
+
+  it("有配方指向就不算 locked，L 跟 R 一視同仁", () => {
+    const cards = cardsOf(withGraph(["cc001_02", "cc001_r05"]), "cc001");
+    const by = Object.fromEntries(cards.map((c) => [c.slot, c.locked]));
+    expect(by["L2"]).toBe(false);
+    expect(by["R5"]).toBe(false);
+    expect(by["L3"]).toBe(true);
+  });
+
+  /**
+   * ⚠⚠ 這一條是整組裡最重要的。
+   *
+   * `mc_asset` 也有 `next`，但它的 `type` 全是 `ccoin`（換代幣）—— 一個 `card`
+   * 目標都沒有（2026-08-17 實測 138 張全有 next、0 個 card 目標）。少了
+   * `hasUpgradeGraph` 這道閘，同一支判準會把**整份怪物卡**標成「官方還沒出」，
+   * 然後編輯器把怪物那一頁藏光。
+   */
+  it("⚠⚠ 那份資產沒有升級圖 → 一張都不准判成 locked（怪物就是這種）", () => {
+    const cat = withGraph([]);
+    expect(cat.monsters.flatMap((g) => g.cards).every((c) => c.locked === false)).toBe(true);
+  });
+
+  it("完全沒送 hasUpgradeGraph 時也一樣 —— 省略等於「判斷不了」", () => {
+    const cat = buildCatalog(src());
+    expect(cat.characters.flatMap((g) => g.cards).every((c) => c.locked === false)).toBe(true);
+    expect(cat.monsters.flatMap((g) => g.cards).every((c) => c.locked === false)).toBe(true);
+  });
+
+  it("⚠ 藏起來是畫面的事 —— 名冊本身照樣列出每一張卡", () => {
+    // 少一張都不行：編輯器的草稿是照名冊填的，名冊漏掉的鍵會從存出來的規則檔
+    // 裡消失，而規則沒定價的卡在引擎裡算 99C。
+    const cards = cardsOf(withGraph([]), "cc001");
+    expect(cards).toHaveLength(10);
   });
 });

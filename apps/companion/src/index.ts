@@ -433,6 +433,8 @@ async function cmdCatalog(args: string[]): Promise<number> {
       equipment: weapons.cards,
       eventCards: events.cards,
       profiles,
+      // ⚠ 少了它每張卡都會被判成「官方還沒出」—— 見 `buildCatalog` 的 `locked`。
+      hasUpgradeGraph: { characters: cc.hasUpgradeGraph, monsters: mc.hasUpgradeGraph },
     });
 
     mkdirSync(dirname(out), { recursive: true });

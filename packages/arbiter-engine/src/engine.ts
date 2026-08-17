@@ -506,14 +506,27 @@ export class ArbiterEngine {
    * 編輯 COST 的介面靠它把 `cc001_01` 顯示成「艾伯李斯特 L1」。呼叫端負責
    * 把結果存起來重複使用 —— 玩家調表時多半沒開遊戲。
    *
-   * ⚠ **要在沒有套自訂 COST 的客戶端上讀。** `baseCost` 讀的是 Phaser 快取裡
-   * 的值，而 `patch-cost` 正是就地改寫那份資料 —— 套過之後讀回來的「原價」
-   * 會是被改過的數字，於是編輯器的「改回原價」會把玩家改回**上一份規則**。
-   * 這裡檢查不出來，所以由呼叫端在還沒套用時抓（見托盤的 `#refreshCatalog`）。
+   * ⚠⚠ **被改寫過的客戶端讀不得，而這件事由這支自己擋。** `baseCost` 讀的是
+   * Phaser 快取裡的值，而 `patch-cost` 正是就地改寫那份資料 —— 套過之後讀回來
+   * 的「原價」會是被改過的數字，於是編輯器的「改回原價」會把玩家改回**上一份
+   * 規則**，價差色階連方向都可能是反的。
+   *
+   * ⚠ 判斷**只能問頁面**（`costPatchState`），不能問插件記著的狀態。「插件現在
+   * 選著哪份規則」跟「頁面上那份資料現在長什麼樣」是兩件事：按了停用還沒重載、
+   * 剛換一份規則、托盤自己重開過 —— 這三種情況插件都會說「沒在套」，而頁面
+   * 上的數字仍然是改過的。2026-08-16 就是這樣讓三格假原價進了名冊。
    */
   async readCardCatalog(gameVersion: string): Promise<CardCatalog> {
     const adapter = this.#adapter;
     if (adapter === null) throw new Error("還沒接上遊戲");
+    const patch = await adapter.costPatchState();
+    if (patch.patched) {
+      throw new Error(
+        `這個客戶端的卡表已經被改寫過了（${patch.applied} 張），現在讀回來的「原價」` +
+          `會是改過的數字。請先在「Cost 表」按停用、重載遊戲，再回來讀一次 ——` +
+          `停用之後不重載是沒有用的，頁面上那份資料還是改過的。`,
+      );
+    }
     // 五次 evaluate，各自只帶需要的欄位回來（§9.1「不搬大物件」）。
     const [characters, monsters, equipment, eventCards, profiles] = [
       await adapter.readCharacterAssets(),
@@ -529,6 +542,12 @@ export class ArbiterEngine {
       equipment: equipment.cards,
       eventCards: eventCards.cards,
       profiles,
+      // ⚠ 一定要一起送。少了它，名冊會把**每一張**卡都判成「官方還沒出」
+      // （`upgradeTarget` 全 false 卻沒有旗標說「這份沒有升級圖」）。
+      hasUpgradeGraph: {
+        characters: characters.hasUpgradeGraph,
+        monsters: monsters.hasUpgradeGraph,
+      },
     });
   }
 

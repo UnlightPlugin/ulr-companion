@@ -50,14 +50,21 @@ import {
   parseHiddenStageStatus,
 } from "./patch-stage.js";
 import type { CdpTransport } from "./protocol.js";
-import type { CardProfiles, CharacterAssetTable, IndexedCardTable } from "./read-card-assets.js";
+import type {
+  CardProfiles,
+  CharacterAssetTable,
+  CostPatchState,
+  IndexedCardTable,
+} from "./read-card-assets.js";
 import {
   CC_ASSET_READ_EXPRESSION,
+  COST_PATCH_STATE_EXPRESSION,
   EVENT_CARD_READ_EXPRESSION,
   MC_ASSET_READ_EXPRESSION,
   PROFILE_READ_EXPRESSION,
   WEAPON_READ_EXPRESSION,
   parseCharacterAssets,
+  parseCostPatchState,
   parseIndexedCards,
   parseProfiles,
 } from "./read-card-assets.js";
@@ -327,11 +334,22 @@ export class CdpAdapter {
   }
 
   /**
+   * 這一份文件的卡表被改寫過了嗎 —— **讀名冊之前要問這個**。
+   *
+   * 問的是頁面自己的旗標，不是插件記的狀態。兩者分開的三種時機（停用沒重載、
+   * 換規則、托盤重開）見 `COST_PATCH_STATE_EXPRESSION` 的說明。
+   */
+  async costPatchState(): Promise<CostPatchState> {
+    const raw = await this.evaluate<string>(COST_PATCH_STATE_EXPRESSION);
+    return parseCostPatchState(raw);
+  }
+
+  /**
    * 讀回這個客戶端的原版角色卡資料（`cc_asset`）。
    *
    * ⚠ 要在**沒有套自訂 COST**的客戶端上呼叫 —— `installCostOverrides` 是就地
-   * 改寫同一份快取資料，套過之後讀回來的是被改過的數字。詳見
-   * `read-card-assets.ts`。
+   * 改寫同一份快取資料，套過之後讀回來的是被改過的數字。先問
+   * {@link costPatchState}。詳見 `read-card-assets.ts`。
    */
   async readCharacterAssets(): Promise<CharacterAssetTable> {
     const raw = await this.evaluate<string>(CC_ASSET_READ_EXPRESSION);
