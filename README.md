@@ -243,7 +243,7 @@ apps/
 rules/
   unlight-official-*.ulrcost.json   從客戶端匯出的原版 COST 表，四張表全帶
                                     （角色·怪物·裝備·事件卡；fork 它來做自訂規則）
-  shinon-squeeze-band-*.ulrcost.json  夾擠式罰 C：逐點遞增的壓 C 曲線
+  tomorin-squeeze-band-*.ulrcost.json 夾擠式罰C：逐點遞增的壓 C 曲線，最小單位 0.5C
                                     ⚠ 一份規則只留一個檔（.rule.json 是 unpack
                                     的產物，不進版控 —— 兩個檔會被誤認成兩份規則）
 docs/
