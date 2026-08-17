@@ -443,9 +443,20 @@
         letter-spacing: 0.04em;
       }
 
-      /* 一格 = 名字（索引型的表才有）＋ 數字欄位 */
+      /*
+       * 一格 = 名字（索引型的表才有）＋ 數字欄位。
+       *
+       * 直排 + 數字欄位 `margin-top:auto`：同一排的格子高度本來就會被格線拉齊，
+       * 把欄位頂到底部就等於**所有數字欄位對齊同一條線**，不必給每個文字區塊
+       * 都寫死高度。名字幾行、有沒有效果說明都不影響。
+       */
       .ecell {
         min-width: 0;
+        display: flex;
+        flex-direction: column;
+      }
+      .ecell input {
+        margin-top: auto;
       }
       .ecell .cn {
         display: block;
@@ -455,6 +466,60 @@
         color: var(--dim);
         overflow: hidden;
         margin-bottom: 2px;
+      }
+
+      /*
+       * 事件卡的插槽顏色。
+       *
+       * 一張事件卡只放得進角色卡上**同色**的事件插槽（灰色是萬用），所以顏色跟
+       * 價格是同一件事的兩面 —— 一張紅卡再便宜，紅槽少的角色也帶不動。編 COST
+       * 的時候看不到顏色，等於在沒有一半資訊的情況下定價。
+       *
+       * 色票是量遊戲自己的 `event_slot` 貼圖來的（2026-08-16，8 個 frame）。
+       * 直接寫死而不是從名冊帶下來：貼圖不會因為玩家的規則檔而變，而把
+       * 「顏色長什麼樣」放進快取只會讓舊快取多一種過期方式。
+       */
+      .ecell.ev {
+        border-left: 3px solid var(--slot, transparent);
+        padding-left: 4px;
+      }
+      /*
+       * 效果說明。名字說得出效果的那些卡根本不會有這個元素（見 edEventEffect）。
+       *
+       * ⚠ **要讓它折兩行。** 一排九格 ≈ 65px，一行只放得下七個字，而
+       * 「出牌後從卡組抽1張卡」被切成「出牌後從卡組…」等於沒寫。兩行放得下
+       * 大部分，剩下的長句滑過去看 title。
+       */
+      .ecell .fx {
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+        line-clamp: 2;
+        font-size: 9.5px;
+        line-height: 1.2;
+        color: var(--grey);
+        overflow: hidden;
+        margin: -1px 0 2px;
+      }
+
+      /* 顏色圖例。事件卡的插槽色、編輯 COST 的價差色階都用這一條。 */
+      .evlegend {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 4px 10px;
+        margin-bottom: 2px;
+        font-size: 11px;
+        color: var(--dim);
+      }
+      .evlegend b {
+        display: inline-block;
+        width: 8px;
+        height: 12px;
+        border-radius: 1px;
+        vertical-align: -2px;
+        margin-right: 4px;
+        border: 1px solid rgba(0, 0, 0, 0.5);
       }
       .ecell input {
         width: 100%;
@@ -467,11 +532,130 @@
         border-radius: 2px;
         color: var(--text);
       }
-      /* 改過的格子要一眼看得出來 —— 存檔前玩家要知道自己動了哪些。 */
+      /*
+       * 改過的格子要一眼看得出來 —— 而且要看得出**改了多少、往哪邊改**。
+       *
+       * ⚠ 顏色帶的是「跟遊戲原價差幾 C」，不是「我剛剛動過它」。一份自訂規則
+       * 本來就有一堆格子跟原價不同（那才是重點），玩家在意的是「這張我調貴了
+       * 多少」。所以色階是**兩條相反方向的坡**：
+       *
+       *   便宜 5C ←──── 藍 ── 青 ──┤原價├── 琥珀 ── 紅 ────→ 貴 5C
+       *
+       * 兩條走**不同色系**（冷／暖）而不是同一個顏色的深淺 —— 差一階的深淺
+       * 在 11.5px 的小格子上根本分不出來，但冷暖一眼就知道是哪一邊。
+       * 冷暖也是紅綠色盲仍然分得開的一組（差在藍黃軸上）。
+       *
+       * 每一階的三個顏色掛在 `--dbg`/`--dfg`/`--dln` 上，下面 `.dirty` 一條
+       * 規則統一取用；沒有階級（名冊查不到原價）時退回原本那身琥珀。
+       */
       .ecell input.dirty {
-        border-color: var(--amber);
-        color: var(--amber);
-        background: rgba(255, 194, 71, 0.08);
+        border-color: var(--dln, var(--amber));
+        color: var(--dfg, var(--amber));
+        background: var(--dbg, rgba(255, 194, 71, 0.08));
+      }
+      /* 貴了：琥珀 → 紅。第 5 階是**上限**，再貴也是這個顏色。 */
+      .up1 {
+        --dbg: rgba(255, 194, 71, 0.07);
+        --dfg: #e3cda2;
+        --dln: rgba(255, 194, 71, 0.35);
+      }
+      .up2 {
+        --dbg: rgba(255, 186, 71, 0.13);
+        --dfg: #ffca6a;
+        --dln: rgba(255, 186, 71, 0.5);
+      }
+      .up3 {
+        --dbg: rgba(255, 150, 55, 0.2);
+        --dfg: #ffb057;
+        --dln: rgba(255, 150, 55, 0.62);
+      }
+      .up4 {
+        --dbg: rgba(250, 110, 55, 0.27);
+        --dfg: #ff9153;
+        --dln: rgba(250, 110, 55, 0.75);
+      }
+      .up5 {
+        --dbg: rgba(232, 70, 60, 0.34);
+        --dfg: #ff7a70;
+        --dln: rgba(232, 70, 60, 0.9);
+      }
+      /* 便宜了：青 → 藍。 */
+      .dn1 {
+        --dbg: rgba(110, 205, 225, 0.07);
+        --dfg: #a6cfda;
+        --dln: rgba(110, 205, 225, 0.35);
+      }
+      .dn2 {
+        --dbg: rgba(90, 190, 230, 0.13);
+        --dfg: #7fd0ee;
+        --dln: rgba(90, 190, 230, 0.5);
+      }
+      .dn3 {
+        --dbg: rgba(75, 165, 235, 0.2);
+        --dfg: #63b6f5;
+        --dln: rgba(75, 165, 235, 0.62);
+      }
+      .dn4 {
+        --dbg: rgba(75, 130, 240, 0.27);
+        --dfg: #6e9bff;
+        --dln: rgba(75, 130, 240, 0.75);
+      }
+      .dn5 {
+        --dbg: rgba(95, 100, 240, 0.34);
+        --dfg: #8b8dff;
+        --dln: rgba(95, 100, 240, 0.9);
+      }
+      /*
+       * 圖例的小色塊：拿那一階的**字色**（實色）。格子裡真正的填色是 `--dbg`，
+       * 但那是給整格用的淡底 —— 畫在 8×12 的小方塊上會淡到看不見。
+       *
+       * 五塊之間留 2px：它們是**五個階級**，不是一條連續的漸層，中間斷開比較
+       * 接近實際看到的東西。
+       */
+      .evlegend b.lv {
+        background: var(--dfg);
+        margin-right: 2px;
+      }
+      /*
+       * 不合最小單位。
+       *
+       * ⚠ **一定要跟價差色階疊得起來，不能取代它。** 一格可以既「比原版貴 3C」
+       * 又「不是 0.5 的倍數」，而作者兩件事都要看得到。色階吃的是 border-color
+       * 與 background，所以這裡改吃 `outline` + 虛線描邊 —— 兩層畫在不同的地方，
+       * 誰也蓋不掉誰。
+       *
+       * 洋紅是刻意的：整個色階是「冷←→暖」那條軸（藍青／琥珀紅），洋紅在那條
+       * 軸之外，所以它不會被讀成「更貴的第六階」。
+       */
+      .ecell input.offunit {
+        outline: 1px dashed #ff5cc8;
+        outline-offset: -2px;
+      }
+      /*
+       * 官方還沒出的卡。
+       *
+       * 藏起來時留一個**空格子**（`.nocard`）而不是把 `<div>` 拿掉 —— 版面是
+       * 固定十欄的格線，而每位角色缺的等級不一樣，真的拿掉的話每一列會各自
+       * 往左縮，`L1…R5` 的欄頭就對不上任何一列。
+       *
+       * 一條很淡的斜線：純空白會被讀成「這裡有一格但沒載入」，畫一筆才看得出
+       * 是刻意留白的。
+       */
+      .ecell .nocard {
+        height: 100%;
+        min-height: 18px;
+        border: 1px dashed rgba(255, 255, 255, 0.07);
+        border-radius: 2px;
+        background: repeating-linear-gradient(
+          -45deg,
+          transparent 0 4px,
+          rgba(255, 255, 255, 0.045) 4px 5px
+        );
+      }
+      /* 選擇顯示它們時：淡掉，但仍然改得動（作者可能想預先定價）。 */
+      .ecell input.lockedcard {
+        opacity: 0.45;
+        font-style: italic;
       }
       .ecell input:focus {
         outline: 1px solid var(--red);
@@ -530,6 +714,16 @@
       button.tier:hover {
         border-color: var(--red);
         color: var(--text);
+      }
+      /*
+       * 選中的那一顆。配對那邊的檔位快速鍵**沒有**這個狀態（按了是把數字填進
+       * 隔壁的輸入框，不是一個持續的選擇），編輯 COST 的幅度**有** —— 它就是
+       * 現在的設定值，看不出「現在是哪一個」的話玩家只能靠隔壁那格數字猜。
+       */
+      button.tier[aria-selected="true"] {
+        border-color: var(--amber);
+        color: var(--amber);
+        background: rgba(255, 194, 71, 0.1);
       }
 
       /* --- 編輯規則：一段壓 C 區間一排 --- */
@@ -1257,6 +1451,39 @@
         return `差距 ${range} → +${b.extraCost}`;
       }
 
+      /**
+       * 作者寫的說明與更新說明，**唯讀**。
+       *
+       * ⚠ 這兩段原本只有「編輯描述」那一頁看得到，而那是一頁**每一格都能打字**
+       * 的編輯畫面 —— 等於要收到規則的人為了讀說明去冒改壞的風險。它們是規則裡
+       * 唯一「作者對拿到規則的人說話」的地方（定價的理由、最小單位、哪些卡刻意
+       * 不動），所以選規則的這一頁一定要讀得到。
+       *
+       * ⚠ 換行要自己轉成 `<br>`：作者是在 textarea 裡打的，分行是他排版的一部分。
+       * 一律先 `esc()` 再換 —— 反過來的話那些 `<br>` 會被跳脫掉，而真正的標籤
+       * 會活下來。
+       */
+      function ruleProse(rule) {
+        const block = (label, text, hint) =>
+          text === ""
+            ? ""
+            : `<div class="row" style="margin-top:8px"><span class="dim">${label}</span></div>
+               <div class="hint" style="margin-top:0">${esc(text).replace(/\n/g, "<br />")}</div>` +
+              (hint ?? "");
+        const desc = block(
+          "說明",
+          rule.description ?? "",
+          // 作者宣告最小單位的地方就是這裡（編輯器只做檢查，不寫進規則檔）。
+          "",
+        );
+        const log = block("更新說明", rule.changelog ?? "", "");
+        if (desc === "" && log === "") {
+          return `<div class="hint">這份規則<b>沒有寫說明</b>。自己編的話，到「編輯描述」補上 ——
+            定價的理由、最小單位、哪些卡刻意不動，收到規則的人只有那裡讀得到。</div>`;
+        }
+        return desc + log;
+      }
+
       PAGES["deck/cost"] = () => {
         const st = snap?.status;
         const rule = snap?.costRule ?? null;
@@ -1314,6 +1541,7 @@
                         對手手上那份還是舊的 —— <b>把這個檔案傳給他</b>，兩邊的碼才會一樣。</div>`
                    : ""
                }
+               ${ruleProse(rule)}
              </div>`
           : failure
             ? // ⚠ 這張卡片是「選了沒反應」的解藥。載入失敗時 costRule 是 null，
@@ -1387,15 +1615,10 @@
                </div>`
           : "";
 
-        return (
-          head(
-            "Cost 表",
-            "套用自訂 COST —— 角色、怪物、裝備、事件卡四張表。只改本機顯示，不會改變伺服器的判定。",
-          ) +
-          chosen +
-          state +
-          bands +
-          `<div class="card">
+        // ⚠ **這張卡要放在最上面。** 它是這一頁唯一「按了會發生事情」的地方，
+        // 而下面那幾張（規則明細、狀態、壓 C 分段）加起來比視窗高得多 ——
+        // 擺在最後的話每次想換規則都要先捲一大段。說明性的內容排在動作後面。
+        const actions = `<div class="card">
              <div class="presets">
                <button id="costPick">選規則檔…</button>
                ${rule ? `<button id="costClear">停用</button>` : ""}
@@ -1405,8 +1628,18 @@
                ⚠ 重載會<b>打斷正在進行的對戰</b>。
                ${st?.connected ? "" : "現在還沒接上遊戲，接上之後才按得到。"}
              </div>
-           </div>
-           <div class="card">
+           </div>`;
+
+        return (
+          head(
+            "Cost 表",
+            "套用自訂 COST —— 角色、怪物、裝備、事件卡四張表。只改本機顯示，不會改變伺服器的判定。",
+          ) +
+          actions +
+          chosen +
+          state +
+          bands +
+          `<div class="card">
              <div class="hint">
                規則檔怎麼來：<code>companion official-rule</code> 匯出一份原版表
                （四張表一次全帶），<b>直接改裡面的數字</b>就是你的版本了 ——
@@ -1467,6 +1700,35 @@
       let edMsg = null;
       /** 正在載入中，避免重複發 IPC。 */
       let edLoading = false;
+      /**
+       * 按一下上下鍵動多少。
+       *
+       * ⚠ **真實來源是設定檔**（`profile.editStep`），這裡只是畫面上那一份 ——
+       * 跟開房設定同一套：改了要立刻送出去（`window.ulr.editor.step`），
+       * 否則下一次重載 payload 就把它打回去了。
+       *
+       * 先給 1 是為了「payload 還沒回來時也畫得出格子」。
+       */
+      let edStep = 1;
+      /**
+       * 最小單位檢查的值。**0 = 不檢查**，預設。
+       *
+       * ⚠ 真實來源同樣是設定檔（`profile.editUnit`），而且它**跟著玩家走、不
+       * 跟著規則走** —— 規則檔裡沒有這個欄位（見主程序 `normalizeEditUnit` 的
+       * 說明）。換一份規則來編要自己重設。
+       */
+      let edUnit = 0;
+      /** 只看不合單位的格子。⚠ 跟名字篩選是 AND，兩個可以一起用。 */
+      let edOnlyOff = false;
+      /**
+       * 把官方還沒出的卡藏起來。**預設藏。**
+       *
+       * ⚠ 這一個**刻意不記進設定檔**，跟 `edStep`／`edUnit` 不一樣。那兩個是
+       * 作者在調的「值」（每個人不同，重設一次很煩）；這個是純粹的檢視開關，
+       * 而它的預設值對每個人都是對的 —— 開著插件的期間改了就一直是那樣，
+       * 重開回到「藏」，那正是想要的。少一個設定欄位、少一條 IPC、少一次遷移。
+       */
+      let edHideLocked = true;
 
       const onEditPage = () => tab === "deck" && sub === "costedit";
 
@@ -1476,6 +1738,171 @@
         { id: "equipment", label: "裝備卡" },
         { id: "monsters", label: "怪物卡" },
       ];
+
+      /**
+       * 換上下鍵的幅度，**並記進設定檔**。
+       *
+       * ⚠ 主程序夾過的那個值才是真的（0、負數、三位小數都會被夾），所以畫面
+       * 用回傳值而不是用玩家打的那個 —— 否則「打了 0」會讓畫面寫著 0、實際上
+       * 是 1，而那一格看起來就是壞的。
+       *
+       * ⚠ 只重畫這一頁。700 個格子的 `step` 全都要換，躲不掉整頁重畫 ——
+       * 但玩家是按按鈕／改完那一格才會走到這裡，游標不在價格格子裡。
+       */
+      function applyEditStep(value) {
+        return window.ulr.editor.step(Number(value)).then((saved) => {
+          edStep = saved;
+          if (ed !== null) ed.editStep = saved;
+          renderBody();
+        });
+      }
+
+      /**
+       * 換最小單位，**並記進設定檔**。0 = 不檢查。
+       *
+       * ⚠ 這支跟 `applyEditStep` 一樣**不碰規則檔** —— 檢查是編輯器的功能，
+       * 規則檔裡沒有「最小單位」這個欄位。
+       */
+      function applyEditUnit(value) {
+        return window.ulr.editor.unit(Number(value)).then((saved) => {
+          edUnit = saved;
+          if (ed !== null) ed.editUnit = saved;
+          // 關掉檢查的話「只看不合的」就沒有意義了，順手關掉 —— 留著的話畫面
+          // 會變成一片空白（沒有任何格子不合），而玩家不會把那個空白跟這顆
+          // 開關連在一起。
+          if (saved === 0) edOnlyOff = false;
+          renderBody();
+        });
+      }
+
+      /**
+       * 十進位 → 整數百分之一。**不做 `v * 100`。**
+       *
+       * ⚠ `21.35 * 100` 是 2134.9999999999998，而這個值等一下要拿去取餘數 ——
+       * 浮點的餘數會讓「剛好合單位」的格子隨機被判成不合。改從十進位字串取
+       * 數字，跟引擎的 `toCentiCost`（`@ulr/rule-schema` 的 cost-number.ts）
+       * 是同一套算法，兩邊對同一個值一定得到同一個整數。
+       *
+       * 超過兩位小數回 `null` —— 那種值連規則檔都收不下（`toCentiCost` 會拋），
+       * 呼叫端一律當成「不合單位」。
+       */
+      function edCenti(value) {
+        const m = /^(-?)(\d+)(?:\.(\d{1,2}))?$/.exec(String(value));
+        if (m === null) return null;
+        const frac = Number((m[3] ?? "").padEnd(2, "0"));
+        return (m[1] === "-" ? -1 : 1) * (Number(m[2]) * 100 + frac);
+      }
+
+      /** 這個數字是最小單位的整數倍嗎。`unit` 是 0 時永遠算合格。 */
+      function edFitsUnit(value, unit) {
+        if (!unit) return true;
+        const v = edCenti(value);
+        const u = edCenti(unit);
+        if (v === null || u === null || u === 0) return true;
+        return v % u === 0;
+      }
+
+      /**
+       * 這個單位疊幾個才會變成整數，以及疊出來是幾 C。
+       *
+       * ⚠ **「除不盡 1」不等於「湊不出整數」**，這兩件事一定要分開講。任何單位
+       * 疊夠多次都會撞上整數 —— `0.33 × 100 = 33C`。作者真正在意的是**湊不湊得出
+       * 剛好 1C**（那是「三張卡合起來加 1C」那種設計要的東西），而那要的是
+       * 「單位除得盡 1」，比前者嚴格。
+       *
+       * 幾個才夠：`k = 100 / gcd(單位的百分之一, 100)`。
+       */
+      function edUnitReach(unit) {
+        const u = edCenti(unit);
+        if (u === null || u <= 0) return null;
+        const gcd = (a, b) => (b === 0 ? a : gcd(b, a % b));
+        const k = 100 / gcd(u, 100);
+        return { count: k, whole: (u * k) / 100, makesOne: u <= 100 && 100 % u === 0 };
+      }
+
+      /**
+       * 官方還沒出這張卡（名冊算好的）。查不到就當它出了。
+       *
+       * ⚠ **方向不能反。** 名冊是舊版快取時 `locked` 根本不存在，那時要當成
+       * 「都出了」—— 反過來的話按下「重讀名冊」之前整頁會是空的。
+       */
+      function edLocked(tableId, key) {
+        return edLockedKeys()[tableId]?.[key] === true;
+      }
+
+      /**
+       * 規則鍵 → locked，四張表各一份。
+       *
+       * ⚠ 建一次就留著。角色那一頁每畫一格都會問，而名冊有 1186 張卡 ——
+       * 每次都線性掃一遍會變成平方級。名冊換掉時（重讀）整份丟掉重建。
+       */
+      let edLockCache = null;
+      function edLockedKeys() {
+        if (edLockCache !== null && edLockCache.cat === ed?.catalog) return edLockCache.map;
+        const map = { characters: {}, monsters: {}, equipment: {}, eventCards: {} };
+        const cat = ed?.catalog;
+        if (cat) {
+          for (const g of cat.characters ?? [])
+            for (const c of g.cards) if (c.locked) map.characters[c.key] = true;
+          for (const g of cat.monsters ?? [])
+            for (const c of g.cards) if (c.locked) map.monsters[c.key] = true;
+        }
+        // 裝備與事件卡沒有升級圖，永遠是空的 —— 留著空物件讓呼叫端不必分case。
+        edLockCache = { cat, map };
+        return map;
+      }
+
+      /** 這一格現在畫不畫得出來（被藏起來的就摸不到）。 */
+      function edVisible(tableId, key) {
+        return !(edHideLocked && edLocked(tableId, key));
+      }
+
+      /** 這一格不合單位嗎。⚠ 看的是**草稿**，所以邊改邊亮。 */
+      function edOffUnit(tableId, key) {
+        if (!edUnit || ed === null) return false;
+        return !edFitsUnit(ed.draft[tableId][key], edUnit);
+      }
+
+      /**
+       * 各處有幾格不合單位。⚠ 要分開報 —— 不然玩家不知道要切到哪一頁。
+       *
+       * ⚠⚠ **壓 C 的 `extraCost` 也要算。** 它跟卡片價格一樣直接加進隊伍總和，
+       * 所以一段 +0.3 的罰則會讓一張「每一格都是 0.5 的倍數」的表照樣算出
+       * 非 0.5 倍數的總和。漏掉它的話這個檢查會給出**假的全部通過** ——
+       * 那比沒有檢查更糟，因為作者會相信它。
+       *
+       * 壓 C 在另一頁（編輯規則），但 payload 本來就帶著它，所以這裡讀得到。
+       *
+       * ⚠ **被藏起來的卡另外算（`hidden`）。** 併進 `total` 的話會出現
+       * 「說有 3 格不合，按『只看這些』卻一格都沒有」—— 因為那幾格正被藏著。
+       * 分開報之後那句話變成可行動的：把「顯示還沒出的卡」打開就看得到。
+       */
+      function edOffCounts() {
+        const out = { total: 0, bands: 0, hidden: 0 };
+        for (const t of ED_TABS) {
+          let n = 0;
+          if (ed !== null && edUnit)
+            for (const k of Object.keys(ed.draft[t.id])) {
+              if (!edOffUnit(t.id, k)) continue;
+              if (edVisible(t.id, k)) n++;
+              else out.hidden++;
+            }
+          out[t.id] = n;
+          out.total += n;
+        }
+        if (ed !== null && edUnit) {
+          for (const b of ed.compression?.bands ?? [])
+            if (!edFitsUnit(b.extraCost, edUnit)) out.bands++;
+        }
+        out.total += out.bands;
+        return out;
+      }
+
+      /** 名冊裡有幾張是官方還沒出的。0 = 這份名冊判斷不了（或全出了）。 */
+      function edLockedCount() {
+        const map = edLockedKeys();
+        return Object.keys(map.characters).length + Object.keys(map.monsters).length;
+      }
 
       function edLoad(force) {
         if (edLoading) return;
@@ -1523,19 +1950,49 @@
         }
         // 載入當下的樣子。**跟 base 是兩回事**，見 edUnsaved()。
         const saved = JSON.parse(JSON.stringify(draft));
+        // 幅度是設定檔裡那份。⚠ 這一行讓「重讀名冊」之後幅度不會被打回預設 ——
+        // 那支也回一份完整的 payload。
+        if (typeof payload.editStep === "number") edStep = payload.editStep;
+        if (typeof payload.editUnit === "number") edUnit = payload.editUnit;
         return { ...payload, base, draft, saved };
       }
 
       /**
-       * 這一格跟**遊戲原價**不一樣嗎 —— 決定要不要標成琥珀色。
+       * 這一格跟**遊戲原價**差幾 C。`null` = 不知道原價，或一模一樣。
        *
        * 名冊沒有原價時（規則比客戶端新）一律當成沒改：我們不知道原價是多少，
        * 標成「改過了」是在講一件自己也不確定的事。
+       *
+       * ⚠ 先夾到兩位小數再比。價格是玩家在輸入框打的，而 `13.1 - 13` 在浮點
+       * 底下是 0.10000000000000053 —— 不夾的話色階會在邊界上抖。
        */
-      function edChanged(tableId, key) {
+      function edDelta(tableId, key) {
         const b = ed?.base[tableId]?.[key];
-        if (b === undefined) return false;
-        return ed.draft[tableId][key] !== b;
+        if (b === undefined) return null;
+        const d = Math.round((ed.draft[tableId][key] - b) * 100) / 100;
+        return d === 0 ? null : d;
+      }
+
+      function edChanged(tableId, key) {
+        return edDelta(tableId, key) !== null;
+      }
+
+      /**
+       * 這一格要穿哪一身顏色。
+       *
+       * 五階，**第 5 階是上限** —— 貴 5C 跟貴 50C 同一個顏色。理由是玩家在這
+       * 張表上找的是「我把誰調貴了」，不是精確讀數；再往下分階只會讓相鄰的
+       * 兩階在 11.5px 的格子裡分不出來。精確的數字就在格子裡，滑過去還有
+       * `title` 寫著原價與差值。
+       *
+       * ⚠ 不滿 1C 也算第一階（`ceil`）。動了就是動了，13 → 13.5 不標的話
+       * 那一格看起來跟沒改過一模一樣。
+       */
+      function edDeltaClass(tableId, key) {
+        const d = edDelta(tableId, key);
+        if (d === null) return "";
+        const level = Math.min(5, Math.ceil(Math.abs(d) - 1e-9));
+        return `dirty ${d > 0 ? "up" : "dn"}${level}`;
       }
 
       /**
@@ -1578,20 +2035,94 @@
        * `data-k` 帶的是規則鍵（`cc001_01`）—— 程式要靠它定位，但**它不顯示**。
        * `title` 也帶著，是為了玩家回報問題時說得出是哪一張。
        */
+      /**
+       * 一整格（含外層 `ecell`）。**藏起來的卡留一個空格子，不是拿掉。**
+       *
+       * ⚠ 版面是固定十欄的格線（`egrid c10`），而每位角色缺的等級不一樣
+       * （有人缺 R2~R5、有人只缺 R5）。真的把 `<div>` 拿掉的話，每一列會各自
+       * 往左縮，`L1…R5` 的欄頭就對不上任何一列了 —— 那比不藏更難看。
+       */
+      function edCell(tableId, key, label) {
+        if (!edVisible(tableId, key)) {
+          return `<div class="ecell"><div class="nocard" title="${esc(label)}（${esc(key)}）&#10;官方還沒開放這張卡"></div></div>`;
+        }
+        return `<div class="ecell">${edInput(tableId, key, label)}</div>`;
+      }
+
       function edInput(tableId, key, label) {
         const v = ed.draft[tableId][key];
-        const cls = edChanged(tableId, key) ? "dirty" : "";
+        // ⚠ `step` 在瀏覽器眼裡不只是「上下鍵動多少」，它同時是一張**格線**：
+        // step=1 時 13.5 會被判成 stepMismatch（`:invalid`）。這裡是刻意接受的
+        // ——「解析度」要的正是那條格線（上下鍵會對齊到整數），而我們沒有替
+        // `:invalid` 上任何樣式，玩家自己打的小數照樣收得下來（真正的驗證在
+        // 主程序的 `sanitizeTable`，不是在瀏覽器）。
+        // ⚠ 不合單位的框線加在 `class` 上而不是換掉價差色階 —— 兩件事要能
+        // **同時**看得到：一格可以既「比原版貴 3C」又「不是 0.5 的倍數」，
+        // 而作者兩個資訊都需要。色階吃背景色，這個吃外框。
+        const off = edOffUnit(tableId, key) ? " offunit" : "";
+        // 選擇「顯示還沒出的卡」時，它們仍然要看得出來 —— 淡化而不是拿掉。
+        const lock = edLocked(tableId, key) ? " lockedcard" : "";
         return (
-          `<input type="number" step="0.01" class="${cls}" value="${v}" ` +
-          `data-t="${tableId}" data-k="${esc(key)}" title="${esc(label)}（${esc(key)}）" />`
+          `<input type="number" step="${edStep}" class="${edDeltaClass(tableId, key)}${off}${lock}" value="${v}" ` +
+          `data-t="${tableId}" data-k="${esc(key)}" title="${esc(edTitle(tableId, key, label))}" />`
         );
+      }
+
+      /**
+       * 這一組（一位角色、一個武器族群…）要不要畫出來。
+       *
+       * 名字篩選與「只看不合單位的」是 **AND** —— 兩個一起用才找得到
+       * 「艾伯那一排裡不合單位的那幾格」。
+       */
+      function edKeepGroup(tableId, matched, keys) {
+        if (!matched) return false;
+        if (!edOnlyOff) return true;
+        // ⚠ 只算**畫得出來**的那些。被藏起來的卡就算不合單位也碰不到，把整列
+        // 留下來只會給出一列每一格都空白的東西。
+        return keys.some((k) => edVisible(tableId, k) && edOffUnit(tableId, k));
+      }
+
+      /** 篩到一個都不剩時說的話。⚠ 要分得出是哪一個條件篩掉的。 */
+      function edEmptyText() {
+        if (edOnlyOff && edFilter === "") return "這一頁每一格都合最小單位。";
+        if (edOnlyOff) return `「${edFilter}」裡沒有不合最小單位的格子。`;
+        return `沒有名字對得上「${edFilter}」。`;
+      }
+
+      /** 「原價多少、現在差多少」。色階只分到五階，精確的差值在這裡。 */
+      function edDeltaText(tableId, key) {
+        const base = ed?.base[tableId]?.[key];
+        if (base === undefined) return "⚠ 名冊裡沒有這張，不知道原價";
+        const d = edDelta(tableId, key);
+        if (d === null) return `原價 ${base}，沒改`;
+        return `原價 ${base} → ${d > 0 ? `貴 ${d}C` : `便宜 ${-d}C`}`;
+      }
+
+      /**
+       * 滑鼠停著時的說明：這是哪一張、原價多少、差多少、合不合單位。
+       *
+       * ⚠ 不合單位那一行要寫**現在的值**與**單位**。光看一圈洋紅虛線，作者知道
+       * 「這格有問題」卻不知道問題是什麼 —— 而 1186 格裡他多半已經忘記自己設的
+       * 單位是多少了。
+       */
+      function edTitle(tableId, key, label) {
+        const off = edOffUnit(tableId, key)
+          ? `\n⚠ ${ed.draft[tableId][key]} 不是最小單位 ${edUnit} 的整數倍`
+          : "";
+        const lock = edLocked(tableId, key) ? "\n⚠ 官方還沒開放這張卡（沒有配方做得出來）" : "";
+        return `${label}（${key}）\n${edDeltaText(tableId, key)}${off}${lock}`;
       }
 
       /** 角色：一位一排，L1~L5 R1~R5。欄頭只印一次。 */
       function edCharacters(cat) {
-        const groups = cat.characters.filter((g) => edMatch(g.name));
-        if (groups.length === 0)
-          return `<div class="hint">沒有名字對得上「${esc(edFilter)}」。</div>`;
+        const groups = cat.characters.filter((g) =>
+          edKeepGroup(
+            "characters",
+            edMatch(g.name),
+            g.cards.map((c) => c.key),
+          ),
+        );
+        if (groups.length === 0) return `<div class="hint">${esc(edEmptyText())}</div>`;
         const slots = groups[0].cards.map((c) => `<div class="slot">${esc(c.slot)}</div>`).join("");
         const head = `<div class="ehead"><div class="ename">角色</div><div class="egrid c10">${slots}</div></div>`;
         const rows = groups
@@ -1599,10 +2130,7 @@
             (g) =>
               `<div class="erow"><div class="ename" title="${esc(g.name)}">${esc(g.name)}</div>` +
               `<div class="egrid c10">${g.cards
-                .map(
-                  (c) =>
-                    `<div class="ecell">${edInput("characters", c.key, `${g.name} ${c.slot}`)}</div>`,
-                )
+                .map((c) => edCell("characters", c.key, `${g.name} ${c.slot}`))
                 .join("")}</div></div>`,
           )
           .join("");
@@ -1611,9 +2139,14 @@
 
       /** 怪物：M1~M3，一排放三種不同的怪物。 */
       function edMonsters(cat) {
-        const groups = cat.monsters.filter((g) => edMatch(g.name));
-        if (groups.length === 0)
-          return `<div class="hint">沒有名字對得上「${esc(edFilter)}」。</div>`;
+        const groups = cat.monsters.filter((g) =>
+          edKeepGroup(
+            "monsters",
+            edMatch(g.name),
+            g.cards.map((c) => c.key),
+          ),
+        );
+        if (groups.length === 0) return `<div class="hint">${esc(edEmptyText())}</div>`;
         const blocks = groups.map(
           (g) =>
             `<div class="mblock"><div class="mname" title="${esc(g.name)}">${esc(g.name)}</div>` +
@@ -1621,10 +2154,7 @@
               .map((c) => `<div class="slot">${esc(c.slot)}</div>`)
               .join("")}</div>` +
             `<div class="egrid c3">${g.cards
-              .map(
-                (c) =>
-                  `<div class="ecell">${edInput("monsters", c.key, `${g.name} ${c.slot}`)}</div>`,
-              )
+              .map((c) => edCell("monsters", c.key, `${g.name} ${c.slot}`))
               .join("")}</div></div>`,
         );
         const rows = [];
@@ -1642,10 +2172,14 @@
        */
       function edEquipment(cat) {
         const groups = cat.equipment
-          .map((g) => ({ ...g, items: g.items.filter((i) => edMatch(i.name) || edMatch(g.name)) }))
+          .map((g) => ({
+            ...g,
+            items: g.items.filter((i) =>
+              edKeepGroup("equipment", edMatch(i.name) || edMatch(g.name), [i.key]),
+            ),
+          }))
           .filter((g) => g.items.length > 0);
-        if (groups.length === 0)
-          return `<div class="hint">沒有名字對得上「${esc(edFilter)}」。</div>`;
+        if (groups.length === 0) return `<div class="hint">${esc(edEmptyText())}</div>`;
         return groups
           .map(
             (g) =>
@@ -1662,26 +2196,116 @@
           .join("");
       }
 
+      /**
+       * 事件卡的插槽顏色，索引就是名冊裡的 `slotType`（＝遊戲資料的 `type`）。
+       *
+       * 色票量自遊戲自己的 `event_slot` 貼圖（2026-08-16，八個 frame）。
+       * ⚠ 「黑」取的是貼圖的**鏡邊**顏色而不是填色（填色量到 `#0b0a08`）——
+       * 純黑貼在這個深色面板上等於沒畫。同一個取捨在上面 `--ink-off` 也做過：
+       * 像它，但不要像到看不見。
+       */
+      const EV_SLOT = [
+        { c: "#d82a4e", name: "紅", family: "劍" },
+        { c: "#61ca3b", name: "綠", family: "槍" },
+        { c: "#038ae9", name: "藍", family: "防禦" },
+        { c: "#b403e9", name: "紫", family: "移動" },
+        { c: "#ddb13c", name: "黃", family: "特殊" },
+        { c: "#f3f4f6", name: "白", family: "機會" },
+        { c: "#595142", name: "黑", family: "詛咒" },
+        { c: "#bdbdbd", name: "灰", family: "萬用" },
+      ];
+
+      /** 名冊沒帶顏色（讀不到那一欄）時回 `null`，呼叫端要能接受沒有顏色。 */
+      function edSlot(item) {
+        return EV_SLOT[item.slotType] ?? null;
+      }
+
+      /**
+       * 這張卡的效果說明 —— **名字已經說完的就回空字串**。
+       *
+       * 110 張裡有 90 張的說明是「此卡當作劍4使用」這種把名字再講一次的樣板，
+       * 全部印出來只會讓真正需要讀的那 20 張淹沒在裡面。
+       *
+       * 判斷方式是「說明裡有沒有出現名字本身」，不是比對那句樣板 —— 樣板的寫法
+       * 會隨語言與改版變，而「名字有沒有被複述」在哪一版都成立。認錯的代價也
+       * 只是多印一行，不會印錯東西。
+       *
+       * | 卡          | 說明                     | 顯示   |
+       * | ----------- | ------------------------ | ------ |
+       * | 劍3·盾3卡   | 此卡當作劍3·盾3使用      | 不顯示 |
+       * | Hp恢復      | 回復1點Hp                | 顯示   |
+       * | 聚焦卡      | 出牌時,移動階段…加算20點 | 顯示   |
+       */
+      function edEventEffect(item) {
+        const info = item.info ?? "";
+        if (info === "") return "";
+        const stem = item.name.replace(/(卡|カード)$/, "");
+        return stem !== "" && info.includes(stem) ? "" : info;
+      }
+
+      /** 事件卡篩選：名字、效果、顏色都算數（打「紅」找得到所有紅卡）。 */
+      function edEventMatch(item) {
+        if (edFilter === "") return true;
+        const slot = edSlot(item);
+        return (
+          edMatch(item.name) ||
+          edMatch(item.info ?? "") ||
+          (slot !== null && (edMatch(slot.name) || edMatch(slot.family)))
+        );
+      }
+
+      /** 左邊那條色帶是什麼意思。**規則寫出來** —— 光看顏色猜不到灰色是萬用。 */
+      function edEventLegend() {
+        const swatches = EV_SLOT.map(
+          (s) =>
+            `<span><b style="background:${s.c}"></b>${esc(s.name)}<span class="dim">·${esc(
+              s.family,
+            )}</span></span>`,
+        ).join("");
+        return (
+          `<div class="evlegend"><span>插槽色</span>${swatches}</div>` +
+          `<div class="hint" style="margin-top:0">一張事件卡只放得進角色卡上<b>同色</b>的事件插槽 ——
+             <b>灰是萬用</b>，哪一格都放得進去。⚠ 顏色跟名字上的等級<b>沒有</b>對應關係
+             （「劍3·盾3卡」是紅的，「劍5·槍5卡」卻是萬用），所以定價前先看這條色帶：
+             紅卡再便宜，紅槽少的角色也帶不動。</div>`
+        );
+      }
+
       /** 事件卡：族群一塊，一排 9 張（劍1~劍9、劍3·槍1~劍5·移動1…）。 */
       function edEvents(cat) {
         const groups = cat.eventCards
-          .map((g) => ({ ...g, items: g.items.filter((i) => edMatch(i.name)) }))
+          .map((g) => ({
+            ...g,
+            items: g.items.filter((i) => edKeepGroup("eventCards", edEventMatch(i), [i.key])),
+          }))
           .filter((g) => g.items.length > 0);
-        if (groups.length === 0)
-          return `<div class="hint">沒有名字對得上「${esc(edFilter)}」。</div>`;
-        return groups
-          .map(
-            (g) =>
-              `<div class="egroup">${esc(g.name)}<span class="sub">${g.items.length} 張</span></div>` +
-              `<div class="egrid c9">${g.items
-                .map(
-                  (i) =>
-                    `<div class="ecell"><span class="cn" title="${esc(i.name)}">${esc(i.name)}</span>` +
-                    `${edInput("eventCards", i.key, i.name)}</div>`,
-                )
-                .join("")}</div>`,
-          )
-          .join("");
+        if (groups.length === 0) return `<div class="hint">${esc(edEmptyText())}</div>`;
+        return (
+          edEventLegend() +
+          groups
+            .map(
+              (g) =>
+                `<div class="egroup">${esc(g.name)}<span class="sub">${g.items.length} 張</span></div>` +
+                `<div class="egrid c9">${g.items
+                  .map((i) => {
+                    const slot = edSlot(i);
+                    const fx = edEventEffect(i);
+                    // 滑過去看得到完整資訊 —— 名字被切掉、或想確認顏色時要用。
+                    const label =
+                      i.name +
+                      (fx === "" ? "" : ` —— ${fx}`) +
+                      (slot === null ? "" : `　[${slot.name}·${slot.family}]`);
+                    return (
+                      `<div class="ecell ev"${slot === null ? "" : ` style="--slot:${slot.c}"`}>` +
+                      `<span class="cn" title="${esc(label)}">${esc(i.name)}</span>` +
+                      (fx === "" ? "" : `<span class="fx" title="${esc(fx)}">${esc(fx)}</span>`) +
+                      `${edInput("eventCards", i.key, label)}</div>`
+                    );
+                  })
+                  .join("")}</div>`,
+            )
+            .join("")
+        );
       }
 
       /** 沒有名冊時這一頁做不了事 —— 要講清楚為什麼，以及下一步按哪裡。 */
@@ -1774,12 +2398,137 @@
           `</div>`;
 
         const tools = `<div class="row" style="margin-bottom:8px">
-             <input type="text" id="edFilter" placeholder="打名字找卡（例：艾伯、聖水、短劍）" value="${esc(edFilter)}" style="flex:1" />
+             <input type="text" id="edFilter" placeholder="${
+               edTab === "eventCards"
+                 ? "打名字、效果或顏色找卡（例：聖水、回復、紅）"
+                 : "打名字找卡（例：艾伯、聖水、短劍）"
+             }" value="${esc(edFilter)}" style="flex:1" />
              <span class="dim" style="font-size:11px">名冊 ${esc(cat.gameVersion)} · ${esc(
                cat.readAt.slice(0, 10),
              )} 讀的</span>
              <button id="edCatalog" ${ed.connected ? "" : "disabled"}>重讀名冊</button>
            </div>`;
+
+        // 價差色階的圖例。⚠ 沒有這一條的話那些顏色只是「有顏色」—— 玩家看得出
+        // 兩格不一樣，卻不知道哪一邊是變貴的。放在表格正上方，跟著捲不走。
+        const swatch = (cls) => `<b class="lv ${cls}"></b>`;
+        const legend = `<div class="evlegend">
+             <span>跟原版差</span>
+             <span>${["dn5", "dn4", "dn3", "dn2", "dn1"].map(swatch).join("")}&nbsp;便宜 5C 起 ← 1C</span>
+             <span>1C → 貴 5C 起&nbsp;${["up1", "up2", "up3", "up4", "up5"].map(swatch).join("")}</span>
+           </div>
+           <div class="hint" style="margin-top:0">冷色是<b>調便宜</b>、暖色是<b>調貴</b>，
+             越深差越多。<b>第五階是上限</b> —— 差 5C 跟差 50C 同一個顏色，
+             精確的數字滑過那一格就看得到。沒上色＝跟原版一模一樣。</div>`;
+
+        // 上下鍵的幅度。⚠ 快速鍵的清單**從主程序來**（`editSteps`），畫面不自己
+        // 寫死一份 —— 兩份清單遲早會走散。
+        const stepKeys = ed.editSteps ?? [1, 0.5, 0.1, 0.05, 0.01];
+        const stepButtons = stepKeys
+          .map(
+            (n) =>
+              `<button class="tier" data-step="${n}"${edStep === n ? ' aria-selected="true"' : ""}>${n}</button>`,
+          )
+          .join("");
+        const steps = `<div class="row" style="margin:2px 0 8px">
+             <span class="dim">上下鍵每次 ±</span>
+             <span>${stepButtons}
+               <input id="edStep" type="number" min="0.01" max="100" step="0.01"
+                      style="width:5em;margin-left:6px" value="${edStep}" />
+             </span>
+           </div>
+           <div class="hint" style="margin-top:0">按鍵盤上下鍵、或滑鼠在格子上滾輪時一次動多少。
+             預設 <b>1</b>：COST 幾乎都是整數，0.01 的意思是「13 調到 14 要按一百次」。
+             要更細的自己打一個數字（壓 C 邊界那種 x.99 就會用到）。<b>記在設定裡</b>。</div>`;
+
+        // ── 官方還沒出的卡 ───────────────────────────────────────────────
+        //
+        // ⚠ **只藏顯示，草稿與存檔照樣含那些鍵。** 從資料裡拿掉的話，官方哪天
+        // 開放了（凱倫貝克 R5 就是 2026-08-17 開的），那份規則會安靜地把它算成
+        // 99C（`UNKNOWN_COST`），而玩家帶著一張合法的卡會被自己的規則判超標。
+        const lockedN = edLockedCount();
+        const locks =
+          lockedN === 0
+            ? ""
+            : `<div class="row" style="margin:2px 0 8px">
+                 <span class="dim">官方還沒出的卡</span>
+                 <span>${lockedN} 張
+                   <button id="edHideLocked" class="tier"${edHideLocked ? ' aria-selected="true"' : ""}>${
+                     edHideLocked ? "已藏起來" : "顯示中"
+                   }</button>
+                 </span></div>
+               <div class="hint" style="margin-top:0">資產裡有完整資料（數值、技能、插槽都是好的），但
+                 <b>沒有任何配方做得出來</b> —— 沒有人帶得上場，所以定價也沒有意義。
+                 判準是遊戲自己的升級圖，<b>官方一開放就會自己跟上</b>（不必更新插件，按一次「重讀名冊」即可）。<br />
+                 ⚠ 藏起來的只是<b>畫面</b>：它們照樣留在草稿裡、存檔照樣寫進規則檔。
+                 從規則裡拿掉的話，官方開放的那天你的規則會把它算成 <b>99C</b>。</div>`;
+
+        // 最小單位檢查。⚠ 這是**檢查**，不是限制 —— 它不擋存檔、也不會去改你的
+        // 數字，只把不合的格子找出來。1186 格裡混進一個 18.5 用眼睛是找不到的。
+        const off = edOffCounts();
+        const unitKeys = ed.editUnits ?? [1, 0.5, 0.25, 0.2, 0.1];
+        const unitButtons = unitKeys
+          .map(
+            (n) =>
+              `<button class="tier" data-unit="${n}"${edUnit === n ? ' aria-selected="true"' : ""}>${n}</button>`,
+          )
+          .join("");
+        const breakdown = ED_TABS.filter((t) => off[t.id] > 0)
+          .map((t) => `${esc(t.label)} ${off[t.id]}`)
+          // 壓 C 在另一頁，所以要標出來 —— 不然「只看這些」按下去會什麼都沒有，
+          // 而計數還寫著有幾格不合。
+          .concat(off.bands > 0 ? [`壓 C ${off.bands} 段（在「編輯規則」那一頁）`] : [])
+          .join("、");
+        const unit = `<div class="row" style="margin:2px 0 8px">
+             <span class="dim">最小單位</span>
+             <span><button class="tier" data-unit="0"${edUnit === 0 ? ' aria-selected="true"' : ""}>不檢查</button>
+               ${unitButtons}
+               <input id="edUnit" type="number" min="0" max="100" step="0.01"
+                      style="width:5em;margin-left:6px" value="${edUnit}" />
+             </span></div>
+           ${
+             edUnit === 0
+               ? `<div class="hint" style="margin-top:0">選一個單位，插件就會把<b>不是它整數倍</b>的格子框起來 ——
+                    1186 格裡混進一個 18.5，用眼睛是找不到的。<b>不擋存檔、也不會動你的數字</b>，只是找出來。</div>`
+               : `<div class="row"><span class="dim">不合單位</span><span>${
+                   off.total === 0
+                     ? // ⚠ 這句涵蓋四張表**加上壓 C**。只查表的話它是假的全部通過。
+                       '<span class="good">沒有，四張表與壓 C 都是 ' +
+                       esc(String(edUnit)) +
+                       " 的倍數</span>"
+                     : `<b class="warn">${off.total} 格</b>${
+                         breakdown === "" ? "" : `<span class="dim">（${breakdown}）</span>`
+                       }
+                        <button id="edOnlyOff" class="tier"${
+                          edOnlyOff ? ' aria-selected="true"' : ""
+                        }>${edOnlyOff ? "看全部" : "只看這些"}</button>`
+                 }${
+                   // ⚠ 藏起來的那些**分開報**。併進上面那個數字的話，會出現
+                   // 「說有 3 格不合，按『只看這些』卻一格都沒有」。
+                   off.hidden > 0
+                     ? `<div class="hint" style="margin:4px 0 0">另有 <b>${off.hidden} 格</b>在<b>官方還沒出的卡</b>上（正被藏著，改不到）。
+                          要處理的話先把上面那顆切成「顯示中」。</div>`
+                     : ""
+                 }</span></div>
+                  <div class="hint" style="margin-top:0">${
+                    // ⚠ 湊不出剛好 1C 的單位要**當場講**。作者設 0.33 多半是想要
+                    // 「三張湊 1C」，而 0.33×3 = 0.99 —— 那個 0.01 的缺口不講的話，
+                    // 他會在整張表定完價、甚至傳給對手之後才發現。
+                    (() => {
+                      const r = edUnitReach(edUnit);
+                      if (r === null) return "";
+                      const head = `${r.count} 個 ${esc(String(edUnit))} 湊得出剛好 ${r.whole}C。`;
+                      return r.makesOne
+                        ? head
+                        : `${head} ⚠ 但<b>湊不出剛好 1C</b> —— 引擎的最小刻度是 0.01，
+                             而 ${esc(String(edUnit))} 除不盡 1。想要「三張合起來剛好 1C」的話，
+                             三分之一在兩位小數裡表達不出來，最接近的做法是把那三張定成
+                             <code>0.33 / 0.33 / 0.34</code>。`;
+                    })()
+                  }
+                    這個值<b>記在設定裡，但不會寫進規則檔</b> —— 規則檔沒有「最小單位」這個欄位。
+                    要讓拿到規則的人知道，請自己寫進「<b>編輯描述</b>」的說明欄（那一段在「Cost 表」那一頁讀得到）。</div>`
+           }`;
 
         const body =
           edTab === "characters"
@@ -1790,7 +2539,13 @@
                 ? edEquipment(cat)
                 : edEvents(cat);
 
-        return title + header + tabs + tools + `<div class="card">${body}</div>`;
+        return (
+          title +
+          header +
+          tabs +
+          tools +
+          `<div class="card">${legend}${steps}${locks}${unit}${body}</div>`
+        );
       };
 
       // --- 牌組 › 編輯規則 --------------------------------------------------
@@ -2307,7 +3062,10 @@
 
         if (!s?.connected) {
           return (
-            head("約戰", "跟指定的對手用同一份 COST 規則開一場。") +
+            head(
+              "自動配對",
+              "用同一套 COST 規則的人自動湊一場 —— 亞歷山卓城的快速比賽，換成自訂規則。",
+            ) +
             `<div class="card"><div class="hint warn">⚠ 還沒接上遊戲。請先開遊戲並確認「設置 › 連線」那邊是綠的。</div></div>`
           );
         }
@@ -2332,11 +3090,25 @@
                     s.myCost.unknown > 0
                       ? ` <span class="badge">${s.myCost.unknown} 張沒定價</span>`
                       : ""
+                  }${
+                    // ⚠ 「這副牌排不排得進這一檔」要在**按下開始之前**就看得到。
+                    // 少了它，玩家只能按了才知道要回遊戲改牌組，再回來按一次。
+                    s.myCost.fit === "ok"
+                      ? ` <span class="badge">在 ${esc(s.band ?? "")} 之內</span>`
+                      : s.myCost.fit === "over"
+                        ? ` <span class="bad"><b>超過這一檔（${esc(s.band ?? "")}）</b></span>`
+                        : s.myCost.fit === "under"
+                          ? ` <span class="bad"><b>低於這一檔（${esc(s.band ?? "")}）</b></span>`
+                          : ""
                   }</span></div>
                    <div class="hint">上面那個是<b>伺服器</b>用原版 COST 算的，遊戲的「牌組Cost限制 ±N」判的是它；
-                     這一個是<b>你選的規則</b>算的，約戰的約定上限判的是它。<b>兩個是不同的數字</b>。${
+                     這一個是<b>你選的規則</b>算的，約定的檔位判的是它。<b>兩個是不同的數字</b>。${
                        s.myCost.unknown > 0
                          ? " ⚠ 有卡在這份規則裡沒有定價，一律當 99 算 —— 這個總和不能當真。"
+                         : ""
+                     }${
+                       s.myCost.fit === "over" || s.myCost.fit === "under"
+                         ? " ⚠ 這副牌<b>排不進</b>目前約定的那一檔，按開始會被擋下來。先去遊戲裡換牌組，或改約別的檔位。"
                          : ""
                      }</div>`
             }
@@ -2380,23 +3152,22 @@
         // ⚠ 畫面上那份（`mform`）與設定檔那份（`s.match`）—— 開頁的第一拍還沒
         // 同步過來時用後者。兩份都沒有是不可能的（主程序一定會給）。
         const f = mform ?? s.match;
-        const roomName = f.roomName === "" ? K.defaultRoomName : f.roomName;
-        // 官方那 11 項 + 官方選單裡沒有的四張。⚠ 兩組要分開標：後者在遊戲自己的
-        // 選單上是選不到的，玩家要知道自己選的是哪一種。
-        const opt = (g) =>
-          `<option value="${esc(g.value)}"${f.stage === g.value ? " selected" : ""}>${esc(g.value)} ${esc(g.name)}</option>`;
-        const stageOpts =
-          K.stages.map(opt).join("") +
-          `<optgroup label="隱藏地圖（官方選單沒有）">` +
-          K.hiddenStages.map(opt).join("") +
-          `</optgroup>`;
-
-        const bandOpts = K.costRanges
-          .map((n) => `<option value="${n}"${f.band === n ? " selected" : ""}>± ${n}</option>`)
+        // ⚠ 地圖**不是**下拉選單了 —— 玩家只選「誰來抽」。理由見下面那段 hint
+        // 與 `@ulr/arbiter-engine` 的 `StagePick`。
+        const stagePicks = [
+          ["arcadia", `亞城隨機（插件從 ${K.arcadiaStages.length} 張裡抽）`],
+          ["official", "官方隨機（交給遊戲伺服器抽）"],
+        ];
+        const stageOpts = stagePicks
+          .map(
+            ([v, label]) =>
+              `<option value="${v}"${f.stage === v ? " selected" : ""}>${esc(label)}</option>`,
+          )
           .join("");
 
-        // 排隊中就把「會改變配對條件」的欄位鎖起來 —— 改了也不會生效（鍵是
-        // 按下開始時算的），而一個「改了沒反應」的輸入框比鎖起來更難懂。
+        // 排隊中就把**整組**設定鎖起來 —— 這一整張表在按下「開始」的當下就被
+        // 抄進 `MatchPairing` 了（配對鍵、開房參數都是那時算的），排隊途中改任何
+        // 一格都不會生效。一個「改了沒反應」的輸入框比鎖起來更難懂。
         const pairing = s.pairing ?? { phase: "idle" };
         const queueBusy = pairing.phase !== "idle" && pairing.phase !== "blocked";
 
@@ -2419,42 +3190,60 @@
                  }
                  ⚠ 它們<b>每週二遊戲更新會變</b>，所以插件每次都現讀，不記在設定裡。</div>`;
 
-        // ── 開房設定（配到人之後要怎麼開房）──────────────────────────────
+        // ── 配對設定（配到人之後要怎麼開房）──────────────────────────────
         //
         // ⚠ 這些**只服務自動配對**。插件不再提供手動開房 —— 遊戲自己就做得很好，
         // 而兩邊都能開房的話「取消」會把玩家手動開的那間一起收掉（`delete_room`
         // 是整個頻道一起收的）。
+        //
+        // ⚠ **房名與地圖不是輸入框了。** 自動配對是要取代亞歷山卓城的快速比賽，
+        // 而那邊兩樣都不讓人填 —— 按一顆按鈕就該打得起來，不該先填一張表。
         const form = `<div class="card">
-            <div class="row"><span class="dim">開房設定</span>
+            <div class="row"><span class="dim">配對設定</span>
               <span class="dim">配到人之後就用這些開房</span></div>
-            <div class="row"><span class="dim">房間名</span>
-              <span><input id="mRoomName" type="text" maxlength="20" value="${esc(roomName)}" /></span></div>
-            <div class="hint">你當房主時清單上顯示的名字，<b>會記起來</b>。
-              ⚠ 房名是公開的，<b>不要把密碼寫進去</b> —— 密碼由插件自己產，只有配到的那個人拿得到。</div>
+            <div class="row"><span class="dim">房名</span>
+              <span>${
+                s.roomName
+                  ? `<code>${esc(s.roomName)}</code>`
+                  : '<span class="dim">選了規則才組得出來</span>'
+              }</span></div>
+            <div class="hint">房名<b>由系統取，玩家改不了</b> —— 大廳裡的人要一眼看得出這是哪一檔，
+              那正是亞歷山卓城的房間列在做的事（<code>Quickmatch [COST:57]</code>）。
+              前面那段是你選的<b>規則名</b>（太長會截），<code>[COST:n]</code> 那一段永遠完整。
+              ⚠ 密碼<b>不在</b>房名裡 —— 那是插件自己產的，只有配到的那個人拿得到。</div>
             <div class="row"><span class="dim">對戰地點</span>
-              <span><select id="mStage">${stageOpts}</select></span></div>
-            <div class="hint"><b>這是偏好，不是決定</b> —— 雙方選的不一樣時由插件協商：<br />
-              · 兩邊<b>一樣</b> → 就開那裡<br />
-              · 有一邊選<b>隨機（014）</b> → <b>強制開隨機</b>，忽略另一邊指定的那張<br />
-              · 兩邊指定<b>不同</b>地圖 → 從<b>這兩張</b>裡抽一張（各一半，不會抽到誰都沒選的）<br />
-              · 對手沒回報（舊版插件）→ 用<b>開房那一方</b>的<br />
-              官方選單是 000～009 加上 014，中間的 010～013 整段跳過 —— 但那四張是<b>真的地圖</b>。
-              要在<b>遊戲自己的開房對話框</b>裡也選得到，去「隱藏地圖」那一頁打開。</div>
-            <div class="row"><span class="dim">對戰規則</span>
-              <span><select id="mMulti" ${queueBusy ? "disabled" : ""}>
-                <option value="1"${f.multi ? " selected" : ""}>3vs3</option>
-                <option value="0"${f.multi ? "" : " selected"}>1vs1</option>
-              </select></span></div>
-            <div class="row"><span class="dim">牌組Cost限制</span>
-              <span><input id="mBandOn" type="checkbox" ${f.bandOn ? "checked" : ""} />
-                    <select id="mBand">${bandOpts}</select></span></div>
-            <div class="hint">遊戲自己的欄位，<b>伺服器用原版 COST 判</b> —— 跟你選的規則算出來的數字對不上。</div>
-            <div class="row"><span class="dim">約定 COST 上限</span>
+              <span><select id="mStage" ${queueBusy ? "disabled" : ""}>${stageOpts}</select></span></div>
+            <div class="hint"><b>選不到「哪一張地圖」，只能選誰來抽</b> —— 開房的只有一方，
+              指定地圖對另一邊永遠是被決定的。<br />
+              · <b>亞城隨機</b>：插件從 <code>${esc(K.arcadiaStages[0] ?? "")}</code>～<code>${esc(
+                K.arcadiaStages[K.arcadiaStages.length - 1] ?? "",
+              )}</code> 這 ${K.arcadiaStages.length} 張裡抽一張<br />
+              · <b>官方隨機</b>：送 <code>014</code>，交給遊戲伺服器抽<br />
+              兩邊選的不一樣時走<b>官方隨機</b> —— 選它的那一邊等於說了「不要插件替我抽」。
+              對手沒回報（舊版插件）時用<b>開房那一方</b>的。<br />
+              ⚠ 亞城池裡的 <code>010</code>（魔女山谷）在<b>官方選單裡是選不到的</b>，
+              而插件只驗過它的背景圖載得起來，<b>沒有在上面打完一整場</b>。不想碰就選官方隨機。</div>
+            <div class="row"><span class="dim">對戰規則</span><span><b>3vs3</b>，不設「牌組Cost限制 ±N」</span></div>
+            <div class="hint">這兩格<b>選不到，是固定的</b> —— 一顆按鈕就該打得起來，而每多一個選項，
+              自動配對就再劈一次人潮。<b>3vs3 還特別貴：它進配對鍵</b>，選 1vs1 的人跟選 3vs3 的人
+              物理上配不到彼此。<br />
+              至於<b>「牌組Cost限制 ±N」，那是遊戲自己的欄位，伺服器用原版 COST 判</b> ——
+              跟你選的規則算出來的數字對不上，開著只會把一副照約定完全合法的牌組擋在門外。
+              這個玩法真正的限制是下面那個<b>約定 COST 檔位</b>，雙方各自用約定的規則檢查。</div>
+            <div class="row"><span class="dim">約定 COST 檔位</span>
               <span><input id="mLimitOn" type="checkbox" ${f.limitOn ? "checked" : ""} ${queueBusy ? "disabled" : ""} />
                     <input id="mLimit" type="number" min="0" max="200" step="0.01" style="width:5em"
                            value="${f.limit}" ${queueBusy ? "disabled" : ""} />
                     ${tierButtons}</span></div>
-            <div class="hint">用<b>你選的規則</b>算的上限，由插件檢查 —— 遊戲伺服器不認得它。
+            <div class="hint">${
+              f.limitOn && s.band
+                ? `這一檔<b>收 ${esc(s.band)}</b>，用<b>你選的規則</b>算 —— 跟亞城的 <code>COST${esc(
+                    String(f.limit),
+                  )}</code> 同一個意思：<b>有下限</b>，
+                   一副 40C 的隊伍排不進 ${esc(String(f.limit))} 檔。壓到剛好卡滿才是這個玩法的重點。`
+                : `<b>沒勾 = 什麼牌組都收</b>。勾起來才有「檔位」可言 —— 一檔的寬度是 1.00C
+                   （填 57 就是收 56.01～57.00），跟亞城的 <code>COST57</code> 同一個意思。`
+            }
               ⚠ 這個數字<b>進配對條件</b>：填得不一樣的人會排在不同的隊伍裡，永遠配不到。
               雙方各自檢查自己那副牌，所以誰都看不到對方的 COST。</div>
             ${tierHint}
@@ -2504,6 +3293,19 @@
                  : ""
              }
              ${
+               // 這一檔收多少。⚠ 排隊中一定要看得到 —— 「配對條件」是兩邊要對上
+               // 的東西，而它同時決定了自己那副牌合不合法。
+               pairing.band
+                 ? `<div class="row"><span class="dim">這一檔</span><span>${esc(pairing.band)}${
+                     pairing.myTotal
+                       ? `　你的牌組 <b>${esc(pairing.myTotal)}</b>${
+                           pairing.overLimit ? " ⚠ 太高" : pairing.underLimit ? " ⚠ 太低" : ""
+                         }`
+                       : ""
+                   }</span></div>`
+                 : ""
+             }
+             ${
                pairing.skipped > 0
                  ? `<div class="row"><span class="dim">已跳過</span><span>${pairing.skipped} 位（規則版本算出來的東西不一樣）</span></div>`
                  : ""
@@ -2517,7 +3319,10 @@
              <div class="hint">插件會去中間人那邊排隊，配到條件一樣的人就<b>自動開房、自動進房</b>
                （開房用下面那張卡的設定）。⚠ 配到之後會直接<b>消耗 AP</b> 並開打 ——
                不想被自動拉進對戰就先按停止。<b>對戰一開始配對就自己結束</b>，不必手動停。<br />
-               對手用的規則是<b>同一族的哪一版都可以</b>，只要這一場算出來的 COST 完全一樣。</div>`;
+               對手用的規則是<b>同一族的哪一版都可以</b>，只要這一場算出來的 COST 完全一樣。<br />
+               ⚠ 排隊時插件會<b>每 5 秒確認你還在這個頻道</b>：跑去打別場、退出頻道、換頻道
+               都會<b>自動停止排隊</b>（不然你打完回來會發現有人開好房在等你）。
+               你自己在遊戲裡開房<b>不會</b>停止排隊 —— 真的配到人時插件會幫你把那間收掉。</div>`;
 
         const queueCard = `<div class="card">
             <div class="row"><span class="dim">自動配對</span><span class="dim">走中間人的佇列</span></div>
@@ -2552,7 +3357,10 @@
           </div>`;
 
         return (
-          head("自動配對", "跟用同一套 COST 規則的人自動湊一場 —— 開房、進房都由插件代勞。") +
+          head(
+            "自動配對",
+            "用同一套 COST 規則的人自動湊一場 —— 亞歷山卓城的快速比賽，換成自訂規則。",
+          ) +
           queueCard +
           form +
           ruleCard +
@@ -3008,6 +3816,13 @@
             renderBody();
           });
         }
+        // 自己打的幅度。⚠ 走 `change` 而不是 `input`：打「0.05」的中途會經過
+        // 「0」與「0.0」，而 0 是非法值（上下鍵完全不動）—— 每打一個字就送一次
+        // 的話，主程序會把中途那些夾成 1 再回推，玩家看到輸入框自己跳。
+        if (t.id === "edStep") return void applyEditStep(t.value);
+        // 同 `edStep` 走 `change` 而不是 `input`：打「0.25」的中途會經過 0 與 0.2，
+        // 而 0 的意思是「關掉檢查」—— 每打一個字就送一次會讓開關自己跳。
+        if (t.id === "edUnit") return void applyEditUnit(t.value);
         if (t.id === "atLogin") return void options({ launchAtLogin: t.checked });
         if (t.id === "startMin") return void options({ startMinimized: t.checked });
         if (t.id === "multi") return void options({ multiProfile: t.checked });
@@ -3046,7 +3861,14 @@
           editing = t;
           const n = Number(t.value);
           if (t.value !== "" && Number.isFinite(n)) ed.draft[t.dataset.t][t.dataset.k] = n;
-          t.classList.toggle("dirty", edChanged(t.dataset.t, t.dataset.k));
+          // ⚠ 整組換掉，不能只 toggle 一個 class —— 顏色是**價差的階級**，
+          // 打字時每按一個鍵都可能換一階（或換一邊）。舊的階級留在身上的話，
+          // 兩個 `--dfg` 會同時中，格子的顏色由 CSS 的先後順序決定而不是數字。
+          // 這幾個 class 是這個 input 身上唯一的 class，整個蓋掉是安全的。
+          t.className = edDeltaClass(t.dataset.t, t.dataset.k);
+          // 說明也要跟著改 —— 色階只分五階，「到底差幾 C」看的是這一行，
+          // 留著上一次的數字比沒有還糟。第一行（是哪一張）不會變，留著。
+          t.title = `${t.title.split("\n")[0]}\n${edDeltaText(t.dataset.t, t.dataset.k)}`;
           edMsg = null;
           const save = $("edSave");
           if (save) save.disabled = edUnsavedCount() === 0;
@@ -3162,6 +3984,16 @@
             // 訊息可能落在最後一次重畫之後，變成存了檔卻沒有任何回應。
             renderBody();
           });
+        }
+        if (btn.dataset.step !== undefined) return void applyEditStep(btn.dataset.step);
+        if (btn.dataset.unit !== undefined) return void applyEditUnit(btn.dataset.unit);
+        if (btn.id === "edOnlyOff") {
+          edOnlyOff = !edOnlyOff;
+          return void renderBody();
+        }
+        if (btn.id === "edHideLocked") {
+          edHideLocked = !edHideLocked;
+          return void renderBody();
         }
         if (btn.id === "edResetTab") {
           const label = ED_TABS.find((t) => t.id === edTab)?.label ?? edTab;
@@ -3324,15 +4156,9 @@
       //
       // ⚠ 手動開房／進房那三支拿掉了 —— 插件不再提供那條路（見這一頁的檔頭）。
 
-      const MATCH_FIELDS = new Set([
-        "mRoomName",
-        "mStage",
-        "mMulti",
-        "mBandOn",
-        "mBand",
-        "mLimitOn",
-        "mLimit",
-      ]);
+      // ⚠ 沒有 `mRoomName`、`mMulti`、`mBandOn`/`mBand` 了 —— 房名由系統取，
+      // 3vs3 與遊戲自己的 ±N 是固定的（見這一頁的開房設定那張卡）。
+      const MATCH_FIELDS = new Set(["mStage", "mLimitOn", "mLimit"]);
 
       /**
        * 把畫面上的值收回 `mform` **並存進設定檔**。
@@ -3344,22 +4170,24 @@
       function readMatchForm() {
         const v = (id) => $(id);
         if (mform === null) mform = { ...(mstate?.match ?? {}) };
-        if (v("mRoomName")) mform.roomName = v("mRoomName").value.trim();
         if (v("mStage")) mform.stage = v("mStage").value;
-        if (v("mMulti")) mform.multi = v("mMulti").value === "1";
-        if (v("mBandOn")) mform.bandOn = v("mBandOn").checked;
-        if (v("mBand")) mform.band = Number(v("mBand").value);
         if (v("mLimitOn")) mform.limitOn = v("mLimitOn").checked;
-        // ⚠ 夾到兩位小數。上限會進配對鍵（`matchCriteriaString` 用 toFixed(2)），
+        // ⚠ 夾到兩位小數。檔位會進配對鍵（`matchCriteriaString` 用 toFixed(2)），
         // 打三位小數的話「畫面上的數字」跟「實際比的數字」會不一樣。
         if (v("mLimit")) {
           const n = Number(v("mLimit").value);
           if (Number.isFinite(n) && n >= 0) mform.limit = Math.round(n * 100) / 100;
         }
         return window.ulr.match.prefs(mform).then((saved) => {
-          // 主程序整理過的那份才是真的（房名會被 trim、數字會被夾）。
-          mform = { ...saved };
-          if (mstate) mstate.match = saved;
+          // 主程序整理過的那份才是真的（數字會被夾）。
+          mform = { ...saved.match };
+          if (mstate) {
+            mstate.match = saved.match;
+            // ⚠ 房名與檔位區間是主程序從那幾格算的，一起收回來 —— 不收的話
+            // 「改了檔位，房名卻還是舊的」會停留到下一次輪詢（3 秒）。
+            mstate.roomName = saved.roomName;
+            mstate.band = saved.band;
+          }
         });
       }
 
@@ -3367,7 +4195,7 @@
        * 開始自動配對。
        *
        * ⚠ 開房設定**不從這裡送** —— 主程序自己讀設定檔（`profile.match`）。
-       * 送過去的話會有兩份真相，而「我改了房名但開出來的是舊的」看不出來。
+       * 送過去的話會有兩份真相，而「我改了設定但開出來的是舊的」看不出來。
        */
       function queueStart() {
         const ch = mstate?.context?.channel;
@@ -3376,8 +4204,8 @@
           return renderBody();
         }
         matchError = null;
-        // 先把畫面上還沒存的改動落地，再開始 —— 否則玩家剛打完房名就按開始，
-        // 開出來的會是上一次存的那個。
+        // 先把畫面上還沒存的改動落地，再開始 —— 否則玩家剛改完檔位就按開始，
+        // 排的會是上一次存的那個。
         return readMatchForm()
           .then(() => window.ulr.match.queue.start({ channel: ch }))
           .then((r) => {

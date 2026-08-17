@@ -16,6 +16,8 @@
 
 import type { LinkPrefs } from "@ulr/arbiter-link";
 import { DEFAULT_LINK_TARGET, normalizePrefs } from "@ulr/arbiter-link";
+import { DEFAULT_STAGE_PICK, RANDOM_STAGE } from "@ulr/arbiter-engine";
+import type { StagePick } from "@ulr/arbiter-engine";
 import {
   BROWSER_DEBUG_PORT,
   DEFAULT_BROWSER_PROFILE_DIR,
@@ -30,47 +32,61 @@ export type ClientKind = "desktop" | "web";
 /**
  * 自動配對開房時要用的設定。
  *
- * ⚠ **一定要記在設定檔裡。** 這些是玩家的偏好（房名、常打的地點、約定的上限），
- * 而自動配對是「按一顆按鈕就開打」的功能 —— 每次重開插件都要重填一輪的話，
- * 那顆按鈕就不是一顆按鈕了。房名尤其明顯：它是玩家對外的招牌，不是一次性的值。
+ * ⚠ **一定要記在設定檔裡。** 這些是玩家的約定（常打的檔位、地點抽法），而
+ * 自動配對是「按一顆按鈕就開打」的功能 —— 每次重開插件都要重填一輪的話，
+ * 那顆按鈕就不是一顆按鈕了。
  *
  * ⚠ 這裡**不記官方的 COST 檔位**（57/66/78 那幾顆），它們每週二會變，插件每次
  * 都現讀。記的是玩家自己填的那個數字 —— 那是他的約定，不是遊戲的狀態。
+ *
+ * ⚠ **沒有房名這一格了。** 房名改成系統照「規則名 + 檔位」組（`buildRoomName`），
+ * 因為自動配對要取代亞歷山卓城的快速比賽，而那邊的房名長這樣：
+ * `Quickmatch [COST:57]` —— 大廳裡的人一眼就看得出那是哪一檔。讓玩家自己取的話
+ * 那個資訊就沒了，而它正是這個功能能不能取代亞城的關鍵。
+ *
+ * ⚠ **也沒有「對戰規則」與「牌組Cost限制 ±N」這兩格了**，同一個理由再往下推：
+ * 插件開的房固定 3vs3、固定不設 ±N（`@ulr/arbiter-engine` 的 `ROOM_MULTI` 與
+ * `ROOM_DECK_COST_BAND`，兩支都寫了為什麼）。3vs3 那格還特別貴 —— 它**進配對鍵**，
+ * 留著等於把本來就不多的人潮劈成兩半。
  */
 export interface MatchPrefs {
-  /** 開房用的房名。空字串 = 用官方預設（客戶端的 `DEFAULT_NAMES.tcn`）。 */
-  roomName: string;
   /**
-   * 想打的地點（`000`~`014`）。
+   * 地點誰來抽 —— `arcadia`（插件從 000~010 抽）或 `official`（伺服器抽）。
    *
-   * ⚠ 這是**偏好不是決定** —— 雙方選不一樣時由插件協商（見
-   * `@ulr/arbiter-engine` 的 `negotiateStage`）。
+   * ⚠ **玩家選不到「哪一張地圖」**，只能選抽法。理由見 `@ulr/arbiter-engine`
+   * 的 `StagePick`：開房的只有 host，指定地圖對另一邊永遠是單方面的。
    */
-  stage: string;
-  /** 3vs3（true）還是 1vs1。**進配對鍵**，兩邊要一樣才配得到。 */
-  multi: boolean;
-  /** 要不要設遊戲自己的「牌組Cost限制 ±N」。伺服器用**原版 COST** 判。 */
-  bandOn: boolean;
-  band: number;
-  /** 要不要設約定的自訂 COST 上限。**進配對鍵**，由插件自己檢查。 */
+  stage: StagePick;
+  /**
+   * 要不要設約定的自訂 COST 檔位。**進配對鍵**，由插件自己檢查。
+   *
+   * ⚠ `limit` 是這一檔的**上限**，實際收的是 `limit − 0.99` 到 `limit`
+   * （見 `@ulr/arbiter-engine` 的 `COST_BAND_WIDTH`）—— 跟亞城的 `COST57`
+   * 同一個意思。
+   */
   limitOn: boolean;
   limit: number;
 }
 
-/** 官方對話框打開時就是這兩個值：000 雷德貝魯格城、3vs3。 */
+/** 新裝就是這樣：亞城池抽地點、不設約定檔位。 */
 export const DEFAULT_MATCH_PREFS: MatchPrefs = {
-  roomName: "",
-  stage: "000",
-  multi: true,
-  bandOn: false,
-  band: 5,
+  stage: DEFAULT_STAGE_PICK,
   limitOn: false,
   limit: 62,
 };
 
-/** 地點代號長這樣（`000`~`014`）。認不得的一律回預設 —— 不讓一格壞值擋住開房。 */
-function normalizeStage(raw: unknown): string {
-  return typeof raw === "string" && /^\d{3}$/.test(raw) ? raw : DEFAULT_MATCH_PREFS.stage;
+/**
+ * 舊設定檔那格是三位數的地點代號（`000`~`014`），現在是抽法。
+ *
+ * ⚠ **要搬，不能直接丟。** 直接丟的話每個既有使用者升級之後都會被拉回預設，
+ * 而選過「隨機」的那些人是明確表示過「不要插件替我抽」的 —— `014` 對應
+ * `official`，其餘（他指定了某一張）對應預設的亞城池，因為「指定某一張」
+ * 這個選項已經沒有了。
+ */
+function normalizeStage(raw: unknown): StagePick {
+  if (raw === "arcadia" || raw === "official") return raw;
+  if (raw === RANDOM_STAGE) return "official";
+  return DEFAULT_STAGE_PICK;
 }
 
 function normalizeNumber(raw: unknown, fallback: number, max: number): number {
@@ -85,12 +101,14 @@ export function normalizeMatchPrefs(raw: unknown): MatchPrefs {
   if (typeof raw !== "object" || raw === null) return { ...DEFAULT_MATCH_PREFS };
   const r = raw as Record<string, unknown>;
   return {
-    roomName: typeof r["roomName"] === "string" ? r["roomName"].slice(0, 20).trim() : "",
+    // ⚠ 舊設定檔的 `roomName`、`multi`、`bandOn`/`band` 刻意**不搬過來**（連讀
+    // 都不讀）。這三樣現在都是系統決定的，留一個沒人用的欄位在設定檔裡只會讓
+    // 下一個讀這支的人以為它還有效。
+    //
+    // ⚠ 這對**選過 1vs1 的人是一次行為改變**：他下次排隊會排進 3vs3 那條佇列。
+    // 那是刻意的（見 `MatchPrefs` 的說明），而且是**唯一**誠實的做法 —— 悄悄
+    // 沿用舊值的話，他會排在一條沒有 UI 顯示、也沒有 UI 改得掉的隊伍上。
     stage: normalizeStage(r["stage"]),
-    // ⚠ `!== false` 而不是 `=== true`：舊設定檔沒有這一欄，而預設是 3vs3。
-    multi: r["multi"] !== false,
-    bandOn: r["bandOn"] === true,
-    band: normalizeNumber(r["band"], DEFAULT_MATCH_PREFS.band, 99),
     limitOn: r["limitOn"] === true,
     limit: normalizeNumber(r["limit"], DEFAULT_MATCH_PREFS.limit, 999),
   };
@@ -150,6 +168,84 @@ export interface Profile {
    * 配對成立之後，不是在這裡。
    */
   match: MatchPrefs;
+  /**
+   * 「編輯 COST」裡按一下上下鍵動多少（解析度）。
+   *
+   * ⚠ 預設是 **1**，不是 0.01。`step` 同時決定上下鍵與滾輪的幅度，而 COST 幾乎
+   * 都是整數 —— 0.01 的意思是「把一張卡從 13 調到 14 要按一百次」。要小數的
+   * 場合真的有（壓 C 邊界那種 x.99），所以做成可調而不是寫死。
+   *
+   * ⚠ 一定要記在配置裡。這是每次開編輯器都會用到的東西，每次都要重設一遍的
+   * 偏好等於沒有這個功能。
+   */
+  editStep: number;
+  /**
+   * 「最小單位」檢查用的值。**0 = 不檢查**，預設。
+   *
+   * ⚠ 這**不是規則檔的欄位**，是編輯器的工具設定 —— 完整理由見
+   * {@link normalizeEditUnit}。作者要讓別人知道自己用什麼單位，寫進**描述**。
+   */
+  editUnit: number;
+}
+
+/**
+ * 上下鍵的幅度只收這幾個 —— 但**不是下拉選單的全部**：畫面另外讓玩家自己打
+ * 一個數字（見編輯 COST 那一頁）。這幾個只是快速鍵。
+ */
+export const EDIT_STEPS = [1, 0.5, 0.1, 0.05, 0.01] as const;
+export const DEFAULT_EDIT_STEP = 1;
+
+/**
+ * 「最小單位」的快速鍵。同樣**不是全部** —— 畫面讓作者自己打一個數字。
+ *
+ * 為什麼是這幾個：它們都**除得盡 1**（2×0.5、4×0.25、5×0.2、10×0.1），所以
+ * 一份用它們定價的表湊得出整數。0.33 那種除不盡的也填得進去（自己打），
+ * 檢查照樣跑 —— 只是那時 `0.33 × 3 = 0.99`，畫面會誠實地說這件事。
+ */
+export const EDIT_UNITS = [1, 0.5, 0.25, 0.2, 0.1] as const;
+
+/**
+ * 檢查用的最小單位。**0 = 不檢查**，那也是預設。
+ *
+ * ⚠ 這是**編輯器的工具設定，不是規則檔的欄位**。規則檔裡沒有這個東西，理由
+ * 有兩層：
+ *
+ * 1. 它是**作者端的約束**，不是比賽規則。兩份規則把這一場的每張卡定成一樣的
+ *    價就是打得起來，跟作者宣告自己用 0.5 還是 0.01 無關 —— 寫進規則檔會讓
+ *    它進 contentHash，於是「顆粒度改了但價格一格沒動」的兩版看起來是不同的
+ *    規則（docs/match-making.md §2 整節在反對的那件事）。
+ * 2. 真要讓別人知道，作者寫進**描述**就好（「編輯描述」那一頁）—— 那是給人
+ *    看的自由文字，引擎永遠不解析它。
+ *
+ * 所以這個值跟著**玩家**走而不是跟著規則走：換一份規則來編要自己重設。
+ *
+ * ⚠ 跟 `editStep`（上下鍵幅度）**是兩個不同的東西**，不要合併。幅度是「我想
+ * 按幾下」，單位是「這份表允許出現什麼值」—— 作者完全可能用 0.01 的幅度去微調
+ * 一張最小單位 0.5 的表（然後靠檢查抓回來）。
+ */
+export function normalizeEditUnit(raw: unknown): number {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n) || n <= 0 || n > 100) return 0;
+  // 夾到兩位小數：COST 值本身就只到兩位（`toCentiCost` 對三位小數會拋例外），
+  // 一個三位小數的單位會讓每一格都判成不合，而那個結果沒有意義。
+  const rounded = Math.round(n * 100) / 100;
+  return rounded <= 0 ? 0 : rounded;
+}
+
+/**
+ * 夾一個合法的幅度。
+ *
+ * ⚠ **0 與負數一定要擋掉。** `<input step="0">` 在 Chromium 裡等於「上下鍵完全
+ * 不動」，而那看起來就是鍵盤壞了；負數則會讓上鍵變成往下。壞值一律退回 1。
+ *
+ * 上限 100：再大就不是「調價格」而是誤觸了。夾到兩位小數的理由跟價格一樣 ——
+ * 三位小數的 step 會產生 `toCentiCost` 收不下的值。
+ */
+export function normalizeEditStep(raw: unknown): number {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n) || n <= 0 || n > 100) return DEFAULT_EDIT_STEP;
+  const rounded = Math.round(n * 100) / 100;
+  return rounded <= 0 ? DEFAULT_EDIT_STEP : rounded;
 }
 
 export interface ProfileStore {
@@ -254,6 +350,10 @@ export function normalizeProfile(raw: unknown): Profile | null {
     // 關閉。插件裝上去不該改變玩家在遊戲裡看到的選單。
     hiddenStages: r["hiddenStages"] === true,
     match: normalizeMatchPrefs(r["match"]),
+    // 舊設定檔沒有這一欄 → 1。那也是新裝的預設。
+    editStep: normalizeEditStep(r["editStep"]),
+    // 舊設定檔沒有這一欄 → 0（不檢查）。插件裝上去不該憑空替作者宣告一個單位。
+    editUnit: normalizeEditUnit(r["editUnit"]),
   };
 }
 
@@ -279,6 +379,10 @@ export function defaultProfile(kind: ClientKind = "desktop"): Profile {
     // 同理，預設不動遊戲的開房選單。
     hiddenStages: false,
     match: { ...DEFAULT_MATCH_PREFS },
+    // 整數 —— COST 幾乎都是整數，要小數的人自己調。
+    editStep: DEFAULT_EDIT_STEP,
+    // 不檢查。這是作者才會用到的東西，而大多數人不編規則。
+    editUnit: 0,
   };
 }
 

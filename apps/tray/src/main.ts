@@ -47,17 +47,16 @@ import {
   MOVE_PHASE_TOTAL_SECONDS,
 } from "@ulr/arbiter-link";
 import {
+  ARCADIA_STAGES,
   CHANNEL_NAMES,
-  COST_RANGES,
   costTiersFor,
   DEBUG_PORT_SWITCH_AUTO,
-  DEFAULT_ROOM_NAME,
   HIDDEN_STAGES,
   resolveDebugPort,
   STAGES,
 } from "@ulr/cdp-adapter";
 import type { HiddenStageStatus, MatchContext, RoomEntry } from "@ulr/cdp-adapter";
-import { checkOwnDeck, MatchPairing } from "@ulr/arbiter-engine";
+import { buildRoomName, checkOwnDeck, formatBand, MatchPairing } from "@ulr/arbiter-engine";
 import type { PairingStatus } from "@ulr/arbiter-engine";
 import { deckFromKeys } from "@ulr/cost-engine";
 import type { CardCatalog, CompressionRule, CostRule, GapBand } from "@ulr/rule-schema";
@@ -80,8 +79,12 @@ import type { ClientKind, MatchPrefs, Profile, ProfileStore } from "./profiles.j
 import {
   addProfile,
   defaultPortFor,
+  EDIT_STEPS,
+  EDIT_UNITS,
   loadStore,
   markUsed,
+  normalizeEditStep,
+  normalizeEditUnit,
   normalizeMatchPrefs,
   removeProfile,
   resolveProfile,
@@ -414,6 +417,13 @@ interface MyDeckCost {
   total: string | null;
   /** 規則裡沒定價、被當成 99 的卡數。不是 0 就要顯示警告。 */
   unknown: number;
+  /**
+   * 這副牌在**目前約定的那一檔**裡嗎。沒設檔位、或讀不到牌組時是 `null`。
+   *
+   * ⚠ 這是「按下去之前就看得到」的那一格。少了它，玩家只能按了開始才知道
+   * 自己這副牌不合檔 —— 而那是一個要回遊戲改牌組、再回來按一次的來回。
+   */
+  fit: "ok" | "over" | "under" | null;
 }
 
 interface MatchPageState {
@@ -438,29 +448,58 @@ interface MatchPageState {
   /** 自動配對的狀態。沒在配對時 phase 是 `idle`。 */
   pairing: PairingStatus;
   /**
-   * 玩家記在配置裡的開房設定（房名、地點、上限…）。
+   * 玩家記在配置裡的配對設定（地點抽法、約定檔位）。
    *
    * ⚠ 畫面**從這裡取初始值**，不要自己留一份預設 —— 兩份預設一定會漂，
-   * 而漂掉的症狀是「我明明改過房名，重開又變回請多關照」。
+   * 而漂掉的症狀是「我明明改過設定，重開又變回去」。
    */
   match: MatchPrefs;
+  /**
+   * 配到人時會開出來的房名，**主程序組好的**。沒選規則時是 `null`。
+   *
+   * ⚠ 畫面**不准自己組一份**。房名同時是 host 在清單裡認出自己那間房的依據
+   * （`findOwnRoom` 拿它比對），畫面組的跟開房用的漂掉一個字，症狀是
+   * 「開好房卻找不到自己那間」—— 而那看起來完全像是遊戲那邊的問題。
+   */
+  roomName: string | null;
+  /** 目前約定的那一檔收多少（`56.01～57.00`）。沒設檔位是 `null`。 */
+  band: string | null;
   /** 頻道編號 → 顯示名稱。遊戲的 `channels` 物件裡沒有名稱。 */
   channelNames: Readonly<Record<number, string>>;
-  /** 官方的對戰地點清單、官方選單沒有的那四張、Cost 限制檔位、預設房名。 */
+  /**
+   * 官方的對戰地點清單、官方選單沒有的那四張、亞城池。
+   *
+   * ⚠ `stages` 與 `hiddenStages` 現在**只給「這一場抽到哪」那一行查名字**
+   * （`stageLabel`），不再是一個下拉選單 —— 玩家選不到地圖了。
+   *
+   * ⚠ 遊戲的 `COST_RANGES`（±0～±5）**不在這裡**：插件開房永遠不設那一格
+   * （`@ulr/arbiter-engine` 的 `ROOM_DECK_COST_BAND`），畫面上沒有東西要列它。
+   */
   statics: {
     stages: readonly { value: string; name: string }[];
     hiddenStages: readonly { value: string; name: string }[];
-    costRanges: readonly number[];
-    defaultRoomName: string;
+    /** 「亞城隨機」會抽到的那幾張。畫面拿它講清楚池子有多大、含哪幾張。 */
+    arcadiaStages: readonly string[];
   };
+}
+
+/**
+ * `ulr:match-prefs` 回的東西。
+ *
+ * ⚠ 房名與檔位區間**跟著一起回**，因為它們是從 `match` 算出來的，而畫面必須
+ * 在玩家改完的當下就看到新的值。算它們的地方仍然只有主程序（見那支 handler）。
+ */
+interface MatchPrefsResult {
+  match: MatchPrefs;
+  roomName: string | null;
+  band: string | null;
 }
 
 /** 從客戶端抄回來的官方設定。畫面不自己編一份，避免兩邊對不上。 */
 const MATCH_STATICS: MatchPageState["statics"] = {
   stages: STAGES,
   hiddenStages: HIDDEN_STAGES,
-  costRanges: COST_RANGES,
-  defaultRoomName: DEFAULT_ROOM_NAME,
+  arcadiaStages: ARCADIA_STAGES,
 };
 
 // ---------------------------------------------------------------------------
@@ -492,13 +531,15 @@ async function stageStatus(): Promise<HiddenStageStatus | null> {
 /**
  * 「開始自動配對」帶的東西。
  *
- * ⚠ `channel` 與**設定裡的 multi / costLimit** 進配對鍵（`matchKey`），也就是
- * 說：兩邊填得不一樣就物理上配不到對方。房名不進 —— 那是 host 自己的事。
- * 地點也不進，它是配對成立**之後**才協商的（`negotiateStage`）。
+ * ⚠ `channel` 與**設定裡的約定檔位**進配對鍵（`matchKey`），也就是說：兩邊填得
+ * 不一樣就物理上配不到對方。3vs3 那一格也在鍵裡，但它現在是**固定值**
+ * （`@ulr/arbiter-engine` 的 `ROOM_MULTI`），沒有人填得到。地點不進 —— 它是配對
+ * 成立**之後**才協商的（`negotiateStage`）。房名也不進，那是系統照規則與檔位
+ * 組出來的。
  *
- * ⚠ 開房要用的那幾格（房名、地點、±N、約定上限）**不從這裡送** —— 它們記在
- * 配置裡（`profile.match`），主程序自己讀。畫面送過來的話會有兩份真相，而
- * 「我改了房名但開出來的是舊的」這種 bug 完全看不出來。
+ * ⚠ 開房要用的那幾格（地點抽法、約定檔位）**不從這裡送** —— 它們記在配置裡
+ * （`profile.match`），主程序自己讀。畫面送過來的話會有兩份真相，而
+ * 「我改了設定但開出來的是舊的」這種 bug 完全看不出來。
  */
 interface MatchQueueOptions {
   channel: number;
@@ -528,6 +569,8 @@ let pairingStatus: PairingStatus = {
   compatibility: null,
   myTotal: null,
   overLimit: false,
+  underLimit: false,
+  band: null,
   skipped: 0,
   stage: null,
   message: "沒在配對。",
@@ -543,11 +586,20 @@ let pairingStatus: PairingStatus = {
 function myDeckCost(context: MatchContext | null): MyDeckCost | null {
   if (costRuleFull === null) return null;
   const keys = context?.deckKeys ?? null;
-  if (keys === null) return { total: null, unknown: 0 };
+  if (keys === null) return { total: null, unknown: 0, fit: null };
   const deck = deckFromKeys(keys);
-  if (deck.characters.length === 0) return { total: null, unknown: 0 };
+  if (deck.characters.length === 0) return { total: null, unknown: 0, fit: null };
+  // ⚠ 算兩次是刻意的：`total` 要的是「這副牌多少 C」（跟檔位無關，沒設檔位時
+  // 也要顯示），`fit` 要的是「在不在這一檔」。把上限塞進第一次呼叫的話，沒設
+  // 檔位的人就拿不到總和了。
   const check = checkOwnDeck(costRuleFull, deck, null);
-  return { total: check.total, unknown: check.unknown.length };
+  const limit = profile.match.limitOn ? profile.match.limit : null;
+  const banded = limit === null ? null : checkOwnDeck(costRuleFull, deck, limit);
+  return {
+    total: check.total,
+    unknown: check.unknown.length,
+    fit: banded === null ? null : banded.over ? "over" : banded.under ? "under" : "ok",
+  };
 }
 
 function snapshot(): Snapshot {
@@ -715,6 +767,23 @@ export interface CostRuleInfo {
   ruleSetId: string;
   /** 壓 C 區間，給畫面列表用。`null` = 這份規則不壓 C。 */
   bands: { minGap: number; maxGap: number | null; extraCost: number }[] | null;
+  /**
+   * 作者寫的說明與更新說明。沒寫是空字串。
+   *
+   * ⚠ **一定要在「Cost 表」那一頁看得到，不能只有「編輯描述」看得到。**
+   * 這兩欄是規則裡唯一「作者對拿到規則的人說話」的地方 —— 定價的理由、
+   * 最小單位、哪些卡刻意不動、這一版改了什麼，全部只能寫在這裡（引擎永遠
+   * 不解析它們，見 `Restriction.condition` 那條同樣的立場）。
+   *
+   * 只放在編輯頁的話，收到規則的人要**進到一個編輯畫面**才讀得到自己收到的
+   * 東西，而那一頁的每一格都是可以打字的 —— 等於要他為了讀說明去冒改壞的
+   * 風險。所以摘要要帶著它們，即使它們比其他欄位長得多。
+   *
+   * ⚠ 長度有上限（編輯器那邊 `maxlength=2000`），所以放進每次 pushState 的
+   * 快照是可接受的 —— 跟 700 筆的 COST 表不是同一個量級。
+   */
+  description: string;
+  changelog: string;
 }
 
 /**
@@ -824,6 +893,19 @@ export interface EditorPayload {
   catalogError: string | null;
   /** 遊戲接上了沒 —— 決定「從遊戲讀取名冊」那顆按不按得下去。 */
   connected: boolean;
+  /** 按一下上下鍵動多少。⚠ 真實來源是設定檔，畫面上那個只是它的樣子。 */
+  editStep: number;
+  /** 幅度的快速鍵。⚠ 從這裡送而不是讓畫面自己寫死 —— 兩份清單會走散。 */
+  editSteps: readonly number[];
+  /**
+   * 最小單位檢查用的值。**0 = 不檢查。**
+   *
+   * ⚠ 這**不在規則檔裡**，是編輯器的工具設定（見 `profiles-core.ts` 的
+   * `normalizeEditUnit`）。所以它跟 `rule` 是兩個獨立的東西 —— 換一份規則來編，
+   * 這個值不會跟著換。
+   */
+  editUnit: number;
+  editUnits: readonly number[];
 }
 
 export interface EditorSaveResult {
@@ -881,6 +963,10 @@ function editorPayload(): EditorPayload {
     catalog,
     catalogError: null,
     connected: latest?.connected ?? false,
+    editStep: profile.editStep,
+    editSteps: EDIT_STEPS,
+    editUnit: profile.editUnit,
+    editUnits: EDIT_UNITS,
   };
 }
 
@@ -1140,6 +1226,9 @@ function loadCostRule(path: string | null): void {
               maxGap: b.maxGap ?? null,
               extraCost: b.extraCost,
             })),
+      // 作者對「拿到這份規則的人」說的話。⚠ 摘要要帶著 —— 理由見型別那邊。
+      description: rule.description ?? "",
+      changelog: rule.changelog ?? "",
     };
     // ⚠ 罰則跟價格要一起送。只送價格的話，自訂規則的 compressionRule 對
     // 遊戲畫面完全沒有作用 —— 罰則的公式是寫死在客戶端裡的。
@@ -1334,12 +1423,45 @@ app.whenReady().then(() => {
   ipcMain.handle("ulr:editor-load", (): EditorPayload => editorPayload());
 
   /**
+   * 改上下鍵的幅度並**記進配置**。不碰遊戲、不碰規則檔，只是偏好。
+   *
+   * ⚠ 走 `profile = {...}` 而不是 `editProfile`：臨時配置（`--port` 對不上任何
+   * 一份時建的）不在清單裡，`editProfile` 對它是完全的空操作 —— 症狀是「改了
+   * 幅度，下一次重畫又跳回去」。跟 `ulr:set-tint`、`ulr:match-prefs` 同一招。
+   */
+  ipcMain.handle("ulr:editor-step", (_event, raw: unknown): number => {
+    const next = normalizeEditStep(raw);
+    profile = { ...profile, editStep: next };
+    if (!ephemeral) store = updateProfile(profile.id, { editStep: next });
+    return next;
+  });
+
+  /**
+   * 改「最小單位」檢查的值並記進配置。**0 = 不檢查。**
+   *
+   * ⚠ 這**不會動到規則檔**。最小單位不是規則的欄位，是編輯器的工具設定 ——
+   * 作者要讓拿到規則的人知道，得自己寫進「編輯描述」的說明欄（那一欄現在在
+   * 「Cost 表」那一頁讀得到）。完整理由見 `profiles-core.ts` 的
+   * `normalizeEditUnit`。
+   */
+  ipcMain.handle("ulr:editor-unit", (_event, raw: unknown): number => {
+    const next = normalizeEditUnit(raw);
+    profile = { ...profile, editUnit: next };
+    if (!ephemeral) store = updateProfile(profile.id, { editUnit: next });
+    return next;
+  });
+
+  /**
    * 從跑著的遊戲重讀名冊。
    *
    * ⚠ **套用中的客戶端讀不得。** `patch-cost` 是就地改寫 Phaser 快取，套過之後
-   * 讀回來的「原價」會是上一份規則的數字 —— 而編輯器的「改回原價」正是拿它當
-   * 基準，於是玩家按下去會改回一個他從來沒設過的值。擋在這裡，並且把怎麼救
-   * 講出來（停用 → 重載 → 再讀）。
+   * 讀回來的「原價」會是上一份規則的數字 —— 而編輯器的「改回原價」與價差色階
+   * 正是拿它當基準，於是玩家按下去會改回一個他從來沒設過的值。
+   *
+   * ⚠ 下面這道閘**只是快路**（省一趟 CDP 往返，訊息也講得清楚一點）。它問的是
+   * 插件記著的狀態，而那擋不住「停用了但沒重載」「剛換一份規則」「托盤重開過」
+   * 這三種頁面仍然是髒的情況 —— 真正的判斷在 `readCardCatalog` 裡問頁面自己。
+   * **不要**因為這裡有檢查就把那邊的拿掉。
    */
   ipcMain.handle("ulr:editor-catalog", async (): Promise<EditorPayload> => {
     if (engine === null) return { ...editorPayload(), catalogError: "還沒接上遊戲。" };
@@ -1406,12 +1528,17 @@ app.whenReady().then(() => {
   // -------------------------------------------------------------------------
 
   ipcMain.handle("ulr:match-state", async (): Promise<MatchPageState> => {
+    const limit = profile.match.limitOn ? profile.match.limit : null;
     const base = {
       rule: matchRuleInfo(),
       pairing: pairingStatus,
       channelNames: CHANNEL_NAMES,
       statics: MATCH_STATICS,
       match: profile.match,
+      // ⚠ 沒選規則就沒有房名可組 —— 而沒選規則本來就開始不了配對，畫面那邊
+      // 已經有一句更該講的話（「先去選一份規則」）。
+      roomName: costRuleFull === null ? null : buildRoomName(costRuleFull.name, limit),
+      band: formatBand(limit),
     };
     const off = {
       connected: false as const,
@@ -1458,19 +1585,19 @@ app.whenReady().then(() => {
     if (!driver) return { ok: false as const, reason: "還沒連上遊戲" };
 
     // ⚠ 開房設定**從配置讀**，不從畫面收。畫面送過來的話會有兩份真相，而
-    // 「我改了房名但開出來的是舊的」這種 bug 完全看不出來。
+    // 「我改了設定但開出來的是舊的」這種 bug 完全看不出來。
     const m = profile.match;
     const p = new MatchPairing({
       endpoint: engine?.linkEndpoint ?? "",
       rule: costRuleFull,
       channel: options.channel,
-      multi: m.multi,
       costLimit: m.limitOn ? m.limit : null,
       room: {
-        name: m.roomName,
+        // ⚠ 房名不在這裡 —— 引擎照「規則名 + 檔位」自己組（`buildRoomName`）。
+        // 3vs3 與遊戲自己的 ±N 也不在：兩個都是固定的（`ROOM_MULTI`、
+        // `ROOM_DECK_COST_BAND`）。
         stage: m.stage,
         friend: false,
-        deckCostBand: m.bandOn ? m.band : null,
       },
       driver,
       onStatus: (s) => {
@@ -1489,9 +1616,15 @@ app.whenReady().then(() => {
     });
     pairing = p;
     await p.start();
+    // ⚠ **`start()` 期間推出去的狀態不算數，回來時的 `phase` 才是真的。**
+    // 這行原本只在被擋下來時清掉（`if (…) pairing = null`），於是 `start()`
+    // 中途只要推出一次 idle，上面 `onStatus` 就把 `pairing` 設成 null 而**沒有
+    // 人補回來** —— 排隊照跑，但玩家按「停止」是空操作（`pairing?.stop()`
+    // 打在 null 上），畫面永遠停在「排隊中」。改成整個重指派，那條路就不存在。
+    //
     // 開場就被擋下來（沒在大廳、牌組超標…）的話不要留著一個死掉的物件，
     // 否則玩家改好之後再按會收到「已經在配對中了」。
-    if (p.status.phase === "idle" || p.status.phase === "blocked") pairing = null;
+    pairing = p.status.phase === "idle" || p.status.phase === "blocked" ? null : p;
     return { ok: true as const, status: p.status };
   });
 
@@ -1502,20 +1635,29 @@ app.whenReady().then(() => {
   });
 
   /**
-   * 改開房設定（房名、地點、±N、約定上限）並**記進配置**。
+   * 改配對設定（地點抽法、約定檔位）並**記進配置**。
    *
    * ⚠ 這一支跟上面兩支不一樣：它**不碰遊戲**，只是存偏好。所以畫面可以在
    * 每一次輸入之後就叫它，不必等玩家按什麼按鈕。
    *
    * ⚠ 走 `profile = {...}` 而不是 `editProfile`：臨時配置（`--port` 對不上
    * 任何一份時建的）不在清單裡，`editProfile` 對它是完全的空操作 —— 症狀是
-   * 「改了房名，下一次重畫又跳回去」。跟 `ulr:set-tint` 同一招。
+   * 「改了設定，下一次重畫又跳回去」。跟 `ulr:set-tint` 同一招。
+   *
+   * ⚠ **回的不只是 `MatchPrefs`。** 房名與檔位區間是從這幾格算出來的，而畫面
+   * 一改就要看到新的 —— 只回 prefs 的話那兩行會停在舊值直到下一次輪詢（3 秒），
+   * 而玩家會以為「我改了檔位，房名卻沒跟著改」。算的地方仍然只有主程序一處。
    */
-  ipcMain.handle("ulr:match-prefs", (_event, patch: unknown): MatchPrefs => {
+  ipcMain.handle("ulr:match-prefs", (_event, patch: unknown): MatchPrefsResult => {
     const next = normalizeMatchPrefs({ ...profile.match, ...(patch as object) });
     profile = { ...profile, match: next };
     if (!ephemeral) store = updateProfile(profile.id, { match: next });
-    return next;
+    const limit = next.limitOn ? next.limit : null;
+    return {
+      match: next,
+      roomName: costRuleFull === null ? null : buildRoomName(costRuleFull.name, limit),
+      band: formatBand(limit),
+    };
   });
 
   // -------------------------------------------------------------------------

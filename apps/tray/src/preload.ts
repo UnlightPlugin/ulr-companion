@@ -72,6 +72,19 @@ contextBridge.exposeInMainWorld("ulr", {
     save: (payload: Record<string, unknown>) => ipcRenderer.invoke("ulr:editor-save", payload),
     /** 從跑著的遊戲重讀一份名冊（中文名 + 原價）。 */
     refreshCatalog: () => ipcRenderer.invoke("ulr:editor-catalog"),
+    /**
+     * 改上下鍵的幅度並記進配置。回傳主程序夾過的那個值。
+     *
+     * 不碰遊戲也不碰規則檔，所以畫面可以在玩家一改就叫，不必等按什麼按鈕。
+     */
+    step: (value: number) => ipcRenderer.invoke("ulr:editor-step", value),
+    /**
+     * 改「最小單位」檢查的值並記進配置。**0 = 不檢查。**
+     *
+     * ⚠ 跟 `step` 一樣**不碰規則檔** —— 最小單位不是規則的欄位，是編輯器的
+     * 工具設定。作者要宣告它得自己寫進描述欄。
+     */
+    unit: (value: number) => ipcRenderer.invoke("ulr:editor-unit", value),
   },
 
   /**
@@ -79,15 +92,24 @@ contextBridge.exposeInMainWorld("ulr", {
    *
    * ⚠ **插件不再提供手動開房。** `open` / `join` / `cancel` 三支拿掉了：
    * 手動開房遊戲自己就做得很好，而插件多一條路只是多一個會跟自動配對搶房間
-   * 的東西（`delete_room` 是頻道層級的，兩間房會一起被收掉）。房名、地點、
-   * COST 限制那些設定現在**只服務自動配對**。
+   * 的東西（`delete_room` 是頻道層級的，兩間房會一起被收掉）。地點、COST 檔位
+   * 那些設定現在**只服務自動配對**。
+   *
+   * ⚠ **房名不在這條介面上。** 它是主程序照「規則名 + 檔位」組的
+   * （`buildRoomName`），畫面只讀得到組好的結果。畫面能指定房名的話，那個字串
+   * 會被送進遊戲封包，而它同時是 host 認出自己那間房的依據。
    *
    * `state` 與 `prefs` 是安全的（唯讀 / 只寫設定檔）；`queue.start` **會替
    * 玩家操作遊戲** —— 開房消耗 AP、進房直接開打，只能綁在玩家按下去的按鈕上。
    */
   match: {
     state: () => ipcRenderer.invoke("ulr:match-state"),
-    /** 改開房設定並記進配置。不碰遊戲，所以可以邊打字邊叫。 */
+    /**
+     * 改配對設定並記進配置。不碰遊戲，所以可以邊改邊叫。
+     *
+     * 回的是 `{ match, roomName, band }` —— 後兩個是主程序從設定算出來的，
+     * 一起回是為了讓畫面在玩家改完的當下就看到新的房名與檔位區間。
+     */
     prefs: (patch: Record<string, unknown>) => ipcRenderer.invoke("ulr:match-prefs", patch),
     /**
      * 走中間人的佇列。

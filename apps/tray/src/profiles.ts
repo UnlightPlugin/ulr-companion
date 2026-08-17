@@ -21,8 +21,13 @@ import { addTo, emptyStore, normalizeStore, removeFrom, updateIn } from "./profi
 
 export type { ClientKind, MatchPrefs, Profile, ProfileStore } from "./profiles-core.js";
 export {
+  DEFAULT_EDIT_STEP,
   DEFAULT_MATCH_PREFS,
   defaultPortFor,
+  EDIT_STEPS,
+  EDIT_UNITS,
+  normalizeEditStep,
+  normalizeEditUnit,
   normalizeMatchPrefs,
   resolveProfile,
   userDataDirFor,
