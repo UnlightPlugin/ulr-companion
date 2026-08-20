@@ -59,15 +59,19 @@ export interface SignedRelease {
  * 就當作「這次沒更新」然後安靜結束 —— 那正是我們要的行為。回一份 version 是
  * 空字串的清單反而會讓它每小時判定一次「有新版」。
  */
+// ⚠ **1.1.0 的 url 還是 .exe，即使這一版的主力下載是 zip。** 1.0.0 的客戶端
+// 只認得 exe（它會把 zip 下載回來、驗完雜湊，然後 `spawn(zip, ["/S"])` 失敗），
+// 而那批人正是要靠這份清單升上來的人。zip 給新玩家從 Release 頁自己抓。
+// 等大家都在 1.1.0 以上之後，下一版才可以只發 zip。詳見 docs/release.md §2。
 export const CURRENT_RELEASE: SignedRelease | null = {
   manifest: {
-    version: "1.0.0",
-    url: "https://github.com/UnlightPlugin/ulr-companion/releases/download/v1.0.0/ULR-Companion-Setup-1.0.0.exe",
-    sha256: "f816f0d4868accf12a1574bd6221f99047a90426e9660c0541af0da20557599a",
-    notes: "自動配對改成亞城的快速比賽：檔位有下限、房名系統取、地圖抽亞城池",
+    version: "1.1.0",
+    url: "https://github.com/UnlightPlugin/ulr-companion/releases/download/v1.1.0/ULR-Companion-Setup-1.1.0.exe",
+    sha256: "3fae8df48ddd5c42a8440909cc27ea0fd4a4d0ebb623ec5a4ea8a288eb7941a8",
+    notes: "迪城大廳多一顆快速比賽、裝上就有預設 COST 表、戰鬥結束後不再留著握手",
   },
   signature:
-    "ROAeRqFV2tO0U8ECGSF7tvvsELQtVL7mYlcD/sU9FjgrWciXk+fiq6k031AK6st3iYyv9JcLosBKpproDbNrAg==",
+    "WpsowY7hNoCAPD1oeVAS4kYhY0kc9WInUktmJre4sa9WOAGtG0tZ238POiq38TRc91UdsHWD2S2R4dA2x1CbAg==",
 };
 
 // 發版時把上面那行換成 `npm run release:sign` 印出來的那一段（形狀如下，
