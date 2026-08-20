@@ -27,6 +27,9 @@ function ctx(over: Partial<MatchContext> = {}): MatchContext {
     playerName: "燈皇",
     isMatching: false,
     inMatch: true,
+    ap: 30,
+    apMax: 30,
+    duelFree: 0,
     ...over,
   };
 }
@@ -221,5 +224,50 @@ describe("guestJoinRoom", () => {
     });
     const r = await guestJoinRoom(d, { roomId: "對方的房", pass: "AB12CD34", sleep: nosleep });
     expect(r).toMatchObject({ ok: false, fail: 9 });
+  });
+});
+
+/**
+ * 「按下去到開打」那幾秒花在哪。
+ *
+ * ⚠ 玩家 2026-08-19 回報「2~5 秒還是很久」。那段時間幾乎全部是這兩支在等
+ * 房間清單，而其中**一整秒是白等的** —— host 原本先睡再看，即使推播早就到了
+ * 也要睡滿一輪。這一組釘的就是「先看再睡」。
+ */
+describe("⚠ 開房／進房不白等", () => {
+  it("房已經在清單上時，host 一次都不睡", async () => {
+    const sleep = vi.fn(async () => {});
+    const d = driver({
+      snapshots: [
+        { seq: 10, rooms: [] }, // 開房前
+        { seq: 11, rooms: [room({ roomId: "新的一間" })] }, // 開房後，推播已經到了
+      ],
+    });
+    const r = await hostOpenRoom(d, { room: ROOM, playerName: "燈皇", sleep });
+    expect(r).toEqual({ ok: true, roomId: "新的一間" });
+    // 先看再睡：第一眼就找到 → 完全沒有睡過
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("推播還沒到就照節奏等，等到了才回", async () => {
+    const sleep = vi.fn(async () => {});
+    const d = driver({
+      snapshots: [
+        { seq: 10, rooms: [] }, // 開房前
+        { seq: 10, rooms: [] }, // 第一眼：還沒推下來
+        { seq: 11, rooms: [room({ roomId: "新的一間" })] },
+      ],
+    });
+    const r = await hostOpenRoom(d, { room: ROOM, playerName: "燈皇", sleep });
+    expect(r).toEqual({ ok: true, roomId: "新的一間" });
+    expect(sleep).toHaveBeenCalledTimes(1);
+  });
+
+  it("guest 同樣先看再睡", async () => {
+    const sleep = vi.fn(async () => {});
+    const d = driver({ snapshots: [{ seq: 1, rooms: [room({ roomId: "對方的" })] }] });
+    const r = await guestJoinRoom(d, { roomId: "對方的", pass: "AB12CD34", sleep });
+    expect(r.ok).toBe(true);
+    expect(sleep).not.toHaveBeenCalled();
   });
 });

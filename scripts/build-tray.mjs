@@ -13,7 +13,7 @@
  * `electron` 本身要 external —— 它是執行期由 Electron 提供的，打進來會壞掉。
  */
 
-import { cpSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -88,4 +88,23 @@ if (hits.length > 0) {
 
 // 畫面是靜態檔案，直接複製過去 —— 沒有需要編譯的東西。
 cpSync(join(app, "renderer"), join(out, "renderer"), { recursive: true });
+
+/**
+ * 預設 COST 表。**烤進安裝包，離線也一定有一份。**
+ *
+ * ⚠ 這是那份規則的**唯一來源**（`rules/` 底下那個檔）—— 中間人發的那一份也是
+ * 從同一個檔簽出來的（`scripts/sign-rule.mjs`）。複製而不是各留一份，是因為
+ * 「安裝包裡的規則」與「發下去的規則」內容不同時，症狀是**兩個玩家的預設規則
+ * 不一樣卻都寫著同一個版本號** —— 而那正是配對驗算會擋、但畫面上完全看不出來
+ * 的那種問題。
+ */
+const DEFAULT_RULE_SOURCE = join(root, "rules", "tomorin-squeeze-band-1C.ulrcost.json");
+if (!existsSync(DEFAULT_RULE_SOURCE)) {
+  console.error(`✗ 找不到預設 COST 表：${DEFAULT_RULE_SOURCE}`);
+  console.error("  它是安裝包的一部分，缺了的話玩家裝上去會沒有規則。");
+  process.exit(1);
+}
+mkdirSync(join(out, "rules"), { recursive: true });
+cpSync(DEFAULT_RULE_SOURCE, join(out, "rules", "default.ulrcost.json"));
+
 console.log(`✓ 托盤已打包到 ${out}`);

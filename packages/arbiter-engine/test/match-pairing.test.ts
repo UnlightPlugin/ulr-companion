@@ -28,6 +28,8 @@ import {
   parsePrefBody,
   pickArcadiaStage,
   RANDOM_STAGE,
+  teamCostCenti,
+  tierForTotal,
   type PairingOptions,
   type QueueLink,
   type StagePick,
@@ -187,6 +189,64 @@ describe("COST 檔位", () => {
     expect(costBand(null)).toBeNull();
   });
 
+  /**
+   * ⚠⚠ 2026-08-19 的實機回歸：`checkOwnDeck` 與 `teamCostCenti` **只加了三個
+   * 槽位**，武器與事件卡完全沒算進去。
+   *
+   * 症狀一點都不像少算：玩家帶著遊戲畫面上寫 92C 的牌組按快速比賽，插件算出
+   * 84C，於是判成「不在任何一檔裡」，跳出遊戲自己那句「這個牌組不符合遊戲
+   * 規則」。差的 8C 就是他那三把武器。
+   *
+   * 遊戲自己的 `Deck.getCost()` 是三格 + 三把武器 + 18 張事件卡，玩家看的就是
+   * 那個數字 —— 我們算的只要跟他看的不一樣，檔位判斷就是一句謊話。
+   */
+  describe("⚠ 武器與事件卡也要算進總和", () => {
+    const geared = rule({
+      characters: { a: 20, b: 20, c: 20 },
+      equipment: { wp001: 3, wp002: 5 },
+      eventCards: { ev001: 2 },
+    });
+    const deck = deckFromKeys({
+      characters: ["a", "b", "c"],
+      equipment: ["wp001", "wp002"],
+      eventCards: ["ev001"],
+    });
+
+    it("checkOwnDeck 的總和含武器與事件卡", () => {
+      // 60（三格）+ 3 + 5（武器）+ 2（事件卡）= 70.00
+      expect(checkOwnDeck(geared, deck, null).total).toBe("70.00");
+    });
+
+    it("teamCostCenti 一樣 —— 兩支要是同一個數字", () => {
+      expect(teamCostCenti(geared, deck)).toBe(7000);
+    });
+
+    it("⚠ 90+ 那一檔就是這樣被擋掉的：不算武器會少到掉出檔位", () => {
+      const heavy = rule({
+        characters: { a: 28, b: 28, c: 28 },
+        equipment: { wp001: 4, wp002: 4 },
+      });
+      const withWeapons = deckFromKeys({
+        characters: ["a", "b", "c"],
+        equipment: ["wp001", "wp002"],
+      });
+      // 84（三格）+ 8（武器）= 92 → 進得了 90+
+      expect(teamCostCenti(heavy, withWeapons)).toBe(9200);
+      expect(tierForTotal(teamCostCenti(heavy, withWeapons), [54, 61, 77], 90)).toEqual({
+        kind: "open",
+        tier: 90,
+      });
+    });
+
+    it("同一把武器帶三把就是三份 COST —— 重複不能去掉", () => {
+      const three = deckFromKeys({
+        characters: ["a", "b", "c"],
+        equipment: ["wp001", "wp001", "wp001"],
+      });
+      expect(teamCostCenti(geared, three)).toBe(6900);
+    });
+  });
+
   it("⚠ 上限比一檔還窄時下限夾到 0，不能是負的", () => {
     expect(costBand(0.5)).toEqual({ floor: 0, cap: 50 });
   });
@@ -199,6 +259,63 @@ describe("COST 檔位", () => {
     const check = checkOwnDeck(rule(), slots("leon", "沒這隻"), null);
     expect(check.unknown).toEqual(["沒這隻"]);
     expect(check.total).toBe("121.00");
+  });
+});
+
+/**
+ * 檔位由牌組自己決定（WP-17）。
+ *
+ * ⚠ 這是**遊戲大廳那顆「快速比賽」**用的判斷：亞城按下去之後伺服器照你的牌組
+ * 把你放進某一檔，迪城那顆要一樣。托盤的配對頁仍然是玩家自己填檔位。
+ */
+describe("檔位由牌組決定", () => {
+  const TIERS = [54, 61, 77];
+
+  it("落在哪一檔就是哪一檔", () => {
+    // 53.01～54.00
+    expect(tierForTotal(5400, TIERS)).toEqual({ kind: "band", tier: 54 });
+    expect(tierForTotal(5301, TIERS)).toEqual({ kind: "band", tier: 54 });
+    expect(tierForTotal(6050, TIERS)).toEqual({ kind: "band", tier: 61 });
+  });
+
+  it("⚠⚠ 不在任何一檔裡就是不合法，不會幫他挑最接近的", () => {
+    // 48C：比最低檔的下限還低 —— 亞城那邊看到的就是「這個牌組不符合遊戲規則」。
+    expect(tierForTotal(4800, TIERS)).toBeNull();
+    // 61.50：兩檔之間的縫。
+    expect(tierForTotal(6150, TIERS)).toBeNull();
+    // 80C：最高檔以上、但還沒到開口檔。
+    expect(tierForTotal(8000, TIERS, 90)).toBeNull();
+  });
+
+  it("開口檔（COST90+）收下限以上的全部", () => {
+    expect(tierForTotal(9000, TIERS, 90)).toEqual({ kind: "open", tier: 90 });
+    expect(tierForTotal(12345, TIERS, 90)).toEqual({ kind: "open", tier: 90 });
+    // 沒有開口檔時同一副牌就是不合法。
+    expect(tierForTotal(9000, TIERS)).toBeNull();
+  });
+
+  it("開口檔只有下限，沒有上限", () => {
+    const r = rule({ characters: { a: 95 } });
+    expect(checkOwnDeck(r, slots("a"), null, 90)).toMatchObject({
+      total: "95.00",
+      over: false,
+      under: false,
+      band: "90.00 以上",
+    });
+    const low = rule({ characters: { a: 89.99 } });
+    expect(checkOwnDeck(low, slots("a"), null, 90)).toMatchObject({ under: true, over: false });
+  });
+
+  it("⚠ 有上限時 openFloor 一律不算數（兩者互斥）", () => {
+    expect(checkOwnDeck(rule(), hostDeck, 57, 90)).toMatchObject({
+      band: "56.01～57.00",
+      under: false,
+    });
+  });
+
+  it("開口檔的房名照抄畫面上的寫法", () => {
+    expect(formatCostTag(null, 90)).toBe("[COST:90+]");
+    expect(buildRoomName("夾擠式罰C", null, 90)).toBe("夾擠式罰C [COST:90+]");
   });
 });
 
@@ -351,6 +468,9 @@ function ctx(over: Partial<MatchContext> = {}): MatchContext {
     playerName: "燈皇",
     isMatching: false,
     inMatch: true,
+    ap: 30,
+    apMax: 30,
+    duelFree: 0,
     ...over,
   };
 }

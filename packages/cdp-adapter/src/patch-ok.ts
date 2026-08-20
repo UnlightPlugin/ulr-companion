@@ -252,7 +252,13 @@ export const OK_PATCH_GLOBAL = "__ulrArbiter";
 export interface OkPatchTick {
   /** 畫面上的剩餘秒數。讀不到（不在有倒數的階段）就是 null。 */
   remaining: number | null;
-  /** 攔截有沒有掛在 socket 上。 */
+  /**
+   * 攔截掛在 socket 上，**而且這一場還在進行中**。
+   *
+   * ⚠ 後半段不是多餘的：戰鬥結束後 Phaser 的場景物件與那顆（已關閉的）
+   * socket 都還留著，只問「掛上了沒」的話托盤會在結算畫面上繼續寫
+   * 「對戰中」。托盤直接拿這個欄位當「在不在對戰」用。
+   */
   armed: boolean;
   /** 目前這場的座位。**每場重新分配，不能快取。** */
   seat: string | null;
@@ -472,13 +478,73 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
   }
 
   /**
+   * ⚠⚠ **這一場對戰還在進行中嗎。戰鬥結束不等於場景消失。**
+   *
+   * 玩家 2026-08-20 回報：戰鬥打完了，握手卻還留著，而且會影響到下一場
+   * （下一場的對手沒插件）。成因是 Phaser 的場景物件**建一次就一直留著** ——
+   * 結算畫面出現之後，MainA 上的 room、config.rule、socket、ok 全部原封不動
+   * 還在。只讀那些欄位的話，插件會在結算、回大廳、下一輪配對的整段時間裡
+   * 一直宣稱「還在對戰、房號是上一場那個」，於是側通道停在上一場的房裡
+   * 繼續握手（2026-08-20 對兩個跑著的客戶端實測：MainA 已經 shutdown，
+   * tick() 仍然回 pvp=true、room=上一場）。
+   *
+   * 權威來源是客戶端自己的 MainA.on_result（同日從跑著的客戶端讀出來的）：
+   *
+   *     this.socket.off()
+   *     this.socket.emit("leaveRoom", this.room)
+   *     this.socket.disconnect()          ← 最早、也最明確的結束訊號
+   *     … 等結束語音播完，可能好幾秒 …
+   *     this.scene.stop(); this.scene.start("Result")
+   *
+   * 所以兩個訊號都收：**連線關了**（早幾秒）或**場景收掉了**（保險，
+   * 改版把 disconnect 拿掉時還有這一道）。
+   *
+   * ⚠ socket 是遊戲自己的 WSClient，**沒有 connected 這個欄位** ——
+   * 它把底下那顆 WebSocket 的 readyState 透出來（實測結束後兩個客戶端都是 3）。
+   * 用的是標準的 0 連線中 / 1 開著 / 2 關閉中 / 3 已關閉，所以只有 >= 2 才算
+   * 結束：還沒建好時是 undefined，那是「還不知道」不是「結束了」，
+   * 當成結束會讓每一場的開頭判錯。
+   *
+   * ⚠ 場景那道看的是 **status 而不是 active**。Phaser 的
+   * status：5 RUNNING / 6 PAUSED / 7 SLEEPING / 8 SHUTDOWN / 9 DESTROYED，
+   * 而 active 只有 RUNNING 時是 true —— 也就是**暫停也會被當成結束**。
+   * 目前沒有任何場景會 pause／sleep MainA（2026-08-20 掃過客戶端全部場景的
+   * 原始碼），但雙開時永遠有一邊沒有焦點，把某條暫停路徑誤判成「戰鬥結束」
+   * 的代價是那一邊整場不生效。只認 >= 8（收掉了）就沒有這個風險。
+   *
+   * ⚠ 反過來，還沒開始的那一頭**不需要**這裡管：status 是 0 的時候
+   * MainA 上根本還沒有 config 與 room，battleRule() 與 room() 自然回 null。
+   *
+   * （注入腳本是 TS 的樣板字串，這段註解裡不能用反引號。）
+   */
+  function battleLive() {
+    try {
+      var sc = mainScene();
+      if (!sc) return false;
+      var st = sc.sys && sc.sys.settings;
+      if (!st) return false;
+      if (typeof st.status === "number" && st.status >= 8) return false;
+      var rs = sc.socket && sc.socket.readyState;
+      if (typeof rs === "number" && rs >= 2) return false;
+      return true;
+    } catch (e) {
+      // 判斷不出來就當成不在對戰。跟這個檔案其他地方一樣：不確定時停手。
+      return false;
+    }
+  }
+
+  /**
    * 這一場的 rule（quest / raid / event / duel / ranked）。讀不到就 null。
    *
    * 值在 MainA.config.rule，2026-08-09 對著跑著的客戶端實測：
    * 打渦讀到 "raid"、打任務讀到 "quest"。
+   *
+   * ⚠ **戰鬥結束後要回 null，不是回上一場的 rule。** config 會留在場景上，
+   * 而這個函式是 inPvpMatch() 的唯一輸入 —— 見 battleLive()。
    */
   function battleRule() {
     try {
+      if (!battleLive()) return null;
       var sc = mainScene();
       var r = sc && sc.config && sc.config.rule;
       // 只收像模式名的短小寫字串 —— 別的東西一律當成「不知道」。
@@ -1020,7 +1086,10 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
       state.lastBeat = Date.now();
       return {
         remaining: state.remaining(),
-        armed: state.armed,
+        // ⚠ 要**連這一場還活著**才算 armed —— state.armed 只講「掛在 socket 上」，
+        // 而那顆 socket 在結算畫面上還在（只是已經關了）。差別是托盤會不會在
+        // 打完之後繼續寫「對戰中」。見 battleLive()。
+        armed: state.armed && battleLive(),
         seat: state.seat(),
         inPhase: inInterceptPhase(),
         pvp: inPvpMatch(),
@@ -1248,8 +1317,16 @@ export function buildOkPatchScript(options: OkPatchOptions): string {
       var sc = mainScene();
       return (sc && typeof sc.PLAYER === "string") ? sc.PLAYER : null;
     },
-    /** 這一場的 room id。⚠ 高熵字串，出了這個函式就只能雜湊過再用（§12）。 */
+    /**
+     * 這一場的 room id。⚠ 高熵字串，出了這個函式就只能雜湊過再用（§12）。
+     *
+     * ⚠ **戰鬥結束就回 null。** sc.room 會一直留在場景上（Phaser 不丟場景
+     * 物件），照著它報下去的話側通道會停在上一場的房裡繼續握手 ——
+     * 見 battleLive()。Node 那邊在 pvp=false 時本來就會清房，這裡是同一件事
+     * 的第二道：兩個欄位講的話要一致，不然「為什麼沒生效」會查不出來。
+     */
     room: function () {
+      if (!battleLive()) return null;
       var sc = mainScene();
       return (sc && typeof sc.room === "string" && sc.room.length > 0) ? sc.room : null;
     },

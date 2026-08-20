@@ -26,7 +26,8 @@
     "verify": "npm run format:check && npm run lint && npm run typecheck && npm run typecheck:worker && npm run test",
     "dist": "tsx scripts/pack-tray.mjs",
     "release:keygen": "node scripts/keygen-release.mjs",
-    "release:sign": "tsx scripts/sign-release.mjs"
+    "release:sign": "tsx scripts/sign-release.mjs",
+    "rules:sign": "tsx scripts/sign-rule.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",

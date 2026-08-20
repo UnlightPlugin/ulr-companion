@@ -139,6 +139,25 @@ export type Sleep = (ms: number) => Promise<void>;
 
 const realSleep: Sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * 兩邊等房間清單的節奏。
+ *
+ * ⚠⚠ **這個數字直接就是玩家感覺到的「按下去多久才開打」。** 從按鈕到進房的
+ * 時間幾乎全部花在這裡：host 等自己那間房出現、guest 等同一間房出現在他的
+ * 清單裡，兩段各等一次。原本是 1000ms，於是最好的情況也要兩秒起跳。
+ *
+ * 調得動的理由是 `roomSnapshot()` **是一次本機 CDP 讀取**（讀客戶端自己收下來
+ * 的那份清單），不是一個伺服器請求 —— 問得密一點不會多產生任何流量，只是多幾次
+ * 幾毫秒的往返。真正決定快慢的是伺服器什麼時候把清單推下來，我們只是別在它
+ * 推下來之後還睡著。
+ *
+ * ⚠ `attempts × intervalMs` 是**總等待上限**，兩個一起改才不會把它縮短：
+ * 300 × 40 = 12 秒，跟原本的 1000 × 20 = 20 秒同一個量級，而閒置時房間清單
+ * 45 秒才推一次的情況本來就是靠開房自己觸發那一次推播（見上面那段註解）。
+ */
+const DEFAULT_INTERVAL_MS = 300;
+const DEFAULT_ATTEMPTS = 40;
+
 export interface HostOptions {
   room: CreateRoomOptions;
   /** 房名。找自己那間房要靠它，所以必須跟 `room.name` 一致。 */
@@ -166,7 +185,11 @@ export type HostResult =
  * 否則清單上會留一間永遠不會有人進來的空房。
  */
 export async function hostOpenRoom(driver: MatchDriver, options: HostOptions): Promise<HostResult> {
-  const { attempts = 20, intervalMs = 1000, sleep = realSleep } = options;
+  const {
+    attempts = DEFAULT_ATTEMPTS,
+    intervalMs = DEFAULT_INTERVAL_MS,
+    sleep = realSleep,
+  } = options;
 
   const before = await driver.roomSnapshot();
   const created = await driver.createRoom(options.room);
@@ -184,7 +207,11 @@ export async function hostOpenRoom(driver: MatchDriver, options: HostOptions): P
   const beforeIds = new Set(before.rooms.map((r) => r.roomId));
 
   for (let i = 0; i < attempts; i++) {
-    await sleep(intervalMs);
+    // ⚠ **先看再睡。** 原本是先 `sleep(1000)`，於是開房到交出 room_id 之間
+    // **一定**多一秒，即使推播早就到了 —— 而那一秒兩邊都在乾等（對手要等我們
+    // 送 `q-room` 才動得了）。`roomSnapshot()` 是一次本機 CDP 讀取，不打伺服器，
+    // 先看一眼不花任何東西。
+    if (i > 0) await sleep(intervalMs);
     const snapshot = await driver.roomSnapshot();
     const fresh = snapshot.rooms.filter((r) => !beforeIds.has(r.roomId));
     const own = findOwnRoom(fresh, options.playerName, options.room.name);
@@ -222,7 +249,11 @@ export async function guestJoinRoom(
   driver: MatchDriver,
   options: GuestOptions,
 ): Promise<GuestResult> {
-  const { attempts = 20, intervalMs = 1000, sleep = realSleep } = options;
+  const {
+    attempts = DEFAULT_ATTEMPTS,
+    intervalMs = DEFAULT_INTERVAL_MS,
+    sleep = realSleep,
+  } = options;
 
   for (let i = 0; i < attempts; i++) {
     const snapshot = await driver.roomSnapshot();

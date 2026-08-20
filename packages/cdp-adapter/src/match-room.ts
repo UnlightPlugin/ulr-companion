@@ -105,10 +105,21 @@ export interface MatchContext {
   /** 目前選的牌組（1/2/3）。 */
   deckNow: number | null;
   /**
-   * 目前牌組的 COST。
+   * 目前牌組的 COST，**遊戲自己算的那個數字**（大廳牌組縮圖下面的 `cost:NN`）。
    *
-   * ⚠ 這是**伺服器用原版 COST 算的**，不是自訂規則的總和 —— 改寫 cc_asset
-   * 不會改到它。要顯示自訂規則的總和必須自己加。
+   * ⚠⚠ **兩次實測結論相反，不要憑印象用它。**
+   *
+   * | 日期       | 觀察                                                     |
+   * | ---------- | -------------------------------------------------------- |
+   * | 2026-08-15 | 改寫 cc_asset 後三張加起來 48，這個欄位仍是 49 → 沒跟著改 |
+   * | 2026-08-19 | Deck3 顯示 101 = 自訂規則的 101，而官方規則算出來是 105   |
+   *
+   * 後者是三副牌一起量的（54／92／101 三副全中自訂規則），所以「它跟著自訂
+   * 規則走」在**那個時間點**是確定的 —— 差別多半在牌組資料什麼時候被重算。
+   *
+   * **要判檔位、要顯示總和，一律自己用 `calculateTeamCost()` 算**（
+   * `teamCostCenti()`），不要讀這一格：那支吃的是玩家手上那份規則，答案什麼
+   * 時候都對。這一格留著只給「遊戲說它幾 C」這種診斷用途。
    */
   deckCost: number | null;
   /**
@@ -128,6 +139,71 @@ export interface MatchContext {
   isMatching: boolean;
   /** Match 場景是不是 active。不是的話什麼都不能做。 */
   inMatch: boolean;
+  /** 目前 AP。讀不到是 `null`（那時**不要**當成 0，見 {@link canAffordDuel}）。 */
+  ap: number | null;
+  /** AP 上限。只拿來顯示。 */
+  apMax: number | null;
+  /**
+   * 剩幾顆免費對戰星星（0～3）。
+   *
+   * 遊戲畫面右下角那三顆 ★：黃的是還有的，灰的是用掉的（`duel_star` 的顏色
+   * 就是照這個數字塗的）。**有星星時對戰不吃 AP**，打一場消一顆。
+   */
+  duelFree: number | null;
+}
+
+/**
+ * 開一間對戰房要多少 AP。**照客戶端自己的算式**（2026-08-19 從 bundle 讀的）：
+ *
+ * ```js
+ *   this.ap = this.crossplay ? (+this.multi ? 4 : 2) : (+this.multi ? 5 : 2)
+ * ```
+ *
+ * | 頻道                       | 1vs1 | 3vs3 |
+ * | -------------------------- | ---- | ---- |
+ * | 一般（亞城／迪城）         | 2    | 5    |
+ * | 跨平台（峰亥盧／布萊德）   | 2    | 4    |
+ *
+ * ⚠ **不要寫死 5。** 自動配對現在固定 3vs3 非跨平台，所以確實是 5 —— 但那兩個
+ * 條件都是變數，寫死的話官方調價或我們開放 1vs1 時會變成「插件說不夠、遊戲說
+ * 夠」，而那種矛盾玩家永遠查不出原因。
+ */
+export function duelApCost(options: { multi: boolean; crossplay: boolean }): number {
+  if (!options.multi) return 2;
+  return options.crossplay ? 4 : 5;
+}
+
+/** {@link canAffordDuel} 的答案。 */
+export type DuelAffordability =
+  /** 打得起。`byStar` = 靠星星，不吃 AP。 */
+  | { ok: true; byStar: boolean; cost: number }
+  /** 打不起 —— AP 不夠而且沒有星星。 */
+  | { ok: false; cost: number; ap: number };
+
+/**
+ * 這一場排不排得下去。**星星優先，AP 其次。**
+ *
+ * ```
+ *   有星星（duelFree > 0）      → 打得起，而且不吃 AP
+ *   沒星星但 AP 夠              → 打得起
+ *   沒星星而且 AP 不夠          → ✗ 「AP不足」
+ * ```
+ *
+ * ⚠⚠ **讀不到就當打得起。** `ap` 或 `duelFree` 是 `null` 代表我們沒問到
+ * （玩家還沒進大廳、`db_player` 還沒回來、遊戲改版換了欄位）——「不知道」不是
+ * 「不夠」。擋錯的代價是玩家完全排不了隊而且看不出原因，放行的代價只是退回
+ * 原本的行為（伺服器自己會回 `fail: 4`）。這一條的方向不能反。
+ */
+export function canAffordDuel(options: {
+  ap: number | null;
+  duelFree: number | null;
+  cost: number;
+}): DuelAffordability {
+  const { ap, duelFree, cost } = options;
+  if (duelFree !== null && duelFree > 0) return { ok: true, byStar: true, cost };
+  if (ap === null) return { ok: true, byStar: false, cost };
+  if (ap >= cost) return { ok: true, byStar: false, cost };
+  return { ok: false, cost, ap };
 }
 
 /**
@@ -609,7 +685,8 @@ export const MATCH_ROOM_INSTALL_EXPRESSION = `(function () {
       return JSON.stringify({
         hasId: false, channel: null, channels: null, crossplay: false,
         deckNow: null, deckCost: null, deckKeys: null,
-        playerName: null, isMatching: false, inMatch: false
+        playerName: null, isMatching: false, inMatch: false,
+        ap: null, apMax: null, duelFree: null
       });
     }
     if (sc.channel !== undefined && sc.channel !== null && sock(sc)) listen(sc);
@@ -627,7 +704,15 @@ export const MATCH_ROOM_INSTALL_EXPRESSION = `(function () {
       deckKeys: deckKeysOf(deck),
       playerName: sc.player ? sc.player.name : null,
       isMatching: !!(sc.channel_panel && sc.channel_panel.is_matching),
-      inMatch: true
+      inMatch: true,
+      // ⚠ 開房要 AP（3vs3 是 5，跨平台頻道 4），不夠就白排一場 —— 玩家會排到
+      // 配對成功才看到「AP不足」，而那時對手也白等了。三個欄位都是遊戲自己
+      // 從 db_player 收下來的，我們只是唸出來。
+      ap: sc.player && typeof sc.player.ap === "number" ? sc.player.ap : null,
+      apMax: sc.player && typeof sc.player.ap_max === "number" ? sc.player.ap_max : null,
+      // 免費對戰星星（0～3）。⚠ 有星星就不吃 AP，所以它不是「附加資訊」，
+      // 是判斷「排不排得了」的另一半。
+      duelFree: sc.player && typeof sc.player.duel_free === "number" ? sc.player.duel_free : null
     });
   };
 

@@ -267,8 +267,12 @@ function trimCost(limit: number): string {
  * ⚠ 標的是**這一檔的上限**，跟亞城的 `[COST:57]` 同一個意思：那不是「剛好 57」，
  * 是「57 這一檔」，實際收的區間見 {@link costBand}。
  */
-export function formatCostTag(costLimit: number | null): string {
-  return costLimit === null ? "[COST:自由]" : `[COST:${trimCost(costLimit)}]`;
+export function formatCostTag(costLimit: number | null, openFloor: number | null = null): string {
+  if (costLimit !== null) return `[COST:${trimCost(costLimit)}]`;
+  // 開口檔照抄遊戲畫面上的寫法（`COST90+`）—— 大廳裡的人一眼認得出那是哪一檔，
+  // 而那正是這個標籤存在的理由。
+  if (openFloor !== null) return `[COST:${trimCost(openFloor)}+]`;
+  return "[COST:自由]";
 }
 
 /**
@@ -295,8 +299,12 @@ export function formatCostTag(costLimit: number | null): string {
  * ⚠ 代價講清楚：同一族的不同版本可以改名字，所以大廳上可能出現兩個標籤不同、
  * 卻排在同一條佇列的房。那隻影響觀感，不影響配對。
  */
-export function buildRoomName(ruleName: string, costLimit: number | null): string {
-  const tag = formatCostTag(costLimit);
+export function buildRoomName(
+  ruleName: string,
+  costLimit: number | null,
+  openFloor: number | null = null,
+): string {
+  const tag = formatCostTag(costLimit, openFloor);
   // ⚠ 換行與連續空白要壓掉 —— 規則名是規則檔裡的自由文字，帶著換行送進房名
   // 等於把一個沒人看得懂的東西貼在公開清單上。
   let label = ruleName.replace(/\s+/gu, " ").trim();
@@ -414,11 +422,95 @@ export function costBand(costLimit: number | null): CostBand | null {
   return { floor: Math.max(0, cap - toCentiCost(COST_BAND_WIDTH) + 1), cap };
 }
 
-/** 這一檔在畫面上長什麼樣 —— `56.01～57.00`。沒有約定上限是 `null`。 */
-export function formatBand(costLimit: number | null): string | null {
+/**
+ * 這一檔在畫面上長什麼樣 —— `56.01～57.00`，開口檔是 `90.00 以上`。
+ *
+ * ⚠ `openFloor` **只在 `costLimit === null` 時才看**。兩個都給是矛盾的輸入
+ * （一檔不會既有上限又是開口的），這裡以 `costLimit` 為準。
+ */
+export function formatBand(
+  costLimit: number | null,
+  openFloor: number | null = null,
+): string | null {
   const band = costBand(costLimit);
-  if (band === null) return null;
-  return `${formatCentiCost(band.floor)}～${formatCentiCost(band.cap)}`;
+  if (band !== null) return `${formatCentiCost(band.floor)}～${formatCentiCost(band.cap)}`;
+  if (openFloor === null) return null;
+  return `${formatCentiCost(toCentiCost(Number(openFloor.toFixed(2))))} 以上`;
+}
+
+/**
+ * 開口檔（`COST90+`）配對的窗口 —— **±5.00 C**。
+ *
+ * 最高檔以上沒有上限可言，所以那一檔不能用「上限 − 0.99」那套：95C 的隊伍要
+ * 配得到 90～100C 的人。作法因此不一樣 ——
+ *
+ * ```
+ *   有上限的檔（54/61/77）   檔位進配對鍵 → 同一檔的人才在同一條佇列
+ *   開口檔（90+）            全部排同一條佇列 → 配到之後各自看差幾 C
+ * ```
+ *
+ * ⚠ **窗口是在客戶端判的，而且兩邊都會判。** 差太多時送 `q-reject`，兩個人
+ * 都留在佇列裡而中間人會記得「這一對試過了」（跟規則不相容走同一條路，見
+ * docs/match-making.md「驗算沒過會怎樣」）—— 少了那張清單，兩個差 8C 的人會
+ * 在 FIFO 裡被立刻重新湊成同一對，變成毫秒級的無窮迴圈。
+ *
+ * ⚠⚠ **這個窗口需要對手的總和，所以開口檔一定要交換牌組**，即使兩邊的規則
+ * 完全相同（`EXACT` 快路在這一檔不能走）。算出來的數字**只拿來當閘門**，
+ * 不進畫面、不進記錄檔 —— 那是 docs/match-making.md §7 那條線，理由是運動
+ * 精神：看得到對手多少 C 就能挑對手。
+ */
+export const OPEN_TIER_WINDOW = 5;
+
+/**
+ * 這副牌**自己落在哪一檔**（WP-17）。
+ *
+ * 亞歷山卓城的快速比賽不讓玩家挑檔位 —— 你按下去，伺服器照你的牌組把你放進
+ * 某一檔的佇列。迪特赫姆那顆按鈕要一樣：**檔位由牌組決定，不是由設定決定**。
+ *
+ * ```
+ *   檔位 [54, 61, 77] + 開口檔 90
+ *
+ *   53.01～54.00 → COST54        48.00 → ✗（不在任何一檔裡）
+ *   60.01～61.00 → COST61        61.50 → ✗
+ *   76.01～77.00 → COST77        80.00 → ✗
+ *   90.00 以上   → COST90+       95.00 → COST90+（配 90～100，見 OPEN_TIER_WINDOW）
+ * ```
+ *
+ * ⚠⚠ **不落在任何一檔就是不合法，不是「幫他挑最接近的」。** 每一檔都有下限
+ * （見 {@link COST_BAND_WIDTH}），而下限正是「壓 C」這件事存在的理由 ——
+ * 自動幫一副 48C 的牌挑 COST54 等於把下限拿掉。玩家看到的是遊戲自己那句
+ * 「這個牌組不符合遊戲規則」，跟他在亞城帶一副不合檔的牌時看到的一模一樣。
+ *
+ * ⚠ 檔位清單是從**玩家自己的客戶端**現讀的（`costTiersFor`），每週二會變。
+ * 開口檔那個數字也是（從遊戲自己的 `PLAYER_COUNT` 模板裡的 `COST90+` 讀出來）。
+ * 這支不快取、也不接受呼叫端寫死的清單。
+ *
+ * @param totalCenti 這副牌在約定規則下的總和，**整數百分之一**
+ * @param openTier 開口檔的下限（90）。`null` = 這個頻道沒有開口檔
+ */
+export function tierForTotal(
+  totalCenti: number,
+  tiers: readonly number[],
+  openTier: number | null = null,
+): CostTierPick | null {
+  for (const tier of tiers) {
+    const band = costBand(tier);
+    if (band === null) continue;
+    if (totalCenti >= band.floor && totalCenti <= band.cap) return { kind: "band", tier };
+  }
+  // ⚠ 開口檔**最後才看**。它跟有上限的檔位在數線上不重疊（90 以上 vs 77 以下），
+  // 但順序寫反的話，之後有人把開口檔調到 77 時會安靜地吃掉 COST77 那一檔。
+  if (openTier !== null && totalCenti >= toCentiCost(Number(openTier.toFixed(2)))) {
+    return { kind: "open", tier: openTier };
+  }
+  return null;
+}
+
+/** 命中的檔位。`band` = 有上限的那幾檔，`open` = `COST90+`。 */
+export interface CostTierPick {
+  kind: "band" | "open";
+  /** `band` 是那一檔的上限（57），`open` 是它的下限（90）。 */
+  tier: number;
 }
 
 export interface LimitCheck {
@@ -450,17 +542,55 @@ export function checkOwnDeck(
   rule: CostRule,
   deck: DeckDescriptor,
   costLimit: number | null,
+  /**
+   * 開口檔（`COST90+`）的下限。**只在 `costLimit === null` 時才看。**
+   *
+   * ⚠ 開口檔**沒有上限**（`over` 永遠 false）—— 上面那一檔配不配得到由 ±5 的
+   * 窗口決定，而那是配到人之後兩邊各自算的，不是這裡。
+   */
+  openFloor: number | null = null,
 ): LimitCheck {
-  const members = canonicalDeck(deck).characters.map((characterId) => ({ characterId }));
-  const result = calculateTeamCost(rule, { members });
+  const result = calculateTeamCost(rule, teamOf(deck));
   const band = costBand(costLimit);
+  const floor =
+    band !== null
+      ? band.floor
+      : openFloor === null
+        ? null
+        : toCentiCost(Number(openFloor.toFixed(2)));
   return {
     total: formatCentiCost(result.total),
     over: band !== null && result.total > band.cap,
-    under: band !== null && result.total < band.floor,
-    band: formatBand(costLimit),
+    under: floor !== null && result.total < floor,
+    band: formatBand(costLimit, openFloor),
     unknown: result.unknownIds,
   };
+}
+
+/**
+ * 一份描述子 → `calculateTeamCost()` 吃的形狀。
+ *
+ * ⚠⚠ **武器與事件卡一定要一起送。** 這裡原本只送三個槽位，而症狀完全不像
+ * 少算了東西：玩家 2026-08-19 帶著遊戲畫面上寫 92C 的牌組按快速比賽，插件
+ * 算出 84C，於是判成「不在任何一檔裡」跳出「這個牌組不符合遊戲規則」——
+ * 差的 8C 就是他那三把武器。
+ *
+ * 遊戲自己的 `Deck.getCost()` 把三格槽位、三把武器、18 張事件卡全部加起來，
+ * 而玩家看的是那個數字。**只要我們算的跟他看的不一樣，任何一句話都會變成
+ * 謊話** —— 檔位判斷、±5 窗口、配對頁上的總和，全部同一個來源。
+ */
+function teamOf(deck: DeckDescriptor): Parameters<typeof calculateTeamCost>[1] {
+  const canonical = canonicalDeck(deck);
+  return {
+    members: canonical.characters.map((characterId) => ({ characterId })),
+    equipment: canonical.equipment,
+    eventCards: canonical.eventCards,
+  };
+}
+
+/** 這副牌的總和，**整數百分之一**。⚠ 只給閘門用（±5 窗口），不進畫面。 */
+export function teamCostCenti(rule: CostRule, deck: DeckDescriptor): number {
+  return calculateTeamCost(rule, teamOf(deck)).total;
 }
 
 // ---------------------------------------------------------------------------
@@ -558,7 +688,7 @@ export interface QueueLink {
  * ⚠ **值一定要是 `true`（3vs3），不能改。** 它進 `matchCriteriaString`，改成
  * 別的值等於換掉整個社群的配對鍵 —— 舊版插件與新版永遠配不到，而症狀是安靜的。
  */
-const ROOM_MULTI = true;
+export const ROOM_MULTI = true;
 
 /**
  * 遊戲自己的「牌組Cost限制 ±N」，插件開房時**永遠不設**。
@@ -584,6 +714,13 @@ export interface PairingOptions {
    * `上限 − 0.99` 到 `上限`，見 {@link COST_BAND_WIDTH}。
    */
   costLimit: number | null;
+  /**
+   * 開口檔（`COST90+`）的下限。**只在 `costLimit === null` 時有意義。**
+   *
+   * 那一檔沒有上限，所以配對條件換成「都在這條佇列上，配到之後看兩副牌差
+   * 幾 C」—— 窗口是 ±{@link OPEN_TIER_WINDOW}。詳見那個常數。
+   */
+  costFloor?: number | null;
   /**
    * 開房用的欄位。
    *
@@ -681,6 +818,18 @@ export class MatchPairing {
   /** 上一次讀牌組時玩家在哪個頻道。`null` = 沒進頻道或讀不到。 */
   #currentChannel: number | null = null;
 
+  /**
+   * 開口檔（`COST90+`）的下限。`null` = 這一場約的是有上限的檔（或不設限）。
+   *
+   * ⚠ **`costLimit` 有值時一律回 `null`。** 兩者互斥，而讓「上限」贏是因為
+   * 那是玩家看得到的那一格 —— 兩個都填是呼叫端的錯，靜靜地照開口檔跑會讓
+   * 房名、檢查、配對鍵三個地方各說各話。
+   */
+  get #openFloor(): number | null {
+    if (this.#options.costLimit !== null) return null;
+    return this.#options.costFloor ?? null;
+  }
+
   constructor(options: PairingOptions) {
     this.#options = options;
   }
@@ -721,7 +870,7 @@ export class MatchPairing {
     const deck = await this.#readOwnDeck();
     if (deck === null) return;
 
-    const check = checkOwnDeck(this.#options.rule, deck, this.#options.costLimit);
+    const check = checkOwnDeck(this.#options.rule, deck, this.#options.costLimit, this.#openFloor);
     this.#patch({
       myTotal: check.total,
       overLimit: check.over,
@@ -748,6 +897,9 @@ export class MatchPairing {
       // 格式一旦發布就不能改，而拿掉它會讓舊版插件與新版算出不同的鍵。
       multi: ROOM_MULTI,
       costLimit: this.#options.costLimit,
+      // ⚠ 開口檔要自己一條佇列（見 `MatchCriteria.costFloor`）。不是開口檔時
+      // 這一格是 null，算出來的鍵跟舊版一個位元都不差。
+      costFloor: this.#openFloor,
     });
     // ⚠ 算一次就留著。`contentHash` 要把整份規則（700 筆）正規化過一遍，
     // 而配對成立時要拿它跟對手的標籤比 —— 每配到一個人就重算一次是白費的，
@@ -1034,7 +1186,7 @@ export class MatchPairing {
       return;
     }
 
-    const check = checkOwnDeck(this.#options.rule, deck, this.#options.costLimit);
+    const check = checkOwnDeck(this.#options.rule, deck, this.#options.costLimit, this.#openFloor);
     this.#patch({
       myTotal: check.total,
       overLimit: check.over,
@@ -1048,8 +1200,12 @@ export class MatchPairing {
       return;
     }
 
-    if (info.peerTag === this.#myTag) {
+    if (info.peerTag === this.#myTag && this.#openFloor === null) {
       // 快路：同一份規則，連牌組都不用交換 —— 對手帶什麼我們永遠不會知道。
+      //
+      // ⚠⚠ **開口檔（COST90+）走不了這條。** 那一檔的條件是「兩副牌差 ±5 C」，
+      // 而那個判斷需要對手的總和 —— 不交換牌組就算不出來。規則相同時仍然標成
+      // `exact`（那是事實），只是多走一趟交換。
       this.#compatibility = "exact";
       this.#patch({
         compatibility: "exact",
@@ -1060,9 +1216,15 @@ export class MatchPairing {
       return;
     }
 
+    // 開口檔走到這裡時標籤可能是一樣的（快路被 ±5 窗口擋掉了）—— 先記下來，
+    // 驗算過了之後才判得出要說「版本相同」還是「版本不同但相容」。
+    if (info.peerTag === this.#myTag) this.#compatibility = "exact";
     this.#patch({
       phase: "checking",
-      message: "對手的規則是另一個版本，正在確認這一場算出來的東西一不一樣…",
+      message:
+        info.peerTag === this.#myTag
+          ? "正在確認兩邊的 COST 差距在範圍內…"
+          : "對手的規則是另一個版本，正在確認這一場算出來的東西一不一樣…",
     });
     this.#client?.sendDeck(encodeDeckBody(deck));
     this.#armTimeout("對手沒有在時限內回應，換下一位。");
@@ -1135,11 +1297,38 @@ export class MatchPairing {
       return;
     }
 
-    this.#compatibility = "compatible";
+    /**
+     * 開口檔（`COST90+`）的 ±5 窗口。
+     *
+     * ⚠ **要在驗算過了之後才判。** 順序反過來的話，我們會拿「我的規則算出來的
+     * 對手總和」去做決定，而那個數字在規則不相容時根本不成立 —— 兩邊會得到
+     * 不同的答案，於是一邊開了房、另一邊不進來。
+     *
+     * ⚠ 差距**只當閘門**：不 `#patch` 進畫面、不寫進記錄檔（§7 那條線）。
+     * 訊息也只說「差太多」，不說對手幾 C。
+     */
+    if (this.#openFloor !== null) {
+      const mineCenti = teamCostCenti(this.#options.rule, mine);
+      const peerCenti = teamCostCenti(this.#options.rule, peer);
+      const window = toCentiCost(OPEN_TIER_WINDOW);
+      if (Math.abs(mineCenti - peerCenti) > window) {
+        await this.#nextOpponent(
+          `對手的 COST 跟你差超過 ${OPEN_TIER_WINDOW}C（${formatCostTag(null, this.#openFloor)} 的配對範圍），換下一位。`,
+        );
+        return;
+      }
+    }
+
+    // ⚠ 標籤一樣就是 `exact`，即使我們剛剛交換過牌組（開口檔一定會交換）。
+    // 寫成 `compatible` 會讓畫面說「版本不同」，而那是假的。
+    const exact = this.#compatibility === "exact";
+    this.#compatibility = exact ? "exact" : "compatible";
     this.#clearTimer();
     this.#patch({
-      compatibility: "compatible",
-      message: "版本不同，但這一場算出來的東西完全一樣 —— 可以打。",
+      compatibility: this.#compatibility,
+      message: exact
+        ? "規則版本相同、COST 差距也在範圍內 —— 可以打。"
+        : "版本不同，但這一場算出來的東西完全一樣 —— 可以打。",
     });
     await this.#commit();
   }
@@ -1182,7 +1371,7 @@ export class MatchPairing {
         // ⚠ 房名是**系統組的**，玩家取不到（見 `buildRoomName`）。它同時是
         // `hostOpenRoom` 在清單裡認出「哪一間是我剛開的」的依據之一，所以這裡
         // 跟那邊一定要是同一個字串 —— 傳同一個表達式就不會漂。
-        name: buildRoomName(this.#options.rule.name, this.#options.costLimit),
+        name: buildRoomName(this.#options.rule.name, this.#options.costLimit, this.#openFloor),
         stage,
         multi: ROOM_MULTI,
         friend: this.#options.room.friend,

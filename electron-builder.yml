@@ -38,9 +38,22 @@ electronLanguages:
 compression: maximum
 
 win:
-  # ⚠ **不要用 portable。** portable exe 沒有安裝器，自我替換做不到，
-  # 等於放棄自動更新（docs/release.md §2）。
-  target: nsis
+  # ⚠ **不要用 portable。** portable 是「單一 exe，執行時解到暫存目錄再跑」——
+  # 那種形態沒有一個穩定的安裝目錄可以換檔，自我更新真的做不到。
+  #
+  # `zip` 不一樣：它就是把 win-unpacked 整包壓起來，玩家解到哪就是哪，
+  # 而**執行中的 exe 改名是允許的**（只有覆寫不行）—— 所以換檔做得到，
+  # 作法照 MAA（`apps/tray/src/zip-update.ts` 的檔頭）。
+  #
+  # 為什麼兩種都出：
+  #   zip  —— **主力**。瀏覽器幾乎不擋 zip，而 .exe 的下載會被 Chrome/Edge
+  #            標成「不常下載，可能有危險」甚至直接封鎖（2026-08 真的流失過
+  #            一位玩家）。而且 zip 可以「右鍵 → 內容 → 解除封鎖」之後再解壓，
+  #            解出來的檔案沒有 MOTW，執行時連 SmartScreen 都不會跳。
+  #   nsis —— 留給已經用安裝器裝過的人（1.0.0 那批），以及想要開始選單捷徑的人。
+  target:
+    - zip
+    - nsis
   icon: icon.ico
 
 nsis:

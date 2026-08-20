@@ -19,8 +19,15 @@ import { app } from "electron";
 import type { Profile, ProfileStore } from "./profiles-core.js";
 import { addTo, emptyStore, normalizeStore, removeFrom, updateIn } from "./profiles-core.js";
 
-export type { ClientKind, MatchPrefs, Profile, ProfileStore } from "./profiles-core.js";
+export type {
+  ClientKind,
+  CostRuleMode,
+  MatchPrefs,
+  Profile,
+  ProfileStore,
+} from "./profiles-core.js";
 export {
+  DEFAULT_COST_RULE_MODE,
   DEFAULT_EDIT_STEP,
   DEFAULT_MATCH_PREFS,
   defaultPortFor,

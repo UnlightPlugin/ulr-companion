@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { LOBBY_ROOM_KEY, roomKey } from "@ulr/arbiter-link/protocol";
-import { MAX_MESSAGE_BYTES, parseRoomPath, shortRoom, TokenBucket } from "../src/guard.js";
+import {
+  MAX_COUNT_KEYS,
+  MAX_MESSAGE_BYTES,
+  parseCountKeys,
+  parseCountTags,
+  parseRoomPath,
+  shortRoom,
+  TokenBucket,
+} from "../src/guard.js";
 
 describe("房號路徑", () => {
   it("收 roomKey() 真的產出來的那種字串", () => {
@@ -74,5 +82,72 @@ describe("其餘關卡", () => {
 
   it("log 裡的房號要截短", () => {
     expect(shortRoom("0123456789abcdef")).toBe("01234567");
+  });
+});
+
+/**
+ * 等待人數的路由（WP-17）。
+ *
+ * ⚠ 這條是**沒有身分、誰都打得到**的，而每一把鍵都是一次 DO 往返 ——
+ * 上限那一關是防「一個請求叫醒任意多個 Durable Object」的。
+ */
+describe("等待人數的路由", () => {
+  const key = (n: string) => n.repeat(16).slice(0, 16);
+
+  it("收合法的鍵", () => {
+    const url = new URL(`https://x/qn?k=${key("a")}&k=${key("b")}`);
+    expect(parseCountKeys(url)).toEqual([key("a"), key("b")]);
+  });
+
+  it("路徑不對就不是這條路由", () => {
+    expect(parseCountKeys(new URL(`https://x/other?k=${key("a")}`))).toBeNull();
+  });
+
+  it("一把鍵都沒有就不收", () => {
+    expect(parseCountKeys(new URL("https://x/qn"))).toBeNull();
+  });
+
+  it("⚠ 超過上限就整個拒絕，不是截斷", () => {
+    const many = Array.from({ length: MAX_COUNT_KEYS + 1 }, (_, i) => `k=${key(String(i % 10))}`);
+    expect(parseCountKeys(new URL(`https://x/qn?${many.join("&")}`))).toBeNull();
+  });
+
+  it("鍵的格式跟房號同一套（16 個十六進位字元）", () => {
+    expect(parseCountKeys(new URL("https://x/qn?k=short"))).toBeNull();
+    expect(parseCountKeys(new URL(`https://x/qn?k=${"Z".repeat(16)}`))).toBeNull();
+    // 大寫十六進位也不收 —— `matchKey()` 產的一律是小寫。
+    expect(parseCountKeys(new URL(`https://x/qn?k=${"A".repeat(16)}`))).toBeNull();
+  });
+});
+
+/**
+ * 只數同一份規則的人（2026-08-20）。
+ *
+ * ⚠ 標籤是 `ruleTag(配對鍵, contentHash)` —— **拌過配對鍵**，所以同一份規則
+ * 在四個檔位上是四個不同的字串。位置錯開的話每一檔都會拿到不屬於它的標籤，
+ * 結果全部數到 0，而且沒有任何錯誤訊息。
+ */
+describe("parseCountTags", () => {
+  const url = (q: string): URL => new URL(`https://x/qn?${q}`);
+  const tag = (c: string): string => c.repeat(16);
+
+  it("沒帶 → undefined（不挑規則，全部都數）", () => {
+    expect(parseCountTags(url(`k=${tag("a")}`), 1)).toBeUndefined();
+  });
+
+  it("帶得剛好 → 照順序回", () => {
+    expect(
+      parseCountTags(url(`k=${tag("a")}&k=${tag("b")}&t=${tag("c")}&t=${tag("d")}`), 2),
+    ).toEqual([tag("c"), tag("d")]);
+  });
+
+  it("⚠ 數量對不上 → null（呼叫端要回 400，不能當成沒帶）", () => {
+    expect(parseCountTags(url(`k=${tag("a")}&k=${tag("b")}&t=${tag("c")}`), 2)).toBeNull();
+    expect(parseCountTags(url(`k=${tag("a")}&t=${tag("c")}&t=${tag("d")}`), 1)).toBeNull();
+  });
+
+  it("格式不對 → null", () => {
+    expect(parseCountTags(url("k=" + tag("a") + "&t=short"), 1)).toBeNull();
+    expect(parseCountTags(url(`k=${tag("a")}&t=${"Z".repeat(16)}`), 1)).toBeNull();
   });
 });

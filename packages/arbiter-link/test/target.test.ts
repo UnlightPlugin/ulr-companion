@@ -5,6 +5,7 @@ import {
   describeTarget,
   endpointOf,
   parseLinkTarget,
+  queueCountUrl,
   roomUrl,
 } from "../src/target.js";
 import { CLOSE_TOO_FAST, CLOSE_WRONG_ROOM } from "../src/protocol.js";
@@ -119,5 +120,35 @@ describe("斷線之後等多久", () => {
   it("一般斷線用預設間隔", () => {
     expect(reconnectDelayFor(1006, DEFAULT_RECONNECT_MS)).toBe(DEFAULT_RECONNECT_MS);
     expect(reconnectDelayFor(1000, 500)).toBe(500);
+  });
+});
+
+describe("queueCountUrl", () => {
+  const A = "0123456789abcdef";
+  const B = "fedcba9876543210";
+
+  it("⚠ 是 http(s) 不是 ws —— endpoint 存的是連線用的位址", () => {
+    expect(queueCountUrl("wss://x.workers.dev", { keys: [A] })).toBe(
+      "https://x.workers.dev/qn?k=" + A,
+    );
+    expect(queueCountUrl("ws://127.0.0.1:9350", { keys: [A] })).toBe(
+      "http://127.0.0.1:9350/qn?k=" + A,
+    );
+  });
+
+  it("一次問完所有檔位（一個請求，不是四個）", () => {
+    expect(queueCountUrl("wss://x", { keys: [A, B] })).toBe(`https://x/qn?k=${A}&k=${B}`);
+  });
+
+  it("⚠ 標籤是一把鍵一個，照順序接在後面", () => {
+    // ruleTag 拌過配對鍵，所以同一份規則在不同檔位上是不同的字串 ——
+    // 傳一個配四把的話，三檔會永遠數到 0 而且沒有任何錯誤。
+    expect(queueCountUrl("wss://x", { keys: [A, B], tags: ["aaaa", "bbbb"] })).toBe(
+      `https://x/qn?k=${A}&k=${B}&t=aaaa&t=bbbb`,
+    );
+  });
+
+  it("舊的陣列寫法還能用（不帶標籤 = 全部都數）", () => {
+    expect(queueCountUrl("wss://x", [A])).toBe("https://x/qn?k=" + A);
   });
 });

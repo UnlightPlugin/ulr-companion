@@ -94,6 +94,14 @@ export const COST_TABLE_IDS: readonly CostTableId[] = [
  *   - `filename` —— 用那一筆自己的 `filename` 欄位當鍵
  *   - `index`    —— 用陣列索引的十進位字串當鍵
  */
+/**
+ * 補丁裝在頁面上的旗標名。
+ *
+ * ⚠ 注入腳本與「補丁蓋到了沒」那支查詢**共用這一個常數**。分成兩份字面值的
+ * 話，改名時只會改到其中一邊，而症狀是查詢永遠回「沒蓋到」→ 每次接上都重載。
+ */
+export const COST_PATCH_FLAG = "__ulrCostPatch";
+
 export const COST_TABLE_TARGETS: Readonly<
   Record<CostTableId, { assetKey: string; field: string; keyMode: "filename" | "index" }>
 > = {
@@ -281,18 +289,26 @@ export function buildCostPatchScript(options: CostPatchOptions): string {
     pollIntervalMs: options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     maxWaitMs: options.maxWaitMs ?? DEFAULT_MAX_WAIT_MS,
     targets,
+    // 這一份規則的指紋。⚠ 它留在頁面上是為了讓「來得及嗎」那支問得出
+    // **是哪一份**規則蓋上去的，見 `costsStamp()`。
+    stamp: costsStamp(options.costs),
   };
 
   return `(function () {
   "use strict";
   var CFG = JSON.parse(${embedJson(config)});
-  var FLAG = "__ulrCostPatch";
+  var FLAG = "${COST_PATCH_FLAG}";
   var has = Object.prototype.hasOwnProperty;
 
   // addScriptToEvaluateOnNewDocument 每個 frame 都會跑，重連時也會再注入一次。
   // 沒有這道閘就會把 onProcess 疊好幾層，每次載入重複改寫同一份資料。
+  //
+  // ⚠ **換了規則也照樣早退。** 掛鉤只在資料「載入的那一刻」有機會動手，重跑
+  // 一次它救不回已經在快取裡的東西 —— 真正會換掉數字的是重載，而重載由
+  // 「來得及嗎」那支（看 stamp）去觸發。早退時舊的 stamp 因此要留著，
+  // 那正是它判斷得出「頁面上是別份規則」的依據。
   if (window[FLAG]) return;
-  window[FLAG] = { installed: false, applied: 0 };
+  window[FLAG] = { installed: false, applied: 0, stamp: CFG.stamp };
 
   function report(payload) {
     try {
@@ -416,4 +432,146 @@ export function buildCostPatchScript(options: CostPatchOptions): string {
     }
   }, CFG.pollIntervalMs);
 })();`;
+}
+
+// ---------------------------------------------------------------------------
+// 「這個頁面來得及嗎」
+// ---------------------------------------------------------------------------
+
+/**
+ * 這一份 COST 表的指紋。**內容一樣就一樣，換了一個數字就不一樣。**
+ *
+ * 存在理由：`buildCostPatchCoverageExpression` 原本只問「這張表被改過嗎」，
+ * 而那個問題答不出**換規則**的情況 —— 頁面上蓋著上一份規則的數字，旗標上
+ * 也確實記著「改過 700 張」，於是判成「本來就好了」，永遠不會重載。症狀跟
+ * 「插件沒生效」一模一樣：畫面上是舊價格，而記錄檔說規則載入成功。
+ *
+ * ⚠ **鍵要排序。** 同一份規則從不同來源讀進來（快取／安裝包／玩家的檔）
+ * 物件的鍵序不保證一樣，不排序的話會多重載一次 —— 那是會打斷玩家的事。
+ *
+ * 用 FNV-1a 是因為這裡要的是「一樣不一樣」，不是防篡改：頁面上那個值本來就
+ * 改得動，而能改它的人也能直接改補丁本身。真正的信任邊界在規則檔的簽章。
+ */
+export function costsStamp(costs: CostOverrides | CostOverrideTables): string {
+  const tables = normalizeCostTables(costs);
+  let hash = 0x811c9dc5;
+  const feed = (text: string): void => {
+    for (let i = 0; i < text.length; i++) {
+      hash ^= text.charCodeAt(i);
+      // FNV prime 16777619，用位移做乘法才不會掉進浮點數。
+      hash = (hash + ((hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24))) >>> 0;
+    }
+  };
+  for (const id of COST_TABLE_IDS) {
+    feed(`|${id}|`);
+    for (const key of Object.keys(tables[id]).sort()) feed(`${key}=${String(tables[id][key])};`);
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
+/**
+ * 這份規則會動到哪幾個快取鍵，以及那個鍵屬於哪張表。
+ *
+ * 跟 `buildCostPatchScript` 用的是同一套推導 —— 兩邊各算一次的話，某一天
+ * 改了鍵就會變成「掛鉤掛在 A，卻去查 B 載了沒」。
+ */
+export function costTargetAssetKeys(
+  costs: CostOverrides | CostOverrideTables,
+  options: { assetKey?: string; assetKeys?: Partial<Record<CostTableId, string>> } = {},
+): Record<string, CostTableId> {
+  const tables = normalizeCostTables(costs);
+  const out: Record<string, CostTableId> = {};
+  for (const id of COST_TABLE_IDS) {
+    if (Object.keys(tables[id]).length === 0) continue;
+    const target = COST_TABLE_TARGETS[id];
+    const assetKey =
+      options.assetKeys?.[id] ??
+      (id === "characters" ? options.assetKey : undefined) ??
+      target.assetKey;
+    out[assetKey] = id;
+  }
+  return out;
+}
+
+/** 補丁對「已經載進來的資料」蓋到了多少。 */
+export interface CostPatchCoverage {
+  /**
+   * 已經在快取裡、而且補丁**沒有**改到的目標鍵。
+   *
+   * ⚠ **不是空的就代表畫面上是原版價格，只有重載才救得回來。**
+   */
+  missed: string[];
+  /** 已經在快取裡、補丁也改到了的。 */
+  covered: string[];
+}
+
+/**
+ * 補丁到底有沒有蓋到這個頁面上已經載入的卡片資料。
+ *
+ * ⚠ **判準是「在快取裡卻沒被改到」，不是「在快取裡」。** 這兩者只差一個字，
+ * 但用後者會變成無窮重載：重載完成之後資料當然還是在快取裡（而且已經被改過
+ * 了），照樣會被判成「來不及」，於是再重載一次，永遠停不下來。
+ *
+ * 四種狀況：
+ *
+ * ```
+ *   還沒載（剛開遊戲、還在登入畫面）  missed=[]        掛鉤趕得上 → 不必重載
+ *   載了但沒改到（插件事後才接上）    missed=[cc…]     只有重載救得回來
+ *   載了、改到了，但**是別份規則**    missed=[cc…]     同上（見 stamp）
+ *   載了而且改的就是這一份            missed=[]        本來就好了
+ * ```
+ *
+ * ⚠⚠ **第三列是後來補的，而少了它的症狀跟「插件沒生效」分不出來。**
+ * 判準本來只有「這張表被改過嗎」，於是玩家換一份規則（或插件重開時載到
+ * 另一份）之後，頁面上留著上一份的數字、旗標上也確實記著「改過 700 張」，
+ * 一律判成「本來就好了」—— 而記錄檔還會說規則載入成功。
+ * 現在多比一個指紋（`costsStamp`），不是同一份就當成沒蓋到。
+ *
+ * ⚠ 舊版腳本沒有 `stamp` 這一格，會被判成「不是這一份」→ 重載一次。那是對的：
+ * 那個頁面上蓋的確實是我們現在不知道內容的某一份規則。
+ */
+export function buildCostPatchCoverageExpression(
+  targets: Record<string, CostTableId>,
+  stamp?: string,
+): string {
+  return `(function () {
+  try {
+    var stamp = JSON.parse(${embedJson(stamp ?? null)});
+    var want = JSON.parse(${embedJson(targets)});
+    var g = window.game;
+    var c = g && g.cache && g.cache.json;
+    // 遊戲物件都還沒建起來 = 一張都還沒載，掛鉤穩穩趕得上。
+    if (!c) return JSON.stringify({ missed: [], covered: [] });
+    var flag = window["${COST_PATCH_FLAG}"];
+    // 頁面上蓋的是**別份**規則 → 每一張已經載進來的表都要重載才救得回來。
+    // ⚠ stamp 沒傳進來（舊呼叫端）時不比對，行為完全跟以前一樣。
+    var sameRule = stamp === null || (!!flag && flag.stamp === stamp);
+    var missed = [];
+    var covered = [];
+    for (var key in want) {
+      if (!Object.prototype.hasOwnProperty.call(want, key)) continue;
+      if (!c.has(key)) continue;
+      // 補丁跑過那張表的話會把改到幾張記在旗標上（見 patchCostData）。
+      if (sameRule && flag && typeof flag[want[key]] === "number") covered.push(key);
+      else missed.push(key);
+    }
+    return JSON.stringify({ missed: missed, covered: covered });
+  } catch (e) {
+    return JSON.stringify({ missed: [], covered: [] });
+  }
+})()`;
+}
+
+/** 解析上面那支的回傳。認不得的形狀一律當成「沒有漏」—— 寧可不重載也不要亂重載。 */
+export function parseCostPatchCoverage(raw: unknown): CostPatchCoverage {
+  const empty: CostPatchCoverage = { missed: [], covered: [] };
+  if (typeof raw !== "string") return empty;
+  try {
+    const o = JSON.parse(raw) as { missed?: unknown; covered?: unknown };
+    const str = (v: unknown): string[] =>
+      Array.isArray(v) ? v.filter((k): k is string => typeof k === "string") : [];
+    return { missed: str(o.missed), covered: str(o.covered) };
+  } catch {
+    return empty;
+  }
 }

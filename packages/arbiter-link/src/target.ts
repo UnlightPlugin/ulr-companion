@@ -80,6 +80,15 @@ export const DEFAULT_LINK_TARGET = CLOUD.endpoint;
 export const DEFAULT_UPDATE_FEED = `${SERVICE_ORIGIN}/update`;
 
 /**
+ * 預設 COST 規則的清單在哪。
+ *
+ * ⚠ **跟發布清單分開兩條路由，是刻意的。** 兩者的更新節奏完全不同：規則會為了
+ * 一張卡的定價改一次，插件不會。綁在一起的話，改一個 cost 就得讓每個玩家下載
+ * 一份 82 MB 的安裝檔 —— 而那正是「有新規則卻不敢發」的開始。
+ */
+export const DEFAULT_RULE_FEED = `${SERVICE_ORIGIN}/rules`;
+
+/**
  * 開發者用的關鍵字：不要雲端，改用同一台電腦上的 broker。
  *
  * 留著的理由只有一個：**雙開測試**（`packages/arbiter-link/test/broker.test.ts`
@@ -167,6 +176,52 @@ export function roomUrl(endpoint: string, room: string): string {
  */
 export function queueUrl(endpoint: string, key: string): string {
   return `${endpoint}/q/${key}`;
+}
+
+/**
+ * 問「這幾條佇列各有幾個人在等」的網址（WP-17）。
+ *
+ * ⚠ **是 http(s) 不是 ws**：那是一次普通的 GET，不是連線。`endpoint` 存的是
+ * `wss://…`（連線用），所以這裡要換回去 —— 忘了換的症狀是 `fetch()` 直接
+ * 拋「unsupported protocol」，而它發生在背景輪詢裡，畫面上只會看到人數永遠
+ * 不出現。
+ *
+ * ⚠ **一次問完所有檔位。** 一檔一個請求等於把量乘以四，而玩家坐在大廳的時間
+ * 遠比對戰長 —— 免費額度是被輪詢吃掉的，不是被對戰吃掉的（docs/match-making.md
+ * 那張 43,200 vs 1,440 的表）。
+ */
+export interface QueueCountQuery {
+  /** 要問的那幾條佇列。 */
+  keys: readonly string[];
+  /**
+   * 只數用**同一份規則**的人。省略 = 全部都數（舊行為）。
+   *
+   * ⚠ 一條佇列上會站著規則內容不同的人（配對鍵裡沒有版本，那是刻意的），
+   * 而他們配不配得到要看驗算過不過。畫面上寫「1 位玩家等待中」而那個人永遠
+   * 配不到，比寫 0 還糟 —— 玩家會一直等，然後以為插件壞了。
+   *
+   * ⚠⚠ **每一條佇列的標籤不一樣，所以這是一份「跟 `keys` 對齊的清單」，
+   * 不是一個值。** `ruleTag(salt, contentHash)` 的 salt 就是配對鍵 —— 同一份
+   * 規則在四個檔位上是四個不同的字串（那是刻意的去連結設計，見 `ruleTag`）。
+   * 傳一個值配四把鍵的話，三檔會永遠數到 0。
+   */
+  tags?: readonly string[] | undefined;
+}
+
+export function queueCountUrl(
+  endpoint: string,
+  query: QueueCountQuery | readonly string[],
+): string {
+  const q: QueueCountQuery = Array.isArray(query)
+    ? { keys: query as readonly string[] }
+    : (query as QueueCountQuery);
+  const base = endpoint.replace(/^wss:/, "https:").replace(/^ws:/, "http:");
+  const parts = q.keys.map((k) => `k=${encodeURIComponent(k)}`);
+  // ⚠ **位置對位置**：第 i 個 t 配第 i 個 k。伺服器要嘛收到 0 個、要嘛收到
+  // 跟 k 一樣多個，數量對不上一律 400（見 `parseCountTags`）—— 錯位的話
+  // 每一檔都會拿一個不屬於它的標籤去比，結果全部是 0 而且沒有任何錯誤。
+  if (q.tags !== undefined) for (const t of q.tags) parts.push(`t=${encodeURIComponent(t)}`);
+  return `${base}/qn?${parts.join("&")}`;
 }
 
 /** 給 UI 顯示用的一行字。 */

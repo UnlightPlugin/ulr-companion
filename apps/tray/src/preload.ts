@@ -45,6 +45,13 @@ contextBridge.exposeInMainWorld("ulr", {
     pick: () => ipcRenderer.invoke("ulr:cost-pick"),
     /** 停用自訂 COST，回原版數字。 */
     clear: () => ipcRenderer.invoke("ulr:cost-clear"),
+    /**
+     * 換規則來源：`default`（插件附的、會自己更新）／`file`（自己選的檔）／
+     * `off`（原版數字）。
+     *
+     * ⚠ 收的是一個**列舉值**而不是路徑 —— 同上，渲染層不指定檔案。
+     */
+    mode: (mode: "default" | "file" | "off") => ipcRenderer.invoke("ulr:cost-mode", mode),
     /** 重載遊戲讓注入生效。⚠ 會打斷對戰。 */
     reload: () => ipcRenderer.invoke("ulr:cost-reload"),
   },

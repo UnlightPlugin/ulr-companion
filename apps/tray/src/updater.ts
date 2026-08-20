@@ -42,6 +42,7 @@ import { DEFAULT_UPDATE_FEED } from "@ulr/arbiter-link";
 import { UPDATE_PUBLIC_KEY } from "./update-key.js";
 import type { UpdateManifest } from "./update-verify.js";
 import { isNewerVersion, verifySignedFeed } from "./update-verify.js";
+import { applyZipUpdate } from "./zip-update.js";
 
 /** 多久檢查一次。一小時 —— 這不是需要即時的東西。 */
 const CHECK_INTERVAL_MS = 60 * 60 * 1000;
@@ -144,27 +145,61 @@ export function startAutoUpdate(options: UpdaterOptions): () => void {
   };
 
   /**
-   * 套用：**把安裝檔叫起來，然後自己退出。**
+   * 套用：**把安裝檔（或換檔腳本）叫起來，然後自己退出。**
+   *
+   * ## 兩種包，兩條路
+   *
+   * | 清單裡的網址 | 怎麼套                                                  |
+   * | ------------ | ------------------------------------------------------- |
+   * | `….exe`      | NSIS 安裝器，`/S` 靜默安裝（它裝完會把新版叫起來）      |
+   * | `….zip`      | 解壓 → 換檔腳本等我們退出後搬檔案 → 它把新版叫起來      |
+   *
+   * ⚠ **判準是副檔名，不是設定。** 這樣同一版的客戶端**兩種包都吃得下**，
+   * 發布端想什麼時候從 exe 換成 zip 都可以，不必先讓所有人升級到某一版
+   * ——「換發布格式」與「客戶端升級」在時間上完全解耦。
    *
    * ⚠ **一定要真的執行那個安裝檔。** 早期版本只做了 `app.relaunch()` 而沒有
    * spawn 它 —— 於是版本永遠不變，下一輪 tick 又下載一次、又重開一次，
    * 變成**每小時無限重啟**。而且因為版本沒變，log 上看起來像更新一直失敗，
    * 但錯誤訊息一行都沒有。
    *
-   * ⚠ **一定要 `app.quit()`。** NSIS 換不掉正在執行的檔案。
+   * ⚠ **一定要 `app.quit()`。** 兩條路都換不掉正在執行的檔案。
    *
-   * ⚠ **一定要清掉 `ELECTRON_RUN_AS_NODE`。** 安裝檔本身不是 Electron，
-   * 但它裝完會把**新版的 app** 叫起來，而那個是。帶著這個變數的話新版會
+   * ⚠ **一定要清掉 `ELECTRON_RUN_AS_NODE`。** 安裝檔／腳本本身不是 Electron，
+   * 但它們裝完會把**新版的 app** 叫起來，而那個是。帶著這個變數的話新版會
    * 被當成純 Node 跑，第一行就炸在 `app.setPath` —— 玩家看到的是「更新完
    * 就再也打不開了」。（同一個坑第五次出現，見 docs/launching.md 陷阱 1。）
    */
   const applyIfIdle = (ready: { version: string; path: string }): void => {
     if (options.isBusy()) return;
+
+    if (ready.path.toLowerCase().endsWith(".zip")) {
+      log(`⟳ 套用 ${ready.version}（換檔，換完會自己重新啟動）`);
+      markUpdating();
+      const started = applyZipUpdate({
+        zipPath: ready.path,
+        version: ready.version,
+        exePath: process.execPath,
+        workDir: join(app.getPath("userData"), "updates"),
+        onLog: log,
+      });
+      if (!started) {
+        // 換不上去（多半是安裝目錄沒有寫入權）。⚠ 紙條要撕掉，否則下一次
+        // 手動開啟會被當成「更新後自動起來的」而不跳視窗。
+        clearUpdating();
+        // ⚠ 已下載的那一份留著沒有用 —— 每小時 tick 會再走一次同一條失敗路徑。
+        // 清成 null 讓它至少能在使用者搬動安裝位置之後重新試一次完整流程。
+        staged = null;
+        return;
+      }
+      app.quit();
+      return;
+    }
+
     log(`⟳ 套用 ${ready.version}（靜默安裝，裝完會自己重新啟動）`);
 
     // 留一張紙條給新版：「你是更新後起來的，不要跳視窗」。
     markUpdating();
-
     const env = { ...process.env };
     delete env["ELECTRON_RUN_AS_NODE"];
     try {
@@ -324,7 +359,11 @@ async function download(manifest: UpdateManifest): Promise<string | null> {
 
   const dir = join(app.getPath("userData"), "updates");
   mkdirSync(dir, { recursive: true });
-  const path = join(dir, `ulr-companion-${manifest.version}.exe`);
+  // ⚠ **副檔名要跟著清單走**，因為 `applyIfIdle()` 是照副檔名決定怎麼套的。
+  // 寫死 `.exe` 的話 zip 版會被拿去當安裝檔執行 —— Windows 會跳一個
+  // 「無法執行」的框，而 log 上只有一句「啟動安裝檔失敗」。
+  const zip = new URL(manifest.url).pathname.toLowerCase().endsWith(".zip");
+  const path = join(dir, `ulr-companion-${manifest.version}.${zip ? "zip" : "exe"}`);
   writeFileSync(path, bytes);
   return path;
 }

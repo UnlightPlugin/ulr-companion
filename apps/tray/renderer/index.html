@@ -1214,7 +1214,9 @@
                 NPC_RULE_TEXT[st.rule]
                 ? `${NPC_RULE_TEXT[st.rule]}中（對手是 NPC）`
                 : `對戰中${st.seat ? `（座位 ${st.seat}）` : ""}`
-              : "已接上，還沒進對戰";
+              : // ⚠ 不要寫「還沒進對戰」。**打完之後也會走到這裡**（結算畫面、
+                // 回大廳），而那時「還沒」是錯的 —— 玩家剛打完一場。
+                "已接上，不在對戰中";
         $("fLink").textContent = st
           ? st.connected && !st.pvp && NPC_RULE_TEXT[st.rule]
             ? "不生效（NPC）"
@@ -1618,12 +1620,41 @@
         // ⚠ **這張卡要放在最上面。** 它是這一頁唯一「按了會發生事情」的地方，
         // 而下面那幾張（規則明細、狀態、壓 C 分段）加起來比視窗高得多 ——
         // 擺在最後的話每次想換規則都要先捲一大段。說明性的內容排在動作後面。
+        // 規則從哪裡來。⚠ 這三個是**互斥的模式**，不是三顆各自做一件事的按鈕 ——
+        // 畫面一定要看得出「現在是哪一個」，否則玩家按了「用預設」之後，
+        // 那顆按鈕跟沒按過長得一模一樣。
+        const mode = snap?.costRuleMode ?? "default";
+        const origin = snap?.costRuleOrigin ?? null;
+        // ⚠ 選中的那顆用 `aria-pressed`（CSS 已經有那條規則）而不是自訂 class ——
+        // 這一頁的其他分段選擇器都是這樣，換一種寫法會讓它看起來不像同一組東西。
+        const modeButton = (id, value, label) =>
+          `<button id="${id}" aria-pressed="${mode === value}"${mode === value ? " disabled" : ""}>${label}</button>`;
+
         const actions = `<div class="card">
              <div class="presets">
-               <button id="costPick">選規則檔…</button>
-               ${rule ? `<button id="costClear">停用</button>` : ""}
+               ${modeButton("costModeDefault", "default", "插件附的規則")}
+               ${modeButton("costModeFile", "file", "自己的規則檔")}
+               ${modeButton("costModeOff", "off", "不套用（原版數字）")}
+             </div>
+             <div class="presets">
+               ${mode === "file" ? `<button id="costPick">選規則檔…</button>` : ""}
                ${rule && st?.connected ? `<button id="costReload">重載遊戲讓它生效</button>` : ""}
              </div>
+             ${
+               mode === "default"
+                 ? `<div class="hint">插件附了一份預設規則，<b>裝上就會套用</b>，之後也會自己更新
+                      （每小時檢查一次，簽章驗過才收）。${
+                        origin === "feed"
+                          ? "目前用的是<b>更新下來</b>的那一份。"
+                          : origin === "bundled"
+                            ? "目前用的是<b>安裝包裡</b>那一份。"
+                            : ""
+                      }</div>`
+                 : mode === "file"
+                   ? `<div class="hint">用你自己選的那個檔。⚠ 這個模式下<b>插件不會替你更新規則</b> ——
+                        檔案是你的，我們一個位元組都不碰。</div>`
+                   : `<div class="hint">遊戲顯示原版 COST。⚠ 自動配對在這個模式下用不了（沒有規則就沒有「約定」可言）。</div>`
+             }
              <div class="hint">
                ⚠ 重載會<b>打斷正在進行的對戰</b>。
                ${st?.connected ? "" : "現在還沒接上遊戲，接上之後才按得到。"}
@@ -3641,7 +3672,9 @@
              }</span></div>
              <div class="row"><span class="dim">分頁</span><span>${esc(st?.title ?? "—")}</span></div>
              <div class="row"><span class="dim">攔截已掛上</span><span>${
-               st?.armed ? "是" : "否（還在大廳）"
+               // ⚠ 「不在對戰中」不等於「還在大廳」：戰鬥打完、還停在結算畫面
+               // 的那段時間也是否 —— 而那正是玩家最容易來看這一頁的時候。
+               st?.armed ? "是" : "否（不在對戰中）"
              }</span></div>
              <div class="row"><span class="dim">側通道</span><span>${
                st ? (LINK_TEXT[st.link] ?? st.link) : "—"
@@ -4136,6 +4169,16 @@
         if (btn.id === "costPick") return void window.ulr.cost.pick().then(apply);
         if (btn.id === "costClear") return void window.ulr.cost.clear().then(apply);
         if (btn.id === "costReload") return void window.ulr.cost.reload().then(apply);
+        if (btn.id === "costModeDefault") return void window.ulr.cost.mode("default").then(apply);
+        if (btn.id === "costModeOff") return void window.ulr.cost.mode("off").then(apply);
+        if (btn.id === "costModeFile") {
+          // ⚠ 切到「自己的規則檔」而還沒選過檔的話，直接把檔案選擇框開起來 ——
+          // 不然畫面會停在一個什麼都沒有的狀態，而玩家剛剛才按了一顆按鈕。
+          return void window.ulr.cost.mode("file").then((s) => {
+            apply(s);
+            if (s?.costRule === null) void window.ulr.cost.pick().then(apply);
+          });
+        }
         if (btn.dataset.link) {
           return void window.ulr.openExternal(btn.dataset.link);
         }

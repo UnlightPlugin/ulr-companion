@@ -13,7 +13,9 @@ import vm from "node:vm";
 import { describe, expect, it } from "vitest";
 import type { CostPatchApplied, CostPatchReport, CostTableId } from "@ulr/cdp-adapter";
 import {
+  buildCostPatchCoverageExpression,
   buildCostPatchScript,
+  costsStamp,
   InvalidCostOverrideError,
   isCostPatchReport,
   normalizeCostTables,
@@ -541,5 +543,99 @@ describe("buildCostPatchScript", () => {
       // `<` 只該出現在我們自己的註解與程式碼裡，不該來自資料
       expect(script).toContain("\\u003c");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 「這個頁面來得及嗎」
+// ---------------------------------------------------------------------------
+
+describe("costsStamp", () => {
+  it("同一份規則的指紋一樣，鍵的順序不算數", () => {
+    const a = { cc001_01: 8, cc001_02: 12, cc002_01: 9 };
+    const b = { cc002_01: 9, cc001_02: 12, cc001_01: 8 };
+    expect(costsStamp(a)).toBe(costsStamp(b));
+  });
+
+  it("改一個數字就換一個指紋", () => {
+    expect(costsStamp({ cc001_01: 8 })).not.toBe(costsStamp({ cc001_01: 9 }));
+  });
+
+  it("值放在不同的表上算不同的規則", () => {
+    expect(costsStamp({ characters: { a: 1 } })).not.toBe(costsStamp({ monsters: { a: 1 } }));
+  });
+
+  it("扁平寫法等同只有角色表 —— 舊規則檔的語意不能變", () => {
+    expect(costsStamp({ cc001_01: 8 })).toBe(costsStamp({ characters: { cc001_01: 8 } }));
+  });
+});
+
+describe("buildCostPatchCoverageExpression", () => {
+  /** 一個「資料已經載進快取」的假頁面。`flag` 就是頁面上那份 `__ulrCostPatch`。 */
+  function coverage(flag: unknown, stamp?: string): { missed: string[]; covered: string[] } {
+    const sandbox = {
+      window: {
+        __ulrCostPatch: flag,
+        game: { cache: { json: { has: (k: string) => k === "cc_asset" } } },
+      },
+    };
+    vm.createContext(sandbox);
+    const raw = vm.runInContext(
+      buildCostPatchCoverageExpression({ cc_asset: "characters" }, stamp),
+      sandbox,
+    ) as string;
+    return JSON.parse(raw) as { missed: string[]; covered: string[] };
+  }
+
+  it("補丁蓋過而且是同一份規則 → 不必重載", () => {
+    expect(coverage({ characters: 700, stamp: "abc" }, "abc").missed).toEqual([]);
+  });
+
+  it("補丁根本沒跑過 → 只有重載救得回來", () => {
+    expect(coverage(undefined, "abc").missed).toEqual(["cc_asset"]);
+  });
+
+  it("⚠ 蓋的是**別份**規則 → 也要重載（少了這一關就跟「沒生效」一模一樣）", () => {
+    expect(coverage({ characters: 700, stamp: "old" }, "abc").missed).toEqual(["cc_asset"]);
+  });
+
+  it("舊版腳本沒有 stamp → 當成別份規則，重載一次", () => {
+    expect(coverage({ characters: 700 }, "abc").missed).toEqual(["cc_asset"]);
+  });
+
+  it("沒傳 stamp 時行為跟以前完全一樣", () => {
+    expect(coverage({ characters: 700 }).missed).toEqual([]);
+  });
+});
+
+describe("補丁把指紋留在頁面上", () => {
+  it("裝上去之後 __ulrCostPatch.stamp 就是這份規則的指紋", async () => {
+    const costs = { cc078_04: 18 };
+    const page = createFakePage();
+    page.installPhaser();
+    await runScript(page, buildCostPatchScript({ costs, bindingName: BINDING, pollIntervalMs: 1 }));
+
+    const flag = page.window["__ulrCostPatch"] as { stamp?: string };
+    expect(flag.stamp).toBe(costsStamp(costs));
+  });
+
+  it("⚠ 換規則時早退，而且**留著舊指紋** —— 那是判斷得出「該重載」的唯一依據", async () => {
+    const page = createFakePage();
+    page.installPhaser();
+    const first = { cc078_04: 18 };
+    await runScript(
+      page,
+      buildCostPatchScript({ costs: first, bindingName: BINDING, pollIntervalMs: 1 }),
+    );
+
+    const second = { cc078_04: 22 };
+    await runScript(
+      page,
+      buildCostPatchScript({ costs: second, bindingName: BINDING, pollIntervalMs: 1 }),
+    );
+
+    const flag = page.window["__ulrCostPatch"] as { stamp?: string };
+    expect(flag.stamp).toBe(costsStamp(first));
+    expect(flag.stamp).not.toBe(costsStamp(second));
   });
 });

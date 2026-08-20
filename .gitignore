@@ -46,3 +46,8 @@ Thumbs.db
 # unpack 的產物。⚠ 它跟 .ulrcost.json 是同一份規則的兩種包裝，兩個檔一起躺在
 # rules/ 裡會被當成「有兩份 shinon 規則」。要看內容就當場 unpack，不要留檔。
 rules/*.rule.json
+
+# 給人下載用的壓縮檔。規則的**唯一來源**是同名的 .ulrcost.json —— 壓縮檔進了
+# 版控就會有第二份內容可以漂移，而且 diff 看不出來。要發給人就當場壓。
+rules/*.rar
+rules/*.zip

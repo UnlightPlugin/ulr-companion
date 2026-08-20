@@ -103,6 +103,21 @@ export const MAX_RELAY_BODY_LENGTH = 900;
 export type QueueClientMessage =
   /** 第一則。`key` 是 `matchKey()` 算出來的，佇列不解讀它。 */
   | { t: "q-hello"; v: number; key: string; tag: string }
+  /**
+   * **我只是看，不要把我排進去。**
+   *
+   * ⚠⚠ 這是「大廳那四行人數」的來源，而它存在的理由是**輪詢做不到即時**：
+   * 我自己按下快速比賽時我的插件第一個知道（畫面立刻 +1），但**別人**的插件
+   * 只能等下一輪 `/qn`，最久 15 秒。玩家 2026-08-20 回報的就是這個 ——
+   * 「一邊開始匹配後，另一邊要等 15 秒」。
+   *
+   * 看的人不進 `MatchQueue`（那是配對規則，看的人不參與配對），只掛在 DO 的
+   * socket 清單上；佇列一有人進出就把新數字推給他們。
+   *
+   * ⚠ `tag` 省略 = 全部都數。帶了就只數同一份規則的人 —— 跟 `/qn?t=` 同一個
+   * 判準，兩條路回同一個數字，否則畫面會在「推播來的」與「輪詢來的」之間跳。
+   */
+  | { t: "q-watch"; v: number; key: string; tag?: string }
   /** 我的牌組描述子。**佇列不解讀 `body`**，原封不動轉給對手。 */
   | { t: "q-deck"; body: string }
   /** 我用自己那份規則算出來的兩個指紋。同樣不被解讀。 */
@@ -130,6 +145,13 @@ export type QueueClientMessage =
 export type QueueServerMessage =
   /** `q-hello` 的回覆。`waiting` 是**含自己**在排隊的人數。 */
   | { t: "q-welcome"; v: number; waiting: number }
+  /**
+   * 這一檔現在幾個人在等。`q-watch` 之後**立刻送一則**，之後每次有人進出再送。
+   *
+   * ⚠ 只送給「看的人」（`q-watch`）。排隊中的人不需要 —— 他自己就是那個數字
+   * 的一部分，而且他真正在等的是 `q-matched`。
+   */
+  | { t: "q-count"; waiting: number }
   /**
    * 湊成了。兩邊各自拿到自己的角色、共用的 token，以及**對手的規則標籤**。
    *
@@ -201,6 +223,18 @@ export interface MatchCriteria {
    * （見 docs/match-making.md）。
    */
   costLimit: number | null;
+  /**
+   * **開口檔位**的下限（亞城畫面上那個 `COST90+`）。`null`／不填 = 這不是開口檔。
+   *
+   * 最高檔以上沒有上限可言，所以它不是一條「上限 = N」的佇列，而是
+   * 「N 以上的人都排這裡，配到之後再看兩副牌差幾 C」—— 窗口是 ±5
+   * （`@ulr/arbiter-engine` 的 `OPEN_TIER_WINDOW`），95C 配得到 90～100C。
+   *
+   * ⚠⚠ **這一格只在開口檔時才會出現在配對鍵裡。** 有上限的檔位算出來的鍵
+   * **一個位元都沒變** —— 那是刻意的：`matchCriteriaString` 的格式一發布就
+   * 不能改，改了會讓新舊版插件算出不同的鍵，而症狀是安靜地配不到人。
+   */
+  costFloor?: number | null;
 }
 
 /**
@@ -215,13 +249,20 @@ export interface MatchCriteria {
 export function matchCriteriaString(c: MatchCriteria): string {
   // 固定順序、固定分隔符。任何一個欄位的表示法變了，配對鍵就會變，
   // 所以這裡的格式一旦發布就不能改。
-  return [
+  const parts = [
     "ulr-match-v2",
     c.ruleSetId,
     String(c.channel),
     c.multi ? "multi" : "single",
     c.costLimit === null ? "nolimit" : c.costLimit.toFixed(2),
-  ].join("|");
+  ];
+  // ⚠ **第六格只在開口檔時才加。** 不是開口檔的鍵因此跟舊版完全一樣（同一個
+  // 位元組序列），舊版插件配得到新版插件 —— 而開口檔是舊版根本產生不出來的
+  // 鍵，所以那條佇列上不會有聽不懂 ±5 窗口的人。
+  if (c.costFloor !== undefined && c.costFloor !== null) {
+    parts.push(`over${c.costFloor.toFixed(2)}`);
+  }
+  return parts.join("|");
 }
 
 /**
@@ -333,7 +374,28 @@ export class MatchQueue {
 
   /** 還在排隊（沒配到人）的數量。 */
   get waiting(): number {
-    return [...this.#waiters.values()].filter((w) => w.partner === null).length;
+    return this.waitingWithTag(null);
+  }
+
+  /**
+   * 還在排隊、而且**用同一份規則**的人數。`tag === null` = 不挑，全部都數。
+   *
+   * ⚠⚠ 這是「幾個人在等」跟「幾個人我打得到」的差別。配對鍵裡沒有規則版本
+   * （見 `matchCriteriaString`），所以同一條佇列上會站著規則內容不同的人 ——
+   * 他們配不配得到要看驗算過不過。畫面上寫「1 位玩家等待中」而那個人永遠
+   * 配不到，比寫 0 還糟：玩家會一直等，然後以為插件壞了。
+   *
+   * ⚠ 標籤本身是 `ruleTag(配對鍵, contentHash)`，中間人看不出那是哪一份規則
+   * （只看得出「這兩個人的是不是同一份」）—— 這一支不會讓它多知道任何事。
+   */
+  waitingWithTag(tag: string | null): number {
+    let n = 0;
+    for (const w of this.#waiters.values()) {
+      if (w.partner !== null) continue;
+      if (tag !== null && w.tag !== tag) continue;
+      n++;
+    }
+    return n;
   }
 
   waiterOf(id: string): Waiter | null {
@@ -424,6 +486,15 @@ export class MatchQueue {
 
       case "q-cancel":
         return this.leave(id, "cancel");
+
+      // ⚠⚠ **看的人不歸這個類別管，所以這裡什麼都不做。** 這一格存在只是為了
+      // 讓 switch 蓋滿所有訊息型別 —— 真正處理 `q-watch` 的是 DO（它把那條線
+      // 記在 attachment 上，不放進 `#waiters`）。
+      //
+      // 真的在這裡把他排進去的話症狀是：一個人在大廳站著，被湊成一對、開了房，
+      // 而他完全不知道 —— 他只是想看人數。
+      case "q-watch":
+        return [];
     }
   }
 
@@ -587,6 +658,16 @@ export function decodeQueue(raw: string): QueueClientMessage | null {
       // 一百萬字的字串進去只是浪費兩邊的頻寬與記憶體。
       if (typeof m["tag"] !== "string" || m["tag"].length > 64) return null;
       return { t: "q-hello", v: m["v"], key: m["key"], tag: m["tag"] };
+    case "q-watch": {
+      if (typeof m["v"] !== "number" || typeof m["key"] !== "string") return null;
+      const tag = m["tag"];
+      // ⚠ 標籤選填（不帶 = 全部都數），但帶了就要像個標籤 —— 長度限制跟
+      // `q-hello` 同一個，理由也一樣。
+      if (tag !== undefined && (typeof tag !== "string" || tag.length > 64)) return null;
+      return tag === undefined
+        ? { t: "q-watch", v: m["v"], key: m["key"] }
+        : { t: "q-watch", v: m["v"], key: m["key"], tag };
+    }
     case "q-deck":
     case "q-eval":
     case "q-pref": {
@@ -628,6 +709,13 @@ export function decodeQueueServer(raw: string): QueueServerMessage | null {
     case "q-welcome":
       if (typeof m["v"] !== "number" || typeof m["waiting"] !== "number") return null;
       return { t: "q-welcome", v: m["v"], waiting: m["waiting"] };
+    case "q-count": {
+      const waiting = m["waiting"];
+      // ⚠ 這個數字會直接寫到遊戲畫面上，所以形狀要驗死：非整數或負數一律
+      // 當成壞掉的訊息丟掉，寧可保留上一個數字也不要畫一個 -1 出來。
+      if (typeof waiting !== "number" || !Number.isInteger(waiting) || waiting < 0) return null;
+      return { t: "q-count", waiting };
+    }
     case "q-matched": {
       const role = m["role"];
       if (role !== "host" && role !== "guest") return null;

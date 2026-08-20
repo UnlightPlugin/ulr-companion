@@ -126,6 +126,73 @@ function normalizeKey(key: string): string {
 }
 
 /**
+ * 預設 COST 規則的清單。**跟發布清單共用同一把鑰匙、同一套正規化**，
+ * 只是內容不同：這份直接把規則包**整份帶在裡面**。
+ *
+ * ⚠ **為什麼不是 url + sha256（發布清單那個形狀）。** 那個形狀存在的理由是
+ * 安裝檔有 82 MB，塞不進一份清單；規則包只有 30 KB，帶著走就少掉一整條路徑
+ * （下載、白名單、雜湊比對，以及「清單發出去了但檔案還沒上傳」那個順序陷阱）。
+ * 簽章直接蓋在內容上，中間少一層就少一種對不上的方式。
+ */
+export interface RuleManifest {
+  /** 規則族 —— `publisherSlug/ruleSlug`。換一族就是換一份規則，不是更新。 */
+  ruleSetId: string;
+  version: string;
+  /** 規則包本體（`.ulrcost.json` 的內容）。**驗章蓋的就是這個東西**。 */
+  package: unknown;
+  notes?: string;
+}
+
+export interface SignedRuleFeed {
+  manifest: RuleManifest;
+  signature: string;
+}
+
+function isRuleManifest(value: unknown): value is RuleManifest {
+  if (typeof value !== "object" || value === null) return false;
+  const m = value as Record<string, unknown>;
+  // ⚠ `ruleSetId` 要有斜線 —— 它是 `publisher/rule`，而客戶端會拿它去比
+  // 「這份跟我在用的是同一族嗎」。格式不對的清單一律不收。
+  if (typeof m["ruleSetId"] !== "string" || !m["ruleSetId"].includes("/")) return false;
+  if (typeof m["version"] !== "string" || m["version"].length === 0) return false;
+  if (typeof m["package"] !== "object" || m["package"] === null) return false;
+  if (m["notes"] !== undefined && typeof m["notes"] !== "string") return false;
+  return true;
+}
+
+/**
+ * 驗一份簽過的規則清單。**驗不過一律回 `null`，絕不拋例外。**
+ *
+ * ⚠ 這裡**只驗簽章**，不驗規則內容合不合規格 —— 那是 `@ulr/rule-schema` 的
+ * `loadRulePackage()` 的事，而且一定要在**寫進快取之前**做完。順序反過來的話
+ * 一份簽對了但內容壞掉的規則會落地，然後每次開機都載入失敗一次。
+ */
+export function verifySignedRuleFeed(raw: unknown, publicKeyPem: string): RuleManifest | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const feed = raw as Record<string, unknown>;
+  const manifest = feed["manifest"];
+  const signature = feed["signature"];
+  if (!isRuleManifest(manifest)) return null;
+  if (typeof signature !== "string" || signature.length === 0) return null;
+
+  let sig: Buffer;
+  try {
+    sig = Buffer.from(signature, "base64");
+  } catch {
+    return null;
+  }
+  if (sig.length !== SIGNATURE_BYTES) return null;
+
+  try {
+    const key = createPublicKey(normalizeKey(publicKeyPem));
+    const ok = verify(null, Buffer.from(canonicalBytes(manifest)), key, sig);
+    return ok ? manifest : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 驗一份簽過的發布清單。**驗不過一律回 `null`，絕不拋例外。**
  *
  * 拋例外的代價是「更新整支停掉，而且玩家看不到任何原因」—— 那跟被入侵一樣

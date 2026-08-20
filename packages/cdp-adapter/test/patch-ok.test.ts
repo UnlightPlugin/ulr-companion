@@ -106,11 +106,15 @@ describe("buildOkPatchScript", () => {
   });
 
   it("判斷不出階段時放行，不要亂攔", () => {
-    // 放行是安全的；攔錯階段會拖慢玩家。函式裡有兩條 return false：
-    // 一條是「不在清單裡」，一條是 catch。
-    const start = script.indexOf("function inInterceptPhase()");
-    const body = script.slice(start, script.indexOf("function nodeAlive()", start));
-    expect(body.match(/return false/g)).toHaveLength(2);
+    // 放行是安全的；攔錯階段會拖慢玩家。movePhase() 有兩條 return null：
+    // 一條是「清單裡的場景都不 active」，一條是 catch。
+    //
+    // ⚠ 範圍要**只圈住 movePhase()**。舊版是從 inInterceptPhase() 一路切到
+    // nodeAlive()，那中間還夾著 battleRule / inPvpMatch / patchDisplay ——
+    // 加一個函式就會讓這條紅掉，而它其實一點問題都沒有。
+    const start = script.indexOf("function movePhase()");
+    const body = script.slice(start, script.indexOf("var GAME_PHASE_SECONDS", start));
+    expect(body.match(/return null/g)).toHaveLength(2);
   });
 
   it("⚠ 攔不攔在階段開始就定案，中途不會改", () => {
@@ -325,6 +329,14 @@ class FakeOkButton {
 
 interface FakeSocket {
   anyHandlers: ((...a: unknown[]) => void)[];
+  /**
+   * 遊戲的 WSClient 把底下那顆 WebSocket 的 readyState 透出來
+   * （0 連線中 / 1 開著 / 2 關閉中 / 3 已關閉）。
+   *
+   * ⚠ **沒有 connected 這個欄位** —— 2026-08-20 實測，那是 socket.io 的形狀，
+   * 不是這個客戶端的。戰鬥結束後兩個客戶端讀到的都是 3。
+   */
+  readyState: number;
   fire(...args: unknown[]): void;
   emit(...args: unknown[]): void;
   onAny(fn: (...a: unknown[]) => void): void;
@@ -353,6 +365,8 @@ function makeSocketWorld(): { sent: unknown[][]; makeSocket: () => FakeSocket } 
   const makeSocket = (): FakeSocket => {
     const s = Object.create(proto) as FakeSocket;
     s.anyHandlers = [];
+    s.readyState = 1; // OPEN —— 對戰中的樣子
+
     s.fire = (...args: unknown[]): void => {
       for (const h of [...s.anyHandlers]) h(...args);
     };
@@ -379,6 +393,7 @@ interface Page {
       hazard: boolean;
       hold: boolean;
       sent: boolean;
+      room: string | null;
     };
     release(by: string): string;
     forceEnd(why?: string): string;
@@ -407,6 +422,23 @@ interface Page {
   setRule(rule: string | null): void;
   /** 設定畫面上顯示的狀態圖示（種類 + 剩餘回合）。 */
   setStatuses(entries: readonly { key: string; turns: number }[]): void;
+  /**
+   * 戰鬥結束。**照 MainA.on_result 的實際順序**（2026-08-20 從跑著的客戶端
+   * 讀出來的）：先關連線，好幾秒之後場景才收掉。
+   *
+   * ⚠ 兩件事一定要分開做得到 —— 中間那段時間（結算動畫、語音）是真實存在的，
+   * 而插件在那段時間裡就已經該停手了。
+   */
+  endBattle(step: "socket" | "scene"): void;
+  /** MainA 起來了／收掉了。下一場開始就是 `true` + `swapSocket()`。 */
+  setMainActive(active: boolean): void;
+  /**
+   * MainA 被暫停（Phaser 的 PAUSED=6：`active` 變 false，但場景還在）。
+   *
+   * ⚠ **暫停不是結束。** 這是 `battleLive()` 看 `status` 而不看 `active`
+   * 的唯一理由，所以假頁面要做得出這個狀態。
+   */
+  pauseMain(): void;
 }
 
 const BINDING = "__test_binding";
@@ -441,7 +473,12 @@ function bootPage(
     room: "room-1",
     id: "player-1",
     socket: options.withSocket === false ? undefined : makeSocket(),
-    sys: { settings: { active: true } },
+    /**
+     * ⚠ **status 要跟 active 一起給。** Phaser 的 5 = RUNNING、8 = SHUTDOWN
+     * （2026-08-20 對著跑著的客戶端實測：打完之後 MainA 是 8）。判斷戰鬥有沒有
+     * 結束看的是 status —— 只給 active 的假頁面會讓那條路完全測不到。
+     */
+    sys: { settings: { active: true, status: 5 } },
     // 0=劍1卡、91=聖水（實測索引，見 constants.ts 的 EVENT_INFO_JSON_KEY）
     arr1: [handCard(0), handCard(0)],
     /**
@@ -615,6 +652,29 @@ function bootPage(
       // MainA.config 本身就不存在，讀 config.rule 會是存取 undefined 的屬性。
       if (rule === null) delete mainA["config"];
       else mainA["config"] = { rule };
+    },
+    endBattle(step: "socket" | "scene"): void {
+      // ⚠ **room / config / socket / ok 全部留著不動** —— Phaser 不丟場景物件，
+      // 而那正是這個 bug 的成因。假頁面只要少留一個欄位，測試就會綠得毫無意義。
+      if (step === "socket") {
+        const so = mainA["socket"] as FakeSocket | undefined;
+        if (so) so.readyState = 3; // CLOSED
+        return;
+      }
+      // MainA.on_result 最後做的事：scene.stop() 自己（Phaser 的 SHUTDOWN=8）。
+      const s = (mainA["sys"] as { settings: { active: boolean; status: number } }).settings;
+      s.active = false;
+      s.status = 8;
+    },
+    setMainActive(active: boolean): void {
+      const s = (mainA["sys"] as { settings: { active: boolean; status: number } }).settings;
+      s.active = active;
+      s.status = active ? 5 : 8;
+    },
+    pauseMain(): void {
+      const s = (mainA["sys"] as { settings: { active: boolean; status: number } }).settings;
+      s.active = false;
+      s.status = 6; // PAUSED
     },
   };
 }
@@ -942,6 +1002,123 @@ describe("跑起來：只對真人對戰生效（玩家 2026-08-09 回報）", (
     pressOk(page);
     expect(page.sent).toHaveLength(before + 1); // 直接送出，沒攔
     expect(page.arbiter.held).toBeNull();
+  });
+});
+
+/**
+ * 戰鬥結束（玩家 2026-08-20 回報）
+ * ================================
+ * 症狀：打完了，托盤還寫著「對戰中、已握手」，而且會影響到下一場 ——
+ * 下一場的對手沒插件，準備卻照樣攔。
+ *
+ * 成因不是仲裁邏輯，是**觀測**：Phaser 的場景物件建一次就留著，結算畫面上
+ * MainA 的 room / config.rule / socket / ok 全部原封不動還在，所以
+ * 「還在不在對戰」如果只讀那些欄位，答案永遠是「在」。
+ *
+ * ⚠ 這一組測試的假頁面**刻意把那些欄位全部留著**。少留一個，測試就會因為
+ * 「讀不到所以回 null」而綠，而真的頁面上一個都不會少。
+ */
+describe("戰鬥結束就不要再握手", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("⚠ 連線關掉的那一刻就算結束 —— 場景還要好幾秒才收掉", async () => {
+    // MainA.on_result 的順序（實測）：socket.disconnect() 在最前面，接著等
+    // 結束語音播完（可能好幾秒）才 scene.stop()。中間那段時間也不該再握手。
+    const page = bootPage({ rule: "duel" });
+    page.arbiter.tick();
+    await ticks(1);
+    expect(page.arbiter.tick()).toMatchObject({ pvp: true, rule: "duel", room: "room-1" });
+
+    page.endBattle("socket");
+
+    expect(page.arbiter.tick()).toMatchObject({ pvp: false, rule: null, room: null });
+  });
+
+  it("⚠ 場景收掉了也算 —— 改版拿掉 disconnect 時還有這一道", async () => {
+    const page = bootPage({ rule: "duel" });
+    page.arbiter.tick();
+    await ticks(1);
+
+    page.endBattle("scene");
+
+    expect(page.arbiter.tick()).toMatchObject({ pvp: false, rule: null, room: null });
+  });
+
+  it("⚠⚠ 房號一定要跟著變 null —— 側通道就是靠它退房的", async () => {
+    // 這是玩家回報的那半：房號還在 → 兩個插件留在上一場的房裡繼續配對成功，
+    // 於是下一場（對手沒插件）照樣有 both-ready 與約定秒數。
+    const page = bootPage({ rule: "duel" });
+    page.arbiter.tick();
+    await ticks(1);
+    expect(page.arbiter.tick().room).toBe("room-1");
+
+    page.endBattle("socket");
+
+    expect(page.arbiter.tick().room).toBeNull();
+    // ⚠ 而且欄位本身還在場景上 —— 我們是**選擇不報**，不是讀不到。
+    expect(page.arbiter.tick().pvp).toBe(false);
+  });
+
+  it("⚠ 結算畫面上不要再說「對戰中」", async () => {
+    // 托盤的狀態列直接拿 armed 當「在不在對戰」用。攔截其實還掛在那顆
+    // （已經關掉的）socket 上，所以只問「掛上了沒」會一直是 true。
+    const page = bootPage({ rule: "duel" });
+    page.arbiter.tick();
+    await ticks(1);
+    expect(page.arbiter.tick().armed).toBe(true);
+
+    page.endBattle("socket");
+
+    expect(page.arbiter.tick().armed).toBe(false);
+  });
+
+  it("⚠ 暫停不算結束 —— 雙開時永遠有一邊沒有焦點", async () => {
+    // 這是 battleLive() 看 status（>= 8 才算收掉）而不看 active 的唯一理由。
+    // active 在 PAUSED / SLEEPING 也是 false，把某條暫停路徑誤判成「打完了」
+    // 的代價是那一邊整場都不生效 —— 而雙開正是這個插件最常見的用法。
+    const page = bootPage({ rule: "duel" });
+    page.arbiter.tick();
+    await ticks(1);
+
+    page.pauseMain();
+
+    expect(page.arbiter.tick()).toMatchObject({ pvp: true, rule: "duel", room: "room-1" });
+  });
+
+  it("⚠ 結算畫面上絕對不可以替玩家按 OK", async () => {
+    const page = bootPage({ rule: "duel" });
+    page.arbiter.tick();
+    await ticks(1);
+    page.endBattle("socket");
+
+    const before = page.sent.length;
+    expect(page.arbiter.forceEnd("arbiter")).toBe("not-pvp");
+    expect(page.sent).toHaveLength(before);
+  });
+
+  it("下一場開始就整組回來 —— 停手是暫時的，不是永久的", async () => {
+    // ⚠ 這條是另一半的保險。判斷改成「現讀」之後最危險的失敗是**回不來**：
+    // 症狀會是「打完第一場之後插件就再也不管了」，而且完全沒有錯誤訊息。
+    const page = bootPage({ rule: "duel" });
+    page.arbiter.tick();
+    await ticks(1);
+    page.endBattle("socket");
+    page.endBattle("scene");
+    expect(page.arbiter.tick().pvp).toBe(false);
+
+    // 新的一場：場景重新起來、換一顆新的 socket。
+    page.setMainActive(true);
+    page.swapSocket();
+    page.arbiter.tick();
+    await ticks(1);
+
+    expect(page.arbiter.tick()).toMatchObject({ pvp: true, rule: "duel", room: "room-1" });
+    expect(page.arbiter.tick().armed).toBe(true);
   });
 });
 

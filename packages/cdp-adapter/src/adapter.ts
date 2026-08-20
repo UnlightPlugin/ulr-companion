@@ -22,8 +22,20 @@ import {
   ExecutionContextTracker,
   findGameContext,
 } from "./game-context.js";
-import type { CostOverrides, CostOverrideTables, CostPatchReport } from "./patch-cost.js";
-import { buildCostPatchScript, isCostPatchReport } from "./patch-cost.js";
+import type {
+  CostOverrides,
+  CostOverrideTables,
+  CostPatchCoverage,
+  CostPatchReport,
+} from "./patch-cost.js";
+import {
+  buildCostPatchCoverageExpression,
+  buildCostPatchScript,
+  costsStamp,
+  costTargetAssetKeys,
+  isCostPatchReport,
+  parseCostPatchCoverage,
+} from "./patch-cost.js";
 import type { PenaltyBand, PenaltyPatchReport } from "./patch-penalty.js";
 import {
   buildPenaltyPatchScript,
@@ -42,6 +54,16 @@ import {
   buildJoinRoomExpression,
   MATCH_ROOM_INSTALL_EXPRESSION,
 } from "./match-room.js";
+import type { LobbyReport, LobbyState, LobbyStatus } from "./patch-lobby.js";
+import {
+  buildLobbyErrorExpression,
+  buildLobbyPatchScript,
+  buildLobbyStateExpression,
+  isLobbyReport,
+  LOBBY_STATUS_EXPRESSION,
+  LOBBY_UNINSTALL_EXPRESSION,
+  parseLobbyStatus,
+} from "./patch-lobby.js";
 import type { HiddenStage, HiddenStageStatus } from "./patch-stage.js";
 import {
   buildHiddenStageScript,
@@ -147,6 +169,7 @@ export class CdpAdapter {
   #wsHandlers = new Set<(report: WsWatchReport) => void>();
   #okHandlers = new Set<(report: OkPatchReport) => void>();
   #speedHandlers = new Set<(report: SpeedPatchReport) => void>();
+  #lobbyHandlers = new Set<(report: LobbyReport) => void>();
   #closeHandlers = new Set<(reason: string) => void>();
 
   constructor(options: CdpAdapterOptions = {}) {
@@ -420,6 +443,40 @@ export class CdpAdapter {
     return { scriptIdentifier: res.identifier, takesEffectOnNextLoad: true };
   }
 
+  /**
+   * 把同一份 COST 補丁**直接裝到現在這個頁面上**，不等下一次載入。
+   *
+   * ⚠ **這不是 `installCostOverrides()` 的替代品，是它的搭檔。**
+   * 那支負責「之後每一次載入」（重載、玩家自己按 F5 都靠它），這支負責
+   * 「現在這個已經開著的頁面」。玩家從 Steam 開遊戲時，插件是在遊戲**已經
+   * 建好 document 之後**才接上的 —— 只走那支的話，掛鉤永遠不會在這一輪跑到，
+   * 症狀就是「插件開著、規則也載了，但遊戲裡還是原版價格」。
+   *
+   * 趕不趕得上要看 `costAssetsLoaded()`：已經在快取裡的資料這條路救不回來。
+   */
+  async installCostOverridesLive(costs: CostOverrides | CostOverrideTables): Promise<void> {
+    const source = buildCostPatchScript({ costs, bindingName: REPORT_BINDING_NAME });
+    await this.evaluate<unknown>(source);
+  }
+
+  /**
+   * 補丁有沒有蓋到這個頁面上**已經載入**的卡片資料。
+   *
+   * 回傳的 `missed` 不是空的 = 那幾張是在補丁裝上之前就載進來的，掛鉤碰不到，
+   * 只有重載才會套上新價格。判準為什麼是「載了卻沒改到」而不是「載了」，
+   * 見 `buildCostPatchCoverageExpression`。
+   */
+  async costPatchCoverage(costs: CostOverrides | CostOverrideTables): Promise<CostPatchCoverage> {
+    const targets = costTargetAssetKeys(costs);
+    if (Object.keys(targets).length === 0) return { missed: [], covered: [] };
+    // ⚠ 指紋一定要一起送。少了它，「頁面上蓋的是上一份規則」會被判成沒事，
+    // 而那個症狀跟「插件完全沒生效」在畫面上分不出來。
+    const raw = await this.evaluate<string>(
+      buildCostPatchCoverageExpression(targets, costsStamp(costs)),
+    );
+    return parseCostPatchCoverage(raw);
+  }
+
   /** 拆掉之前裝的腳本。同樣要等下次載入才會真的消失。 */
   async removeCostOverrides(scriptIdentifier: string): Promise<void> {
     const client = this.#client;
@@ -519,6 +576,56 @@ export class CdpAdapter {
   /** 把選單還原成官方的 11 項。 */
   async uninstallHiddenStages(): Promise<string> {
     return await this.evaluate<string>(HIDDEN_STAGE_UNINSTALL_EXPRESSION);
+  }
+
+  // -------------------------------------------------------------------------
+  // 迪特赫姆的快速比賽（WP-17）
+  // -------------------------------------------------------------------------
+
+  /** 訂閱「玩家按了大廳那顆快速比賽」。 */
+  onLobbyReport(handler: (report: LobbyReport) => void): () => void {
+    this.#lobbyHandlers.add(handler);
+    return () => this.#lobbyHandlers.delete(handler);
+  }
+
+  /**
+   * 在 duel 頻道的大廳畫一顆「快速比賽」。
+   *
+   * ⚠ 跟 `installCostOverrides()` 不同，這支走 `Runtime.evaluate`，**不需要
+   * 重載遊戲** —— 但同樣地，**遊戲一重載就會被沖掉**，重連時要再裝一次。
+   *
+   * ⚠ 回傳的 `buttonReady` 常常是 `false`，那**不是失敗**：玩家還沒進頻道時
+   * 面板根本不存在。腳本會自己盯著，進去了就掛上。
+   */
+  async installLobbyPatch(): Promise<LobbyStatus> {
+    const raw = await this.evaluate<string>(
+      buildLobbyPatchScript({ bindingName: REPORT_BINDING_NAME }),
+    );
+    return parseLobbyStatus(raw);
+  }
+
+  async lobbyStatus(): Promise<LobbyStatus> {
+    const raw = await this.evaluate<string>(LOBBY_STATUS_EXPRESSION);
+    return parseLobbyStatus(raw);
+  }
+
+  /** 把等待人數與配對狀態推到畫面上。**畫面上的每一個字都由這支決定。** */
+  async setLobbyState(state: LobbyState): Promise<string> {
+    return await this.evaluate<string>(buildLobbyStateExpression(state));
+  }
+
+  /**
+   * 跳出遊戲自己的錯誤對話框（「這個牌組不符合遊戲規則」）。
+   *
+   * `code` 是 `Match.room_error[lang]` 的索引 —— 用代碼而不是字串，玩家的
+   * 客戶端是什麼語言就顯示什麼語言。
+   */
+  async showLobbyError(code: number | null, message?: string): Promise<string> {
+    return await this.evaluate<string>(buildLobbyErrorExpression(code, message));
+  }
+
+  async uninstallLobbyPatch(): Promise<string> {
+    return await this.evaluate<string>(LOBBY_UNINSTALL_EXPRESSION);
   }
 
   /**
@@ -755,6 +862,10 @@ export class CdpAdapter {
     }
     if (isSpeedPatchReport(parsed)) {
       dispatch(this.#speedHandlers, parsed);
+      return;
+    }
+    if (isLobbyReport(parsed)) {
+      dispatch(this.#lobbyHandlers, parsed);
     }
   }
 }

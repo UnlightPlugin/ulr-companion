@@ -49,6 +49,10 @@ import type {
   CostPatchReport,
   CostTableId,
   HiddenStageStatus,
+  LobbyQuickPressed,
+  LobbyReport,
+  LobbyState,
+  LobbyStatus,
   OkPatchReport,
   PenaltyBand,
   PenaltyPatchReport,
@@ -176,6 +180,16 @@ export interface CostState {
   penaltyEverywhere: boolean;
   /** 罰則區間數。`null` = 這份規則不壓 C 或沒選規則。 */
   bands: number | null;
+  /**
+   * 這個頁面**在補丁裝上之前就把卡片資料載進去了**。
+   *
+   * ⚠ 這是「玩家從 Steam 開遊戲、插件事後才接上」的常態，不是異常狀況。
+   * 掛鉤攔的是 `JSONFile.prototype.onProcess`，只改之後才載入的資料 ——
+   * 已經在快取裡的那幾張，只有重載一次才會套上規則的價格。
+   *
+   * `true` 時畫面上的數字**還是原版的**，托盤會等一個不在對戰中的時機重載。
+   */
+  stale: boolean;
   /** 出錯時的原因。 */
   error: string | null;
 }
@@ -188,6 +202,7 @@ const COST_OFF: CostState = {
   penalty: "off",
   penaltyEverywhere: false,
   bands: null,
+  stale: false,
   error: null,
 };
 
@@ -304,6 +319,8 @@ export class ArbiterEngine {
    * 又只剩 11 項」，而玩家不會把它跟重載連在一起。
    */
   #hiddenStages = false;
+  /** 誰在等「玩家按了大廳那顆快速比賽」。 */
+  #lobbyHandlers = new Set<(press: LobbyQuickPressed) => void>();
   #stopping = false;
   #loop: Promise<void> | null = null;
   #resolveStop: (() => void) | null = null;
@@ -397,6 +414,9 @@ export class ArbiterEngine {
               penalty: "off",
               penaltyEverywhere: false,
               bands: rule.bands === null ? null : rule.bands.length,
+              // 換規則的當下還不知道趕不趕得上 —— `#syncCosts()` 問過頁面
+              // 之後才會把這格改成真的答案。
+              stale: false,
               error: null,
             },
     });
@@ -494,6 +514,95 @@ export class ArbiterEngine {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // 迪特赫姆的快速比賽（WP-17）
+  //
+  // ⚠ 這一組跟隱藏地圖一樣**不改任何數字**：它在 duel 頻道的大廳畫一顆按鈕、
+  // 一段等待人數，然後把「玩家按了」交給呼叫端。真正會開房（消耗 AP）的仍然
+  // 是 `MatchPairing`，而它的前提沒有變 —— 玩家親手按下去。
+  // -------------------------------------------------------------------------
+
+  /**
+   * 玩家按了大廳那顆快速比賽。**呼叫端負責決定要開始還是停止配對。**
+   *
+   * ⚠ 引擎自己不做那件事：開房會消耗 AP、進房會直接開打，那條路徑一定要留在
+   * 「有規則、有配置」的那一層（`main.ts`），引擎這裡只知道有人按了按鈕。
+   */
+  onLobbyQuick(handler: (press: LobbyQuickPressed) => void): () => void {
+    this.#lobbyHandlers.add(handler);
+    return () => this.#lobbyHandlers.delete(handler);
+  }
+
+  /**
+   * 把等待人數與配對狀態推到遊戲畫面上。沒接上遊戲時安靜地什麼都不做。
+   *
+   * ⚠ **不要在這裡加「跟上次一樣就不送」的最佳化。** 面板每次換頻道都是新的
+   * 物件，而新面板上的字是空的 —— 省掉那一次推送的症狀是「換個頻道回來，
+   * 人數就不見了」。
+   */
+  async setLobbyState(state: LobbyState): Promise<void> {
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    try {
+      await adapter.setLobbyState(state);
+    } catch {
+      // 連線正在死。下一輪重連會重裝，這裡不必吵。
+    }
+  }
+
+  /** 跳出遊戲自己的錯誤對話框（「這個牌組不符合遊戲規則」）。 */
+  async showLobbyError(code: number | null, message?: string): Promise<void> {
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    try {
+      await adapter.showLobbyError(code, message);
+    } catch {
+      /* 同上 */
+    }
+  }
+
+  /**
+   * 大廳按鈕現在在頁面上的狀態。沒接上遊戲時是 `null`。
+   *
+   * ⚠⚠ **頁面說「沒裝」就當場補裝。** 這支是 `evaluate` 裝的，遊戲一重載就
+   * 整份消失，而重載**不會**斷 CDP 連線 —— 沒有人會來重跑 `#syncLobby()`。
+   * 而且我們自己就會重載（卡片價格套用那條路），所以這不是罕見狀況：
+   * 症狀是玩家回報的「快速比賽按鈕有時候沒出現」，而且要等到他把遊戲關掉
+   * 再開才會回來。
+   *
+   * 托盤每 15 秒問一次這支，所以補裝最慢 15 秒內發生；`#reinstall()` 那條路
+   * 更快（幾秒），兩條都留是因為它們偵測到的是不同的東西。
+   */
+  async lobbyStatus(): Promise<LobbyStatus | null> {
+    const adapter = this.#adapter;
+    if (adapter === null) return null;
+    try {
+      const status = await adapter.lobbyStatus();
+      if (status.installed) return status;
+      return await adapter.installLobbyPatch();
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 把大廳補丁裝上去。**每次接上遊戲都會自己叫一次**，這支是給「重試」用的。
+   *
+   * ⚠ 跟隱藏地圖同一種東西：`evaluate` 裝的，**遊戲一重載就沒了**。
+   */
+  async #syncLobby(): Promise<void> {
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    try {
+      const status = await adapter.installLobbyPatch();
+      // ⚠ `buttonReady: false` 幾乎一定會發生（這時玩家還在標題畫面），
+      // 那**不是錯誤** —— 腳本會自己盯著他進頻道。所以這裡不寫 log。
+      if (!status.installed) this.#log(`· 大廳快速比賽還沒裝上：${status.reason ?? "原因不明"}`);
+    } catch (err) {
+      this.#log(`✗ 大廳快速比賽注入失敗：${describe(err)}`);
+    }
+  }
+
   async reloadGame(): Promise<void> {
     const adapter = this.#adapter;
     if (adapter === null) throw new Error("還沒接上遊戲");
@@ -571,6 +680,20 @@ export class ArbiterEngine {
 
       const { scriptIdentifier } = await adapter.installCostOverrides(this.#costs);
       this.#costScriptId = scriptIdentifier;
+
+      // ⚠ **上面那支只管「之後」載入的 document。** 玩家從 Steam 開遊戲時，
+      // 插件是在遊戲已經建好 document 之後才接上的 —— 只走那支的話掛鉤這一輪
+      // 永遠不會跑到，症狀就是玩家回報的「插件開著、規則也載了，遊戲裡卻還是
+      // 原版價格」。所以同一份腳本**也要立刻裝到現在這個頁面上**。
+      //
+      // 趕不趕得上要看快取：已經載進去的資料掛鉤碰不到，那才需要重載。
+      // 先問再裝，順序不能顛倒 —— 反過來的話會把自己剛剛救回來的那幾張
+      // 也算成「來不及」，於是每次接上都白白重載一次。
+      await adapter.installCostOverridesLive(this.#costs);
+      const coverage = await adapter.costPatchCoverage(this.#costs);
+      this.#emit({
+        cost: { ...this.#status.cost, stale: coverage.missed.length > 0 },
+      });
     } catch (err) {
       // 連線多半正在死 —— 重連時會再走一次 #syncCosts，不必在這裡吵。
       this.#emit({
@@ -633,6 +756,23 @@ export class ArbiterEngine {
     }
   }
 
+  /** 頁面回報大廳那顆按鈕的事。 */
+  #onLobbyReport(report: LobbyReport): void {
+    if (report.type === "lobby-error") {
+      this.#log(`· 大廳快速比賽掛不上：${report.reason}`);
+      return;
+    }
+    // ⚠ 一個 handler 拋例外不該讓其他人收不到 —— 這條路徑上的 handler 會去
+    // 開房，而那是玩家按了按鈕之後唯一會發生的事。
+    for (const handler of [...this.#lobbyHandlers]) {
+      try {
+        handler(report);
+      } catch (err) {
+        this.#log(`✗ 處理大廳快速比賽時出錯：${describe(err)}`);
+      }
+    }
+  }
+
   /** 頁面回報罰則補丁的結果。 */
   #onPenaltyReport(report: PenaltyPatchReport): void {
     if (report.type === "penalty-patch-error") {
@@ -685,6 +825,10 @@ export class ArbiterEngine {
     this.#emit({
       cost: {
         ...this.#status.cost,
+        // 攔到了就代表補丁在**這個**頁面上真的跑了 —— 不管之前判成怎樣。
+        // ⚠ 少了這一行，重載完成之後 `stale` 會一直留著 true，而托盤看到
+        // true 就重載 —— 那是一個停不下來的迴圈。
+        stale: false,
         phase: "applied",
         entries: countEntries(this.#costs),
         applied,
@@ -891,6 +1035,10 @@ export class ArbiterEngine {
         // 隱藏地圖同理。⚠ 這時候遊戲多半還在標題畫面，Match 類別還沒載進來，
         // 所以裝不上很正常 —— 玩家進大廳後由配對頁那邊補裝（見 main.ts）。
         await this.#syncHiddenStages();
+        // 迪城的快速比賽同理，而且它**自己會等**（腳本裡有輪詢），所以這裡
+        // 裝一次就夠 —— 玩家進頻道時按鈕會自己出現。
+        adapter.onLobbyReport((r) => this.#onLobbyReport(r));
+        await this.#syncLobby();
 
         // ⚠ 不必等到進對戰。沒有 socket 也裝得上（回 waiting），頁面每 200ms
         // 自己補掛 —— 「先開插件再開遊戲」才是玩家實際的順序。
@@ -915,7 +1063,13 @@ export class ArbiterEngine {
           // ⚠ 原始 room id 到這裡為止 —— 送出去的只有雜湊（§12）。
           // `null` = 離開對戰（回大廳，或去打任務／渦）→ 直接退出那間房，
           // 否則會沿用上一場的配對，讓 NPC 戰也拿到 both-ready。
-          onRoomChange: (room) => this.#link?.client.setRoom(room === null ? null : roomKey(room)),
+          onRoomChange: (room) => {
+            this.#link?.client.setRoom(room === null ? null : roomKey(room));
+            // ⚠ 這一行是玩家唯一看得到「握手真的解除了」的證據。2026-08-20
+            // 修的正是它沒發生：戰鬥打完了，側通道還停在上一場的房裡。
+            // **不要寫房號**（§12），只講事件本身。
+            if (room === null) this.#log("· 離開對戰 —— 已退出側通道的房間（握手解除）");
+          },
           onModeChange: ({ pvp, rule }) => {
             this.#emit({ pvp, rule });
             // 只在**進**了非對戰時講一句。玩家看到「已配對」卻沒反應時，
@@ -1017,6 +1171,10 @@ export class ArbiterEngine {
       await this.#syncSpeed();
       // ⚠ 隱藏地圖也是。症狀是「開房選單又只剩官方那 11 項」。
       await this.#syncHiddenStages();
+      // ⚠ 大廳的快速比賽也是 `evaluate` 裝的。少了這一行，症狀是「按鈕有時候
+      // 沒出現」—— 而「有時候」正好就是**我們自己重載過**的那些時候
+      // （卡片價格要套用時會重載一次），所以它比看起來常見得多。
+      await this.#syncLobby();
     } catch (err) {
       // 連線多半也快死了 —— 那條路會走重連，這裡安靜退場就好。
       this.#emit({ error: `重裝攔截失敗：${describe(err)}` });

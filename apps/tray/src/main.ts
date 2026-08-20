@@ -22,8 +22,8 @@
  * 所有仲裁規則都在 `@ulr/arbiter-engine` 裡，跟命令列跑的是同一份。
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { readFileSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import type { MenuItemConstructorOptions } from "electron";
 import {
   app,
@@ -41,29 +41,54 @@ import type { EngineStatus } from "@ulr/arbiter-engine";
 import { ArbiterEngine } from "@ulr/arbiter-engine";
 import type { LinkPrefs } from "@ulr/arbiter-link";
 import {
+  matchKey,
   MAX_SPEED_FACTOR,
   MIN_PHASE_SECONDS,
   MIN_SPEED_FACTOR,
   MOVE_PHASE_TOTAL_SECONDS,
+  queueCountUrl,
+  QueueWatcher,
+  ruleTag,
 } from "@ulr/arbiter-link";
 import {
   ARCADIA_STAGES,
+  canAffordDuel,
   CHANNEL_NAMES,
   costTiersFor,
   DEBUG_PORT_SWITCH_AUTO,
+  duelApCost,
   HIDDEN_STAGES,
   resolveDebugPort,
+  ROOM_ERROR_AP_SHORT,
+  ROOM_ERROR_DECK_INVALID,
   STAGES,
 } from "@ulr/cdp-adapter";
-import type { HiddenStageStatus, MatchContext, RoomEntry } from "@ulr/cdp-adapter";
-import { buildRoomName, checkOwnDeck, formatBand, MatchPairing } from "@ulr/arbiter-engine";
+import type {
+  DuelAffordability,
+  HiddenStageStatus,
+  LobbyQuickPressed,
+  LobbyTierCount,
+  MatchContext,
+  RoomEntry,
+} from "@ulr/cdp-adapter";
+import {
+  buildRoomName,
+  checkOwnDeck,
+  formatBand,
+  MatchPairing,
+  ROOM_MULTI,
+  teamCostCenti,
+  tierForTotal,
+} from "@ulr/arbiter-engine";
 import type { PairingStatus } from "@ulr/arbiter-engine";
 import { deckFromKeys } from "@ulr/cost-engine";
 import type { CardCatalog, CompressionRule, CostRule, GapBand } from "@ulr/rule-schema";
 import {
   assertCostRule,
   catalogSize,
+  contentHash,
   createRulePackage,
+  formatCentiCost,
   loadRulePackage,
   parseEquipmentKey,
   parseEventCardKey,
@@ -71,11 +96,14 @@ import {
   toIndexTable,
 } from "@ulr/rule-schema";
 import { readCatalog, writeCatalog } from "./catalog-store.js";
+import { bundledRulePath, resolveDefaultRule } from "./default-rule.js";
+import type { TierRef } from "./lobby-counts.js";
+import { displayCounts, tierOf } from "./lobby-counts.js";
 import { trayIconPng } from "./icon.js";
 import type { IconState } from "./icon.js";
 import { launchAtLoginEnabled, launchInstance, setLaunchAtLogin } from "./launch.js";
 import { openLogFile } from "./log-file.js";
-import type { ClientKind, MatchPrefs, Profile, ProfileStore } from "./profiles.js";
+import type { ClientKind, CostRuleMode, MatchPrefs, Profile, ProfileStore } from "./profiles.js";
 import {
   addProfile,
   defaultPortFor,
@@ -92,7 +120,9 @@ import {
   updateProfile,
   userDataDirFor,
 } from "./profiles.js";
+import { startRuleFeed } from "./rule-feed.js";
 import { consumeUpdatedFlag, startAutoUpdate } from "./updater.js";
+import { cleanupStaleFiles } from "./zip-update.js";
 
 /**
  * 版本號。**建置時烤進去的**（`scripts/build-tray.mjs` 的 `define`）。
@@ -127,7 +157,7 @@ let ephemeral = false;
  */
 const APP_DIR = join(app.getPath("appData"), "ulr-companion");
 
-// ⚠ 關卡 1：兩份實例不能共用 userData（Windows 的目錄鎖會擋掉第二份）。
+// ⚠ 關卡 1：兩份實例不能共用 userData。
 // 必須在 app ready 之前設，而且要在讀完配置之後 —— 埠是從配置來的。
 {
   // `loadStore()` 會用到 app.getPath，那在 ready 之前就可以呼叫。
@@ -137,6 +167,36 @@ const APP_DIR = join(app.getPath("appData"), "ulr-companion");
   ephemeral = resolved.ephemeral;
   app.setPath("userData", join(APP_DIR, `port-${profile.port}`));
 }
+
+/**
+ * ⚠⚠ 關卡 2：**同一份配置不能開兩份。**
+ *
+ * 這裡原本什麼都沒有，檔頭寫著「userData 目錄的鎖會自然擋掉」。**那是錯的**，
+ * 而且錯得很安靜：Electron 不會替 userData 上鎖（那是 Chrome 自己的
+ * ProcessSingleton，不是 Electron 的行為）。2026-08-19 實測抓到安裝版
+ * （開機自動啟動）與開發版**同時**綁在 `port-59222` 上跑了一整天。
+ *
+ * 症狀不是「跳出兩個視窗」那麼明顯 —— 兩份都會接上**同一個**遊戲：
+ *
+ *   - 每一段注入都裝兩次，記錄檔裡每一行出現兩次
+ *   - 頁面上的補丁是「先拆再裝」的，於是兩份會**互相拆掉對方的東西**
+ *     （大廳那顆按鈕「有時候沒出現」就有這一份）
+ *   - 兩個引擎各自跟中間人連線、各自算配對
+ *
+ * `requestSingleInstanceLock()` 是**依 userData 分開**的，而上面那一段已經把
+ * userData 依埠分開了 —— 所以多開（不同配置＝不同埠）完全不受影響，被擋掉的
+ * 剛好只有「同一個埠開兩份」這一種，也就是我們本來就想擋的那一種。
+ *
+ * ⚠ 第二份不是安靜地死掉：它會把第一份的視窗叫出來，因為玩家按下「開新實例」
+ * 或再點一次捷徑時想看到的就是那個視窗。**但開機自動啟動那次不叫**
+ * （`--startup`）—— 開機跳視窗正是 `startMinimized` 要避免的事。
+ */
+if (!app.requestSingleInstanceLock()) {
+  app.exit(0);
+}
+app.on("second-instance", (_event, argv) => {
+  if (!argv.includes("--startup")) showWindow();
+});
 
 let tray: Tray | null = null;
 let window: BrowserWindow | null = null;
@@ -376,6 +436,16 @@ interface Snapshot {
   /** 目前載入的 COST 規則摘要。`null` = 沒選。 */
   costRule: (CostRuleInfo & { fileName: string }) | null;
   /**
+   * 規則從哪來（`default` 插件附的／`file` 玩家選的／`off` 停用）與實際載到的
+   * 是哪一份。
+   *
+   * ⚠ `mode` 與 `origin` 是兩件事：`mode: "default"` 的人可能載著安裝包那份
+   * （`bundled`），也可能載著中間人發下來的新版（`feed`）。畫面要說得出是哪
+   * 一種 —— 「我的規則跟對手不一樣」最常見的原因就是一邊還沒收到更新。
+   */
+  costRuleMode: CostRuleMode;
+  costRuleOrigin: CostRuleOrigin | null;
+  /**
    * 上一次載入規則失敗的原因。`null` = 沒失敗過。
    *
    * ⚠ **這個欄位不能省。** 載入失敗時 `costRule` 是 `null`，而畫面對
@@ -602,6 +672,620 @@ function myDeckCost(context: MatchContext | null): MyDeckCost | null {
   };
 }
 
+/**
+ * 這一場排不排得下去（AP／免費對戰星星）。
+ *
+ * 兩個入口（大廳按鈕、托盤的配對頁）共用這一支，差別只有怎麼把答案講出來 ——
+ * 大廳那條走遊戲自己的對話框（`ROOM_ERROR_AP_SHORT`），托盤那條回一句話。
+ * 判準寫在 `@ulr/cdp-adapter`，兩邊都不自己算。
+ */
+function affordDuel(context: MatchContext): DuelAffordability {
+  return canAffordDuel({
+    ap: context.ap,
+    duelFree: context.duelFree,
+    // ⚠ 費用跟著頻道與 3vs3 走，不是常數 —— 見 `duelApCost`。
+    cost: duelApCost({ multi: ROOM_MULTI, crossplay: context.crossplay }),
+  });
+}
+
+/**
+ * 開始一次自動配對。**托盤的按鈕與遊戲大廳裡那顆走的是這同一支。**
+ *
+ * ⚠⚠ 這支會一路走到**開房**（消耗 AP 5）或**進房**（直接開打），所以它只能
+ * 由玩家親手按下的動作觸發 —— 任何輪詢、重試、狀態同步都不准叫它。
+ *
+ * 兩個呼叫端的差別只有檔位怎麼來：
+ *
+ * | 呼叫端           | 檔位                                              |
+ * | ---------------- | ------------------------------------------------- |
+ * | 托盤的配對頁     | 玩家自己在設定裡填的那一格                        |
+ * | 大廳的「快速比賽」| **照牌組自動判**（`tierForTotal`，亞城就是這樣） |
+ */
+async function startPairing(args: {
+  channel: number;
+  costLimit: number | null;
+  costFloor: number | null;
+}): Promise<{ ok: true; status: PairingStatus } | { ok: false; reason: string }> {
+  if (pairing !== null) return { ok: false as const, reason: "已經在配對中了。" };
+  if (costRuleFull === null) {
+    // 沒有規則就沒有「約定」可言 —— 那正是這個功能存在的理由。
+    return { ok: false as const, reason: "自動配對要先選一份 COST 規則（牌組 › Cost 表）。" };
+  }
+  const driver = await engine?.matchDriver().catch(() => null);
+  if (!driver) return { ok: false as const, reason: "還沒連上遊戲" };
+
+  // ⚠⚠ **AP 要在排隊之前擋。** 排下去之後才發現不夠的話，對手已經被配給我們、
+  // 已經在等一間永遠不會開的房 —— 而玩家看到的是配對走到一半跳出「AP不足」。
+  // 大廳那顆按鈕自己也擋一次（那條路要用遊戲的對話框），這裡擋的是托盤那一頁。
+  const context = await driver.matchContext().catch(() => null);
+  if (context !== null) {
+    const afford = affordDuel(context);
+    if (!afford.ok) {
+      return {
+        ok: false as const,
+        reason: `AP 不足：現在 ${afford.ap}，開一場要 ${afford.cost}（也沒有免費對戰星星）。`,
+      };
+    }
+  }
+
+  // ⚠ 記下排的是哪一檔 —— 大廳那幾行要**立刻**把自己算進去（`displayCounts`），
+  // 不能等下一輪去問中間人。這裡是唯一知道答案的地方。
+  pairingTier = tierOf(args);
+
+  const m = profile.match;
+  const p = new MatchPairing({
+    endpoint: engine?.linkEndpoint ?? "",
+    rule: costRuleFull,
+    channel: args.channel,
+    costLimit: args.costLimit,
+    costFloor: args.costFloor,
+    room: {
+      // ⚠ 房名不在這裡 —— 引擎照「規則名 + 檔位」自己組（`buildRoomName`）。
+      // 3vs3 與遊戲自己的 ±N 也不在：兩個都是固定的（`ROOM_MULTI`、
+      // `ROOM_DECK_COST_BAND`）。
+      stage: m.stage,
+      friend: false,
+    },
+    driver,
+    onStatus: (s) => {
+      pairingStatus = s;
+      // ⚠ 停下來就把物件放掉。留著的話玩家再按「開始配對」只會收到
+      // 「已經在配對中了」，而畫面上明明寫著已停止 —— 那是最讓人以為插件
+      // 壞掉的一種狀態。
+      //
+      // `idle` 跟 `blocked` 都要放：配對成功走到底（對手進房、對戰開始）
+      // 之後狀態機會自己回到 idle，而那正是玩家最可能馬上想再排一次的時候。
+      if (s.phase === "blocked" || s.phase === "idle") pairing = null;
+      // ⚠ 配對頁是**自己輪詢**的（見 `MatchPageState` 的說明），所以這裡
+      // 不 pushState —— 那會把整份 Snapshot 推給畫面，而配對狀態不在裡面。
+      //
+      // 但**遊戲畫面那一行要立刻跟上**：玩家人在遊戲裡，托盤視窗多半是收著的。
+      void pushLobbyState();
+    },
+    onLog: (line) => log(line),
+  });
+  pairing = p;
+  await p.start();
+  // ⚠ **`start()` 期間推出去的狀態不算數，回來時的 `phase` 才是真的。**
+  // 這行原本只在被擋下來時清掉（`if (…) pairing = null`），於是 `start()`
+  // 中途只要推出一次 idle，上面 `onStatus` 就把 `pairing` 設成 null 而**沒有
+  // 人補回來** —— 排隊照跑，但玩家按「停止」是空操作（`pairing?.stop()`
+  // 打在 null 上），畫面永遠停在「排隊中」。改成整個重指派，那條路就不存在。
+  //
+  // 開場就被擋下來（沒在大廳、牌組超標…）的話不要留著一個死掉的物件，
+  // 否則玩家改好之後再按會收到「已經在配對中了」。
+  pairing = p.status.phase === "idle" || p.status.phase === "blocked" ? null : p;
+  return { ok: true as const, status: p.status };
+}
+
+// ---------------------------------------------------------------------------
+// 迪特赫姆的快速比賽（WP-17）
+// ---------------------------------------------------------------------------
+
+/**
+ * 看一眼玩家在不在大廳的節奏。**這一拍不發任何網路請求** —— 它只問頁面
+ * （兩次 CDP evaluate），成本跟中間人無關。
+ *
+ * ⚠ 這個數字決定的是「剛進頻道多久看得到人數」與「按下去多久看得到自己」。
+ * 15 秒那個是**問中間人**的節奏，兩者刻意分開：玩家抱怨的「不像亞城那樣
+ * 立即反應」全部落在這一拍上，而把中間人那一拍一起調快是要付錢的。
+ */
+const LOBBY_TICK_MS = 3_000;
+
+/**
+ * **問中間人**「各檔幾個人在等」的最短間隔。
+ *
+ * ⚠ **這是輪詢，所以它的成本是「玩家坐在大廳的時間 ÷ 這個數字」**，跟對戰
+ * 次數無關 —— docs/match-making.md 那張 43,200 vs 1,440 的表就是這件事。
+ * 15 秒 = 一小時 240 次，而一個請求就問完所有檔位（`queueCountUrl`）。
+ *
+ * ⚠ 只有在**玩家真的在 duel 頻道的大廳裡**才會發（`buttonReady`），
+ * 打牌中、選單裡、沒開遊戲都不會。
+ */
+const LOBBY_COUNT_MS = 15_000;
+
+/**
+ * **推播接得上的時候**，多久還是去問一次 `/qn`。
+ *
+ * ⚠ 推播已經是即時的了，這一拍純粹是保險：一條**開著但對面已經不在**的
+ * WebSocket 在 Windows 上是真的會發生的（DO 被搬走、NAT 把連線收掉），而它
+ * 的症狀是人數停在某個數字不動 —— 跟「真的沒人」長得一模一樣。
+ *
+ * 兩分鐘一次 = 一小時 30 次，是輪詢版本（240 次）的八分之一。
+ */
+const LOBBY_COUNT_PUSH_MS = 120_000;
+
+/**
+ * 推播來了之後多久換一次畫面。**合併用的，不是延遲。**
+ *
+ * 四檔會各自推自己的，而一個人從 COST54 換到 COST61 會讓兩檔同時變 ——
+ * 每一則都換一次畫面等於兩趟 CDP 白跑。
+ */
+const LOBBY_PUSH_DEBOUNCE_MS = 120;
+
+let lobbyTimer: ReturnType<typeof setInterval> | null = null;
+/**
+ * 每一條佇列最新的人數（**兩條來源共用這一格**：推播與輪詢）。
+ *
+ * ⚠ 只拿來在「這次問不到」時**不要**把畫面洗成空的 —— 舊數字比沒有數字好。
+ */
+const lobbyByKey = new Map<string, number>();
+/** 現在畫面上是哪幾檔（順序就是畫面的順序）。 */
+let lobbySpecs: TierSpec[] = [];
+/** 推播的線。`null` = 還沒開過（進大廳才會開）。 */
+let lobbyWatcher: QueueWatcher | null = null;
+/** `lobbyWatcher` 是連著哪一台中間人開的。玩家改了位址就要整組重來。 */
+let lobbyWatchEndpoint = "";
+/** 合併推播用的計時器，見 `lobbyPushSoon()`。 */
+let lobbyPushTimer: ReturnType<typeof setTimeout> | null = null;
+/** 上一次真的問中間人是什麼時候。0 = 還沒問過。 */
+let lobbyCountsAt = 0;
+/**
+ * **問那一次的當下，我自己排在哪一檔。** `null` = 那時沒在排。
+ *
+ * 拿來跟現在比對 —— 差別就是「這個數字還沒把我算進去／已經不該算我了」，
+ * 見 `countsForDisplay()`。
+ */
+let lobbyCountsSelf: TierRef | null = null;
+/** 上一拍玩家在不在 duel 大廳。false → true 就是「他剛進頻道」。 */
+let lobbyReady = false;
+
+/**
+ * 最近一次排的是哪一檔。**只有 `pairing !== null` 的時候才算數**，
+ * 所以永遠透過 `selfTier()` 讀，不要直接讀這一格。
+ */
+let pairingTier: TierRef | null = null;
+
+/**
+ * 我**現在**排在哪一檔。`null` = 沒在排。
+ *
+ * ⚠ 寫成函式而不是一格變數，是因為 `pairing` 有四個地方會被設成 null
+ * （按取消、狀態機回到 idle、被擋下來、關掉插件）。多一格要自己同步的狀態
+ * 就是多一個會忘記清的地方，而忘了清的症狀是「明明沒排隊，那一檔卻永遠
+ * 多一個人」—— 那正是這整段要修掉的那種假數字。
+ */
+function selfTier(): TierRef | null {
+  return pairing === null ? null : pairingTier;
+}
+
+/**
+ * 把等待人數與配對狀態推到遊戲畫面上。
+ *
+ * ⚠ **問不到人數時要保留上一次的數字，不要推 `null`。** 中間人抖一下就把
+ * 那三行清掉的話，玩家看到的是「人數忽有忽無」—— 而那比慢個 15 秒難懂得多。
+ *
+ * ⚠⚠ **不是每一拍都去問中間人。** 這支同時掛在配對狀態的 `onStatus` 上，而
+ * 一次配對從按下去到開打會推十幾次狀態 —— 每一次都問的話，那十幾個 HTTP
+ * 請求全部發生在最不需要更新人數的那幾秒。真的發請求只有三種時候：
+ *
+ * ```
+ *   force        玩家剛按下快速比賽／取消 —— 那一檔的數字馬上就不一樣了
+ *   剛進大廳     ⚠ 少了這條，玩家進頻道會先看到**空白**，最久等 15 秒
+ *   距上次 15 秒 穩定狀態的節奏
+ * ```
+ */
+async function pushLobbyState(options: { refreshCounts?: boolean } = {}): Promise<void> {
+  if (engine === null) return;
+  const status = await engine.lobbyStatus();
+  if (status === null || !status.buttonReady) {
+    lobbyReady = false;
+    // ⚠ 人不在大廳就把推播的線收掉。連著不看是**白付的連線** —— 而且玩家
+    // 打一場牌可以是二十分鐘，那二十分鐘裡沒有任何人會看那幾行字。
+    stopLobbyWatch();
+    return;
+  }
+  // ⚠ 「剛進頻道」要當場問一次。這是玩家回報的第二句：進頻道時那幾行是空的，
+  // 要等一陣子才出現 —— 因為第一次問是排在下一個 15 秒的節拍上。
+  const entered = !lobbyReady;
+  lobbyReady = true;
+
+  // ⚠ 用的不是預設那份 COST 表就不顯示，理由見這一段的段首註解。
+  if (costRuleHash === null || costRuleHash !== defaultRuleHash()) {
+    stopLobbyWatch();
+    lobbySpecs = [];
+    lobbyByKey.clear();
+    await engine.setLobbyState({ counts: null, matching: pairing !== null });
+    return;
+  }
+
+  // ⚠ 算不出來（CDP 逾時、還沒讀到頻道）時**留著上一組** —— 那幾行不該因為
+  // 一次讀取失敗就消失。真的換頻道時下一拍就會算出新的一組。
+  const specs = await tierSpecs(status.openTier);
+  if (specs !== null) setLobbySpecs(specs);
+
+  // ⚠⚠ **推播接得上就不必一直問。** 這一格就是這次改動省下來的錢：接得上時
+  // 兩分鐘問一次（純保險），接不上時退回原本的 15 秒。
+  const interval = lobbyWatcher?.allLive === true ? LOBBY_COUNT_PUSH_MS : LOBBY_COUNT_MS;
+  const due = Date.now() - lobbyCountsAt >= interval;
+  if (lobbySpecs.length > 0 && (options.refreshCounts === true || entered || due)) {
+    const self = selfTier();
+    const byKey = await fetchTierCounts(lobbySpecs);
+    if (byKey !== null) {
+      for (const spec of lobbySpecs) {
+        const waiting = byKey.get(spec.key);
+        if (waiting !== undefined) lobbyByKey.set(spec.key, waiting);
+      }
+      lobbyCountsAt = Date.now();
+      // ⚠ 記的是**發出請求那一刻**的狀態，不是回來時的 —— 玩家可能在這幾百
+      // 毫秒之間按了取消，那樣這份數字裡的「我」就該被扣掉。
+      lobbyCountsSelf = self;
+    }
+  }
+
+  await engine.setLobbyState({
+    // ⚠ 推出去的不是中間人那份原始數字，是**把「我自己」放到對的位置之後**
+    // 的那一份。理由整段寫在 `lobby-counts.ts` 的檔頭。
+    counts: displayCounts({
+      counts: currentCounts(),
+      fetchedWhileIn: lobbyCountsSelf,
+      nowIn: selfTier(),
+    }),
+    // ⚠ 配對中就跳**遊戲自己的等待視窗**（有計時、有 cancel），不是在 INFO
+    // 那一區多寫一行字 —— 亞城按下快速比賽之後跳的就是那個框。
+    matching: pairing !== null,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 「COST54:N 位玩家等待中」那幾行
+//
+// ⚠⚠ **只有用預設 COST 表的人才有這幾行數字**（玩家 2026-08-20 的決定）。
+// 用別份規則的人看不到 —— 那不是壞掉，是那個數字對他沒有意義：他排的是
+// 一條只有他自己那份規則算得出來的隊，而中間人數的是「跟預設表同一份」的人。
+//
+// ⚠⚠ **判準是「內容一不一樣」，不是「他從哪裡選的」。** 2026-08-20 實測到
+// 差別：玩家的 `costRuleMode` 是 `file`，指著 `rules/…-1C.ulrcost.json`，
+// 而那個檔的 contentHash 跟安裝包裡那份**一模一樣** —— 他排的是同一條佇列、
+// 數的是同一群人，用「來源」去擋只會把一個完全正常的玩家的人數藏起來。
+//
+// ⚠ 數的範圍也跟著窄了一層：中間人只數**規則內容跟我一模一樣**的人
+// （`ruleTag`）。同一條佇列上站著別份規則的人是常態（配對鍵裡沒有版本），
+// 而他們配不配得到要看驗算 —— 寫「1 位玩家等待中」卻永遠配不到，比寫 0 還糟。
+//
+// 數字有兩條來源，**推播是主要的、輪詢是退路**：
+//
+//   QueueWatcher   `q-watch` → 中間人一有人進出就推 `q-count`（即時）
+//   /qn            接不上推播時的退路，外加一個很慢的保險節奏
+// ---------------------------------------------------------------------------
+
+/**
+ * 「插件附的預設 COST 表」的 contentHash。**兩份都不在就回 `null`。**
+ *
+ * ⚠ 用 mtime 當快取鍵：這支每三秒會被叫一次，而每次重讀 28KB 再 hash 一遍
+ * 是白做的。中間人發下新的一份時（`rule-feed.ts` 寫檔）mtime 會變，快取自己
+ * 就過期了 —— 少了這一格的話，玩家會停在「舊的預設表」的判斷上，而症狀是
+ * 更新之後人數突然消失。
+ */
+let defaultRuleHashCache: { path: string; mtimeMs: number; hash: string } | null = null;
+function defaultRuleHash(): string | null {
+  const choice = resolveDefaultRule(APP_DIR);
+  if (choice === null) return null;
+  try {
+    const mtimeMs = statSync(choice.path).mtimeMs;
+    const cached = defaultRuleHashCache;
+    if (cached !== null && cached.path === choice.path && cached.mtimeMs === mtimeMs) {
+      return cached.hash;
+    }
+    const result = loadRulePackage(JSON.parse(readFileSync(choice.path, "utf8")));
+    if (!result.ok) return null;
+    defaultRuleHashCache = { path: choice.path, mtimeMs, hash: result.value.contentHash };
+    return result.value.contentHash;
+  } catch {
+    // 讀不到就當成「沒有預設表可比」= 不顯示人數。⚠ 不能反過來當成「都算」——
+    // 那會讓一台讀不到規則的機器把所有人的數字都畫出來。
+    return null;
+  }
+}
+
+/** 一檔在中間人那邊的身分：配對鍵，加上「我這份規則」在那條佇列上的標籤。 */
+interface TierSpec {
+  tier: number;
+  open: boolean;
+  key: string;
+  /** `ruleTag(key, contentHash(規則))`。⚠ **拌過配對鍵，所以一檔一個。** */
+  tag: string;
+}
+
+/**
+ * 這個頻道現在有哪幾檔，各自的配對鍵與規則標籤是什麼。
+ *
+ * ⚠ 鍵是**這裡自己算的**（`matchKey`），跟真的去排隊時算的是同一支函式 ——
+ * 兩邊各算一次的話，某一天其中一邊改了欄位就會變成「人數永遠 0，但排得到人」。
+ *
+ * ⚠ 回 `null` 是**這一次算不出來**（還沒接上遊戲、讀不到頻道），不是「這個
+ * 玩家不該看到人數」—— 後者由呼叫端先擋掉（規則內容跟預設那份不一樣）。
+ * 兩者混在一起的話，遊戲畫面會在一次 CDP 逾時之後把那幾行清空。
+ */
+async function tierSpecs(openTier: number | null): Promise<TierSpec[] | null> {
+  if (costRuleFull === null || engine === null) return null;
+  const driver = await engine.matchDriver().catch(() => null);
+  if (!driver) return null;
+
+  let context: MatchContext;
+  try {
+    context = await driver.matchContext();
+  } catch {
+    return null;
+  }
+  const channel = context.channel;
+  if (channel === null) return null;
+  // ⚠ 現讀，不快取 —— 每週二遊戲更新會變（見 `costTiersFor`）。
+  const tiers = costTiersFor(context.channels, channel) ?? [];
+  if (tiers.length === 0 && openTier === null) return null;
+
+  const ruleSetId = costRuleFull.ruleSetId;
+  const ruleHash = costRuleHash ?? contentHash(costRuleFull);
+  const keyed = [
+    ...tiers.map((tier) => ({
+      tier,
+      open: false,
+      key: matchKey({ ruleSetId, channel, multi: ROOM_MULTI, costLimit: tier }),
+    })),
+    ...(openTier === null
+      ? []
+      : [
+          {
+            tier: openTier,
+            open: true,
+            key: matchKey({
+              ruleSetId,
+              channel,
+              multi: ROOM_MULTI,
+              costLimit: null,
+              costFloor: openTier,
+            }),
+          },
+        ]),
+  ];
+  return keyed.map((s) => ({ ...s, tag: ruleTag(s.key, ruleHash) }));
+}
+
+/**
+ * 問中間人「這幾檔各有幾個人在等」。**這是退路，不是主要的路** ——
+ * 主要的路是推播（`QueueWatcher`），這支只在推播接不上時撐著。
+ *
+ * ⚠ 回傳是「鍵 → 人數」而不是畫面用的那個陣列：推播來的也是一次一個鍵，
+ * 兩條路要餵進同一格狀態，否則畫面會在兩份數字之間跳。
+ */
+async function fetchTierCounts(specs: readonly TierSpec[]): Promise<Map<string, number> | null> {
+  if (engine === null || specs.length === 0) return null;
+  try {
+    // ⚠ 標籤是**一把鍵一個**（`ruleTag` 拌過配對鍵），不是共用一個 —— 傳一個
+    // 配四把的話三檔會永遠數到 0，而且沒有任何錯誤訊息。
+    const url = queueCountUrl(engine.linkEndpoint, {
+      keys: specs.map((s) => s.key),
+      tags: specs.map((s) => s.tag),
+    });
+    const res = await fetch(url, { headers: { accept: "application/json" } });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { counts?: { key?: string; waiting?: number }[] };
+    return new Map((body.counts ?? []).map((c) => [c.key ?? "", c.waiting ?? 0]));
+  } catch {
+    // 中間人連不上／舊版沒有這條路由 → 這次沒有人數。**不是錯誤**，
+    // 按鈕照樣能按（配對本身走的是另一條路）。
+    return null;
+  }
+}
+
+/**
+ * 現在畫面上那幾行的數字（**還沒把「我」算進去**，那是 `displayCounts` 的事）。
+ *
+ * ⚠ 一個鍵都還沒有答案時回 `null`（= 那幾行整個不畫）。有部分答案就照畫、
+ * 缺的當 0 —— 一檔問不到就把四檔全部藏起來，比顯示一個 0 難懂得多。
+ */
+function currentCounts(): LobbyTierCount[] | null {
+  if (lobbySpecs.length === 0) return null;
+  if (!lobbySpecs.some((s) => lobbyByKey.has(s.key))) return null;
+  return lobbySpecs.map((s) => ({
+    tier: s.tier,
+    waiting: lobbyByKey.get(s.key) ?? 0,
+    ...(s.open ? { open: true } : {}),
+  }));
+}
+
+/** 現在要看哪幾檔。**一樣就什麼都不做** —— 這支每三秒會被叫一次。 */
+function setLobbySpecs(specs: readonly TierSpec[]): void {
+  const same =
+    lobbySpecs.length === specs.length &&
+    lobbySpecs.every((s, i) => {
+      const t = specs[i];
+      return t !== undefined && s.key === t.key && s.tag === t.tag && s.tier === t.tier;
+    });
+  if (same) {
+    startLobbyWatch();
+    return;
+  }
+  lobbySpecs = [...specs];
+  // ⚠ 換頻道／換規則之後，舊鍵的數字對現在這個畫面沒有意義。留著的話玩家會
+  // 在切頻道的瞬間看到上一個頻道的人數，而那個數字看起來完全合理。
+  const keys = new Set(lobbySpecs.map((s) => s.key));
+  for (const key of [...lobbyByKey.keys()]) if (!keys.has(key)) lobbyByKey.delete(key);
+  // 逼下一拍去問一次（推播接得上的話它會先到，這只是保險）。
+  lobbyCountsAt = 0;
+  startLobbyWatch();
+}
+
+/**
+ * 把推播的線接上（或換成新的一組鍵）。
+ *
+ * ⚠ 中間人的位址換了就要整個重來 —— `QueueWatcher` 的 endpoint 是建構時
+ * 決定的，而玩家在設定裡改位址之後，舊的那幾條線還連在舊的中間人上。
+ */
+function startLobbyWatch(): void {
+  if (engine === null || lobbySpecs.length === 0) return;
+  const endpoint = engine.linkEndpoint;
+  if (lobbyWatcher !== null && lobbyWatchEndpoint !== endpoint) {
+    lobbyWatcher.stop();
+    lobbyWatcher = null;
+  }
+  if (lobbyWatcher === null) {
+    lobbyWatchEndpoint = endpoint;
+    lobbyWatcher = new QueueWatcher({
+      endpoint,
+      onCount: (key, waiting) => {
+        lobbyByKey.set(key, waiting);
+        // ⚠ 記下「收到這個數字的當下我排在哪一檔」，理由同輪詢那條路：
+        // 這一份可能還沒把我算進去（我的 `q-hello` 還在飛）。
+        lobbyCountsSelf = selfTier();
+        lobbyPushSoon();
+      },
+      onLog: (line) => log(line),
+    });
+  }
+  lobbyWatcher.setTargets(lobbySpecs.map((s) => ({ key: s.key, tag: s.tag })));
+}
+
+/** 離開大廳、或不該顯示人數了。**連著不看是白付的連線。** */
+function stopLobbyWatch(): void {
+  lobbyWatcher?.stop();
+  if (lobbyPushTimer !== null) clearTimeout(lobbyPushTimer);
+  lobbyPushTimer = null;
+}
+
+/**
+ * 推播來了 → 盡快把畫面更新一次。
+ *
+ * ⚠ 要合併：四檔同時變（一個人從 COST54 換到 COST61）會連著來兩三則，而
+ * `pushLobbyState()` 每一次都是兩趟 CDP。合併之後那一串只換一次畫面，
+ * 而玩家眼裡仍然是「立刻」。
+ */
+function lobbyPushSoon(): void {
+  if (lobbyPushTimer !== null) return;
+  lobbyPushTimer = setTimeout(() => {
+    lobbyPushTimer = null;
+    void pushLobbyState();
+  }, LOBBY_PUSH_DEBOUNCE_MS);
+}
+
+/**
+ * 玩家按了遊戲大廳裡那顆「快速比賽」。
+ *
+ * ```
+ *   在配對中 → 停止（那顆按鈕同時是取消鍵，亞城的等待視窗也是這樣）
+ *   否則     → 讀牌組 → 算它落在哪一檔 → 排進那一檔
+ *              算不出來 → 跳遊戲自己的「這個牌組不符合遊戲規則」
+ * ```
+ *
+ * ⚠ **檔位是算出來的，不是玩家選的。** 亞歷山卓城的快速比賽就是這樣：按下去
+ * 之後伺服器照你的牌組把你放進某一檔。托盤那一頁仍然可以自己指定檔位 ——
+ * 那是「約戰」的用法，兩者刻意不同。
+ */
+async function onLobbyQuick(press: LobbyQuickPressed): Promise<void> {
+  if (engine === null) return;
+
+  // 再按一次 = 取消。⚠ 一定要有這條路：玩家人在遊戲裡，托盤視窗多半收著，
+  // 而「排了隊之後只能去托盤按停止」等於這顆按鈕只做了一半。
+  if (pairing !== null) {
+    await pairing.stop();
+    pairing = null;
+    log("· 已停止自動配對（大廳按鈕）");
+    // ⚠ **這裡刻意不重問中間人。** 我剛剛才把線關掉，而那條線在對面消失是
+    // 非同步的 —— 馬上問回來的答案有很高機率**還把我算在裡面**，於是畫面會
+    // 從「1」跳成「1」，看起來就是按了取消卻沒反應。
+    //
+    // 推播接得上時這件事更乾淨：`q-cancel` 一到中間人就會推一則新的 `q-count`
+    // 回來，而那一則是**真的**已經把我扣掉的數字。
+    //
+    // 不問反而是對的：`countsForDisplay()` 知道「上一次問的時候我在那一檔、
+    // 現在不在了」，直接扣掉 —— 那個數字立刻正確，而且下一輪（最多 15 秒）
+    // 拿到的新答案會接手。
+    await pushLobbyState();
+    return;
+  }
+
+  if (costRuleFull === null) {
+    await engine.showLobbyError(null, "插件還沒載入 COST 表，先到托盤的「Cost 表」看一下。");
+    return;
+  }
+
+  const driver = await engine.matchDriver().catch(() => null);
+  if (!driver) return;
+  const context = await driver.matchContext().catch(() => null);
+  if (context === null) return;
+
+  const channel = press.channel ?? context.channel;
+  if (channel === null) {
+    await engine.showLobbyError(null, "請先進入一個頻道。");
+    return;
+  }
+
+  // ⚠⚠ **AP 要在排隊之前擋，不是等開房才知道。** 排下去之後才發現不夠的話，
+  // 對手已經被配給我們、已經在等一間永遠不會開的房 —— 而玩家看到的是配對
+  // 走到一半跳出「AP不足」。這一關擋掉的正是玩家 2026-08-19 回報的那個畫面。
+  //
+  // 有星星就不吃 AP（右下角那三顆 ★），所以兩個條件是「或」不是「且」。
+  const afford = affordDuel(context);
+  if (!afford.ok) {
+    // 遊戲自己那句「AP不足」—— 跟他手動開房不夠時看到的一模一樣。
+    await engine.showLobbyError(ROOM_ERROR_AP_SHORT);
+    log(`· 大廳快速比賽被擋下：AP ${afford.ap}／需要 ${afford.cost}，而且沒有免費對戰星星`);
+    return;
+  }
+
+  const keys = context.deckKeys;
+  const deck = keys === null ? null : deckFromKeys(keys);
+  if (deck === null || deck.characters.length === 0) {
+    await engine.showLobbyError(null, "讀不到你的牌組，切一次牌組再試。");
+    return;
+  }
+
+  const total = teamCostCenti(costRuleFull, deck);
+  const status = await engine.lobbyStatus();
+  const tiers = costTiersFor(context.channels, channel) ?? [];
+  const pick = tierForTotal(total, tiers, status?.openTier ?? null);
+
+  if (pick === null) {
+    // ⚠ **用遊戲自己那句話。** 玩家在亞城帶一副不合檔的牌時看到的就是它，
+    // 而這整個功能的目的正是讓迪城跟那邊一樣。
+    await engine.showLobbyError(ROOM_ERROR_DECK_INVALID);
+    log(
+      `· 大廳快速比賽被擋下：牌組 ${formatCentiCost(total)}C 不在任何一檔裡` +
+        `（${tiers.join("／")}${status?.openTier === undefined || status.openTier === null ? "" : `／${status.openTier}+`}）`,
+    );
+    return;
+  }
+
+  const result = await startPairing({
+    channel,
+    costLimit: pick.kind === "band" ? pick.tier : null,
+    costFloor: pick.kind === "open" ? pick.tier : null,
+  });
+  if (!result.ok) {
+    await engine.showLobbyError(null, result.reason);
+    return;
+  }
+  log(
+    `▶ 大廳快速比賽：牌組 ${formatCentiCost(total)}C → ` +
+      `${pick.kind === "open" ? `COST${pick.tier}+` : `COST${pick.tier}`}` +
+      `（${afford.byStar ? "用免費對戰星星" : `AP ${context.ap ?? "?"}／需要 ${afford.cost}`}）`,
+  );
+  // 剛排進去，這一檔的人數就多了自己一個。
+  // ⚠ 推播接得上時**不必重問** —— 我的 `q-hello` 會讓中間人立刻推一則新的
+  // `q-count` 回來（我自己也是那條佇列的「看的人」）。多問這一次不只是白花
+  // 一個請求，還很可能問在 `q-hello` 還在飛的那一刻，答案裡沒有我。
+  await pushLobbyState({ refreshCounts: lobbyWatcher?.allLive !== true });
+}
+
 function snapshot(): Snapshot {
   return {
     profile:
@@ -618,6 +1302,8 @@ function snapshot(): Snapshot {
     gamePorts: Object.fromEntries(gamePorts),
     costRule: costRule === null ? null : { ...costRule, fileName: basename(costRule.path) },
     costRuleError: costRuleError,
+    costRuleMode: profile.costRuleMode,
+    costRuleOrigin: costRuleOrigin,
     limits: {
       minSeconds: MIN_PHASE_SECONDS,
       maxSeconds: MOVE_PHASE_TOTAL_SECONDS,
@@ -715,6 +1401,10 @@ async function quit(): Promise<void> {
   quitting = true;
   if (probeTimer !== null) clearInterval(probeTimer);
   probeTimer = null;
+  if (lobbyTimer !== null) clearInterval(lobbyTimer);
+  lobbyTimer = null;
+  // 大廳人數的推播線。⚠ 不收的話 Electron 退不乾淨（那幾條 socket 還活著）。
+  stopLobbyWatch();
   // ⚠ 排隊中就關掉插件的話，要先把自己從佇列上拿掉、順手收掉開了一半的房 ——
   // 否則對手會一直等一間永遠不會出現的房，而玩家的頻道上留一間空房。
   await pairing?.stop().catch(() => {});
@@ -803,12 +1493,27 @@ let costRule: CostRuleInfo | null = null;
 let costRuleError: CostRuleFailure | null = null;
 
 /**
+ * 這份規則是從哪裡來的。**畫面一定要分得出來** —— 「插件附的預設規則」與
+ * 「我自己選的檔」在玩家心裡是兩件完全不同的事，而它們在 `costRule` 裡長得
+ * 一模一樣（都只是一個路徑）。
+ */
+export type CostRuleOrigin = "bundled" | "feed" | "file";
+let costRuleOrigin: CostRuleOrigin | null = null;
+
+/**
  * 目前規則的**完整內容**。配對要用它算牌組（`checkOwnDeck` / 交叉驗算）。
  *
  * ⚠ 跟 `costRule`（摘要）分開放，而且**絕不進 `Snapshot`** —— 那是 700 筆的
  * COST 表，每次狀態變動都在 IPC 上搬一次的話，畫面會一格一格地卡。
  */
 let costRuleFull: CostRule | null = null;
+/**
+ * `costRuleFull` 的 contentHash。**跟著它一起設，不要用到的時候現算。**
+ *
+ * 現算不是慢的問題，是**會漂移**：規則標籤（`ruleTag`）跟大廳人數的判準都靠
+ * 這個值，散在三個地方各算一次的話，總有一天其中一個會拿到不同步的那一份。
+ */
+let costRuleHash: string | null = null;
 
 // ---------------------------------------------------------------------------
 // 編輯 COST
@@ -1171,11 +1876,13 @@ const COST_FILE_FILTERS = [
  * ⚠ **失敗要講出來並清掉路徑**，不能安靜地當作沒選。玩家把規則檔刪了或搬走
  * 之後，如果 UI 還顯示「已選規則」而數字是原版的，他會以為插件壞了。
  */
-function loadCostRule(path: string | null): void {
+function loadCostRule(path: string | null, origin: CostRuleOrigin = "file"): void {
   if (path === null) {
     costRule = null;
     costRuleFull = null;
+    costRuleHash = null;
     costRuleError = null;
+    costRuleOrigin = null;
     engine?.setCostRule(null);
     return;
   }
@@ -1245,7 +1952,9 @@ function loadCostRule(path: string | null): void {
       bands,
     });
     costRuleFull = rule;
+    costRuleHash = contentHash(rule);
     costRuleError = null;
+    costRuleOrigin = origin;
     const t = costRule.tableEntries;
     const summary = [
       `角色 ${t.characters}`,
@@ -1272,17 +1981,162 @@ function loadCostRule(path: string | null): void {
     const message = err instanceof Error ? err.message : String(err);
     costRule = null;
     costRuleFull = null;
+    costRuleHash = null;
+    costRuleOrigin = null;
     engine?.setCostRule(null);
     // ⚠ 記錄**不夠**。記錄在「戰鬥」頁，玩家人在「牌組 › Cost 表」頁，
     // 那一頁只會說「還沒選規則」—— 看起來就是按了沒反應。所以同時留一份
     // 給畫面，由 Cost 頁自己顯示。
     costRuleError = { fileName: basename(path), message, hint: costRuleHint(message) };
     log(`✗ COST 規則載入失敗，已停用：${message}`);
-    // 路徑留在設定檔裡只會每次開機再失敗一次。清掉，讓玩家重選。
+    // 玩家自己選的檔壞掉／不在了 → 清掉路徑讓他重選，否則每次開機再失敗一次。
+    //
+    // ⚠ **預設規則不走這條。** 它的路徑不是玩家填的，清掉沒有任何意義，而且
+    // `applyCostRule()` 已經幫它處理過退路了（快取壞掉退回安裝包那份）。
     // ⚠ editProfile 會 pushState，而那要在 costRuleError 設好之後 ——
     // 反過來的話畫面會先收到一份「沒選規則、也沒有錯誤」的狀態。
-    if (profile.costRulePath !== null) editProfile(profile.id, { costRulePath: null });
+    if (origin === "file" && profile.costRulePath !== null) {
+      editProfile(profile.id, { costRulePath: null });
+    }
   }
+}
+
+/**
+ * 有一份新的預設規則載進來了，但**遊戲那邊還是舊價格**。
+ *
+ * 卡片價格是 `Page.addScriptToEvaluateOnNewDocument` 裝的 —— 它只對之後載入
+ * 的 document 生效，所以規則換了之後遊戲得重載一次才看得到新數字。
+ */
+let pendingRuleReload = false;
+
+/**
+ * 這一條連線已經為了「頁面比插件早載入」自動重載過了嗎。
+ *
+ * ⚠ 防的是無窮重載：判斷 `stale` 要問頁面，而問回來的答案不保證永遠正確。
+ * 斷線重連會重置（`onStatus`）—— 玩家關掉遊戲再開仍然救得回來。
+ */
+let autoReloadedThisAttach = false;
+
+/**
+ * 等一個安全的時機把新規則套到遊戲上。
+ *
+ * ⚠ **這是 `updater.ts` 那條線的同一條原則**：下載可以完全靜默，
+ * **換版的那一刻不能落在對戰進行中**。判準也是同一個（`status.armed` ——
+ * 攔截真的掛在 socket 上），因為「連上但還在大廳」正是最安全、也最常見的
+ * 停留點。
+ *
+ * ⚠ 套用**一定要留一行 log**。玩家事後要查得到「今天的數字為什麼跟昨天不同」，
+ * 而那是靜默更新唯一不能省的義務。
+ */
+async function applyPendingReload(): Promise<void> {
+  if (engine === null) return;
+
+  // 兩種要重載的理由，判準與時機**完全一樣**，所以走同一支：
+  //
+  //   pendingRuleReload  規則換了（玩家自己選的，或中間人推下來一份新的）
+  //   cost.stale         頁面上那份卡片資料**不是這一份規則**改出來的
+  //
+  // ⚠ 後者有兩種情形，而且都是常態不是異常：
+  //
+  //   1. 玩家從 Steam 開遊戲 —— 遊戲先跑起來、插件兩秒後才接上，而
+  //      `addScriptToEvaluateOnNewDocument` 只管之後載入的 document
+  //   2. 插件重開之後載到**另一份**規則 —— 頁面上留著上一份的數字
+  //
+  // 兩種的症狀是同一句「插件開著，cost 沒生效」，而第 2 種一度判不出來
+  // （見 `costsStamp`：判準原本只問「改過嗎」，不問「改的是哪一份」）。
+  const stale = latest?.cost.stale === true;
+  if (!pendingRuleReload && !stale) return;
+  // 對戰中：留著旗標，下一次狀態推播時再試（`onStatus` 會叫這支）。
+  if (latest?.armed === true) return;
+  // 還沒連上遊戲就不必重載 —— 遊戲一啟動就會帶著新規則載入，那才是常態。
+  if (latest?.connected !== true) {
+    pendingRuleReload = false;
+    return;
+  }
+  // ⚠ **一條連線只自動重載一次。** `stale` 是從頁面問回來的，而「問回來的
+  // 東西一定有一天會回錯」—— 沒有這道閘的話，一個永遠回 true 的答案會讓
+  // 遊戲無限重載，而玩家完全無法把它跟插件連在一起。旗標在斷線時重置
+  // （見 `onStatus`），所以下一次接上仍然救得回來。
+  if (stale && !pendingRuleReload) {
+    if (autoReloadedThisAttach) return;
+    autoReloadedThisAttach = true;
+  }
+
+  const why = pendingRuleReload;
+  pendingRuleReload = false;
+  try {
+    await engine.reloadGame();
+    log(
+      why
+        ? "⟳ 新的 COST 表已套用（不在對戰中，已請遊戲重新載入）"
+        : "⟳ 遊戲畫面上的價格不是現在這份規則（遊戲比插件早開，或剛換過規則）—— 已請遊戲重新載入",
+    );
+  } catch (err) {
+    log(`✗ 套用新 COST 表時重載失敗：${err instanceof Error ? err.message : String(err)}`);
+  }
+  pushState();
+}
+
+/**
+ * 照配置把規則載進來。**開機、換模式、規則更新下來時都走這一支。**
+ *
+ * ```
+ *   off     → 不載（原版數字）
+ *   file    → 玩家選的那個檔
+ *   default → 中間人發下來的那份；壞掉或沒有 → 安裝包裡那份
+ * ```
+ *
+ * ⚠ **`default` 的退路一定要有。** 快取那份是下載來的，而下載來的東西總有
+ * 一天會壞（磁碟滿、防毒攔一半、手動改壞）。沒有退路的話症狀是「插件昨天
+ * 好好的，今天所有卡都變回原版價格」，而玩家完全不知道發生什麼事。
+ */
+function applyCostRule(): void {
+  if (profile.costRuleMode === "off") {
+    loadCostRule(null);
+    return;
+  }
+  if (profile.costRuleMode === "file") {
+    loadCostRule(profile.costRulePath);
+    return;
+  }
+
+  const choice = resolveDefaultRule(APP_DIR);
+  if (choice === null) {
+    // 兩份都不在 —— 打包時漏掉了規則檔才會走到這裡。
+    loadCostRule(null);
+    costRuleError = {
+      fileName: "default.ulrcost.json",
+      message: "找不到插件附的預設 COST 表",
+      hint: "重新安裝一次插件；或到「Cost 表」自己選一份規則檔。",
+    };
+    log("✗ 找不到預設 COST 表（安裝包裡那份也不在）");
+    return;
+  }
+
+  loadCostRule(choice.path, choice.source === "feed" ? "feed" : "bundled");
+  // 下載來的那份載不起來 → 退回安裝包裡那份，而且要講出來。
+  if (costRuleFull === null && choice.source === "feed") {
+    log("⚠ 下載來的預設 COST 表載不起來，改用插件附的那一份");
+    loadCostRule(bundledRulePath(), "bundled");
+  }
+}
+
+/**
+ * 玩家在「Cost 表」那一頁換了規則（選檔、換模式、停用）。
+ *
+ * ⚠ **換完要自己重載，不能只換記憶體裡那份。** 卡片價格是
+ * `addScriptToEvaluateOnNewDocument` 裝的，只對**之後**載入的 document 生效 ——
+ * 頁面上那份資料早就在快取裡，換規則對它一點作用都沒有。這裡原本只換不重載，
+ * 而症狀是「我明明選了規則，數字沒變」（記錄檔還會說載入成功）。
+ *
+ * ⚠ **這裡不直接呼叫 `reloadGame()`。** 走 `applyPendingReload()` 那條線的
+ * 理由跟自動更新完全一樣：它只在**不在對戰中**時動手，正在打的話留著旗標，
+ * 等這一場結束（`onStatus`）再做。玩家在對戰中打開設定換規則不該被踢出去。
+ */
+function changeCostRule(): void {
+  applyCostRule();
+  pendingRuleReload = true;
+  void applyPendingReload();
 }
 
 /** 改配置的連線設定。**埠變了要重開實例才會生效** —— 引擎綁在啟動時的埠上。 */
@@ -1310,14 +2164,19 @@ app.whenReady().then(() => {
       pushState();
     },
     onStatus: (status) => {
+      // ⚠ 斷線就把「這條連線自動重載過了」忘掉。玩家關掉遊戲再開是家常便飯，
+      // 而那是一個全新的頁面 —— 沿用上一條連線的旗標會讓新的那次救不回來。
+      if (latest?.connected === true && !status.connected) autoReloadedThisAttach = false;
       latest = status;
       pushState();
       refreshTray();
+      // 有規則等著套用的話，這裡是唯一會知道「對戰結束了」的地方。
+      void applyPendingReload();
     },
   });
 
   // ⚠ 要在 engine 建好之後 —— loadCostRule 會呼叫 engine.setCostOverrides()。
-  loadCostRule(profile.costRulePath);
+  applyCostRule();
   // ⚠ 同樣要在 engine 建好之後。這裡只是把玩家上次的選擇交給引擎，真正裝到
   // 頁面上是接上遊戲之後的事（`#syncHiddenStages`）。
   engine.setHiddenStages(profile.hiddenStages);
@@ -1384,17 +2243,35 @@ app.whenReady().then(() => {
     const picked = result.canceled ? undefined : result.filePaths[0];
     if (picked === undefined) return snapshot();
 
-    editProfile(profile.id, { costRulePath: picked });
-    loadCostRule(picked);
+    // ⚠ 選了檔就等於離開預設模式。少了 `costRuleMode` 這一格的話，下次開機
+    // 會被預設規則蓋回去 —— 而畫面上寫著他選的那個檔名。
+    editProfile(profile.id, { costRulePath: picked, costRuleMode: "file" });
+    changeCostRule();
     pushState();
     return snapshot();
   });
 
-  /** 取消套用，回到原版數字。一樣要等下次載入才會變回去。 */
+  /**
+   * 換 COST 規則的來源（預設／自己的檔／停用）。
+   *
+   * ⚠ 切回 `file` 時**沿用上次選過的路徑**，沒選過就什麼都不載 —— 畫面那邊
+   * 會顯示「還沒選檔」並附上選檔按鈕。這比「切過去就跳檔案選擇框」好：
+   * 玩家可能只是想看看有哪些選項。
+   */
+  ipcMain.handle("ulr:cost-mode", (_event, raw: unknown) => {
+    const mode: CostRuleMode = raw === "file" || raw === "off" ? raw : "default";
+    editProfile(profile.id, { costRuleMode: mode });
+    changeCostRule();
+    if (mode === "off") log("· 自訂 COST 已停用（不在對戰中的話會自己重載一次）");
+    pushState();
+    return snapshot();
+  });
+
+  /** 取消套用，回到原版數字。 */
   ipcMain.handle("ulr:cost-clear", () => {
-    editProfile(profile.id, { costRulePath: null });
-    loadCostRule(null);
-    log("· 自訂 COST 已停用（要重載遊戲才會變回原版數字）");
+    editProfile(profile.id, { costRuleMode: "off" });
+    changeCostRule();
+    log("· 自訂 COST 已停用（不在對戰中的話會自己重載一次）");
     pushState();
     return snapshot();
   });
@@ -1402,8 +2279,9 @@ app.whenReady().then(() => {
   /**
    * 重載遊戲讓注入生效。
    *
-   * ⚠ **會打斷對戰。** 按鈕文案要講明白 —— 這是玩家自己的決定，插件不該
-   * 在選好規則之後自動重載。
+   * ⚠ **會打斷對戰**，所以按鈕文案要講明白 —— 按下去是玩家自己的決定。
+   * 換規則本身已經**不需要**按它了（`changeCostRule()` 會挑一個不在對戰中的
+   * 時機自己重載），這顆留著是給「我就是要現在」與那條路沒生效時用的。
    */
   ipcMain.handle("ulr:cost-reload", async () => {
     try {
@@ -1576,61 +2454,20 @@ app.whenReady().then(() => {
    * 玩家親手按下的按鈕上 —— 任何輪詢、重試、狀態同步都不准叫它。
    */
   ipcMain.handle("ulr:match-queue-start", async (_event, options: MatchQueueOptions) => {
-    if (pairing !== null) return { ok: false as const, reason: "已經在配對中了。" };
-    if (costRuleFull === null) {
-      // 沒有規則就沒有「約定」可言 —— 那正是這個功能存在的理由。
-      return { ok: false as const, reason: "自動配對要先選一份 COST 規則（牌組 › Cost 表）。" };
-    }
-    const driver = await engine?.matchDriver().catch(() => null);
-    if (!driver) return { ok: false as const, reason: "還沒連上遊戲" };
-
-    // ⚠ 開房設定**從配置讀**，不從畫面收。畫面送過來的話會有兩份真相，而
-    // 「我改了設定但開出來的是舊的」這種 bug 完全看不出來。
+    // ⚠ 托盤這條路的檔位**從配置讀**，不從畫面收。畫面送過來的話會有兩份
+    // 真相，而「我改了設定但開出來的是舊的」這種 bug 完全看不出來。
     const m = profile.match;
-    const p = new MatchPairing({
-      endpoint: engine?.linkEndpoint ?? "",
-      rule: costRuleFull,
+    return await startPairing({
       channel: options.channel,
       costLimit: m.limitOn ? m.limit : null,
-      room: {
-        // ⚠ 房名不在這裡 —— 引擎照「規則名 + 檔位」自己組（`buildRoomName`）。
-        // 3vs3 與遊戲自己的 ±N 也不在：兩個都是固定的（`ROOM_MULTI`、
-        // `ROOM_DECK_COST_BAND`）。
-        stage: m.stage,
-        friend: false,
-      },
-      driver,
-      onStatus: (s) => {
-        pairingStatus = s;
-        // ⚠ 停下來就把物件放掉。留著的話玩家再按「開始配對」只會收到
-        // 「已經在配對中了」，而畫面上明明寫著已停止 —— 那是最讓人以為插件
-        // 壞掉的一種狀態。
-        //
-        // `idle` 跟 `blocked` 都要放：配對成功走到底（對手進房、對戰開始）
-        // 之後狀態機會自己回到 idle，而那正是玩家最可能馬上想再排一次的時候。
-        if (s.phase === "blocked" || s.phase === "idle") pairing = null;
-        // ⚠ 配對頁是**自己輪詢**的（見 `MatchPageState` 的說明），所以這裡
-        // 不 pushState —— 那會把整份 Snapshot 推給畫面，而配對狀態不在裡面。
-      },
-      onLog: (line) => log(line),
+      costFloor: null,
     });
-    pairing = p;
-    await p.start();
-    // ⚠ **`start()` 期間推出去的狀態不算數，回來時的 `phase` 才是真的。**
-    // 這行原本只在被擋下來時清掉（`if (…) pairing = null`），於是 `start()`
-    // 中途只要推出一次 idle，上面 `onStatus` 就把 `pairing` 設成 null 而**沒有
-    // 人補回來** —— 排隊照跑，但玩家按「停止」是空操作（`pairing?.stop()`
-    // 打在 null 上），畫面永遠停在「排隊中」。改成整個重指派，那條路就不存在。
-    //
-    // 開場就被擋下來（沒在大廳、牌組超標…）的話不要留著一個死掉的物件，
-    // 否則玩家改好之後再按會收到「已經在配對中了」。
-    pairing = p.status.phase === "idle" || p.status.phase === "blocked" ? null : p;
-    return { ok: true as const, status: p.status };
   });
 
   ipcMain.handle("ulr:match-queue-stop", async () => {
     await pairing?.stop();
     pairing = null;
+    void pushLobbyState();
     return { ok: true as const, status: pairingStatus };
   });
 
@@ -1741,6 +2578,14 @@ app.whenReady().then(() => {
 
   probeTimer = setInterval(() => void probeGamePorts(), PROBE_INTERVAL_MS);
 
+  // 迪特赫姆大廳那顆「快速比賽」。⚠ 這是**玩家親手按的**，跟托盤上那顆一樣
+  // 會開房消耗 AP —— 所以它掛在點擊事件上，不掛在任何輪詢裡。
+  engine.onLobbyQuick((press) => void onLobbyQuick(press));
+  // 人數那幾行。⚠ **這一拍只是「看一眼」，不等於一個 HTTP 請求** —— 真的去問
+  // 中間人的節奏由 `pushLobbyState()` 自己把關（`LOBBY_COUNT_MS`，外加「剛進
+  // 頻道」那一次）。只有玩家真的坐在 duel 頻道的大廳時才會送請求。
+  lobbyTimer = setInterval(() => void pushLobbyState(), LOBBY_TICK_MS);
+
   void engine.start();
   // 靜默下載、安全的時機才套用。細節與那個「安全」的定義見 updater.ts。
   startAutoUpdate({
@@ -1748,6 +2593,39 @@ app.whenReady().then(() => {
     isBusy: () => latest?.armed === true,
     onLog: (l) => log(l),
   });
+
+  /**
+   * 預設 COST 表的自動更新。**只在預設模式下做事** —— 玩家自己選了檔的話，
+   * 我們一個位元組都不該碰他的規則。
+   *
+   * ⚠ 收到新規則之後**不重載遊戲**。卡片價格是 `addScriptToEvaluateOnNewDocument`
+   * 裝的，要下次載入才生效（見 `engine.ts` 的那張表），而重載會打斷對戰 ——
+   * 這裡照 `updater.ts` 同一條線：等一個安全的時機，由 `#applyPendingReload()`
+   * 在玩家不在對戰中時自己做掉。
+   */
+  startRuleFeed({
+    appDir: APP_DIR,
+    ruleSetId: costRuleFull?.ruleSetId ?? null,
+    currentVersion: costRule?.version ?? null,
+    onLog: (l) => log(l),
+    onRule: (next) => {
+      if (profile.costRuleMode !== "default") {
+        log(`· 收到新的預設 COST 表 ${next.version}，但你現在用的是自己選的規則，沒有套用`);
+        return;
+      }
+      applyCostRule();
+      pushState();
+      pendingRuleReload = true;
+      void applyPendingReload();
+    },
+  });
+
+  // 上一次換檔（zip 版）留下來的 `*.ulrold`。**執行中的檔案只能改名不能刪**，
+  // 所以清理一定得等到下一次啟動 —— 也就是現在。
+  {
+    const stale = cleanupStaleFiles(dirname(process.execPath));
+    if (stale > 0) log(`· 已清掉上次更新留下的 ${stale} 個舊檔`);
+  }
 
   // ⚠ 更新後由安裝檔叫起來的那一次**不要跳視窗**。玩家可能正在打字、
   // 正在看牌組 —— 更新本來就該是他察覺不到的事，跳一個視窗出來剛好相反。

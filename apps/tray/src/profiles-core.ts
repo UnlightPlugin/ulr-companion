@@ -29,6 +29,17 @@ import {
 /** 客戶端種類。只影響提示文字與預設埠，不影響接線方式（兩邊都是 CDP）。 */
 export type ClientKind = "desktop" | "web";
 
+/** COST 規則的來源。詳見 {@link Profile.costRuleMode}。 */
+export type CostRuleMode = "default" | "file" | "off";
+
+/**
+ * 新裝、以及**所有舊設定檔沒選過規則的人**都是這個。
+ *
+ * ⚠ 這個常數改成 `off` 就等於把「裝上去就有規則」整個關掉 —— 它不是隨手挑的
+ * 預設值，是這個功能的全部。
+ */
+export const DEFAULT_COST_RULE_MODE: CostRuleMode = "default";
+
 /**
  * 自動配對開房時要用的設定。
  *
@@ -139,7 +150,29 @@ export interface Profile {
    */
   readyTint: number | null;
   /**
-   * 自訂 COST 規則檔的路徑。`null` = 不套用（原版數字）。
+   * COST 規則從哪裡來。
+   *
+   * | 值        | 意思                                                          |
+   * | --------- | ------------------------------------------------------------- |
+   * | `default` | 插件附的那一份（會自己更新，見 `rule-feed.ts`）。**預設值**    |
+   * | `file`    | 玩家自己選的檔（`costRulePath`）                               |
+   * | `off`     | 不套用，遊戲顯示原版數字                                       |
+   *
+   * ⚠ **舊設定檔沒有這一欄，一律遷成 `default`（選過檔的人是 `file`）。**
+   * 這是一次行為改變：升級之後，從來沒選過規則的人會**開始看到自訂數字**。
+   * 那是刻意的 —— 自訂 COST 要成為一個環境，就不能要求每個人先做一次設定，
+   * 而「先自己去選一份規則檔」正是絕大多數人不會做的那一步。
+   *
+   * ⚠ `off` 一定要是一個**明確的值**，不能用「路徑是 null」代表。兩者混在
+   * 一起的話，玩家按「停用」之後下次開機又會被預設規則套回去，而畫面上寫著
+   * 「已停用」。
+   */
+  costRuleMode: CostRuleMode;
+  /**
+   * 自訂 COST 規則檔的路徑。`null` = 沒選過檔。
+   *
+   * ⚠ 這一格**只在 `costRuleMode === "file"` 時有意義**。留著路徑不清掉是
+   * 刻意的：玩家從自己的檔切到預設、再切回來時不必重選一次。
    *
    * ⚠ 存**路徑**而不是規則內容。理由有兩個：規則檔有 700 個鍵，塞進設定檔
    * 會讓它膨脹到幾十 KB 且每次存檔都重寫；而且玩家在外面改了那個檔之後，
@@ -346,6 +379,7 @@ export function normalizeProfile(raw: unknown): Profile | null {
     prefs: normalizePrefs(r["prefs"] as Partial<LinkPrefs> | undefined),
     readyTint: normalizeTint(typeof r["readyTint"] === "number" ? r["readyTint"] : null),
     costRulePath: normalizeCostRulePath(r["costRulePath"]),
+    costRuleMode: normalizeCostRuleMode(r["costRuleMode"], r["costRulePath"]),
     // ⚠ `=== true` 而不是「有值就算」：舊設定檔沒有這一欄，那時候的預設就該是
     // 關閉。插件裝上去不該改變玩家在遊戲裡看到的選單。
     hiddenStages: r["hiddenStages"] === true,
@@ -355,6 +389,23 @@ export function normalizeProfile(raw: unknown): Profile | null {
     // 舊設定檔沒有這一欄 → 0（不檢查）。插件裝上去不該憑空替作者宣告一個單位。
     editUnit: normalizeEditUnit(r["editUnit"]),
   };
+}
+
+/**
+ * 舊設定檔的遷移在這裡。**只有兩種來源**：
+ *
+ * - 有 `costRuleMode` → 照它（那是新版寫的）
+ * - 沒有 → 看舊的 `costRulePath`：選過檔的人是 `file`，其餘 `default`
+ *
+ * ⚠ 沒選過檔的人遷成 `default` 而不是 `off`，那是這次改動的**全部重點**
+ * （見 {@link Profile.costRuleMode}）。想回原版數字的人在畫面上按一次「停用」，
+ * 那時才會寫進 `off` —— 而寫進去之後就不會再被預設值蓋掉。
+ */
+function normalizeCostRuleMode(raw: unknown, legacyPath: unknown): CostRuleMode {
+  if (raw === "default" || raw === "file" || raw === "off") return raw;
+  return typeof legacyPath === "string" && legacyPath.trim() !== ""
+    ? "file"
+    : DEFAULT_COST_RULE_MODE;
 }
 
 /** 空字串一律當成「沒選」，避免 UI 出現一個看不見的假選擇。 */
@@ -374,8 +425,10 @@ export function defaultProfile(kind: ClientKind = "desktop"): Profile {
     prefs: normalizePrefs(undefined),
     // 預設不染色 —— 玩家指定「官方原本的白色」是預設值。
     readyTint: null,
-    // 預設不套用自訂 COST。插件裝上去不該改變玩家看到的數字。
+    // ⚠ **預設就套用插件附的那一份規則**（不是「不套用」）。理由見
+    // `costRuleMode` —— 這是 v1.1 起刻意改掉的立場。
     costRulePath: null,
+    costRuleMode: DEFAULT_COST_RULE_MODE,
     // 同理，預設不動遊戲的開房選單。
     hiddenStages: false,
     match: { ...DEFAULT_MATCH_PREFS },

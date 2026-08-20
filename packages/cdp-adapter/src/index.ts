@@ -60,9 +60,11 @@ export {
 export type { FindGameContextOptions, GameExecutionContext } from "./game-context.js";
 
 export {
+  buildCostPatchCoverageExpression,
   buildCostPatchScript,
   COST_TABLE_IDS,
   COST_TABLE_TARGETS,
+  costsStamp,
   DEFAULT_MAX_WAIT_MS,
   DEFAULT_POLL_INTERVAL_MS,
   InvalidCostOverrideError,
@@ -109,13 +111,37 @@ export {
 export type { HiddenStage, HiddenStagePatchOptions, HiddenStageStatus } from "./patch-stage.js";
 
 export {
+  buildLobbyErrorExpression,
+  buildLobbyPatchScript,
+  buildLobbyStateExpression,
+  DEFAULT_LOBBY_POLL_MS,
+  isLobbyReport,
+  LOBBY_SCRIPT_VERSION,
+  LOBBY_STATUS_EXPRESSION,
+  LOBBY_UNINSTALL_EXPRESSION,
+  parseLobbyStatus,
+  ROOM_ERROR_AP_SHORT,
+  ROOM_ERROR_DECK_INVALID,
+} from "./patch-lobby.js";
+export type {
+  LobbyPatchOptions,
+  LobbyQuickPressed,
+  LobbyReport,
+  LobbyState,
+  LobbyStatus,
+  LobbyTierCount,
+} from "./patch-lobby.js";
+
+export {
   ARCADIA_STAGES,
   buildCreateRoomExpression,
   buildJoinRoomExpression,
+  canAffordDuel,
   CHANNEL_NAMES,
   COST_RANGES,
   costTiersFor,
   DEFAULT_ROOM_NAME,
+  duelApCost,
   findOwnRoom,
   HIDDEN_STAGES,
   ROOM_NAME_MAX_LENGTH,
@@ -127,6 +153,7 @@ export type {
   ChannelInfo,
   CreateRoomOptions,
   CreateRoomResult,
+  DuelAffordability,
   JoinRoomResult,
   MatchContext,
   RoomDeck,

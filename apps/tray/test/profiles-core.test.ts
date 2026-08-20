@@ -208,7 +208,9 @@ describe("這個實例要用哪一份", () => {
 
   // --- 自訂 COST 規則路徑 ---------------------------------------------------
 
-  it("預設不套用自訂 COST —— 裝了插件不該改變玩家看到的數字", () => {
+  it("新裝就套用插件附的那一份規則（v1.1 起）", () => {
+    expect(defaultProfile("desktop").costRuleMode).toBe("default");
+    // 路徑仍然是空的 —— 預設規則不走 `costRulePath`，它是「玩家自己選的檔」那一格。
     expect(defaultProfile("desktop").costRulePath).toBeNull();
   });
 
@@ -216,6 +218,49 @@ describe("這個實例要用哪一份", () => {
     // undefined 會讓 UI 的 `?? null` 之外的判斷（例如 JSON 往返）行為不一致。
     const p = normalizeProfile({ id: "x", name: "舊的", port: 59222 });
     expect(p?.costRulePath).toBeNull();
+  });
+
+  // --- 規則來源（default / file / off）--------------------------------------
+
+  it("⚠ 從來沒選過規則的舊使用者會開始套用預設規則", () => {
+    // 這是一次刻意的行為改變：自訂 COST 要成為一個環境，就不能要求每個人
+    // 先做一次設定，而「先自己去選一份規則檔」正是大多數人不會做的那一步。
+    const p = normalizeProfile({ id: "x", name: "舊的", port: 59222 });
+    expect(p?.costRuleMode).toBe("default");
+  });
+
+  it("已經選過檔的舊使用者不受影響 —— 他的檔還是他的檔", () => {
+    const path = String.raw`E:\rules\mine.ulrcost.json`;
+    const p = normalizeProfile({ id: "x", port: 59222, costRulePath: path });
+    expect(p?.costRuleMode).toBe("file");
+    expect(p?.costRulePath).toBe(path);
+  });
+
+  it("⚠ 明確停用過的人不會被預設值蓋回去", () => {
+    const p = normalizeProfile({ id: "x", port: 59222, costRuleMode: "off" });
+    expect(p?.costRuleMode).toBe("off");
+  });
+
+  it("看不懂的值退回預設", () => {
+    expect(normalizeProfile({ id: "x", port: 59222, costRuleMode: "亂寫" })?.costRuleMode).toBe(
+      "default",
+    );
+    expect(normalizeProfile({ id: "x", port: 59222, costRuleMode: 42 })?.costRuleMode).toBe(
+      "default",
+    );
+  });
+
+  it("切到預設模式時**不會**把玩家選過的路徑清掉", () => {
+    // 切回去的時候不必重選一次 —— 那一格是他的，不是模式的。
+    const path = String.raw`E:\rules\mine.ulrcost.json`;
+    const p = normalizeProfile({
+      id: "x",
+      port: 59222,
+      costRulePath: path,
+      costRuleMode: "default",
+    });
+    expect(p?.costRuleMode).toBe("default");
+    expect(p?.costRulePath).toBe(path);
   });
 
   it("路徑原樣留著 —— 這是檔案系統的字串，不能正規化掉", () => {

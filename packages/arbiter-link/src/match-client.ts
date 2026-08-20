@@ -326,6 +326,12 @@ export class MatchQueueClient {
         // 狀態沒變（本來就在 waiting）時 setStatus 不會發，但人數變了要讓 UI 知道。
         this.#options.onStatus?.(this.#status, this.#waiting);
         return;
+      // ⚠ 排隊中的人不會收到這一則（中間人只推給「看的人」），但協定裡有它，
+      // 所以這裡要明講「不理」—— 少了這一格，將來有人在中間人那邊改成也推給
+      // 排隊的人時，這支會安靜地把它當成未知訊息丟掉，而不是有人去想清楚
+      // 「排隊中的畫面該不該跟著動」。
+      case "q-count":
+        return;
       case "q-matched":
         this.#setStatus("matched");
         this.#options.onMatched?.({

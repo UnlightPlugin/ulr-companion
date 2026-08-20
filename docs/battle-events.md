@@ -651,6 +651,43 @@ dmgToA  1   0   9  true  false      atkSuc 12 − defSuc 1 = 11  ← 只扣到 1
 
 ---
 
+## ⚠ 戰鬥結束時客戶端自己做了什麼（2026-08-20 讀 `MainA.on_result`）
+
+事件流看不出這一段，但它決定了插件怎麼判斷「打完了」。從跑著的客戶端讀
+`MainA.on_result` 的原始碼：
+
+```js
+async on_result(...) {
+  this.socket.off();                          // 拆掉所有 listener
+  this.socket.emit("leaveRoom", this.room);
+  this.socket.disconnect();                   // ← 連線在這裡就關了
+  … 等結束語音播完，可能好幾秒 …
+  this.events.emit("result", …);
+  this.scene.stop(); this.scene.start("Result");   // ← 場景到這裡才收掉
+}
+```
+
+兩件事**中間隔著好幾秒**，而插件在第一行就該停手了。
+
+⚠⚠ **場景物件不會跟著消失。** Phaser 的 `scene.keys.MainA` 是同一顆物件，
+`room`、`config.rule`、`socket`、`ok` 打完之後全部原封不動還在上面（實測：
+結算畫面上 `config.rule` 仍然是 `"duel"`、`room` 仍然是上一場的）。所以
+**不能用「這些欄位讀不讀得到」當成「在不在對戰」**。可用的判準只有兩個：
+
+| 判準                        | 對戰中    | 打完之後       |
+| --------------------------- | --------- | -------------- |
+| `MainA.socket.readyState`   | 1 OPEN    | **3**          |
+| `MainA.sys.settings.status` | 5 RUNNING | **8** SHUTDOWN |
+
+`socket` 是遊戲自己的 `WSClient`（**沒有 `connected` 欄位** —— 那是 socket.io
+的形狀），它把底下那顆 WebSocket 的 `readyState` 透出來。
+
+順帶確認：`MainA.room === MainA.config.room_id`，而且**兩個客戶端完全相同**
+（雜湊比對過）；`MainA.id` 才是每個玩家各自不同的那個 36 字元字串。
+側通道用 `roomKey(MainA.room)` 把兩邊配在一起是對的。
+
+---
+
 ## 戰鬥結束、獎勵階段、升等
 
 18 回合打滿之後的完整序列（2026-08-02 實測）：

@@ -14,7 +14,9 @@ import {
   STAGES,
   buildCreateRoomExpression,
   buildJoinRoomExpression,
+  canAffordDuel,
   costTiersFor,
+  duelApCost,
   findOwnRoom,
   type ChannelInfo,
   type RoomEntry,
@@ -758,5 +760,64 @@ describe("findOwnRoom", () => {
 
   it("分不出來就回 null", () => {
     expect(findOwnRoom([room({ roomId: "a" }), room({ roomId: "b" })], "燈皇")).toBeNull();
+  });
+});
+
+/**
+ * AP 與免費對戰星星。
+ *
+ * ⚠ 這一組釘的是玩家 2026-08-19 回報的那件事：AP 剩 2 卻排得下去，一路排到
+ * 配對成功、開房時才跳「AP不足」—— 而那時對手已經在等一間永遠不會開的房。
+ */
+describe("開一場要多少 AP", () => {
+  it("一般頻道：3vs3 要 5、1vs1 要 2", () => {
+    expect(duelApCost({ multi: true, crossplay: false })).toBe(5);
+    expect(duelApCost({ multi: false, crossplay: false })).toBe(2);
+  });
+
+  it("跨平台頻道：3vs3 只要 4", () => {
+    expect(duelApCost({ multi: true, crossplay: true })).toBe(4);
+    expect(duelApCost({ multi: false, crossplay: true })).toBe(2);
+  });
+});
+
+describe("排不排得下去", () => {
+  it("AP 夠就排得下去，而且不吃星星", () => {
+    expect(canAffordDuel({ ap: 30, duelFree: 0, cost: 5 })).toEqual({
+      ok: true,
+      byStar: false,
+      cost: 5,
+    });
+  });
+
+  it("剛好等於需要的 AP 也算夠", () => {
+    expect(canAffordDuel({ ap: 5, duelFree: 0, cost: 5 })).toMatchObject({ ok: true });
+  });
+
+  it("⚠ AP 不夠但**還有星星** → 照樣排得下去，而且是靠星星", () => {
+    expect(canAffordDuel({ ap: 2, duelFree: 3, cost: 5 })).toEqual({
+      ok: true,
+      byStar: true,
+      cost: 5,
+    });
+    expect(canAffordDuel({ ap: 0, duelFree: 1, cost: 5 })).toMatchObject({ byStar: true });
+  });
+
+  it("⚠ AP 不夠又沒星星 → 擋下來，而且要講得出差多少", () => {
+    expect(canAffordDuel({ ap: 2, duelFree: 0, cost: 5 })).toEqual({ ok: false, cost: 5, ap: 2 });
+  });
+
+  it("⚠⚠ 讀不到就當排得下去 ——「不知道」不是「不夠」", () => {
+    // 玩家還沒進大廳、db_player 還沒回來、遊戲改版換了欄位都會走到這裡。
+    // 擋錯的代價是完全排不了隊而且看不出原因；放行只是退回原本的行為。
+    expect(canAffordDuel({ ap: null, duelFree: null, cost: 5 })).toMatchObject({ ok: true });
+    expect(canAffordDuel({ ap: null, duelFree: 0, cost: 5 })).toMatchObject({ ok: true });
+  });
+
+  it("星星欄位讀不到但 AP 夠 → 照樣過", () => {
+    expect(canAffordDuel({ ap: 10, duelFree: null, cost: 5 })).toMatchObject({
+      ok: true,
+      byStar: false,
+    });
   });
 });

@@ -79,10 +79,12 @@ export type { LinkClientOptions, LinkStatus } from "./link-client.js";
 // 階段 3：中間人的位址從「一個埠號」變成「一個字串」，兩種傳輸共用同一份解析。
 export {
   DEFAULT_LINK_TARGET,
+  DEFAULT_RULE_FEED,
   DEFAULT_UPDATE_FEED,
   describeTarget,
   endpointOf,
   parseLinkTarget,
+  queueCountUrl,
   queueUrl,
   roomUrl,
   SERVICE_ORIGIN,
@@ -128,3 +130,13 @@ export {
   queueReconnectDelay,
 } from "./match-client.js";
 export type { MatchQueueClientOptions, QueueStatus } from "./match-client.js";
+
+export { QueueWatcher, WATCH_COUNT_TIMEOUT_MS } from "./queue-watch.js";
+export type {
+  QueueWatcherOptions,
+  QueueWatchTarget,
+  WatchSocketFactory,
+  WatchSocketHandlers,
+  WatchSocketLike,
+  WatchState,
+} from "./queue-watch.js";

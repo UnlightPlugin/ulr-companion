@@ -80,6 +80,39 @@ describe("配對鍵", () => {
     expect(matchCriteriaString(base)).toContain("ulr-match-v2");
   });
 
+  /**
+   * 開口檔（`COST90+`）自己一條佇列（WP-17）。
+   *
+   * ⚠ 這一組釘的是**相容性**：有上限的檔位算出來的鍵一個位元都不能變，
+   * 否則舊版插件與新版永遠配不到，而症狀是安靜的。
+   */
+  it("⚠⚠ 不是開口檔時，鍵跟沒有這個欄位的舊版完全一樣", () => {
+    expect(matchCriteriaString({ ...base, costFloor: null })).toBe(matchCriteriaString(base));
+    expect(matchKey({ ...base, costLimit: 57, costFloor: null })).toBe(
+      matchKey({ ...base, costLimit: 57 }),
+    );
+  });
+
+  it("開口檔是另一條佇列 —— 跟「不設限」不是同一個地方", () => {
+    const open = { ...base, costLimit: null, costFloor: 90 };
+    expect(matchKey(open)).not.toBe(matchKey({ ...base, costLimit: null }));
+    expect(matchCriteriaString(open)).toContain("over90.00");
+  });
+
+  it("⚠ 有上限時開口檔那一格不算數（兩者互斥，上限說了算）", () => {
+    // 呼叫端不該同時給，但真的給了的話兩邊要算出同一個鍵，否則一邊排 57、
+    // 另一邊排 57+90 —— 兩個人都在「排隊中」而永遠配不到。
+    expect(matchKey({ ...base, costLimit: 57, costFloor: null })).toBe(
+      matchKey({ ...base, costLimit: 57 }),
+    );
+  });
+
+  it("不同下限的開口檔是不同佇列（官方把 90+ 改成 100+ 時）", () => {
+    expect(matchKey({ ...base, costLimit: null, costFloor: 90 })).not.toBe(
+      matchKey({ ...base, costLimit: null, costFloor: 100 }),
+    );
+  });
+
   it("⚠ 同一套規則的不同版本落在同一條佇列 —— 這正是 v2 要的", () => {
     // 兩個人的 contentHash 不同，但 ruleSetId 一樣 → 同一個鍵 → 配得到。
     expect(matchKey(base)).toBe(matchKey({ ...base }));
@@ -460,5 +493,93 @@ describe("token", () => {
     const seen = new Set<string>();
     for (let i = 0; i < 200; i++) seen.add(defaultTokenSource());
     expect(seen.size).toBe(200);
+  });
+});
+
+/**
+ * 只數同一份規則的人（2026-08-20）。
+ *
+ * ⚠⚠ 配對鍵裡**沒有規則版本**（那是刻意的，見 `matchCriteriaString`），所以
+ * 同一條佇列上站著規則內容不同的人是常態。畫面上寫「1 位玩家等待中」而那個人
+ * 因為驗算過不了永遠配不到，比寫 0 還糟 —— 玩家會一直等，然後以為插件壞了。
+ */
+describe("waitingWithTag", () => {
+  it("不挑標籤時跟 waiting 一樣", () => {
+    const q = queue();
+    q.join("a", hello);
+    q.join("b", helloV2);
+    // a 跟 b 會被湊成一對（佇列不比對標籤），所以先放一個第三人進來
+    q.join("c", hello);
+    expect(q.waitingWithTag(null)).toBe(q.waiting);
+  });
+
+  it("⚠ 只數同一份規則的人", () => {
+    const q = queue();
+    q.join("a", hello);
+    // a 立刻被配走的話就數不到人 —— 這裡只放同標籤的人進來驗計數
+    expect(q.waitingWithTag("same")).toBe(1);
+    expect(q.waitingWithTag("other")).toBe(0);
+  });
+
+  it("⚠ 已經配到人的不算 —— 那個位子不是空的", () => {
+    const q = queue();
+    q.join("a", hello);
+    q.join("b", hello);
+    // 兩個都被配走了
+    expect(q.waiting).toBe(0);
+    expect(q.waitingWithTag("same")).toBe(0);
+  });
+});
+
+/**
+ * 「只看不排」的兩則（2026-08-20）。
+ *
+ * ⚠⚠ **`q-watch` 絕對不能讓人進佇列。** 這兩則是為了把大廳那幾行人數從
+ * 輪詢改成推播而加的，而它們共用 `/q/<鍵>` 這條路 —— 一旦看的人被當成排隊的
+ * 人，症狀是「站在大廳什麼都沒按，卻被配到對手、被開房、被扣 AP」。
+ */
+describe("只看不排（q-watch／q-count）", () => {
+  it("標籤選填 —— 不帶就是「全部都數」", () => {
+    expect(
+      decodeQueue(JSON.stringify({ t: "q-watch", v: LINK_PROTOCOL_VERSION, key: "k" })),
+    ).toEqual({ t: "q-watch", v: LINK_PROTOCOL_VERSION, key: "k" });
+    expect(
+      decodeQueue(JSON.stringify({ t: "q-watch", v: LINK_PROTOCOL_VERSION, key: "k", tag: "t" })),
+    ).toEqual({ t: "q-watch", v: LINK_PROTOCOL_VERSION, key: "k", tag: "t" });
+  });
+
+  it("標籤太長 → 丟掉（同 q-hello 的理由）", () => {
+    const long = "x".repeat(65);
+    expect(
+      decodeQueue(JSON.stringify({ t: "q-watch", v: LINK_PROTOCOL_VERSION, key: "k", tag: long })),
+    ).toBeNull();
+  });
+
+  it("⚠ 方向要分清楚：q-watch 只有客戶端送，q-count 只有中間人送", () => {
+    const watch = { t: "q-watch", v: LINK_PROTOCOL_VERSION, key: "k" };
+    expect(decodeQueueServer(JSON.stringify(watch))).toBeNull();
+    expect(decodeQueue(JSON.stringify({ t: "q-count", waiting: 1 }))).toBeNull();
+  });
+
+  it("⚠ 人數會直接寫到遊戲畫面上，形狀驗死", () => {
+    expect(decodeQueueServer(JSON.stringify({ t: "q-count", waiting: 0 }))).toEqual({
+      t: "q-count",
+      waiting: 0,
+    });
+    // 負數／小數／字串一律當成壞訊息 —— 畫一個「-1 位玩家等待中」出來比
+    // 保留上一個數字糟得多。
+    expect(decodeQueueServer(JSON.stringify({ t: "q-count", waiting: -1 }))).toBeNull();
+    expect(decodeQueueServer(JSON.stringify({ t: "q-count", waiting: 1.5 }))).toBeNull();
+    expect(decodeQueueServer(JSON.stringify({ t: "q-count", waiting: "3" }))).toBeNull();
+  });
+
+  it("⚠⚠ 送給 MatchQueue 的話它什麼都不做 —— 看的人不進佇列", () => {
+    const q = queue();
+    q.join("a", hello);
+    const out = q.handle("a", { t: "q-watch", v: LINK_PROTOCOL_VERSION, key: "x" });
+    expect(out).toEqual([]);
+    // 佇列的內容一個字都沒變
+    expect(q.waiting).toBe(1);
+    expect(q.waiterOf("a")?.partner).toBeNull();
   });
 });

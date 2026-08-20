@@ -33,6 +33,7 @@ export {
   MatchPairing,
   negotiateStage,
   normalizeStagePick,
+  OPEN_TIER_WINDOW,
   outOfBand,
   parseDeckBody,
   parseEvalBody,
@@ -40,11 +41,15 @@ export {
   PEER_REPLY_TIMEOUT_MS,
   pickArcadiaStage,
   RANDOM_STAGE,
+  ROOM_MULTI,
   ROOM_NAME_FALLBACK,
   STAGE_WAIT_MS,
+  teamCostCenti,
+  tierForTotal,
 } from "./match-pairing.js";
 export type {
   CostBand,
+  CostTierPick,
   LimitCheck,
   PairingOptions,
   PairingPhase,

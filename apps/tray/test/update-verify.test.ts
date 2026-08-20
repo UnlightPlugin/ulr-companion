@@ -1,8 +1,8 @@
 import { generateKeyPairSync, sign } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { canonicalBytes } from "@ulr/rule-schema/canonical";
-import type { UpdateManifest } from "../src/update-verify.js";
-import { isNewerVersion, verifySignedFeed } from "../src/update-verify.js";
+import type { RuleManifest, UpdateManifest } from "../src/update-verify.js";
+import { isNewerVersion, verifySignedFeed, verifySignedRuleFeed } from "../src/update-verify.js";
 
 const keys = generateKeyPairSync("ed25519");
 const PUBLIC_PEM = keys.publicKey.export({ type: "spki", format: "pem" }).toString();
@@ -138,6 +138,67 @@ describe("只往新版走（防降版重播）", () => {
     ];
     for (const [a, b] of cases) {
       expect(isNewerVersion(a, b), `${a} vs ${b}`).toBe(false);
+    }
+  });
+});
+
+/**
+ * 預設 COST 表的清單（WP-17）。
+ *
+ * ⚠ 跟發布清單共用同一把鑰匙與同一套正規化，所以這一組釘的是「**內容真的被
+ * 簽章蓋到了**」—— 規則包整份帶在清單裡，改裡面任何一個數字都必須驗不過。
+ */
+describe("預設 COST 表的簽章", () => {
+  const RULE_MANIFEST: RuleManifest = {
+    ruleSetId: "tomorin/squeeze-band",
+    version: "1.1.0",
+    package: {
+      packageVersion: 1,
+      rule: { name: "夾擠式罰C", characters: { cc001_01: 17 } },
+      contentHash: "sha256:" + "a".repeat(64),
+    },
+    notes: "測試用",
+  };
+
+  function signedRule(manifest: RuleManifest, key = keys.privateKey): unknown {
+    return {
+      manifest,
+      signature: sign(null, Buffer.from(canonicalBytes(manifest)), key).toString("base64"),
+    };
+  }
+
+  it("自己簽的自己驗得過", () => {
+    expect(verifySignedRuleFeed(signedRule(RULE_MANIFEST), PUBLIC_PEM)).toEqual(RULE_MANIFEST);
+  });
+
+  it("⚠⚠ 改了規則內容就驗不過 —— 簽章蓋的是整份，不是只有版本號", () => {
+    const feed = signedRule(RULE_MANIFEST) as { manifest: RuleManifest };
+    // 一張卡從 17 改成 1：發布伺服器被入侵時最省事的那種竄改。
+    (feed.manifest.package as { rule: { characters: Record<string, number> } }).rule.characters[
+      "cc001_01"
+    ] = 1;
+    expect(verifySignedRuleFeed(feed, PUBLIC_PEM)).toBeNull();
+  });
+
+  it("別人的私鑰簽的不算", () => {
+    expect(
+      verifySignedRuleFeed(signedRule(RULE_MANIFEST, other.privateKey), PUBLIC_PEM),
+    ).toBeNull();
+  });
+
+  it("形狀不對一律回 null，不拋例外", () => {
+    const bad: unknown[] = [
+      null,
+      "字串",
+      { manifest: RULE_MANIFEST },
+      { manifest: { ...RULE_MANIFEST, ruleSetId: "沒有斜線" }, signature: "x" },
+      { manifest: { ...RULE_MANIFEST, package: null }, signature: "x" },
+      { manifest: { ...RULE_MANIFEST, version: "" }, signature: "x" },
+      { manifest: RULE_MANIFEST, signature: "不是 base64 的簽章" },
+    ];
+    for (const raw of bad) {
+      expect(() => verifySignedRuleFeed(raw, PUBLIC_PEM)).not.toThrow();
+      expect(verifySignedRuleFeed(raw, PUBLIC_PEM)).toBeNull();
     }
   });
 });

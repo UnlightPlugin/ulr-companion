@@ -29,6 +29,9 @@ export const HEALTH_PATH = "/health";
 /** 自動更新的發布清單。`apps/tray/src/updater.ts` 每小時來要一次。 */
 export const UPDATE_PATH = "/update";
 
+/** 預設 COST 表。`apps/tray/src/rule-feed.ts` 每小時來要一次。 */
+export const RULES_PATH = "/rules";
+
 /**
  * 從網址路徑取出房號。**不合格一律回 `null`，呼叫端要回 404。**
  *
@@ -148,4 +151,79 @@ export function parseQueuePath(pathname: string): string | null {
   const key = pathname.slice(QUEUE_PATH_PREFIX.length);
   if (key.length !== ROOM_KEY_LENGTH) return null;
   return /^[0-9a-f]+$/.test(key) ? key : null;
+}
+
+/** 等待人數的路由：`/qn?k=<鍵>&k=<鍵>…[&t=<規則標籤>]`。 */
+export const COUNT_PATH = "/qn";
+
+/**
+ * 只數這一份規則的人。查詢字串的參數名。
+ *
+ * ⚠ **這是「幾個人在等」跟「幾個人我打得到」的差別。** 配對鍵裡沒有規則版本
+ * （那是刻意的，見 `matchCriteriaString`），所以同一條佇列上會站著規則內容
+ * 不同的人 —— 他們配得到彼此的機率要看驗算過不過。畫面上寫「1 位玩家等待中」
+ * 而那個人永遠配不到，比寫 0 還糟。
+ *
+ * ⚠ 標籤是 `ruleTag(配對鍵, contentHash)` —— **拌過配對鍵**，所以中間人拿它
+ * 串不起「同一個人在不同頻道用的是不是同一份規則」（見 `ruleTag` 的說明）。
+ */
+export const COUNT_TAG_PARAM = "t";
+
+/** Worker 轉給 DO 時加在路徑尾巴的記號。DO 靠它分辨「這是要人數不是要連線」。 */
+export const COUNT_SUFFIX = "/count";
+
+/**
+ * 一次最多問幾條佇列。
+ *
+ * ⚠ **一定要有上限。** 每一個鍵都是一次 DO 的往返，而這條路由是**沒有身分、
+ * 誰都打得到**的 —— 沒有上限的話一個請求就能叫醒任意多個 Durable Object，
+ * 那是一條免費的放大攻擊。四是實際需要的數字（亞城也只有四檔），留 8 是餘裕。
+ */
+export const MAX_COUNT_KEYS = 8;
+
+/**
+ * 取出要問的那幾條佇列。**格式不對一律回 `null`，呼叫端要回 400。**
+ *
+ * 驗證跟 `parseQueuePath` 完全一樣（16 個十六進位字元）—— 兩邊的判準要是同一
+ * 個，否則會出現「連得上但問不到人數」這種只在其中一條路上發生的怪狀況。
+ */
+export function parseCountKeys(url: URL): string[] | null {
+  if (url.pathname !== COUNT_PATH) return null;
+  const keys = url.searchParams.getAll("k");
+  if (keys.length === 0 || keys.length > MAX_COUNT_KEYS) return null;
+  for (const key of keys) {
+    if (!isCountToken(key)) return null;
+  }
+  return keys;
+}
+
+/**
+ * 每一條佇列要數的是哪一份規則。**沒帶就是全部都數**（舊版插件會這樣）。
+ *
+ * ⚠⚠ **位置對位置**：第 i 個 `t` 配第 i 個 `k`。標籤是拌過配對鍵的
+ * （`ruleTag(配對鍵, contentHash)`），所以同一份規則在四個檔位上是四個不同的
+ * 字串 —— 不能只帶一個。數量對不上就是呼叫端組錯了，直接 400。
+ *
+ * ⚠ 格式不對回 `null` 而不是「當成沒帶」—— 兩者的差別是一個回 400、一個
+ * 安靜地回一個比較大的數字，而後者查起來會是「人數怎麼有時候對有時候不對」。
+ *
+ * | 回傳        | 意思                           |
+ * | ----------- | ------------------------------ |
+ * | `undefined` | 沒帶 → 不挑規則，全部都數      |
+ * | `null`      | 帶了但不合法 → 呼叫端要回 400  |
+ * | `string[]`  | 跟 `keys` 一樣長的標籤清單     |
+ */
+export function parseCountTags(url: URL, keyCount: number): string[] | null | undefined {
+  const tags = url.searchParams.getAll(COUNT_TAG_PARAM);
+  if (tags.length === 0) return undefined;
+  if (tags.length !== keyCount) return null;
+  for (const tag of tags) {
+    if (!isCountToken(tag)) return null;
+  }
+  return tags;
+}
+
+/** 配對鍵與規則標籤是同一種東西：16 個十六進位字元。 */
+function isCountToken(value: string): boolean {
+  return value.length === ROOM_KEY_LENGTH && /^[0-9a-f]+$/.test(value);
 }
