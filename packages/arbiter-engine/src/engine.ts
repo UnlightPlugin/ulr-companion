@@ -48,7 +48,16 @@ import type {
   CostOverrideTables,
   CostPatchReport,
   CostTableId,
+  DeckApplyResult,
+  DeckEditReport,
+  DeckEditState,
+  DeckEditStatus,
+  DeckPayload,
+  DeckSnapshot,
+  EditDeckRead,
+  GateRoom,
   HiddenStageStatus,
+  InventorySnapshot,
   LobbyQuickPressed,
   LobbyReport,
   LobbyState,
@@ -56,6 +65,9 @@ import type {
   OkPatchReport,
   PenaltyBand,
   PenaltyPatchReport,
+  RoomDeckPreload,
+  RoomGateReport,
+  RoomGateStatus,
   Seat,
 } from "@ulr/cdp-adapter";
 import type { CardCatalog } from "@ulr/rule-schema";
@@ -64,10 +76,12 @@ import {
   ArbiterRunner,
   COST_TABLE_IDS,
   createCdpAdapter,
+  DECK_EDIT_SCRIPT_VERSION,
   DEFAULT_DEBUG_PORT,
   DEFAULT_SPEED_LEASE_MS,
   explainDebugPort,
   HIDDEN_STAGES,
+  LOBBY_SCRIPT_VERSION,
   normalizeTint,
   resolveDebugPort,
 } from "@ulr/cdp-adapter";
@@ -321,6 +335,25 @@ export class ArbiterEngine {
   #hiddenStages = false;
   /** 誰在等「玩家按了大廳那顆快速比賽」。 */
   #lobbyHandlers = new Set<(press: LobbyQuickPressed) => void>();
+  /** 誰在等「玩家在牌組編輯畫面點了什麼」。 */
+  #deckHandlers = new Set<(report: DeckEditReport) => void>();
+  /**
+   * 牌組庫介面現在該顯示什麼。`null` = 呼叫端還沒給過（那就不裝）。
+   *
+   * ⚠ 留著是為了重連與重載後補裝 —— 跟 `#costs`／`#bands` 同一個理由。
+   * 引擎**不產生**這份狀態，它整份是托盤那邊算的（那裡才有牌組庫的檔案）。
+   */
+  #deckEditState: DeckEditState | null = null;
+  /** 誰在等「換房了」與「開戰被攔下來了」。 */
+  #roomGateHandlers = new Set<(report: RoomGateReport) => void>();
+  /**
+   * 頁面那邊的閘門要不要作用（= 有沒有一副牌還沒寫進 Deck1）。
+   *
+   * ⚠ 留著是為了重連與重載後補推 —— 新裝上的腳本預設是 `false`。
+   */
+  #roomGatePending = false;
+  /** 每一房「進去就該用的那一副」。重裝之後靠它補推回去。 */
+  #roomDecks: Partial<Record<GateRoom, RoomDeckPreload>> = {};
   #stopping = false;
   #loop: Promise<void> | null = null;
   #resolveStop: (() => void) | null = null;
@@ -572,13 +605,18 @@ export class ArbiterEngine {
    *
    * 托盤每 15 秒問一次這支，所以補裝最慢 15 秒內發生；`#reinstall()` 那條路
    * 更快（幾秒），兩條都留是因為它們偵測到的是不同的東西。
+   *
+   * ⚠ **版本不一樣也要重裝。** 理由跟 `deckEditStatus()` 那段一模一樣：托盤
+   * 換了新版但遊戲沒重載時，頁面上活著的是**上一個托盤**裝的那份腳本，而
+   * 「裝了沒」對它回 true。大廳這支比較不容易撞到（每次接上遊戲都會無條件
+   * 重裝一次），但撞到時症狀同樣是「發了版卻沒生效」。
    */
   async lobbyStatus(): Promise<LobbyStatus | null> {
     const adapter = this.#adapter;
     if (adapter === null) return null;
     try {
       const status = await adapter.lobbyStatus();
-      if (status.installed) return status;
+      if (status.installed && status.version === LOBBY_SCRIPT_VERSION) return status;
       return await adapter.installLobbyPatch();
     } catch {
       return null;
@@ -600,6 +638,293 @@ export class ArbiterEngine {
       if (!status.installed) this.#log(`· 大廳快速比賽還沒裝上：${status.reason ?? "原因不明"}`);
     } catch (err) {
       this.#log(`✗ 大廳快速比賽注入失敗：${describe(err)}`);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 本地牌組庫（WP-18）
+  //
+  // ⚠ 引擎在這一組裡**只做搬運**：把托盤算好的狀態推到畫面上、把玩家的點擊
+  // 送回托盤。牌組庫的內容、存檔、庫存檢查全都在托盤那一層 —— 那裡才有檔案，
+  // 而且 `applyDecks()` 會改玩家的帳號狀態，那條路徑一定要留在「玩家親手按了
+  // 什麼」的那一層。
+  // -------------------------------------------------------------------------
+
+  /** 玩家在牌組編輯畫面點了什麼（選牌組、加減、改名、拖曳、換房）。 */
+  onDeckEdit(handler: (report: DeckEditReport) => void): () => void {
+    this.#deckHandlers.add(handler);
+    return () => this.#deckHandlers.delete(handler);
+  }
+
+  /**
+   * 換掉牌組庫介面上顯示的東西。**沒接上遊戲時只記著，接上時自己會補。**
+   *
+   * ⚠ 頁面說「沒裝」就當場補裝 —— 理由跟 `lobbyStatus()` 那段一模一樣：
+   * 這是 `evaluate` 裝的，遊戲一重載就整份消失，而重載**不會**斷 CDP 連線。
+   *
+   * ⚠⚠ **「裝了但不是這一版」也要補裝。** 頁面回 `"ok"` 以外的任何東西都算
+   * 要重裝（`not-installed` 或 `stale:<版本>`），所以這裡比的是 `!== "ok"`，
+   * 不是列舉那幾種失敗字串 —— 漏掉一種的代價是功能沉默地不生效。
+   * 完整說明在 `buildDeckEditStateExpression()` 與 `deckEditStatus()`。
+   */
+  async setDeckEditState(state: DeckEditState): Promise<void> {
+    this.#deckEditState = state;
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    try {
+      const result = await adapter.setDeckEditState(state);
+      if (result !== "ok") {
+        await adapter.installDeckEdit(state);
+        await adapter.setDeckEditState(state);
+      }
+    } catch {
+      // 連線正在死。下一輪重連會重裝，這裡不必吵。
+    }
+  }
+
+  /** 呼叫端最後一次推的狀態。重連後補裝用的就是它。 */
+  get deckEditState(): DeckEditState | null {
+    return this.#deckEditState;
+  }
+
+  /**
+   * 牌組庫介面現在在頁面上的狀態。沒接上遊戲、或還沒給過狀態時是 `null`。
+   *
+   * `mounted` 才是「玩家人就在牌組編輯畫面」—— 托盤靠它決定要不要去讀 Deck1
+   * 存回牌組庫（見 main.ts 的自動存檔）。
+   *
+   * ## ⚠⚠ 版本不一樣也要重裝，不能只看「裝了沒」
+   *
+   * 2026-09-09 花了一整輪才找到：發了新版、程式碼確實換了、托盤也重啟了，
+   * **頁面上跑的還是舊腳本**。因為這條路原本寫的是「`installed` 就回去」，而
+   * 頁面上那份是托盤重啟**之前**裝的 —— 遊戲沒重載，`window.__ulrDeckEdit`
+   * 就一直活著，於是新的托盤問一句「裝了沒？」得到 true 就不管了。
+   *
+   * 這條路又是唯一會補裝的：`#syncDeckEdit()` 只在接上遊戲與遊戲重載時跑，
+   * 而**那時候 `#deckEditState` 還是 null**（托盤要先讀到帳號指紋才知道載哪
+   * 一份牌組庫），所以它直接 return 了；之後就再也沒有人叫它。
+   *
+   * 症狀非常難認：功能「沒生效」，但版本號、檔案時間、發版記錄全部是新的。
+   * `patch-deck-edit.ts` 檔頭那句「改了腳本一定要 +1，否則裝了新版也偵測不
+   * 出來」寫得沒錯 —— 只是在這裡之前，沒有任何一處真的去比那個號碼。
+   */
+  async deckEditStatus(): Promise<DeckEditStatus | null> {
+    const adapter = this.#adapter;
+    const state = this.#deckEditState;
+    if (adapter === null || state === null) return null;
+    try {
+      const status = await adapter.deckEditStatus();
+      if (status.installed && status.version === DECK_EDIT_SCRIPT_VERSION) return status;
+      await adapter.installDeckEdit(state);
+      return await adapter.deckEditStatus();
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 讀玩家目前的三副牌組與帳號指紋。
+   *
+   * ⚠ 走的是**自己開的 game 服務連線**，玩家人在哪個畫面都讀得到 —— 見
+   * `deck-write.ts` 檔頭的「服務分池」。
+   */
+  async readDecks(): Promise<DeckSnapshot> {
+    const adapter = this.#adapter;
+    if (adapter === null) throw new Error("還沒接上遊戲");
+    return await adapter.readDecks();
+  }
+
+  /**
+   * **覆寫玩家的三副牌組。**
+   *
+   * ⚠ 這支會改變玩家的帳號狀態而且沒有復原。引擎自己永遠不會呼叫它 ——
+   * 只有玩家在牌組選單裡點了某一副才會走到這裡。
+   */
+  async applyDecks(decks: DeckPayload[], deckCheck: boolean): Promise<DeckApplyResult> {
+    const adapter = this.#adapter;
+    if (adapter === null) throw new Error("還沒接上遊戲");
+    return await adapter.applyDecks(decks, deckCheck);
+  }
+
+  /** 讀玩家的卡片庫存。「只用真的有的卡」那條線靠它。 */
+  async readInventory(): Promise<InventorySnapshot> {
+    const adapter = this.#adapter;
+    if (adapter === null) throw new Error("還沒接上遊戲");
+    return await adapter.readInventory();
+  }
+
+  /**
+   * **換牌組的快路徑**：只換客戶端記憶體並重畫，一次網路都不跑。
+   *
+   * 回 `ok` 表示換好了；`not-active` 表示編輯畫面沒開著，呼叫端要改走
+   * {@link applyDecks}。⚠ 這支**不寫伺服器** —— 玩家離開編輯畫面時遊戲會
+   * 自己把 `deck1` 送出去，而那時它裝的正是我們寫進去的。
+   */
+  async writeEditDeck(deck: DeckPayload, label?: string): Promise<string> {
+    const adapter = this.#adapter;
+    if (adapter === null) throw new Error("還沒接上遊戲");
+    return await adapter.writeEditDeck(deck, label);
+  }
+
+  /**
+   * 牌組編輯畫面**正在編輯**的那一副（客戶端記憶體）。畫面沒開著回 `null`。
+   *
+   * ⚠ 玩家人在那個畫面時，這支才是真相 —— 他拖的卡片要等他離開畫面才會上
+   * 伺服器，`readDecks()` 讀到的是舊的。
+   */
+  async readEditDeck(): Promise<EditDeckRead | null> {
+    const adapter = this.#adapter;
+    if (adapter === null) return null;
+    try {
+      return await adapter.readEditDeck();
+    } catch {
+      return null;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 進了哪一房、開戰前先套牌組（WP-19）
+  //
+  // ⚠ 跟牌組庫那一組同樣的分工：引擎**只做搬運**。哪一房該套哪一副、寫不寫得
+  // 進去，全部在托盤那一層。
+  // -------------------------------------------------------------------------
+
+  /**
+   * 玩家換房了，或者開戰被攔下來了。
+   *
+   * ⚠ 收到 `room-gate-hold` 就**一定要**盡快呼叫 `releaseRoomGate()` ——
+   * 玩家的畫面已經是「已開始」而且點不動任何東西了。
+   */
+  onRoomGate(handler: (report: RoomGateReport) => void): () => void {
+    this.#roomGateHandlers.add(handler);
+    return () => this.#roomGateHandlers.delete(handler);
+  }
+
+  /**
+   * 告訴頁面「有沒有一副牌還沒寫進 Deck1」。
+   *
+   * 頁面說「沒裝」就當場補裝 —— 跟 `setDeckEditState()` 同一個理由：這是
+   * `evaluate` 裝的，遊戲一重載就整份消失，而重載**不會**斷 CDP 連線。
+   */
+  async setRoomGatePending(pending: boolean): Promise<void> {
+    this.#roomGatePending = pending;
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    try {
+      const result = await adapter.setRoomGatePending(pending);
+      if (result === "not-installed") {
+        await adapter.installRoomGate();
+        await adapter.setRoomGatePending(pending);
+      }
+    } catch {
+      // 連線正在死。重連時會重裝並補推。
+    }
+  }
+
+  /**
+   * 推「每一房進去要用哪一副」給頁面，讓房間場景**第一幀就畫對的牌**。
+   *
+   * 見 `patch-room-gate.ts` 的 `RoomDeckPreload`。**沒接上遊戲時只記著**，
+   * 接上（或遊戲重載後重裝）時 `#syncRoomGate()` 會補推。
+   */
+  async setRoomDecks(decks: Partial<Record<GateRoom, RoomDeckPreload>>): Promise<void> {
+    this.#roomDecks = decks;
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    try {
+      await adapter.setRoomDecks(decks);
+    } catch {
+      // 連線正在死。重連時會重裝並補推。
+    }
+  }
+
+  /** 放行被攔下來的那一下開戰。 */
+  async releaseRoomGate(): Promise<string> {
+    const adapter = this.#adapter;
+    if (adapter === null) return "not-connected";
+    try {
+      return await adapter.releaseRoomGate();
+    } catch {
+      // 放不了行也不必吵：頁面自己的看門狗會在幾秒內原樣放行。
+      return "failed";
+    }
+  }
+
+  /** 頁面上閘門的狀態。沒接上遊戲時是 `null`。 */
+  async roomGateStatus(): Promise<RoomGateStatus | null> {
+    const adapter = this.#adapter;
+    if (adapter === null) return null;
+    try {
+      return await adapter.roomGateStatus();
+    } catch {
+      return null;
+    }
+  }
+
+  #onRoomGateReport(report: RoomGateReport): void {
+    if (report.type === "room-gate-timeout") {
+      this.#log(`⚠ 開戰前來不及換牌組（${report.event}）—— 這一場用的是原本那副`);
+    }
+    for (const handler of [...this.#roomGateHandlers]) {
+      try {
+        handler(report);
+      } catch {
+        // §9.1：訂閱者出錯不得讓插件或遊戲崩潰。
+      }
+    }
+  }
+
+  /**
+   * 把房間偵測與開戰閘門裝上去。**每次接上遊戲、每次遊戲重載之後都會自己叫。**
+   *
+   * ⚠ 裝完要把 `pending` 補推回去 —— 新裝上的那份預設是 `false`，不補的話
+   * 遊戲重載之後排著隊的那一副在開戰時**不會**被攔下來。
+   */
+  async #syncRoomGate(): Promise<void> {
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    try {
+      await adapter.installRoomGate();
+      await adapter.setRoomGatePending(this.#roomGatePending);
+      // ⚠⚠ **裝完一定要把每一房的牌組補推回去。** 重裝是「一律從原狀開始」，
+      // 頁面上那份 decks 會被清光 —— 不補的話遊戲重載之後進房又會閃一下上一房
+      // 的牌，而且一行錯誤都沒有。測試裡有一題專門釘這件事。
+      await adapter.setRoomDecks(this.#roomDecks);
+    } catch (err) {
+      this.#log(`✗ 房間偵測注入失敗：${describe(err)}`);
+    }
+  }
+
+  /** 頁面回報玩家在牌組編輯畫面點了什麼。 */
+  #onDeckEditReport(report: DeckEditReport): void {
+    if (report.type === "deck-ui-error") {
+      this.#log(`✗ 牌組庫介面出錯：${report.message}`);
+      return;
+    }
+    for (const handler of [...this.#deckHandlers]) {
+      try {
+        handler(report);
+      } catch {
+        // §9.1：訂閱者出錯不得讓插件或遊戲崩潰。
+      }
+    }
+  }
+
+  /**
+   * 把牌組庫介面裝上去。**每次接上遊戲、每次遊戲重載之後都會自己叫一次。**
+   *
+   * ⚠ 還沒有狀態就什麼都不做 —— 那是正常的開機順序：托盤要先讀到帳號指紋
+   * 才知道該載哪一份牌組庫，而讀那個得等遊戲起來。托盤讀完會呼叫
+   * `setDeckEditState()`，那支自己會補裝。
+   */
+  async #syncDeckEdit(): Promise<void> {
+    const adapter = this.#adapter;
+    const state = this.#deckEditState;
+    if (adapter === null || state === null) return;
+    try {
+      await adapter.installDeckEdit(state);
+    } catch (err) {
+      this.#log(`✗ 牌組庫介面注入失敗：${describe(err)}`);
     }
   }
 
@@ -1039,6 +1364,15 @@ export class ArbiterEngine {
         // 裝一次就夠 —— 玩家進頻道時按鈕會自己出現。
         adapter.onLobbyReport((r) => this.#onLobbyReport(r));
         await this.#syncLobby();
+        // 牌組庫的介面同理（也是輪詢等玩家進 Edit 畫面）。⚠ 這時候多半還沒有
+        // 狀態可以裝 —— 托盤要先讀到帳號指紋才知道載哪一份庫，而那要等遊戲
+        // 起來。真正裝上去的是托盤那邊的 `setDeckEditState()`。
+        adapter.onDeckEditReport((r) => this.#onDeckEditReport(r));
+        await this.#syncDeckEdit();
+        // 房間偵測與開戰閘門。⚠ 這支**不需要等狀態**（它自己輪詢等場景），
+        // 而且一定要在這裡裝：玩家可能一連上就人在任務房裡按 START。
+        adapter.onRoomGateReport((r) => this.#onRoomGateReport(r));
+        await this.#syncRoomGate();
 
         // ⚠ 不必等到進對戰。沒有 socket 也裝得上（回 waiting），頁面每 200ms
         // 自己補掛 —— 「先開插件再開遊戲」才是玩家實際的順序。
@@ -1131,6 +1465,11 @@ export class ArbiterEngine {
           this.#log(gone === "uninstalled" ? "✓ 攔截已拆除，遊戲回到原本行為" : "（本來就沒裝）");
           // 加速沒有心跳，不拆就會一直留在頁面上直到玩家自己重載遊戲。
           await adapter.uninstallSpeedPatch();
+          // ⚠ 牌組庫的選單同理，而且症狀更難懂：插件關掉之後選單還開得起來，
+          // 玩家點一副牌，回報送到一個已經不存在的 binding —— **什麼都不會
+          // 發生，也沒有任何錯誤訊息**。連我們自己開的那條 game 連線一起收掉。
+          await adapter.uninstallDeckEdit();
+          await adapter.closeDeckSocket();
         } catch (err) {
           this.#log(`✗ 拆不掉攔截：${describe(err)}（遊戲重載一次就會乾淨）`);
         }
@@ -1175,6 +1514,9 @@ export class ArbiterEngine {
       // 沒出現」—— 而「有時候」正好就是**我們自己重載過**的那些時候
       // （卡片價格要套用時會重載一次），所以它比看起來常見得多。
       await this.#syncLobby();
+      // ⚠ 牌組庫的介面也是。少了這一行，症狀是「牌盒點不開了」，而玩家同樣
+      // 不會把它跟「剛剛重載過」連在一起。
+      await this.#syncDeckEdit();
     } catch (err) {
       // 連線多半也快死了 —— 那條路會走重連，這裡安靜退場就好。
       this.#emit({ error: `重裝攔截失敗：${describe(err)}` });

@@ -90,6 +90,50 @@ import {
   parseIndexedCards,
   parseProfiles,
 } from "./read-card-assets.js";
+import type { DeckEditReport, DeckEditState, DeckEditStatus } from "./patch-deck-edit.js";
+import {
+  buildDeckEditPatchScript,
+  buildDeckEditStateExpression,
+  DECK_EDIT_STATUS_EXPRESSION,
+  DECK_EDIT_UNINSTALL_EXPRESSION,
+  isDeckEditReport,
+  parseDeckEditStatus,
+} from "./patch-deck-edit.js";
+import type {
+  GateRoom,
+  RoomDeckPreload,
+  RoomGateReport,
+  RoomGateStatus,
+} from "./patch-room-gate.js";
+import {
+  buildRoomGatePendingExpression,
+  buildRoomGateDecksExpression,
+  buildRoomGateScript,
+  isRoomGateReport,
+  parseRoomGateStatus,
+  ROOM_GATE_RELEASE_EXPRESSION,
+  ROOM_GATE_STATUS_EXPRESSION,
+  ROOM_GATE_UNINSTALL_EXPRESSION,
+} from "./patch-room-gate.js";
+import type {
+  DeckApplyResult,
+  DeckPayload,
+  DeckSnapshot,
+  EditDeckRead,
+  InventorySnapshot,
+} from "./deck-write.js";
+import {
+  DECK_READ_EXPRESSION,
+  DECK_SOCKET_CLOSE_EXPRESSION,
+  EDIT_DECK_READ_EXPRESSION,
+  INVENTORY_READ_EXPRESSION,
+  buildDeckApplyExpression,
+  buildEditDeckWriteExpression,
+  parseDeckApplyResult,
+  parseDeckSnapshot,
+  parseEditDeck,
+  parseInventorySnapshot,
+} from "./deck-write.js";
 import type { GamePageSession } from "./session.js";
 import { attachToGamePage } from "./session.js";
 import { discoverDebuggerUrl, WebSocketTransport } from "./transport.js";
@@ -170,6 +214,7 @@ export class CdpAdapter {
   #okHandlers = new Set<(report: OkPatchReport) => void>();
   #speedHandlers = new Set<(report: SpeedPatchReport) => void>();
   #lobbyHandlers = new Set<(report: LobbyReport) => void>();
+  #deckEditHandlers = new Set<(report: DeckEditReport) => void>();
   #closeHandlers = new Set<(reason: string) => void>();
 
   constructor(options: CdpAdapterOptions = {}) {
@@ -415,6 +460,123 @@ export class CdpAdapter {
   }
 
   /**
+   * 讀出玩家目前的三副牌組與帳號指紋（WP-18）。
+   *
+   * 走的是**自己開的 game 服務連線**，不是玩家當下那條 socket —— 理由見
+   * `deck-write.ts` 檔頭的「服務分池」。所以玩家人在哪個畫面都讀得到。
+   */
+  async readDecks(): Promise<DeckSnapshot> {
+    const raw = await this.evaluate<string>(DECK_READ_EXPRESSION);
+    return parseDeckSnapshot(raw);
+  }
+
+  /**
+   * **覆寫玩家的三副牌組。**
+   *
+   * ⚠ 這支會改變玩家的帳號狀態，而且原版介面沒有「復原」。呼叫端必須是玩家
+   * 明確按下的動作，而且**要先有備份**（`readDecks()` 存起來）。
+   *
+   * ⚠ `ack === false` 表示伺服器沒收到 —— 多半是送錯服務池。這時候**不要**
+   * 把本地狀態當成已寫入。
+   */
+  async applyDecks(decks: DeckPayload[], deckCheck: boolean): Promise<DeckApplyResult> {
+    const raw = await this.evaluate<string>(buildDeckApplyExpression(decks, deckCheck));
+    return parseDeckApplyResult(raw);
+  }
+
+  /**
+   * 讀**牌組編輯畫面正在編輯的那一副**（客戶端記憶體）。畫面沒開著回 `null`。
+   *
+   * ⚠ 玩家拖卡片改的是記憶體，遊戲要等他離開畫面才送上伺服器 —— 所以人在
+   * 那個畫面時，這支才是真相，`readDecks()` 讀到的是舊的。詳見
+   * `deck-write.ts` 的 {@link EDIT_DECK_READ_EXPRESSION}。
+   */
+  async readEditDeck(): Promise<EditDeckRead | null> {
+    const raw = await this.evaluate<string>(EDIT_DECK_READ_EXPRESSION);
+    return parseEditDeck(raw);
+  }
+
+  /**
+   * **換牌組的快路徑**：直接換掉編輯畫面正在用的那個記憶體物件並重畫，
+   * 一次網路都不跑（原版 ◀▶ 就是這樣，見 {@link buildEditDeckWriteExpression}）。
+   *
+   * 回 `ok` / `not-active`（畫面沒開著，呼叫端要改走 {@link applyDecks}）。
+   *
+   * ⚠ **這支不會寫進伺服器。** 玩家離開編輯畫面時遊戲會自己送出去。
+   */
+  /**
+   * 把一副牌畫到玩家**現在看得到的那個畫面**上（牌組編輯畫面，或任務／渦／
+   * 對戰房）。⚠ 只動客戶端記憶體，**不碰伺服器**。
+   *
+   * `label` 是要顯示在房裡那行小字上的牌組名（房間場景才有意義）。不給就不動
+   * 那行字。
+   */
+  async writeEditDeck(deck: DeckPayload, label?: string): Promise<string> {
+    return await this.evaluate<string>(buildEditDeckWriteExpression(deck, label));
+  }
+
+  /** 讀玩家的卡片庫存。「只用真的有的卡」那條線靠它。 */
+  async readInventory(): Promise<InventorySnapshot> {
+    const raw = await this.evaluate<string>(INVENTORY_READ_EXPRESSION);
+    return parseInventorySnapshot(raw);
+  }
+
+  /** 關掉牌組用的那條連線。 */
+  async closeDeckSocket(): Promise<string> {
+    return await this.evaluate<string>(DECK_SOCKET_CLOSE_EXPRESSION);
+  }
+
+  // -------------------------------------------------------------------------
+  // 牌組庫的遊戲內介面（WP-18）
+  //
+  // ⚠ 這一組**只畫畫面、只收點擊**。牌組怎麼存、寫不寫得進去、庫存夠不夠，
+  // 全部在呼叫端（`@ulr/deck-library` 與 `applyDecks()`）—— 見
+  // `patch-deck-edit.ts` 檔頭的「這支不決定任何牌組內容」。
+  // -------------------------------------------------------------------------
+
+  /** 訂閱「玩家在牌組編輯畫面點了什麼」。 */
+  onDeckEditReport(handler: (report: DeckEditReport) => void): () => void {
+    this.#deckEditHandlers.add(handler);
+    return () => this.#deckEditHandlers.delete(handler);
+  }
+
+  /**
+   * 把牌組庫的介面裝到牌組編輯畫面上。**不需要 reload。**
+   *
+   * ⚠ 跟大廳那顆按鈕同一種東西：`evaluate` 裝的，**遊戲一重載就沒了**，
+   * 重連或重載之後要再裝一次。
+   *
+   * ⚠ 玩家不在 Edit 畫面時裝也是對的 —— 腳本自己輪詢等他進去（見
+   * `patch-deck-edit.ts` 的「Edit 場景每次進來都是重新 create」）。所以回傳
+   * `installed` 不代表畫面上已經看得到東西，那要問 `deckEditStatus().mounted`。
+   */
+  async installDeckEdit(state: DeckEditState): Promise<string> {
+    return await this.evaluate<string>(
+      buildDeckEditPatchScript({ bindingName: REPORT_BINDING_NAME, state }),
+    );
+  }
+
+  /** 裝了沒、玩家人是不是就在 Edit 畫面。 */
+  async deckEditStatus(): Promise<DeckEditStatus> {
+    const raw = await this.evaluate<string>(DECK_EDIT_STATUS_EXPRESSION);
+    return parseDeckEditStatus(raw);
+  }
+
+  /**
+   * 把新狀態推給畫面。**選單上的每一個字都由這支決定。**
+   *
+   * 回 `not-installed` 表示頁面上根本沒有那支腳本（多半是遊戲重載過），
+   * 呼叫端該改叫 `installDeckEdit()`。
+   */
+  async setDeckEditState(state: DeckEditState): Promise<string> {
+    return await this.evaluate<string>(buildDeckEditStateExpression(state));
+  }
+
+  async uninstallDeckEdit(): Promise<string> {
+    return await this.evaluate<string>(DECK_EDIT_UNINSTALL_EXPRESSION);
+  }
+
+  /**
    * 裝上自訂 COST。
    *
    * 吃四張表（`{ characters, monsters, equipment, eventCards }`），也吃只有
@@ -607,6 +769,69 @@ export class CdpAdapter {
   async lobbyStatus(): Promise<LobbyStatus> {
     const raw = await this.evaluate<string>(LOBBY_STATUS_EXPRESSION);
     return parseLobbyStatus(raw);
+  }
+
+  // ── 進了哪一房、開戰前先套牌組（WP-19） ──────────────────────────────────
+
+  #roomGateHandlers = new Set<(report: RoomGateReport) => void>();
+
+  /**
+   * 訂閱「換房了」與「開戰被攔下來了」。
+   *
+   * ⚠ 收到 `room-gate-hold` 就**一定要**在幾秒內呼叫 `releaseRoomGate()` ——
+   * 那一下開戰正被壓著，而玩家的畫面已經是「已開始」的樣子。頁面自己有看門狗
+   * 兜底（8 秒），但那條路會讓玩家用舊牌組開打。
+   */
+  onRoomGateReport(handler: (report: RoomGateReport) => void): () => void {
+    this.#roomGateHandlers.add(handler);
+    return () => this.#roomGateHandlers.delete(handler);
+  }
+
+  /**
+   * 裝上房間偵測與開戰閘門。
+   *
+   * ⚠ 跟其他 `Runtime.evaluate` 的注入一樣，**遊戲一重載就會被沖掉** ——
+   * 重連時要再裝一次。
+   */
+  async installRoomGate(): Promise<RoomGateStatus> {
+    const raw = await this.evaluate<string>(
+      buildRoomGateScript({ bindingName: REPORT_BINDING_NAME }),
+    );
+    return parseRoomGateStatus(raw);
+  }
+
+  async roomGateStatus(): Promise<RoomGateStatus> {
+    const raw = await this.evaluate<string>(ROOM_GATE_STATUS_EXPRESSION);
+    return parseRoomGateStatus(raw);
+  }
+
+  /**
+   * 告訴頁面「有沒有一副牌還沒寫進 Deck1」。
+   *
+   * `false` 時閘門完全不作用（開戰的 emit 原樣直通），所以**寫完一定要記得推
+   * `false` 回去** —— 忘了的話每一次開戰都會被攔一下，然後靠看門狗放行。
+   */
+  async setRoomGatePending(pending: boolean): Promise<string> {
+    return await this.evaluate<string>(buildRoomGatePendingExpression(pending));
+  }
+
+  /**
+   * 把「每一房進去要用哪一副」事先推給頁面，讓房間場景**第一幀就畫對的牌**。
+   *
+   * 見 `patch-room-gate.ts` 的 {@link RoomDeckPreload} —— 這是唯一會把牌組內容
+   * 下放到頁面的東西，而且只為了時序，決定權仍然整個在 Node。
+   */
+  async setRoomDecks(decks: Partial<Record<GateRoom, RoomDeckPreload>>): Promise<string> {
+    return await this.evaluate<string>(buildRoomGateDecksExpression(decks));
+  }
+
+  /** 放行被攔下來的那一下開戰。 */
+  async releaseRoomGate(): Promise<string> {
+    return await this.evaluate<string>(ROOM_GATE_RELEASE_EXPRESSION);
+  }
+
+  async uninstallRoomGate(): Promise<string> {
+    return await this.evaluate<string>(ROOM_GATE_UNINSTALL_EXPRESSION);
   }
 
   /** 把等待人數與配對狀態推到畫面上。**畫面上的每一個字都由這支決定。** */
@@ -866,6 +1091,14 @@ export class CdpAdapter {
     }
     if (isLobbyReport(parsed)) {
       dispatch(this.#lobbyHandlers, parsed);
+      return;
+    }
+    if (isDeckEditReport(parsed)) {
+      dispatch(this.#deckEditHandlers, parsed);
+      return;
+    }
+    if (isRoomGateReport(parsed)) {
+      dispatch(this.#roomGateHandlers, parsed);
     }
   }
 }

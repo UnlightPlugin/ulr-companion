@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { CostPatchReport } from "@ulr/cdp-adapter";
+import type { CostPatchReport, DeckEditReport } from "@ulr/cdp-adapter";
 import { createCdpAdapter, NotConnectedError, REPORT_BINDING_NAME } from "@ulr/cdp-adapter";
 import { FakeTransport } from "./fake-transport.js";
 
@@ -152,6 +152,27 @@ describe("CdpAdapter", () => {
     );
 
     expect(seen).toHaveLength(0);
+  });
+
+  it("牌組編輯畫面的回報走同一個 binding，用 type 分流", async () => {
+    const t = fakeGame();
+    const adapter = await connected(t);
+
+    const decks: DeckEditReport[] = [];
+    const costs: CostPatchReport[] = [];
+    adapter.onDeckEditReport((r) => decks.push(r));
+    adapter.onCostPatchReport((r) => costs.push(r));
+
+    t.emitEvent(
+      "Runtime.bindingCalled",
+      { name: REPORT_BINDING_NAME, payload: '{"type":"deck-select","id":"d1"}' },
+      SESSION,
+    );
+
+    expect(decks).toHaveLength(1);
+    expect(decks[0]).toMatchObject({ type: "deck-select", id: "d1" });
+    // ⚠ 分流不能外溢：同一個 binding 上還有 COST、罰則、大廳那幾種。
+    expect(costs).toHaveLength(0);
   });
 
   it("還沒 connect 就呼叫要明確報錯", async () => {

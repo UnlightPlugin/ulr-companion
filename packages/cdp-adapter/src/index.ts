@@ -354,5 +354,69 @@ export type {
   StepResult,
 } from "./arbitration.js";
 
+export {
+  buildDeckEditPatchScript,
+  buildDeckEditStateExpression,
+  DECK_EDIT_SCRIPT_VERSION,
+  DECK_EDIT_STATUS_EXPRESSION,
+  DECK_EDIT_UNINSTALL_EXPRESSION,
+  DEFAULT_DECK_EDIT_POLL_MS,
+  isDeckEditReport,
+  parseDeckEditStatus,
+} from "./patch-deck-edit.js";
+export type {
+  DeckEditItem,
+  DeckEditPatchOptions,
+  DeckEditReport,
+  DeckEditState,
+  DeckEditStatus,
+} from "./patch-deck-edit.js";
+
+export {
+  buildRoomGateDecksExpression,
+  buildRoomGatePendingExpression,
+  buildRoomGateScript,
+  DEFAULT_HOLD_TIMEOUT_MS,
+  DEFAULT_ROOM_GATE_POLL_MS,
+  GATED_EVENTS,
+  isRoomGateReport,
+  parseRoomGateStatus,
+  ROOM_GATE_RELEASE_EXPRESSION,
+  ROOM_GATE_SCRIPT_VERSION,
+  ROOM_GATE_STATUS_EXPRESSION,
+  ROOM_GATE_UNINSTALL_EXPRESSION,
+} from "./patch-room-gate.js";
+export type {
+  GateRoom,
+  RoomChangedReport,
+  RoomDeckPreload,
+  RoomGateHoldReport,
+  RoomGateOptions,
+  RoomGateReport,
+  RoomGateStatus,
+  RoomGateTimeoutReport,
+} from "./patch-room-gate.js";
+
+export {
+  buildDeckApplyExpression,
+  buildEditDeckWriteExpression,
+  DECK_READ_EXPRESSION,
+  DECK_SOCKET_CLOSE_EXPRESSION,
+  EDIT_DECK_READ_EXPRESSION,
+  INVENTORY_READ_EXPRESSION,
+  parseDeckApplyResult,
+  parseEditDeck,
+  parseDeckSnapshot,
+  parseInventorySnapshot,
+} from "./deck-write.js";
+export type {
+  DeckApplyResult,
+  DeckPayload,
+  DeckSnapshot,
+  EditDeckRead,
+  FlatDeck,
+  InventorySnapshot,
+} from "./deck-write.js";
+
 export { CdpAdapter, createCdpAdapter, NotConnectedError, REPORT_BINDING_NAME } from "./adapter.js";
 export type { CdpAdapterOptions, CostPatchInstallation } from "./adapter.js";
