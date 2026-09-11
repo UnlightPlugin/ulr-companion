@@ -312,11 +312,14 @@ hazard 判成 false（不縮短），方向是安全的。
 ## 托盤程式
 
 ```powershell
-npm run tray                      # 開發預設：第一份**網頁版**配置
+npm run tray                      # 開發預設：第一份 Chrome 配置
+npm run tray -- --kind edge       # 第一份 Edge 配置
 npm run tray -- --kind desktop    # 第一份桌面版配置
 npm run tray -- --profile <id>    # 指定配置
-npm run tray -- --port 59222       # 相容用法
+npm run tray -- --port 59222      # 相容用法
 ```
+
+畫面、多開與打包的細節見 [tray.md](tray.md)。
 
 兩份同時開，各管一個客戶端。托盤圖示的顏色**就是狀態**，跟遊戲裡 OK 鈕的
 琥珀色同一套語意：
