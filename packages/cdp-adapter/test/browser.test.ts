@@ -2,7 +2,12 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { buildBrowserArgs, findBrowser } from "../src/browser.js";
+import {
+  browserDebugPort,
+  browserProfileDir,
+  buildBrowserArgs,
+  findBrowser,
+} from "../src/browser.js";
 
 const PROFILE = "C:\\Users\\someone\\ulr-cdp-profile";
 
@@ -70,6 +75,37 @@ describe("findBrowser", () => {
       "ProgramFiles(x86)": edge,
     } as NodeJS.ProcessEnv);
     expect(found?.name).toBe("Chrome");
+  });
+
+  it("⚠ 指名 edge 時只找 Edge，不會退而求其次拿 Chrome", () => {
+    // 沉默地換掉玩家指名的瀏覽器比報錯糟得多：他的 profile、書籤、登入的帳號
+    // 全都不是他要的那些，而畫面上只會寫「已開 Chrome」。
+    const chrome = fakeInstall("Google\\Chrome\\Application\\chrome.exe");
+    const edge = fakeInstall("Microsoft\\Edge\\Application\\msedge.exe");
+    const env = { ProgramFiles: chrome, "ProgramFiles(x86)": edge } as NodeJS.ProcessEnv;
+    expect(findBrowser(env, "edge")?.name).toBe("Edge");
+    expect(findBrowser(env, "edge")?.family).toBe("edge");
+    expect(findBrowser(env, "chrome")?.name).toBe("Chrome");
+    // 那一族沒裝就回 null（呼叫端報錯），不是拿另一族頂替。
+    expect(findBrowser({ ProgramFiles: chrome } as NodeJS.ProcessEnv, "edge")).toBeNull();
+  });
+
+  it("Brave 算 chrome 這一族 —— 它是備援，不是玩家會去挑的選項", () => {
+    const brave = fakeInstall("BraveSoftware\\Brave-Browser\\Application\\brave.exe");
+    const found = findBrowser({ ProgramFiles: brave } as NodeJS.ProcessEnv, "chrome");
+    expect(found?.name).toBe("Brave");
+    expect(found?.family).toBe("chrome");
+  });
+
+  it("Chrome 與 Edge 的 profile 目錄與首選埠一定要不同", () => {
+    // 共用的話：後開的瀏覽器只會在前一個裡開分頁（--remote-debugging-port
+    // 整個被忽略），而埠回退會從同一個 DevToolsActivePort 讀 —— Edge 那份
+    // 配置於是接到 Chrome 的遊戲去，畫面上完全看不出來。
+    expect(browserProfileDir("edge")).not.toBe(browserProfileDir("chrome"));
+    expect(browserDebugPort("edge")).not.toBe(browserDebugPort("chrome"));
+    // 不給就是 Chrome 那一份（舊行為）。
+    expect(browserProfileDir()).toBe(browserProfileDir("chrome"));
+    expect(browserDebugPort()).toBe(browserDebugPort("chrome"));
   });
 
   it("環境變數全空時回 null，不是丟例外", () => {

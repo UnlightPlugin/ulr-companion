@@ -17,6 +17,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { API_SCHEMA_VERSION } from "@ulr/api-contract";
 import type {
+  BrowserFamily,
   CostOverrides,
   CostOverrideTables,
   CostPatchReport,
@@ -25,6 +26,7 @@ import type {
 } from "@ulr/cdp-adapter";
 import {
   BROWSER_DEBUG_PORT,
+  browserDebugPort,
   buildBookmarklet,
   buildBookmarkUrl,
   buildExtensionFiles,
@@ -34,6 +36,8 @@ import {
   DEFAULT_BROWSER_PROFILE_DIR,
   DEFAULT_DEBUG_PORT,
   DEFAULT_VALUE_EVENTS,
+  EDGE_BROWSER_PROFILE_DIR,
+  EDGE_DEBUG_PORT,
   ensureBrowser,
   GAME_ORIGIN,
   openGameTab,
@@ -84,7 +88,8 @@ function usage(): void {
   console.log("ULR Companion（骨架）");
   console.log(`  API schema 版本 : ${API_SCHEMA_VERSION}`);
   console.log(`  桌面版 CDP 埠   : ${DEFAULT_DEBUG_PORT}`);
-  console.log(`  網頁版 CDP 埠   : ${BROWSER_DEBUG_PORT}`);
+  console.log(`  Chrome CDP 埠   : ${BROWSER_DEBUG_PORT}`);
+  console.log(`  Edge CDP 埠     : ${EDGE_DEBUG_PORT}`);
   console.log(`  啟動參數        : ${DEBUG_PORT_SWITCH}`);
   console.log("");
   console.log("用法：");
@@ -125,8 +130,11 @@ function usage(): void {
   console.log("  web --steamid <id> [--port N] [--game-port N]");
   console.log("                              免 Steam 直接開一個遊戲分頁");
   console.log("                              瀏覽器沒在跑就自己開一個（帶 debug port）");
+  console.log("                              [--edge] 改用 Edge（自己的 profile 與埠，");
+  console.log("                              跟 Chrome 可以同時開，各掛一個帳號）");
   console.log("                              [--profile <目錄>] [--browser <exe>] 覆寫預設");
   console.log(`                              預設 profile：${DEFAULT_BROWSER_PROFILE_DIR}`);
+  console.log(`                              --edge 的是：${EDGE_BROWSER_PROFILE_DIR}`);
   console.log("  web --bookmarklet --steamid <id>");
   console.log("                              印出書籤網址與 javascript: 書籤");
   console.log("  web --extension <輸出目錄>  產生未封裝的 Chrome 擴充功能");
@@ -140,6 +148,20 @@ function parseFlag(args: string[], name: string): string | undefined {
     throw new Error(`${name} 後面要接一個值`);
   }
   return value;
+}
+
+/**
+ * `--edge` / `--chrome`：要開哪一族瀏覽器。
+ *
+ * ⚠ **不給就回 `undefined`，不要預設成 `"chrome"`。** 兩者不一樣：`undefined`
+ * 是「照偏好順序找一個能用的」（Chrome ＞ Edge ＞ Brave），指名 `"chrome"` 則是
+ * 「非 Chrome 不可，沒有就報錯」。沒裝 Chrome 只有 Edge 的機器上，寫死預設會
+ * 讓本來能跑的指令開始失敗。
+ */
+function parseBrowserFamily(args: string[]): BrowserFamily | undefined {
+  if (args.includes("--edge")) return "edge";
+  if (args.includes("--chrome")) return "chrome";
+  return undefined;
 }
 
 function parsePort(args: string[], fallback: number = DEFAULT_DEBUG_PORT): number {
@@ -540,7 +562,10 @@ async function cmdCost(args: string[]): Promise<number> {
  * 的 `GAME_EXECUTABLE`），不需要重建外殼。
  */
 async function cmdWeb(args: string[]): Promise<number> {
-  const requestedPort = parsePort(args, BROWSER_DEBUG_PORT);
+  const family = parseBrowserFamily(args);
+  // 首選埠跟著瀏覽器走（Chrome 59223、Edge 59224）。共用一個埠的話，兩個
+  // 瀏覽器不可能同時掛著 —— 而「Chrome 掛任務、Edge 打對戰」正是要支援的用法。
+  const requestedPort = parsePort(args, browserDebugPort(family));
   /**
    * **實際**接得上的埠。
    *
@@ -563,6 +588,7 @@ async function cmdWeb(args: string[]): Promise<number> {
     const browserPath = parseFlag(args, "--browser");
     const result = await ensureBrowser({
       port: requestedPort,
+      ...(family !== undefined ? { family } : {}),
       ...(profileDir !== undefined ? { profileDir } : {}),
       ...(browserPath !== undefined ? { browserPath } : {}),
       onNotice: (m) => console.log(`  ${m}`),
@@ -676,10 +702,12 @@ async function cmdWeb(args: string[]): Promise<number> {
  * 書籤就好 —— 那條路不需要 steamid，也不該被逼著給一個。
  */
 async function cmdBrowser(args: string[]): Promise<number> {
+  const family = parseBrowserFamily(args);
   const profileDir = parseFlag(args, "--profile");
   const browserPath = parseFlag(args, "--browser");
   const result = await ensureBrowser({
-    port: parsePort(args, BROWSER_DEBUG_PORT),
+    port: parsePort(args, browserDebugPort(family)),
+    ...(family !== undefined ? { family } : {}),
     ...(profileDir !== undefined ? { profileDir } : {}),
     ...(browserPath !== undefined ? { browserPath } : {}),
     onNotice: (m) => console.log(`  ${m}`),
@@ -694,6 +722,11 @@ async function cmdBrowser(args: string[]): Promise<number> {
     console.log(`  ⚠ 不是你要的 :${result.requestedPort} —— 之後的指令要帶 --port ${result.port}`);
   }
   console.log(`  profile：${result.profileDir}`);
+  // 托盤是照**配置的客戶端種類**去找 DevToolsActivePort 的，種類選錯就會接到
+  // 另一個瀏覽器的遊戲去（而畫面上看不出來）。開的當下講一句最省事。
+  console.log(
+    `  托盤那邊把配置的「客戶端」選成 ${result.browser.family === "edge" ? "Edge" : "Chrome"}。`,
+  );
   console.log("  進去之後點書籤開遊戲即可。接事件：companion watch --port " + result.port);
   return 0;
 }

@@ -226,18 +226,22 @@ export type {
 } from "./debug-port.js";
 
 export {
+  browserDebugPort,
   BrowserNotFoundError,
   BrowserPortTimeoutError,
+  browserProfileDir,
   buildBrowserArgs,
   DEFAULT_BROWSER_POLL_MS,
   DEFAULT_BROWSER_PROFILE_DIR,
   DEFAULT_BROWSER_READY_TIMEOUT_MS,
+  EDGE_BROWSER_PROFILE_DIR,
   ensureBrowser,
   findBrowser,
   isDebugPortLive,
 } from "./browser.js";
 export type {
   BrowserArgsOptions,
+  BrowserFamily,
   FoundBrowser,
   LaunchBrowserOptions,
   LaunchBrowserResult,

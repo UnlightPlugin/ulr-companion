@@ -24,12 +24,26 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { BROWSER_DEBUG_PORT, ENV_KEYS_TO_STRIP } from "./constants.js";
+import { BROWSER_DEBUG_PORT, EDGE_DEBUG_PORT, ENV_KEYS_TO_STRIP } from "./constants.js";
 import { probePortState, resolveDebugPort } from "./debug-port.js";
 import { discoverDebuggerUrl } from "./transport.js";
 
 /**
- * 插件專屬的瀏覽器 profile。
+ * 要開哪一種瀏覽器。
+ *
+ * ⚠ **這不是「顯示用的名字」，是一條會分岔的路。** 每一族有自己的
+ * profile 目錄與自己的首選埠，所以 Chrome 與 Edge 可以**同時**各開一個遊戲
+ * （兩個帳號），而插件分得出哪個是哪個。混成一個「網頁版」的話：兩邊撞同一個
+ * user-data-dir（第二個啟動只會在第一個裡開分頁，`--remote-debugging-port`
+ * 整個被忽略），而 `DevToolsActivePort` 的回退也會把 A 的埠救給 B。
+ *
+ * Brave 歸在 `chrome` 這一族 —— 它只是找不到 Chrome 時的備援，不是一個玩家
+ * 會刻意去挑的選項。
+ */
+export type BrowserFamily = "chrome" | "edge";
+
+/**
+ * 插件專屬的瀏覽器 profile（Chrome 這一族）。
  *
  * ⚠ `--user-data-dir` 是必要的不是選配：玩家已經開著 Chrome 時，用**同一個**
  * profile 再啟動只會在既有實例開一個分頁，**命令列參數整個被忽略**，port 不會開。
@@ -39,6 +53,24 @@ import { discoverDebuggerUrl } from "./transport.js";
  * 清掉就要重裝一次。
  */
 export const DEFAULT_BROWSER_PROFILE_DIR = join(homedir(), "ulr-cdp-profile");
+
+/**
+ * Edge 的那一份。**一定要跟 Chrome 分開**，理由見 {@link BrowserFamily}。
+ *
+ * 目錄名只差一個後綴是刻意的：玩家在檔案總管裡看到兩個並排的資料夾，
+ * 一眼就知道它們是同一件事的兩份，而不是誰的殘留。
+ */
+export const EDGE_BROWSER_PROFILE_DIR = join(homedir(), "ulr-cdp-profile-edge");
+
+/** 這一族的 profile 放哪。 */
+export function browserProfileDir(family: BrowserFamily = "chrome"): string {
+  return family === "edge" ? EDGE_BROWSER_PROFILE_DIR : DEFAULT_BROWSER_PROFILE_DIR;
+}
+
+/** 這一族的**首選**埠（不是保證，見 `constants.ts`）。 */
+export function browserDebugPort(family: BrowserFamily = "chrome"): number {
+  return family === "edge" ? EDGE_DEBUG_PORT : BROWSER_DEBUG_PORT;
+}
 
 /** 等瀏覽器把 debug port 開起來的上限。冷啟動的 Chrome 大約 1~3 秒。 */
 export const DEFAULT_BROWSER_READY_TIMEOUT_MS = 30_000;
@@ -53,21 +85,53 @@ export const DEFAULT_BROWSER_POLL_MS = 250;
  * 每個 candidate 是「基底目錄的環境變數名 + 相對路徑」。寫死 `C:\Program Files`
  * 在非英文版或改過安裝碟的機器上會失準。
  */
-const BROWSER_CANDIDATES: readonly { env: string; rel: string; name: string }[] = [
-  { env: "ProgramFiles", rel: "Google\\Chrome\\Application\\chrome.exe", name: "Chrome" },
-  { env: "ProgramFiles(x86)", rel: "Google\\Chrome\\Application\\chrome.exe", name: "Chrome" },
-  { env: "LOCALAPPDATA", rel: "Google\\Chrome\\Application\\chrome.exe", name: "Chrome" },
-  { env: "ProgramFiles(x86)", rel: "Microsoft\\Edge\\Application\\msedge.exe", name: "Edge" },
-  { env: "ProgramFiles", rel: "Microsoft\\Edge\\Application\\msedge.exe", name: "Edge" },
+const BROWSER_CANDIDATES: readonly {
+  env: string;
+  rel: string;
+  name: string;
+  family: BrowserFamily;
+}[] = [
+  {
+    env: "ProgramFiles",
+    rel: "Google\\Chrome\\Application\\chrome.exe",
+    name: "Chrome",
+    family: "chrome",
+  },
+  {
+    env: "ProgramFiles(x86)",
+    rel: "Google\\Chrome\\Application\\chrome.exe",
+    name: "Chrome",
+    family: "chrome",
+  },
+  {
+    env: "LOCALAPPDATA",
+    rel: "Google\\Chrome\\Application\\chrome.exe",
+    name: "Chrome",
+    family: "chrome",
+  },
+  {
+    env: "ProgramFiles(x86)",
+    rel: "Microsoft\\Edge\\Application\\msedge.exe",
+    name: "Edge",
+    family: "edge",
+  },
+  {
+    env: "ProgramFiles",
+    rel: "Microsoft\\Edge\\Application\\msedge.exe",
+    name: "Edge",
+    family: "edge",
+  },
   {
     env: "ProgramFiles",
     rel: "BraveSoftware\\Brave-Browser\\Application\\brave.exe",
     name: "Brave",
+    family: "chrome",
   },
   {
     env: "LOCALAPPDATA",
     rel: "BraveSoftware\\Brave-Browser\\Application\\brave.exe",
     name: "Brave",
+    family: "chrome",
   },
 ];
 
@@ -75,14 +139,20 @@ export interface FoundBrowser {
   path: string;
   /** `Chrome` / `Edge` / `Brave`。只拿來顯示。 */
   name: string;
+  /** 哪一族。決定 profile 目錄與首選埠，不只是顯示。 */
+  family: BrowserFamily;
 }
 
 export class BrowserNotFoundError extends Error {
   override readonly name = "BrowserNotFoundError";
-  constructor() {
+  constructor(family?: BrowserFamily) {
     super(
-      "找不到 Chromium 系的瀏覽器（Chrome / Edge / Brave）。\n" +
-        "  用 --browser <chrome.exe 的完整路徑> 指定，或裝一個。\n" +
+      (family === "edge"
+        ? "找不到 Microsoft Edge。\n"
+        : family === "chrome"
+          ? "找不到 Chrome（也沒有 Brave）。\n"
+          : "找不到 Chromium 系的瀏覽器（Chrome / Edge / Brave）。\n") +
+        "  用 --browser <瀏覽器 exe 的完整路徑> 指定，或裝一個。\n" +
         "  Firefox 不行 —— `--remote-debugging-port` 是 Chromium 的參數。",
     );
   }
@@ -108,13 +178,21 @@ export class BrowserPortTimeoutError extends Error {
 
 /**
  * 找一個能用的瀏覽器。找不到回 `null` —— 由呼叫端決定要報錯還是換做法。
+ *
+ * `family` 有給就**只找那一族**，不會退而求其次。這條規則是認真的：玩家挑了
+ * Edge 卻拿到 Chrome 的話，他的 profile、書籤、登入的帳號全都不是他要的那些，
+ * 而畫面上只會寫「已開 Chrome」—— 沉默地換掉玩家指名的東西比報錯糟得多。
  */
-export function findBrowser(env: NodeJS.ProcessEnv = process.env): FoundBrowser | null {
+export function findBrowser(
+  env: NodeJS.ProcessEnv = process.env,
+  family?: BrowserFamily,
+): FoundBrowser | null {
   for (const candidate of BROWSER_CANDIDATES) {
+    if (family !== undefined && candidate.family !== family) continue;
     const base = env[candidate.env];
     if (base === undefined || base === "") continue;
     const path = join(base, candidate.rel);
-    if (existsSync(path)) return { path, name: candidate.name };
+    if (existsSync(path)) return { path, name: candidate.name, family: candidate.family };
   }
   return null;
 }
@@ -162,6 +240,14 @@ export async function isDebugPortLive(port: number): Promise<boolean> {
 }
 
 export interface LaunchBrowserOptions {
+  /**
+   * 要開哪一族。**同時決定 profile 目錄與首選埠的預設值**，所以只給這一個就
+   * 夠了 —— `family: "edge"` 會用 Edge 的目錄、Edge 的埠、Edge 的執行檔。
+   *
+   * 不給就照 `BROWSER_CANDIDATES` 的偏好順序找（Chrome ＞ Edge ＞ Brave），
+   * 那是舊的行為，`--browser` 指定路徑的人也走這條。
+   */
+  family?: BrowserFamily;
   port?: number;
   profileDir?: string;
   /** 不給就自己找（`findBrowser`）。 */
@@ -202,8 +288,9 @@ export interface LaunchBrowserResult {
 export async function ensureBrowser(
   options: LaunchBrowserOptions = {},
 ): Promise<LaunchBrowserResult> {
-  const requestedPort = options.port ?? BROWSER_DEBUG_PORT;
-  const profileDir = options.profileDir ?? DEFAULT_BROWSER_PROFILE_DIR;
+  const family = options.family;
+  const requestedPort = options.port ?? browserDebugPort(family);
+  const profileDir = options.profileDir ?? browserProfileDir(family);
   const notice = options.onNotice ?? ((): void => {});
 
   const existing = await resolveDebugPort({ port: requestedPort, userDataDir: profileDir });
@@ -212,7 +299,7 @@ export async function ensureBrowser(
       notice(`既有的瀏覽器聽在 :${existing.port}（不是 :${requestedPort}）—— 沿用它。`);
     }
     return {
-      browser: { path: "(已在跑)", name: "既有實例" },
+      browser: { path: "(已在跑)", name: "既有實例", family: family ?? "chrome" },
       port: existing.port,
       requestedPort,
       profileDir,
@@ -221,11 +308,11 @@ export async function ensureBrowser(
     };
   }
 
-  const browser =
+  const browser: FoundBrowser | null =
     options.browserPath !== undefined
-      ? { path: options.browserPath, name: "(指定)" }
-      : findBrowser();
-  if (browser === null) throw new BrowserNotFoundError();
+      ? { path: options.browserPath, name: "(指定)", family: family ?? "chrome" }
+      : findBrowser(process.env, family);
+  if (browser === null) throw new BrowserNotFoundError(family);
 
   // 綁得上就用首選埠（結果可預期，CLI 的 --port 也才對得起來）；綁不上才讓
   // Chromium 自己挑。`in-use` 不算綁不上 —— 那多半是別的東西在聽，硬換埠反而

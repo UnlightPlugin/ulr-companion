@@ -126,10 +126,27 @@ chrome.exe --remote-debugging-port=59223 --user-data-dir=<插件自己的 profil
 
 ```
 npx tsx apps/companion/src/index.ts web --steamid <SteamID64>
-    [--port 59223] [--profile <目錄>] [--browser <chrome.exe>]
+    [--edge] [--port 59223] [--profile <目錄>] [--browser <chrome.exe>]
 ```
 
-預設 profile 是 `%USERPROFILE%\ulr-cdp-profile`。
+### Chrome 與 Edge 是兩個客戶端，不是一個「網頁版」
+
+| 族     | 首選埠 | profile                              | 托盤裡的種類 |
+| ------ | ------ | ------------------------------------ | ------------ |
+| Chrome | 59223  | `%USERPROFILE%\ulr-cdp-profile`      | `chrome`     |
+| Edge   | 59224  | `%USERPROFILE%\ulr-cdp-profile-edge` | `edge`       |
+
+`--edge` 同時換掉這三樣（`ensureBrowser({ family: "edge" })`）。
+**兩樣都要換，不能只換埠**：共用 `--user-data-dir` 的話，後開的那個瀏覽器
+只會在前一個裡開一個分頁，`--remote-debugging-port` 整個被忽略 —— 而且
+下面那個 `DevToolsActivePort` 的回退會把 Chrome 的埠救給 Edge 那份配置，
+於是插件接到另一個帳號的遊戲去，畫面上完全正常。
+
+分開之後兩個瀏覽器可以同時各掛一個帳號，托盤開兩份配置各管一個。
+
+⚠ `--edge` 是**指名**：找不到 Edge 就報錯，不會退回 Chrome。不給這個旗標
+才是舊行為（Chrome ＞ Edge ＞ Brave 挑第一個找得到的）。Brave 歸在 Chrome
+這一族 —— 它是備援，不是玩家會刻意去挑的選項。
 
 ### ⚠ 埠是首選，不是保證（2026-08-16）
 
@@ -233,14 +250,17 @@ netsh interface ipv4 show dynamicport tcp                  ← 保留是從這�
 ⚠ **所以 0 只能出現在命令列上，不能存進設定。** 托盤是拿埠當實例身分的
 （`main.ts` 的 userData 分離、兩份配置不得重複），存 0 會讓兩份配置撞在一起。
 
-⚠ **回退範圍必須限定在同一種客戶端。** 兩種客戶端各有各的 user-data-dir：
+⚠ **回退範圍必須限定在同一種客戶端。** 每一種各有各的 user-data-dir：
 
 ```
 桌面版  %APPDATA%\UNLIGHT-Revive
-網頁版  %USERPROFILE%\ulr-cdp-profile
+Chrome  %USERPROFILE%\ulr-cdp-profile
+Edge    %USERPROFILE%\ulr-cdp-profile-edge
 ```
 
-不分種類地亂找，症狀會是「我開的是網頁版的插件，它卻接到桌面版的遊戲去」。
+不分種類地亂找，症狀會是「我開的是 Chrome 的插件，它卻接到桌面版的遊戲去」
+—— 而 Chrome 與 Edge 之間更糟：兩邊都是瀏覽器、都接得上，接錯只表現成
+「我改的是另一個帳號的牌組」。
 所以 `userDataDirFor(kind)` 跟著配置的 `kind` 走，而且**不給就不回退** ——
 寧可連不上，也不要接錯客戶端。
 
