@@ -95,39 +95,21 @@ contextBridge.exposeInMainWorld("ulr", {
   },
 
   /**
-   * 自動配對。
+   * 對戰地點。**只剩一支，而且它不碰遊戲。**
    *
-   * ⚠ **插件不再提供手動開房。** `open` / `join` / `cancel` 三支拿掉了：
-   * 手動開房遊戲自己就做得很好，而插件多一條路只是多一個會跟自動配對搶房間
-   * 的東西（`delete_room` 是頻道層級的，兩間房會一起被收掉）。地點、COST 檔位
-   * 那些設定現在**只服務自動配對**。
+   * ⚠ `state` 與 `queue.start`／`queue.stop` 拿掉了（WP-18）：排隊的入口是
+   * **遊戲大廳裡那顆「快速比賽」**，而那條路從頭到尾都在主程序裡。畫面這邊
+   * 連一支「會替玩家操作遊戲」的方法都不再需要 —— 這正是這個檔頭那句話的
+   * 意思：介面越小，「畫面被塞了一段別人的腳本」的後果越小。
    *
-   * ⚠ **房名不在這條介面上。** 它是主程序照「規則名 + 檔位」組的
-   * （`buildRoomName`），畫面只讀得到組好的結果。畫面能指定房名的話，那個字串
-   * 會被送進遊戲封包，而它同時是 host 認出自己那間房的依據。
-   *
-   * `state` 與 `prefs` 是安全的（唯讀 / 只寫設定檔）；`queue.start` **會替
-   * 玩家操作遊戲** —— 開房消耗 AP、進房直接開打，只能綁在玩家按下去的按鈕上。
+   * ⚠ **房名不在這條介面上，檔位也不在。** 房名是主程序照「規則名 + 檔位」
+   * 組的（`buildRoomName`），檔位是照牌組算的（`myDeckTier`）。畫面能指定
+   * 它們的話，那些值會被送進遊戲封包或配對鍵，而漂掉一個字的症狀是
+   * 「開好房卻找不到自己那間」／「明明條件一樣卻永遠配不到」。
    */
   match: {
-    state: () => ipcRenderer.invoke("ulr:match-state"),
-    /**
-     * 改配對設定並記進配置。不碰遊戲，所以可以邊改邊叫。
-     *
-     * 回的是 `{ match, roomName, band }` —— 後兩個是主程序從設定算出來的，
-     * 一起回是為了讓畫面在玩家改完的當下就看到新的房名與檔位區間。
-     */
+    /** 改「這一場開在哪」並記進配置。回主程序整理過的那一份。 */
     prefs: (patch: Record<string, unknown>) => ipcRenderer.invoke("ulr:match-prefs", patch),
-    /**
-     * 走中間人的佇列。
-     *
-     * ⚠ `start` 會一路走到開房或進房。`stop` 會順手收掉開了一半的房。
-     */
-    queue: {
-      start: (options: Record<string, unknown>) =>
-        ipcRenderer.invoke("ulr:match-queue-start", options),
-      stop: () => ipcRenderer.invoke("ulr:match-queue-stop"),
-    },
   },
 
   /**
@@ -136,6 +118,16 @@ contextBridge.exposeInMainWorld("ulr", {
    * ⚠ 跟 `match` 那一組**不一樣**：這裡沒有任何一支會替玩家操作遊戲。`set` 只是
    * 改遊戲自己那個下拉選單的內容，開房仍然是玩家在遊戲的對話框上按的。
    */
+  /**
+   * 牌組的「等候套用」秒數。
+   *
+   * ⚠ 只是一個偏好 —— 這支不碰遊戲、不碰牌組。切了牌組之後等幾秒才寫進
+   * 伺服器由它決定，開戰時會無視它（攔下來立刻寫完再放行）。
+   */
+  deck: {
+    applyDelay: (seconds: number) => ipcRenderer.invoke("ulr:deck-apply-delay", seconds),
+  },
+
   stages: {
     state: () => ipcRenderer.invoke("ulr:stages-state"),
     set: (on: boolean) => ipcRenderer.invoke("ulr:stages-set", on),

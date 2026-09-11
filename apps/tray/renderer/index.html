@@ -258,6 +258,56 @@
         margin-top: 6px;
         line-height: 1.65;
       }
+      /* 「按上去才看得到」的那顆 ⓘ。⚠ 它要看得出來可以按，但不能搶戲 ——
+         畫面上真正重要的字在它旁邊。
+
+         ⚠ 內距是**點得到**用的，不是為了好看：只有一個字元寬的目標，手一抖
+         就滑出去了。內距讓可命中的範圍比看得到的字大一圈。 */
+      .info {
+        display: inline-block;
+        margin-left: 2px;
+        padding: 0 3px;
+        color: var(--dim);
+        cursor: help;
+        font-size: 12px;
+        user-select: none;
+      }
+      .info:hover,
+      .info:focus,
+      .info.on {
+        color: var(--amber);
+        outline: none;
+      }
+
+      /* ⓘ 的說明氣泡。
+         ⚠⚠ **不用瀏覽器原生的 `title`。** 那個延遲大約一秒、由系統決定、改不
+         了，而且滑鼠只要動一格就重新計時 —— 手會抖的人permanently看不到它。
+         這一顆是滑上去**當下**就出現，點一下還會釘住（`.on`）。
+
+         ⚠ 用 `position: fixed` 而不是相對於 ⓘ 的絕對定位：`section.body` 是
+         `overflow-y: auto`，絕對定位的氣泡會被它裁掉一半。fixed 逃得出去，
+         座標由 JS 算（順便夾在視窗內，不會被右邊界切掉）。 */
+      #tip {
+        position: fixed;
+        z-index: 90;
+        max-width: 420px;
+        padding: 8px 10px;
+        background: var(--panel-hi);
+        border: 1px solid var(--line);
+        border-radius: 3px;
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+        color: var(--fg);
+        font-size: 12px;
+        line-height: 1.7;
+        /* ⚠ 滑鼠事件一律穿過去。氣泡就開在 ⓘ 正下方，收得到事件的話它會蓋住
+           ⓘ 本身 → mouseleave → 收起來 → 又露出 ⓘ → 再展開，無限閃爍。 */
+        pointer-events: none;
+        white-space: normal;
+      }
+      #tip[hidden] {
+        display: none;
+      }
+
       .warn {
         color: var(--amber);
       }
@@ -1004,9 +1054,10 @@
           id: "deck",
           label: "牌組",
           subs: [
-            // ⚠ **自動配對排第一。** 它是玩家最常用的功能 —— 規則選一次就不太
-            // 會再動，配對是每天要按的。放在編輯那幾頁後面等於天天多繞一格。
-            { id: "match", label: "自動配對" },
+            // ⚠ **對戰地點排第一。** 自動配對本身搬回遊戲裡了（迪城大廳那顆
+            // 「快速比賽」），托盤這一格只剩「這一場開在哪」—— 而那是玩家會
+            // 回來調的東西，規則選一次就不太會再動。
+            { id: "match", label: "對戰地點" },
             { id: "cost", label: "Cost 表" },
             // 編輯的三頁排在 Cost 表後面，那是實際的動線：先選一份規則
             // （Cost 表）→ 改它 → 拿去配對。
@@ -1017,6 +1068,7 @@
             { id: "ruleedit", label: "編輯規則" },
             { id: "ruledesc", label: "編輯描述" },
             { id: "hidden", label: "隱藏地圖" },
+            { id: "apply", label: "等候套用" },
           ],
         },
         {
@@ -1175,6 +1227,20 @@
       };
 
       /**
+       * 客戶端種類怎麼寫。**瀏覽器一律用它自己的名字，不寫「網頁版」。**
+       *
+       * 理由不是好看：玩家可以同時開 Chrome 與 Edge 各掛一個帳號（兩者有各自
+       * 的 profile 目錄與埠），而配置表上兩列都叫「網頁版」的話，他分不出正在
+       * 改的是哪一邊的設定 —— 而改錯的後果（接到另一個帳號的遊戲）在畫面上
+       * 完全看不出來。措辭與 `profiles-core.ts` 的 `clientLabel()` 對齊。
+       *
+       * 認不出來的值就原樣顯示，不要掰成「桌面版」—— 那會在未來多一種客戶端時
+       * 變成一句錯的話。
+       */
+      const KIND_TEXT = { desktop: "桌面版", chrome: "Chrome", edge: "Edge" };
+      const kindText = (kind) => KIND_TEXT[kind] ?? kind ?? "—";
+
+      /**
        * 對手是 NPC 的那幾種 rule（`status.rule`）。認不出來就不特別講。
        *
        * ⚠ 這幾種模式底下**準備與秒數整組不生效**（2026-08-09），所以每一處
@@ -1268,14 +1334,141 @@
       }
 
       function renderBody() {
+        // ⚠ 重畫會把整個 #content 換掉，釘住的那顆 ⓘ 跟著被丟掉 —— 氣泡是
+        // fixed 的，不收的話會變成一段浮在半空中、指著已經不存在的東西的說明。
+        hideTip();
         const fn = PAGES[`${tab}/${sub}`];
         $("content").innerHTML = fn ? fn() : missingPage(tab, sub);
-        // 配對頁與隱藏地圖頁的資料不在 snapshot 裡，開著的時候才輪詢。
-        if (onMatchPage()) startMatchPolling();
-        else stopMatchPolling();
+        // 隱藏地圖頁的資料不在 snapshot 裡，開著的時候才輪詢。
+        // ⚠ 對戰地點那一頁**不輪詢**了（WP-18）：它只剩一格設定，而那一格
+        // 跟著快照走 —— 一個純設定頁沒有理由每三秒去戳一次遊戲。
         if (onStagePage()) startStagePolling();
         else stopStagePolling();
       }
+
+      /**
+       * 「按上去才看得到」的那一段長話 —— 一顆 ⓘ，內容在 `data-tip` 裡。
+       *
+       * ⚠⚠ **這是給細節找地方住的，不是給重要的話用的。** 玩家可能永遠不會把
+       * 滑鼠移上去，所以任何「不知道就會做錯事」的話都必須留在畫面上。ⓘ 裡放的
+       * 是「知道了會更好，但不知道也不會出事」的那一種。
+       *
+       * ⚠⚠ **不要換回瀏覽器原生的 `title`。** 它看起來比較省事（自己處理邊界、
+       * 換行），但它的顯示延遲大約一秒、由作業系統決定、網頁改不了，而且滑鼠
+       * 只要移動一格就從頭計時 —— 手會抖的人等於永遠看不到那段說明
+       * （2026-09-09 回報）。所以這裡自己畫一顆：滑上去**當下**就出現，
+       * 點一下釘住。邊界問題由 `showTip()` 自己夾。
+       *
+       * ⚠ 說明文字放在 `data-tip`，同時也放進 `aria-label` —— 螢幕閱讀器要唸的
+       * 是那段說明，不是「說明」兩個字。
+       */
+      function info(text) {
+        const t = esc(text);
+        return `<span class="info" data-tip="${t}" aria-label="${t}" role="button" tabindex="0">ⓘ</span>`;
+      }
+
+      // ---------------------------------------------------------------------
+      // ⓘ 的說明氣泡
+      //
+      // 兩種開法，缺一不可：
+      //   滑上去  → 當下就出現（不是原生 title 那個一秒）
+      //   點一下  → **釘住**，滑鼠移開也不收
+      //
+      // ⚠ 釘住這件事不是額外的貼心，是這顆東西能不能用的關鍵：目標只有一個
+      // 字元寬，手一抖就滑出去，純靠 hover 的話說明會在讀到一半時消失。
+      // ---------------------------------------------------------------------
+
+      /** 現在釘住的是哪一顆 ⓘ。`null` = 沒釘（那時候滑鼠移開就收）。 */
+      let tipPinned = null;
+
+      function tipBox() {
+        let el = document.getElementById("tip");
+        if (el === null) {
+          el = document.createElement("div");
+          el.id = "tip";
+          el.hidden = true;
+          document.body.appendChild(el);
+        }
+        return el;
+      }
+
+      /**
+       * 把氣泡開在某顆 ⓘ 底下。
+       *
+       * ⚠ **座標要夾在視窗內。** 這幾顆 ⓘ 有的貼著右邊界，不夾的話氣泡會有一半
+       * 在畫面外，而那正是「自己做的浮層總有一天被切掉」的那個坑 —— 夾一次就
+       * 沒有了。底下放不下就改放上面。
+       */
+      function showTip(el) {
+        const text = el.dataset.tip ?? "";
+        if (text === "") return;
+        const box = tipBox();
+        box.textContent = text;
+        box.hidden = false;
+
+        // ⚠ 先量再擺：要知道它多高多寬才決定放哪，而那要等它有內容且可見。
+        const r = el.getBoundingClientRect();
+        const b = box.getBoundingClientRect();
+        const pad = 8;
+        const left = Math.max(pad, Math.min(r.left, window.innerWidth - b.width - pad));
+        const below = r.bottom + 6;
+        const top = below + b.height + pad > window.innerHeight ? r.top - b.height - 6 : below;
+        box.style.left = `${Math.round(left)}px`;
+        box.style.top = `${Math.round(Math.max(pad, top))}px`;
+      }
+
+      function hideTip() {
+        const box = document.getElementById("tip");
+        if (box !== null) box.hidden = true;
+        if (tipPinned !== null) tipPinned.classList.remove("on");
+        tipPinned = null;
+      }
+
+      // 滑上去就開。⚠ 用 mouseover/mouseout（會冒泡）而不是 mouseenter ——
+      // 內容每次重畫都是新的節點，逐個掛 listener 的話重畫一次就全掉了。
+      document.addEventListener("mouseover", (e) => {
+        const el = e.target.closest?.(".info");
+        if (el === null || el === undefined) return;
+        if (tipPinned !== null && tipPinned !== el) return; // 釘住的優先
+        showTip(el);
+      });
+      document.addEventListener("mouseout", (e) => {
+        const el = e.target.closest?.(".info");
+        if (el === null || el === undefined) return;
+        if (tipPinned !== null) return; // 釘住了就不收
+        const box = document.getElementById("tip");
+        if (box !== null) box.hidden = true;
+      });
+
+      // 點一下釘住／再點一下放開。點別的地方也放開。
+      document.addEventListener("click", (e) => {
+        const el = e.target.closest?.(".info");
+        if (el === null || el === undefined) {
+          if (tipPinned !== null) hideTip();
+          return;
+        }
+        if (tipPinned === el) {
+          hideTip();
+          return;
+        }
+        if (tipPinned !== null) tipPinned.classList.remove("on");
+        tipPinned = el;
+        el.classList.add("on");
+        showTip(el);
+      });
+
+      // 鍵盤：Tab 到它就開，Esc 收起來。
+      document.addEventListener("focusin", (e) => {
+        const el = e.target.closest?.(".info");
+        if (el !== null && el !== undefined) showTip(el);
+      });
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") hideTip();
+      });
+      // ⚠ 視窗一捲動氣泡就要收 —— 它是 fixed 的，捲動時不會跟著那顆 ⓘ 走，
+      // 留著會變成一段浮在半空中、指著別的東西的說明。
+      window.addEventListener("scroll", () => hideTip(), true);
+      window.addEventListener("resize", () => hideTip());
 
       function head(title, lede, badge) {
         return (
@@ -1653,7 +1846,7 @@
                  : mode === "file"
                    ? `<div class="hint">用你自己選的那個檔。⚠ 這個模式下<b>插件不會替你更新規則</b> ——
                         檔案是你的，我們一個位元組都不碰。</div>`
-                   : `<div class="hint">遊戲顯示原版 COST。⚠ 自動配對在這個模式下用不了（沒有規則就沒有「約定」可言）。</div>`
+                   : `<div class="hint">遊戲顯示原版 COST。⚠ 大廳那顆<b>快速比賽</b>在這個模式下用不了（沒有規則就沒有「約定」可言）。</div>`
              }
              <div class="hint">
                ⚠ 重載會<b>打斷正在進行的對戰</b>。
@@ -1697,11 +1890,13 @@
        * `explainDebugPort()` 在真的出事時講一句，而且是講**那一次**的原因 ——
        * 比預先把四種可能都攤在玩家面前準。
        *
-       * ⚠ **網頁版沒有這一段。** 那條路要自己改 `app.asar`，玩家做不到 ——
-       * 對他講等於叫他去撞牆。（我自己也不需要：我知道那支 cmd 在哪。）
+       * ⚠ **瀏覽器（Chrome／Edge）沒有這一段。** 那條路要自己改 `app.asar`，
+       * 玩家做不到 —— 對他講等於叫他去撞牆。（我自己也不需要：我知道那支 cmd
+       * 在哪。）判斷寫成「不是桌面版」而不是列舉瀏覽器，這樣以後多一種瀏覽器
+       * 也不會漏掉，安靜地對他顯示一段做不到的指示。
        */
       function howToConnect(p) {
-        if (p?.kind === "web") return "";
+        if (p && p.kind !== "desktop") return "";
         return `<div class="card">
            <div class="row"><span><b>接不上遊戲？</b></span></div>
            <div class="hint">在 Steam 的啟動選項填這一行，然後重開遊戲：</div>
@@ -1780,6 +1975,20 @@
        * ⚠ 只重畫這一頁。700 個格子的 `step` 全都要換，躲不掉整頁重畫 ——
        * 但玩家是按按鈕／改完那一格才會走到這裡，游標不在價格格子裡。
        */
+      /**
+       * 換「等候套用」的秒數，**並記進設定檔**。
+       *
+       * ⚠ 拿主程序夾過的那個值回填（跟 `applyEditStep` 同一招）—— 玩家打了
+       * 一個超出範圍的數字時，畫面要當場變成真的被存下來的那個值，而不是
+       * 留著他打的那個然後安靜地跑另一個。
+       */
+      function applyDeckDelay(value) {
+        return window.ulr.deck.applyDelay(Number(value)).then((saved) => {
+          if (snap !== null) snap.profile.applyDelaySeconds = saved;
+          renderBody();
+        });
+      }
+
       function applyEditStep(value) {
         return window.ulr.editor.step(Number(value)).then((saved) => {
           edStep = saved;
@@ -2887,7 +3096,7 @@
         {
           key: "ruleSetId",
           label: "規則族",
-          hint: "<code>作者代號/規則代號</code>，只能小寫英數與連字號。⚠ <b>自動配對是照這個分隊的</b>：改了它，你就跟原本那條隊伍上的所有人分開了。",
+          hint: "<code>作者代號/規則代號</code>，只能小寫英數與連字號。⚠ <b>配對是照這個分隊的</b>：改了它，你就跟原本那條隊伍上的所有人分開了。",
           max: 79,
         },
         {
@@ -3000,8 +3209,8 @@
                <span><input type="number" step="0.01" min="0" data-rd="teamCostLimit"
                       value="${esc(String(m.teamCostLimit))}" style="width:6em" /></span></div>
              <div class="hint"><b>0 = 不設限</b>，而那是正常的 —— UNLIGHT 的 COST 上限是
-               <b>伺服器按頻道下發</b>的，客戶端裡根本沒有這個常數。約戰要約幾 C
-               請在「自動配對」那一頁填，那個才是插件會檢查的。</div>
+               <b>伺服器按頻道下發</b>的，客戶端裡根本沒有這個常數。
+               <b>快速比賽的檔位也不看這一格</b>，它是照牌組算的。</div>
            </div>
            <div class="card">
              <div class="row"><span class="dim">說明</span></div>
@@ -3016,424 +3225,108 @@
         );
       };
 
-      // --- 牌組 › 自動配對 --------------------------------------------------
+      // --- 牌組 › 對戰地點 --------------------------------------------------
       //
-      // ⚠ 這一頁的狀態**不在 snapshot 裡**。它要跟遊戲要（兩次 CDP 往返），
-      // 塞進 snapshot 會讓每個無關的狀態變動都去戳一次遊戲。所以這頁自己在
-      // 開著的時候輪詢，離開就停。
+      // ⚠⚠ **這一頁曾經是「自動配對」，整整六張卡。** 排隊狀態、頻道資訊、兩份
+      // COST 對照、開房設定、規則卡、房間清單 —— 要滑三個畫面才看得完，而玩家
+      // 坐下來只想按一顆按鈕打一場。
       //
-      // ⚠ **插件不再提供手動開房。** 手動開房遊戲自己就做得很好，而插件多一條
-      // 路只會跟自動配對搶房間（`delete_room` 是頻道層級的，兩間房會一起被收
-      // 掉）。所以房名、地點、Cost 限制那幾格現在**只服務自動配對** —— 它們是
-      // 「配到人之後要怎麼開房」。
-      let mstate = null;
-      let matchTimer = null;
-      /** 配對頁開著沒。輪詢只在這時候跑。 */
-      const onMatchPage = () => tab === "deck" && sub === "match";
-      /** 開始配對失敗的原因（沒進頻道、沒選規則…）。只活在記憶體。 */
-      let matchError = null;
+      // 那一整套搬回遊戲裡了：WP-17 在迪城大廳畫的那顆「快速比賽」跟亞城那顆
+      // 長得一樣，人數、等待視窗、錯誤對話框全都是遊戲自己的。托盤這邊只留下
+      // **遊戲裡按不到的那一格**：這一場開在哪。
+      //
+      // ⚠ **這一頁不輪詢，也沒有任何會操作遊戲的東西。** 它讀快照、寫設定檔，
+      // 就這樣。
+      //
+      // ⚠ 長話一律進 ⓘ（`info()`）。留在畫面上的只有「你現在選的這個會怎樣」
+      // 那一句 —— 玩家是來放鬆的，一頁的字要一眼看得完。
 
       /**
-       * 開房設定的當下值。
+       * 畫面上還沒被下一份快照蓋回去的那一格。
        *
-       * ⚠ **真實來源是主程序**（`profile.match`，記在設定檔裡）。這裡只是畫面
-       * 上那一份，每次輪詢都會被 `mstate.match` 蓋掉 —— 改動要立刻送出去
-       * （`window.ulr.match.prefs`），否則下一次輪詢就把它打回去了。
+       * ⚠ 真實來源是設定檔（`snap.profile.match`）。這裡留一份是因為 `select`
+       * 的 change 與快照回來之間隔著一趟 IPC —— 中間重畫一次的話選單會彈回舊值。
        */
       let mform = null;
-      /** 把主程序那份同步過來。⚠ 玩家正在打字時不要蓋。 */
-      function syncMatchForm(s) {
-        if (s?.match && mform === null) mform = { ...s.match };
-      }
 
-      function startMatchPolling() {
-        if (matchTimer !== null) return;
-        const tick = () => {
-          // ⚠ **正在打字就整拍跳過，連問都不要問。** 這頁每 3 秒輪詢一次，而
-          // 重畫會把游標跟半個房名一起吃掉。問了不畫也可以，但玩家在改開房設定
-          // 的時候，那兩次 CDP 往返拿回來的東西反正也用不到。
-          if (isEditing()) {
-            scheduleCatchUp();
-            return Promise.resolve();
-          }
-          return window.ulr.match.state().then((s) => {
-            mstate = s;
-            syncMatchForm(s);
-            if (!onMatchPage()) return;
-            // 再問一次 —— 上面那次到現在隔了一趟 IPC，玩家可能剛好點進輸入框。
-            if (isEditing()) {
-              scheduleCatchUp();
-              return;
-            }
-            renderBody();
-          });
-        };
-        void tick();
-        // ⚠ 房間清單閒置時**約 20 秒才推一次**（2026-08-15 實測），輪詢再快也
-        // 不會更新。3 秒是為了「連上／斷線」與自己剛開的房，不是為了清單。
-        matchTimer = setInterval(tick, 3000);
-      }
-      function stopMatchPolling() {
-        if (matchTimer !== null) clearInterval(matchTimer);
-        matchTimer = null;
-      }
-
-      function channelLabel(n) {
-        if (n === null || n === undefined) return "（沒進頻道）";
-        const name = mstate?.channelNames?.[n];
-        return name ? `${n} ${name}` : String(n);
-      }
-
-      PAGES["deck/match"] = () => {
-        const s = mstate;
-        const ctx = s?.context ?? null;
-        const rule = s?.rule ?? null;
-        const ch = ctx?.channel ?? null;
-        const info = ch !== null ? (ctx?.channels?.[String(ch)] ?? null) : null;
-
-        if (!s?.connected) {
-          return (
-            head(
-              "自動配對",
-              "用同一套 COST 規則的人自動湊一場 —— 亞歷山卓城的快速比賽，換成自訂規則。",
-            ) +
-            `<div class="card"><div class="hint warn">⚠ 還沒接上遊戲。請先開遊戲並確認「設置 › 連線」那邊是綠的。</div></div>`
-          );
-        }
-
-        // 現在的狀態。⚠ 每一行都要標清楚數字是誰算的 —— 伺服器算的 COST 跟
-        // 自訂規則算的不是同一個數，混在一起看會做出錯誤的判斷。
-        const state = `<div class="card">
-            <div class="row"><span class="dim">頻道</span><span>${esc(channelLabel(ch))}${
-              info?.crossplay ? ' <span class="badge">跨平台</span>' : ""
-            }${info?.type === "ranked" ? ' <span class="badge">排名</span>' : ""}</span></div>
-            <div class="row"><span class="dim">玩家</span><span>${esc(ctx?.playerName ?? "—")}</span></div>
-            <div class="row"><span class="dim">牌組</span><span>Deck${ctx?.deckNow ?? "—"}</span></div>
-            <div class="row"><span class="dim">COST（伺服器算的）</span><span>${ctx?.deckCost ?? "—"}</span></div>
-            ${
-              s.myCost === null
-                ? ""
-                : `<div class="row"><span class="dim">COST（你的規則算的）</span><span>${
-                    s.myCost.total === null
-                      ? '<span class="dim">讀不到牌組</span>'
-                      : `<b>${esc(s.myCost.total)}</b>`
-                  }${
-                    s.myCost.unknown > 0
-                      ? ` <span class="badge">${s.myCost.unknown} 張沒定價</span>`
-                      : ""
-                  }${
-                    // ⚠ 「這副牌排不排得進這一檔」要在**按下開始之前**就看得到。
-                    // 少了它，玩家只能按了才知道要回遊戲改牌組，再回來按一次。
-                    s.myCost.fit === "ok"
-                      ? ` <span class="badge">在 ${esc(s.band ?? "")} 之內</span>`
-                      : s.myCost.fit === "over"
-                        ? ` <span class="bad"><b>超過這一檔（${esc(s.band ?? "")}）</b></span>`
-                        : s.myCost.fit === "under"
-                          ? ` <span class="bad"><b>低於這一檔（${esc(s.band ?? "")}）</b></span>`
-                          : ""
-                  }</span></div>
-                   <div class="hint">上面那個是<b>伺服器</b>用原版 COST 算的，遊戲的「牌組Cost限制 ±N」判的是它；
-                     這一個是<b>你選的規則</b>算的，約定的檔位判的是它。<b>兩個是不同的數字</b>。${
-                       s.myCost.unknown > 0
-                         ? " ⚠ 有卡在這份規則裡沒有定價，一律當 99 算 —— 這個總和不能當真。"
-                         : ""
-                     }${
-                       s.myCost.fit === "over" || s.myCost.fit === "under"
-                         ? " ⚠ 這副牌<b>排不進</b>目前約定的那一檔，按開始會被擋下來。先去遊戲裡換牌組，或改約別的檔位。"
-                         : ""
-                     }</div>`
-            }
-            <div class="row"><span class="dim">配對中</span><span>${ctx?.isMatching ? "是（已經開著一間房）" : "否"}</span></div>
-            ${
-              info?.type === "ranked"
-                ? `<div class="hint warn">⚠ 這是排名頻道，有 BP 增減與伺服器 COST 上限。約戰建議用迪特赫姆（2）或布萊德克洛伊茲（4）。</div>`
-                : ""
-            }
-            ${
-              s.seq === 0
-                ? `<div class="hint warn">⚠ 還沒收到房間清單。等收到之前不能開房 —— 空的清單分不出「你沒有房」跟「還不知道」。</div>`
-                : ""
-            }
-          </div>`;
-
-        const ruleCard = `<div class="card">
-            <div class="row"><span class="dim">規則</span><span>${
-              rule
-                ? `<b>${esc(rule.name)}</b> ${esc(rule.version)}`
-                : '<span class="dim">沒選，用原版 COST</span>'
-            }</span></div>
-            ${
-              rule
-                ? `<div class="row"><span class="dim">核對碼</span><span>${
-                    rule.shortHash
-                      ? `<code>${esc(rule.shortHash)}</code>`
-                      : '<span class="dim">裸規則，沒有核對碼</span>'
-                  }</span></div>
-                   <div class="row"><span class="dim">規則族</span><span><code>${esc(rule.ruleSetId)}</code></span></div>
-                   <div class="hint">要換規則請到「牌組 › Cost 表」。<b>自動配對是照「規則族」分的，不是照核對碼</b> ——
-                     同一套規則的不同版本會排在同一條隊伍裡，配到之後插件會驗算「這一場算出來的東西一不一樣」，
-                     一樣就能打。手動開房的話還是跟對手核對這 8 碼比較快。</div>`
-                : `<div class="hint">要選規則請到「牌組 › Cost 表」。<b>自動配對一定要有規則</b> —— 沒有規則就沒有「約定」可言。</div>`
-            }
-          </div>`;
-
-        // ⚠ **兩個 COST 限制是不同的東西**，UI 上一定要分開講。混在一起會做出
-        // 「顯示有限制、實際判的是另一套數字」的狀態。
-        const K = s.statics;
-        // ⚠ 畫面上那份（`mform`）與設定檔那份（`s.match`）—— 開頁的第一拍還沒
-        // 同步過來時用後者。兩份都沒有是不可能的（主程序一定會給）。
-        const f = mform ?? s.match;
-        // ⚠ 地圖**不是**下拉選單了 —— 玩家只選「誰來抽」。理由見下面那段 hint
-        // 與 `@ulr/arbiter-engine` 的 `StagePick`。
-        const stagePicks = [
-          ["arcadia", `亞城隨機（插件從 ${K.arcadiaStages.length} 張裡抽）`],
-          ["official", "官方隨機（交給遊戲伺服器抽）"],
-        ];
-        const stageOpts = stagePicks
-          .map(
-            ([v, label]) =>
-              `<option value="${v}"${f.stage === v ? " selected" : ""}>${esc(label)}</option>`,
-          )
-          .join("");
-
-        // 排隊中就把**整組**設定鎖起來 —— 這一整張表在按下「開始」的當下就被
-        // 抄進 `MatchPairing` 了（配對鍵、開房參數都是那時算的），排隊途中改任何
-        // 一格都不會生效。一個「改了沒反應」的輸入框比鎖起來更難懂。
-        const pairing = s.pairing ?? { phase: "idle" };
-        const queueBusy = pairing.phase !== "idle" && pairing.phase !== "blocked";
-
-        // 官方的 COST 階層。⚠ **只是快速鍵** —— 自訂 COST 想約幾就填幾，這幾顆
-        // 只是省下每次自己打數字。duel 頻道自己沒有階層，借的是同一條 socket 上
-        // 那個 ranked 頻道的（主程序的 costTiersFor 處理掉了）。
-        const tiers = s.costTiers ?? null;
-        const tierButtons =
-          tiers === null || queueBusy
-            ? ""
-            : tiers.map((n) => `<button class="tier" data-tier="${n}">${n}</button>`).join("");
-        const tierHint =
-          tiers === null
-            ? ch === null
-              ? `<div class="hint">進了頻道之後，這裡會列出那個頻道的官方 COST 檔位當快速鍵。</div>`
-              : ""
-            : `<div class="hint">上面那幾顆是<b>頻道 ${esc(String(ch))} 的官方 COST 檔位</b>（${tiers.join(" / ")}），
-                 按一下就填進去 —— 平常對戰最常約的就那幾檔。${
-                   info?.type === "duel" ? "這個頻道自己沒有檔位，用的是同一組排名頻道的。" : ""
-                 }
-                 ⚠ 它們<b>每週二遊戲更新會變</b>，所以插件每次都現讀，不記在設定裡。</div>`;
-
-        // ── 配對設定（配到人之後要怎麼開房）──────────────────────────────
-        //
-        // ⚠ 這些**只服務自動配對**。插件不再提供手動開房 —— 遊戲自己就做得很好，
-        // 而兩邊都能開房的話「取消」會把玩家手動開的那間一起收掉（`delete_room`
-        // 是整個頻道一起收的）。
-        //
-        // ⚠ **房名與地圖不是輸入框了。** 自動配對是要取代亞歷山卓城的快速比賽，
-        // 而那邊兩樣都不讓人填 —— 按一顆按鈕就該打得起來，不該先填一張表。
-        const form = `<div class="card">
-            <div class="row"><span class="dim">配對設定</span>
-              <span class="dim">配到人之後就用這些開房</span></div>
-            <div class="row"><span class="dim">房名</span>
-              <span>${
-                s.roomName
-                  ? `<code>${esc(s.roomName)}</code>`
-                  : '<span class="dim">選了規則才組得出來</span>'
-              }</span></div>
-            <div class="hint">房名<b>由系統取，玩家改不了</b> —— 大廳裡的人要一眼看得出這是哪一檔，
-              那正是亞歷山卓城的房間列在做的事（<code>Quickmatch [COST:57]</code>）。
-              前面那段是你選的<b>規則名</b>（太長會截），<code>[COST:n]</code> 那一段永遠完整。
-              ⚠ 密碼<b>不在</b>房名裡 —— 那是插件自己產的，只有配到的那個人拿得到。</div>
-            <div class="row"><span class="dim">對戰地點</span>
-              <span><select id="mStage" ${queueBusy ? "disabled" : ""}>${stageOpts}</select></span></div>
-            <div class="hint"><b>選不到「哪一張地圖」，只能選誰來抽</b> —— 開房的只有一方，
-              指定地圖對另一邊永遠是被決定的。<br />
-              · <b>亞城隨機</b>：插件從 <code>${esc(K.arcadiaStages[0] ?? "")}</code>～<code>${esc(
-                K.arcadiaStages[K.arcadiaStages.length - 1] ?? "",
-              )}</code> 這 ${K.arcadiaStages.length} 張裡抽一張<br />
-              · <b>官方隨機</b>：送 <code>014</code>，交給遊戲伺服器抽<br />
-              兩邊選的不一樣時走<b>官方隨機</b> —— 選它的那一邊等於說了「不要插件替我抽」。
-              對手沒回報（舊版插件）時用<b>開房那一方</b>的。<br />
-              ⚠ 亞城池裡的 <code>010</code>（魔女山谷）在<b>官方選單裡是選不到的</b>，
-              而插件只驗過它的背景圖載得起來，<b>沒有在上面打完一整場</b>。不想碰就選官方隨機。</div>
-            <div class="row"><span class="dim">對戰規則</span><span><b>3vs3</b>，不設「牌組Cost限制 ±N」</span></div>
-            <div class="hint">這兩格<b>選不到，是固定的</b> —— 一顆按鈕就該打得起來，而每多一個選項，
-              自動配對就再劈一次人潮。<b>3vs3 還特別貴：它進配對鍵</b>，選 1vs1 的人跟選 3vs3 的人
-              物理上配不到彼此。<br />
-              至於<b>「牌組Cost限制 ±N」，那是遊戲自己的欄位，伺服器用原版 COST 判</b> ——
-              跟你選的規則算出來的數字對不上，開著只會把一副照約定完全合法的牌組擋在門外。
-              這個玩法真正的限制是下面那個<b>約定 COST 檔位</b>，雙方各自用約定的規則檢查。</div>
-            <div class="row"><span class="dim">約定 COST 檔位</span>
-              <span><input id="mLimitOn" type="checkbox" ${f.limitOn ? "checked" : ""} ${queueBusy ? "disabled" : ""} />
-                    <input id="mLimit" type="number" min="0" max="200" step="0.01" style="width:5em"
-                           value="${f.limit}" ${queueBusy ? "disabled" : ""} />
-                    ${tierButtons}</span></div>
-            <div class="hint">${
-              f.limitOn && s.band
-                ? `這一檔<b>收 ${esc(s.band)}</b>，用<b>你選的規則</b>算 —— 跟亞城的 <code>COST${esc(
-                    String(f.limit),
-                  )}</code> 同一個意思：<b>有下限</b>，
-                   一副 40C 的隊伍排不進 ${esc(String(f.limit))} 檔。壓到剛好卡滿才是這個玩法的重點。`
-                : `<b>沒勾 = 什麼牌組都收</b>。勾起來才有「檔位」可言 —— 一檔的寬度是 1.00C
-                   （填 57 就是收 56.01～57.00），跟亞城的 <code>COST57</code> 同一個意思。`
-            }
-              ⚠ 這個數字<b>進配對條件</b>：填得不一樣的人會排在不同的隊伍裡，永遠配不到。
-              雙方各自檢查自己那副牌，所以誰都看不到對方的 COST。</div>
-            ${tierHint}
-            <div class="hint">這幾格都<b>記在設定裡</b>，下次開插件就是這樣。</div>
-          </div>`;
-
-        // 自動配對。⚠ 這張卡**永遠不會顯示對手的任何東西** —— 跨版本驗算會
-        // 交換牌組描述子，但那只拿去算指紋，不進畫面也不進記錄（見
-        // docs/match-making.md 的「對手的牌組不會出現在畫面上」）。
-        const compatBadge = {
-          exact: '<span class="badge">同一版規則</span>',
-          compatible: '<span class="badge">版本不同，這一場等價</span>',
-          incompatible: '<span class="badge">不相容</span>',
-        };
-        const queue = !rule
-          ? `<div class="hint warn">⚠ 自動配對<b>一定要有規則</b> —— 沒有規則就沒有「約定」可言。
-               先到「牌組 › Cost 表」選一份。</div>`
-          : `<div class="row"><span class="dim">狀態</span><span>${
-              queueBusy
-                ? "<b>" + esc(queuePhaseText(pairing)) + "</b>"
-                : esc(queuePhaseText(pairing))
-            }${pairing.compatibility ? " " + compatBadge[pairing.compatibility] : ""}</span></div>
-             ${
-               // ⚠ **「排隊中·只有你」與「根本沒連上」一定要分開講。** 兩者原本
-               // 長得一模一樣，而它們要玩家做的事完全相反：一個是等，一個是去
-               // 檢查中間人。2026-08-16 就是這樣讓兩台條件相同的客戶端各等各的
-               // ——雲端中間人那時還沒有配對佇列的路由。
-               pairing.phase === "queued" && pairing.linked === false
-                 ? `<div class="row"><span class="dim">中間人</span><span class="bad"><b>還沒連上</b></span></div>
-                    <div class="hint warn">⚠ 這不是在等對手 —— 是連不上配對佇列，插件還在重試。
-                      看「設置 › 記錄」有沒有「連不上配對佇列」那幾行，
-                      中間人的位址在「設置 › 連線」。</div>`
-                 : pairing.phase === "queued"
-                   ? `<div class="row"><span class="dim">排隊中</span><span>${
-                       pairing.waiting > 1
-                         ? `含你共 <b>${pairing.waiting}</b> 人`
-                         : "只有你 —— 對手要用同樣的條件排隊才配得到"
-                     }</span></div>`
-                   : ""
-             }
-             ${
-               // 協商出來的地點。⚠ 只有 host 會有 —— 開房的是他。
-               pairing.stage
-                 ? `<div class="row"><span class="dim">這一場的地點</span><span><b>${esc(
-                     stageLabel(pairing.stage),
-                   )}</b></span></div>`
-                 : ""
-             }
-             ${
-               // 這一檔收多少。⚠ 排隊中一定要看得到 —— 「配對條件」是兩邊要對上
-               // 的東西，而它同時決定了自己那副牌合不合法。
-               pairing.band
-                 ? `<div class="row"><span class="dim">這一檔</span><span>${esc(pairing.band)}${
-                     pairing.myTotal
-                       ? `　你的牌組 <b>${esc(pairing.myTotal)}</b>${
-                           pairing.overLimit ? " ⚠ 太高" : pairing.underLimit ? " ⚠ 太低" : ""
-                         }`
-                       : ""
-                   }</span></div>`
-                 : ""
-             }
-             ${
-               pairing.skipped > 0
-                 ? `<div class="row"><span class="dim">已跳過</span><span>${pairing.skipped} 位（規則版本算出來的東西不一樣）</span></div>`
-                 : ""
-             }
-             <div class="hint">${esc(pairing.message ?? "")}</div>
-             ${matchError ? `<div class="hint warn">⚠ ${esc(matchError)}</div>` : ""}
-             <div class="row"><span></span><span>
-               <button id="mQueueStart" ${queueBusy ? "disabled" : ""}>開始自動配對</button>
-               <button id="mQueueStop" ${queueBusy ? "" : "disabled"}>停止</button>
-             </span></div>
-             <div class="hint">插件會去中間人那邊排隊，配到條件一樣的人就<b>自動開房、自動進房</b>
-               （開房用下面那張卡的設定）。⚠ 配到之後會直接<b>消耗 AP</b> 並開打 ——
-               不想被自動拉進對戰就先按停止。<b>對戰一開始配對就自己結束</b>，不必手動停。<br />
-               對手用的規則是<b>同一族的哪一版都可以</b>，只要這一場算出來的 COST 完全一樣。<br />
-               ⚠ 排隊時插件會<b>每 5 秒確認你還在這個頻道</b>：跑去打別場、退出頻道、換頻道
-               都會<b>自動停止排隊</b>（不然你打完回來會發現有人開好房在等你）。
-               你自己在遊戲裡開房<b>不會</b>停止排隊 —— 真的配到人時插件會幫你把那間收掉。</div>`;
-
-        const queueCard = `<div class="card">
-            <div class="row"><span class="dim">自動配對</span><span class="dim">走中間人的佇列</span></div>
-            ${queue}
-          </div>`;
-
-        // 「有沒有人在等人」＝ B 位是空的。⚠ 這份清單最舊可能是 20 秒前的。
-        const waiting = (s.rooms ?? []).filter((r) => r.playerBName === null);
-        const rows = (s.rooms ?? [])
-          .map(
-            (r) => `<tr>
-                <td>${r.pass ? "🔒" : ""}</td>
-                <td>${esc(r.name)}</td>
-                <td>${esc(r.playerAName ?? "—")}</td>
-                <td>${r.playerBName === null ? "<b>等人中</b>" : esc(r.playerBName)}</td>
-              </tr>`,
-          )
-          .join("");
-
-        const list = `<div class="card">
-            <div class="row"><span class="dim">這個頻道的房間</span><span>${
-              (s.rooms ?? []).length
-            } 間，其中 <b>${waiting.length}</b> 間在等人</span></div>
-            ${
-              rows
-                ? `<table><thead><tr><th></th><th>房名</th><th>房主</th><th>對手</th></tr></thead><tbody>${rows}</tbody></table>`
-                : `<div class="hint">清單是空的。</div>`
-            }
-            <div class="hint">⚠ 清單是遊戲推播的，閒置時<b>約 20 秒才更新一次</b> —— 「等人中」可能已經是舊的了。
-              這裡只是給你看頻道熱不熱鬧，<b>要打就按上面的「開始自動配對」</b>。
-              手動開房請用遊戲自己的按鈕。</div>
-          </div>`;
-
-        return (
-          head(
-            "自動配對",
-            "用同一套 COST 規則的人自動湊一場 —— 亞歷山卓城的快速比賽，換成自訂規則。",
-          ) +
-          queueCard +
-          form +
-          ruleCard +
-          state +
-          list
-        );
-      };
-
-      /** 地點代號 → 「007 佩因霍魯姆」。認不得就原樣印出來。 */
-      function stageLabel(value) {
-        const all = [...(mstate?.statics?.stages ?? []), ...(mstate?.statics?.hiddenStages ?? [])];
-        const hit = all.find((g) => g.value === value);
+      /** 認得的地點代號 → 「007 峰亥盧遺跡」。清單從主程序來（見 `Snapshot`）。 */
+      function stageName(value) {
+        const hit = (snap?.selectableStages ?? []).find((g) => g.value === value);
         return hit ? `${hit.value} ${hit.name}` : String(value);
       }
 
-      /**
-       * 配對狀態 → 一句人話。
-       *
-       * ⚠ 「配到人了」跟「開房了」要分開講：中間隔著規則驗算，而那一步是
-       * 這整個功能的重點 —— 玩家看到「配對成功」卻沒進遊戲時，得知道插件
-       * 正在做什麼，否則那看起來就是卡住了。
-       */
-      function queuePhaseText(p) {
-        switch (p.phase) {
-          case "idle":
-            return "沒在配對";
-          case "queued":
-            return "排隊中";
-          case "checking":
-            return "配到人了，正在對規則";
-          case "opening":
-            return "開房中";
-          case "joining":
-            return "進房中";
-          case "ready":
-            return p.role === "host" ? "房開好了，等對手進來" : "已進房";
-          case "blocked":
-            return "停下來了，要先處理下面那件事";
-          default:
-            return String(p.phase);
-        }
-      }
+      // ⚠ 這三段是**這一頁唯一的長文**，而它們住在 `title=` 裡。畫面上看得到的
+      // 字要短到一眼看完；要細節的人按 ⓘ。
+      const STAGE_TIP =
+        "優先權：亞城隨機 ＞ 官方隨機 ＞ 指定的地圖\n" +
+        "· 一個人選亞城隨機 → 整場走亞城隨機\n" +
+        "· 沒人選亞城隨機、有人選官方隨機 → 官方隨機\n" +
+        "· 兩邊各指定一張且不一樣 → 擲骰子二選一\n" +
+        "\n" +
+        "亞城池是官方選單的 000～009 再加上 010（魔女山谷）。010 在官方開房選單裡選不到，" +
+        "插件只驗過它的背景圖載得起來，沒有在上面打完一整場。\n" +
+        "⚠ 選官方隨機或指定地圖也躲不掉它 —— 對手選亞城隨機時整場就走亞城池。";
+
+      const PICK_TIP =
+        "開房的只有一方，所以「我指定 007」對另一邊永遠是被決定的。\n" +
+        "兩邊指同一張就開那一張；指不同張時擲骰子二選一 —— 那是唯一不偏袒任何一方的解法。\n" +
+        "對手是舊版插件時，他會把你指定的那張讀成「官方隨機」。";
+
+      const AUTO_TIP =
+        "檔位照你的牌組算，你填不到，也不必填：\n" +
+        "· 落在這個頻道的官方檔位裡 → 就是那一檔（跟亞城一樣）\n" +
+        "· 落在外面 → 這副牌自己那一檔，一檔寬 1.00C 而且有下限（壓 C 才有意義）\n" +
+        "· 自訂檔在大廳左下沒有官方的那一行，插件會另外加一列（前面有 ★），沒人在等就不畫\n" +
+        "· 排隊中那個等待視窗上會寫著你排的是哪一檔\n" +
+        "\n" +
+        "房名由系統取（規則名 + [COST:n]），玩家改不了 —— 大廳裡的人要一眼看得出是哪一檔。\n" +
+        "固定 3vs3、固定不設遊戲自己的「牌組Cost限制 ±N」。\n" +
+        "\n" +
+        "⚠ 配到人會直接消耗 AP 並開打。再按一次那顆按鈕就是取消。\n" +
+        "⚠ 排隊時每 5 秒確認你還在那個頻道：跑去打別場、退出頻道、換頻道都會自動停止排隊。";
+
+      PAGES["deck/match"] = () => {
+        const stage = mform?.stage ?? snap?.profile?.match?.stage ?? "arcadia";
+
+        // ⚠ **選單的順序就是協商的優先權**（見 `@ulr/arbiter-engine` 的
+        // `negotiateStage`）。兩者不一致的話這個選單會騙人：玩家會以為排在最
+        // 上面的只是「預設」，而它其實是「一個人選就整場照它走」。
+        const opts = [
+          ["arcadia", "亞城隨機（插件從 11 張裡抽）"],
+          ["official", "官方隨機（交給伺服器抽）"],
+          ...(snap?.selectableStages ?? []).map((g) => [g.value, `${g.value} ${g.name}`]),
+        ]
+          .map(
+            ([v, label]) =>
+              `<option value="${esc(v)}"${stage === v ? " selected" : ""}>${esc(label)}</option>`,
+          )
+          .join("");
+
+        // 選了這個會怎樣，一句話。⚠ 指定某一張時一定要接那句「對手也要選同一張」
+        // —— 少了它，玩家會以為自己選的就是這一場的地點。
+        const line =
+          stage === "arcadia"
+            ? "插件從亞城那 11 張裡抽一張。"
+            : stage === "official"
+              ? "交給遊戲伺服器抽。"
+              : `想開在 ${esc(stageName(stage))}。<b>對手也要選同一張才一定開得成</b>${info(PICK_TIP)}`;
+
+        return (
+          head("對戰地點", "配到人之後，這一場開在哪。") +
+          `<div class="card">
+             <div class="row"><span class="dim">對戰地點</span>
+               <span><select id="mStage">${opts}</select>${info(STAGE_TIP)}</span></div>
+             <div class="hint">${line}</div>
+           </div>
+           <div class="card">
+             <div class="row"><span class="dim">怎麼開始一場</span>
+               <span>在遊戲裡按<b>快速比賽</b></span></div>
+             <div class="hint">迪特赫姆與布萊德克洛伊茲的大廳有一顆<b>快速比賽</b> ——
+               那是插件放的，跟亞歷山卓城那顆一樣：按下去排隊，配到用同一套規則的人就
+               自動開房、自動開打。檔位、房名、3vs3 都是自動的${info(AUTO_TIP)}</div>
+           </div>`
+        );
+      };
 
       // --- 牌組 › 隱藏地圖 --------------------------------------------------
       //
@@ -3579,6 +3472,36 @@
         );
       };
 
+      // --- 牌組 › 等候套用 --------------------------------------------------
+      //
+      // ⚠ **這一頁刻意只有一格。** 說明全部走 tooltip（ⓘ）—— 面板上多一段字
+      // 的代價不是那一段字本身，是它會把「這裡只有一個東西可以調」變成
+      // 「這裡有一堆東西要讀」。
+      const APPLY_TIP =
+        "切了牌組之後等這麼久，才把它寫進伺服器。" +
+        "人在牌組編輯畫面時看到的變化是即時的 —— 等的只有伺服器那一份。" +
+        "按下開戰／開始任務時會無視這個秒數：那一下會先攔下來，套好牌組才放行。" +
+        "0 = 切了馬上寫。";
+
+      PAGES["deck/apply"] = () => {
+        const seconds = snap?.profile.applyDelaySeconds ?? 3;
+        const lim = snap?.limits ?? {};
+        const min = lim.minApplyDelay ?? 0;
+        const max = lim.maxApplyDelay ?? 30;
+        return (
+          head("等候套用") +
+          `<div class="card">
+             <div class="row">
+               <span class="dim">切換牌組後等待${info(APPLY_TIP)}</span>
+               <span>
+                 <input id="applyDelay" type="number" min="${min}" max="${max}" step="0.5"
+                        style="width:5em" value="${seconds}" /> 秒
+               </span>
+             </div>
+           </div>`
+        );
+      };
+
       // --- 設置 › 配置 ------------------------------------------------------
       //
       // ⚠ 這一頁的表格、IPC（window.ulr.profiles.*）與按鈕事件本來就在了，
@@ -3606,8 +3529,12 @@
           return `<tr data-id="${esc(p.id)}"${self ? ' class="self"' : ""}>
               <td><input type="text" data-field="name" value="${esc(p.name)}" /></td>
               <td><select data-field="kind">
-                    <option value="desktop"${p.kind === "desktop" ? " selected" : ""}>桌面版</option>
-                    <option value="web"${p.kind === "web" ? " selected" : ""}>網頁版</option>
+                    ${Object.entries(KIND_TEXT)
+                      .map(
+                        ([k, label]) =>
+                          `<option value="${k}"${p.kind === k ? " selected" : ""}>${label}</option>`,
+                      )
+                      .join("")}
                   </select></td>
               <td><input type="number" data-field="port" value="${p.port}" /></td>
               <td><input type="text" data-field="link" value="${esc(p.link)}" placeholder="留空＝雲端" /></td>
@@ -3626,7 +3553,9 @@
                <tbody>${list.map(row).join("")}</tbody>
              </table>`
           : `<div class="hint">清單是空的。按下面的「新增配置」建一份 ——
-               第一份預設是桌面版，第二份會自動變成網頁版並換一個埠。</div>`;
+               第一份預設是桌面版，第二份會自動變成 Chrome 並換一個埠。
+               要接 Edge 的話在「客戶端」那一格改成 Edge 即可（它有自己的
+               瀏覽器 profile 與埠，跟 Chrome 可以同時開）。</div>`;
 
         return (
           head("配置", "一個視窗管一個遊戲客戶端。要同時管兩個就建兩份配置，各開一個實例。") +
@@ -3646,7 +3575,7 @@
            </div>` +
           (snap?.ephemeral
             ? `<div class="card"><div class="hint warn" style="margin-top:0">
-                 這個視窗是用命令列的 <b>--port ${snap.profile.port}</b> 開的臨時配置，<b>不在清單裡</b>。
+                 這個視窗是命令列開的臨時配置（<b>:${snap.profile.port}</b>），<b>不在清單裡</b>。
                  改它的設定不會存下來 —— 要留著就按上面的「新增配置」。
                </div></div>`
             : "")
@@ -3684,9 +3613,9 @@
            ${
              multi
                ? `<div class="card">
-                    <div class="row"><span class="dim">客戶端</span><span>${
-                      p?.kind === "web" ? "網頁版" : "桌面版"
-                    }</span></div>
+                    <div class="row"><span class="dim">客戶端</span><span>${esc(
+                      kindText(p?.kind),
+                    )}</span></div>
                     <div class="row"><span class="dim">CDP 埠</span><span>${
                       // ⚠ 顯示**實際**接到的埠，不是設定值。用 =0 啟動時客戶端
                       // 自己挑埠，我們從 DevToolsActivePort 讀回來 —— 顯示設定值
@@ -3832,9 +3761,9 @@
       // =====================================================================
       $("content").addEventListener("change", (e) => {
         const t = e.target;
-        // ⚠ 配對表單改動要**立刻**收進 mform。這頁每 3 秒重畫一次，而重畫是從
-        // mform 取值的 —— 不收的話你選好的地點會在下一次輪詢時被打回去。
-        if (MATCH_FIELDS.has(t.id)) readMatchForm();
+        // ⚠ 地點改了要**立刻**存。這一頁沒有存檔鈕，而下一份狀態推播就會照
+        // 設定檔重畫 —— 不存的話選單會自己彈回舊值。
+        if (t.id === "mStage") return void saveStagePick(t.value);
         if (t.id === "ready") return void set({ readyEnabled: t.checked });
         if (t.id === "seconds") {
           dragging = false;
@@ -3852,6 +3781,9 @@
         // 自己打的幅度。⚠ 走 `change` 而不是 `input`：打「0.05」的中途會經過
         // 「0」與「0.0」，而 0 是非法值（上下鍵完全不動）—— 每打一個字就送一次
         // 的話，主程序會把中途那些夾成 1 再回推，玩家看到輸入框自己跳。
+        // 同 `edStep` 走 `change`：打「0.5」的中途會經過 0，而 0 的意思是
+        // 「切了馬上寫」—— 每打一個字就送一次會讓輸入框自己跳。
+        if (t.id === "applyDelay") return void applyDeckDelay(t.value);
         if (t.id === "edStep") return void applyEditStep(t.value);
         // 同 `edStep` 走 `change` 而不是 `input`：打「0.25」的中途會經過 0 與 0.2，
         // 而 0 的意思是「關掉檢查」—— 每打一個字就送一次會讓開關自己跳。
@@ -4144,22 +4076,6 @@
             setTimeout(() => (btn.textContent = "複製"), 1500);
           });
         }
-        if (btn.id === "mQueueStart") return void queueStart();
-        if (btn.id === "mQueueStop") return void queueStop();
-        if (btn.dataset.tier !== undefined) {
-          // 快速鍵：填數字並順手打開勾選 —— 按了檔位卻沒生效是最沒道理的狀態。
-          // ⚠ 先 readMatchForm() 把畫面上其他欄位收起來（它同時會落地），
-          // 再改這兩格、再存一次，否則重畫會把它們打回設定檔裡那份。
-          return void readMatchForm().then(() => {
-            mform.limit = Number(btn.dataset.tier);
-            mform.limitOn = true;
-            return window.ulr.match.prefs(mform).then((saved) => {
-              mform = { ...saved };
-              if (mstate) mstate.match = saved;
-              renderBody();
-            });
-          });
-        }
         if (btn.id === "stagesRetry") {
           return void window.ulr.stages.retry().then((s) => {
             sstate = s;
@@ -4191,76 +4107,25 @@
         if (btn.dataset.act === "del") return void window.ulr.profiles.remove(id).then(apply);
       });
 
-      // --- 自動配對的動作 ---------------------------------------------------
+      // --- 對戰地點的動作 ---------------------------------------------------
       //
-      // ⚠ `queueStart` **會替玩家操作遊戲**：配到人之後不必再按任何東西就會
-      // 開房（消耗 AP）或進房（直接開打）。只能綁在玩家按下去的按鈕上，
-      // 不要放進輪詢或自動重試。
-      //
-      // ⚠ 手動開房／進房那三支拿掉了 —— 插件不再提供那條路（見這一頁的檔頭）。
-
-      // ⚠ 沒有 `mRoomName`、`mMulti`、`mBandOn`/`mBand` 了 —— 房名由系統取，
-      // 3vs3 與遊戲自己的 ±N 是固定的（見這一頁的開房設定那張卡）。
-      const MATCH_FIELDS = new Set(["mStage", "mLimitOn", "mLimit"]);
+      // ⚠ **只剩「存這一格」。** 開始／停止配對那兩支拿掉了（WP-18）：那條路
+      // 的入口是遊戲大廳裡那顆按鈕，而它從頭到尾都在主程序裡。畫面這邊已經沒有
+      // 任何一條會替玩家操作遊戲的路徑了。
 
       /**
-       * 把畫面上的值收回 `mform` **並存進設定檔**。
+       * 把選好的地點存進設定檔。
        *
-       * ⚠ 一定要立刻存。這頁每 3 秒輪詢一次，而輪詢回來的 `s.match` 是設定檔
-       * 裡那份 —— 不存的話玩家改的東西會在下一拍被打回去，而畫面上看起來就是
-       * 「輸入框自己跳回舊值」。
+       * ⚠ **一定要立刻存**（不要等玩家按什麼按鈕）：這一頁沒有存檔鈕，而下一份
+       * 狀態推播就會照設定檔重畫 —— 不存的話選單會自己彈回舊值。
+       *
+       * ⚠ 存完把主程序整理過的那份收回來。認不得的值會被夾成預設，而畫面自己
+       * 留一份的話會跟設定檔漂開。
        */
-      function readMatchForm() {
-        const v = (id) => $(id);
-        if (mform === null) mform = { ...(mstate?.match ?? {}) };
-        if (v("mStage")) mform.stage = v("mStage").value;
-        if (v("mLimitOn")) mform.limitOn = v("mLimitOn").checked;
-        // ⚠ 夾到兩位小數。檔位會進配對鍵（`matchCriteriaString` 用 toFixed(2)），
-        // 打三位小數的話「畫面上的數字」跟「實際比的數字」會不一樣。
-        if (v("mLimit")) {
-          const n = Number(v("mLimit").value);
-          if (Number.isFinite(n) && n >= 0) mform.limit = Math.round(n * 100) / 100;
-        }
+      function saveStagePick(value) {
+        mform = { stage: value };
         return window.ulr.match.prefs(mform).then((saved) => {
-          // 主程序整理過的那份才是真的（數字會被夾）。
           mform = { ...saved.match };
-          if (mstate) {
-            mstate.match = saved.match;
-            // ⚠ 房名與檔位區間是主程序從那幾格算的，一起收回來 —— 不收的話
-            // 「改了檔位，房名卻還是舊的」會停留到下一次輪詢（3 秒）。
-            mstate.roomName = saved.roomName;
-            mstate.band = saved.band;
-          }
-        });
-      }
-
-      /**
-       * 開始自動配對。
-       *
-       * ⚠ 開房設定**不從這裡送** —— 主程序自己讀設定檔（`profile.match`）。
-       * 送過去的話會有兩份真相，而「我改了設定但開出來的是舊的」看不出來。
-       */
-      function queueStart() {
-        const ch = mstate?.context?.channel;
-        if (ch === null || ch === undefined) {
-          matchError = "請先在遊戲裡進入一個頻道。";
-          return renderBody();
-        }
-        matchError = null;
-        // 先把畫面上還沒存的改動落地，再開始 —— 否則玩家剛改完檔位就按開始，
-        // 排的會是上一次存的那個。
-        return readMatchForm()
-          .then(() => window.ulr.match.queue.start({ channel: ch }))
-          .then((r) => {
-            if (!r.ok) matchError = r.reason;
-            else if (mstate) mstate.pairing = r.status;
-            renderBody();
-          });
-      }
-
-      function queueStop() {
-        return window.ulr.match.queue.stop().then((r) => {
-          if (mstate && r.status) mstate.pairing = r.status;
           renderBody();
         });
       }

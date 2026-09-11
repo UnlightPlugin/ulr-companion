@@ -18,6 +18,7 @@ import {
   removeFrom,
   resolveProfile,
   updateIn,
+  userDataDirFor,
 } from "../src/profiles-core.js";
 
 function storeOf(...ports: number[]): ProfileStore {
@@ -77,6 +78,33 @@ describe("整理清單", () => {
       false,
     );
     expect(normalizeStore({ profiles: [{ id: "a" }], multiProfile: true }).multiProfile).toBe(true);
+  });
+
+  it('⚠ 舊設定檔的 kind:"web" 要遷成 chrome，不能變回桌面版', () => {
+    // 遷丟的話，升級之後那份配置會去接桌面版的 DevToolsActivePort ——
+    // 而玩家的遊戲開在瀏覽器裡，畫面上只會寫「等遊戲…」。
+    const p = normalizeStore({ profiles: [{ id: "a", kind: "web", port: 59223 }] }).profiles[0];
+    expect(p?.kind).toBe("chrome");
+    expect(p?.port).toBe(59223);
+    // 目錄要跟著換 —— Chrome 的 profile 在 ~\ulr-cdp-profile，不是桌面版那個。
+    expect(userDataDirFor(p?.kind ?? "desktop")).toBe(userDataDirFor("chrome"));
+  });
+
+  it("舊的自動名「網頁版」換成 Chrome，玩家自己取的名字不動", () => {
+    // 「網頁版」是我們填的預設值，留著會出現「名稱：網頁版／客戶端：Chrome」
+    // 這種自相矛盾的一列。自己取過名字的人不該被改掉。
+    expect(
+      normalizeStore({ profiles: [{ id: "a", kind: "web", name: "網頁版" }] }).profiles[0]?.name,
+    ).toBe("Chrome");
+    expect(
+      normalizeStore({ profiles: [{ id: "a", kind: "web", name: "小號" }] }).profiles[0]?.name,
+    ).toBe("小號");
+  });
+
+  it("認不出來的 kind 一律回桌面版，不要憑空接到某個瀏覽器去", () => {
+    expect(normalizeStore({ profiles: [{ id: "a", kind: "firefox" }] }).profiles[0]?.kind).toBe(
+      "desktop",
+    );
   });
 
   it("埠不合法就退回預設，不讓實例開不起來", () => {
@@ -144,6 +172,23 @@ describe("修改", () => {
     expect(next.profiles[0]?.name).toBe("主帳號");
   });
 
+  it("換客戶端種類時，自動取的名字要跟著改", () => {
+    // 不改的話配置表會出現「名稱：Chrome／客戶端：Edge」，而托盤選單與視窗
+    // 標題顯示的都是名稱 —— 玩家之後分不出那一份接的是哪個瀏覽器。
+    const s = updateIn(storeOf(59223), "id0", { kind: "chrome", name: "Chrome" });
+    expect(updateIn(s, "id0", { kind: "edge" }).profiles[0]?.name).toBe("Edge");
+    // addTo 加的數字後綴要留著（「Chrome 2」→「Edge 2」）。
+    const numbered = updateIn(s, "id0", { name: "Chrome 2" });
+    expect(updateIn(numbered, "id0", { kind: "edge" }).profiles[0]?.name).toBe("Edge 2");
+  });
+
+  it("⚠ 玩家自己取的名字不會被換種類改掉", () => {
+    const s = updateIn(storeOf(59223), "id0", { kind: "chrome", name: "小號" });
+    expect(updateIn(s, "id0", { kind: "edge" }).profiles[0]?.name).toBe("小號");
+    // 同一次一起改名的話，他打的那個字優先。
+    expect(updateIn(s, "id0", { kind: "edge", name: "打渦的" }).profiles[0]?.name).toBe("打渦的");
+  });
+
   it("改成不合法的埠會被夾回去，不會存進一個開不起來的值", () => {
     expect(updateIn(storeOf(59222), "id0", { port: 0 }).profiles[0]?.port).toBe(
       defaultPortFor("desktop"),
@@ -186,6 +231,68 @@ describe("這個實例要用哪一份", () => {
     // 舊用法：純數字 = 本機的那個埠。
     const legacy = resolveProfile(storeOf(59222), ["--port", "1221", "--link-port", "9360"]);
     expect(legacy.profile.link).toBe("9360");
+  });
+
+  it("--kind 拿清單裡第一份那種客戶端（開發時 npm run tray 走這條）", () => {
+    const s: ProfileStore = {
+      ...emptyStore(),
+      profiles: [
+        { ...defaultProfile("desktop"), id: "id0" },
+        { ...defaultProfile("chrome"), id: "id1" },
+      ],
+    };
+    const r = resolveProfile(s, ["--kind", "chrome"]);
+    expect(r.profile.id).toBe("id1");
+    // ⚠ 不是臨時的 —— 在這個視窗改的設定要存得下來。
+    expect(r.ephemeral).toBe(false);
+  });
+
+  it("⚠ Chrome 與 Edge 是兩種客戶端，--kind 不會互相拿錯", () => {
+    // 拿錯的後果在畫面上看不出來：Edge 那份配置會照 Chrome 的 profile 目錄去
+    // 讀 DevToolsActivePort，接上的是另一個帳號的遊戲，而狀態列寫著「已接上」。
+    const s: ProfileStore = {
+      ...emptyStore(),
+      profiles: [
+        { ...defaultProfile("chrome"), id: "id0" },
+        { ...defaultProfile("edge"), id: "id1" },
+      ],
+    };
+    expect(resolveProfile(s, ["--kind", "edge"]).profile.id).toBe("id1");
+    expect(resolveProfile(s, ["--kind", "chrome"]).profile.id).toBe("id0");
+    // 兩種的預設埠也必須不同，否則兩個瀏覽器不可能同時掛著。
+    expect(defaultPortFor("edge")).not.toBe(defaultPortFor("chrome"));
+    expect(userDataDirFor("edge")).not.toBe(userDataDirFor("chrome"));
+  });
+
+  it("⚠ --kind 找不到那種客戶端時開臨時的，不是退回桌面版", () => {
+    // 退回第一份的話，`npm run tray`（預設 --kind chrome）會安靜地綁上桌面版 ——
+    // 而那正是開機自動啟動的安裝版占著的那一個。
+    const r = resolveProfile(storeOf(59222), ["--kind", "chrome"]);
+    expect(r.ephemeral).toBe(true);
+    expect(r.profile.kind).toBe("chrome");
+    expect(r.profile.port).toBe(defaultPortFor("chrome"));
+  });
+
+  it("⚠ --kind web 是舊的說法，要當成 chrome", () => {
+    // 外面還有舊捷徑與舊筆記帶著它。當成「看不懂的值」的話會安靜地綁到桌面版，
+    // 而那是開機自動啟動的安裝版占著的那一個。
+    const s: ProfileStore = {
+      ...emptyStore(),
+      profiles: [
+        { ...defaultProfile("desktop"), id: "id0" },
+        { ...defaultProfile("chrome"), id: "id1" },
+      ],
+    };
+    expect(resolveProfile(s, ["--kind", "web"]).profile.id).toBe("id1");
+  });
+
+  it("--profile / --port 比 --kind 優先", () => {
+    const r = resolveProfile(storeOf(59222, 9334), ["--kind", "chrome", "--port", "9334"]);
+    expect(r.profile.id).toBe("id1");
+  });
+
+  it("--kind 給了看不懂的值就當作沒給", () => {
+    expect(resolveProfile(storeOf(59222, 9334), ["--kind", "firefox"]).profile.id).toBe("id0");
   });
 
   it("⚠ 什麼都沒帶就用**第一份**，不看上次用的那份", () => {
@@ -313,10 +420,15 @@ describe("這個實例要用哪一份", () => {
   });
 
   /**
-   * ⚠ 約定上限預設是**關的** —— 插件不該替玩家憑空約定一個上限。
+   * ⚠ 「約定 COST 檔位」那兩格**整個拿掉了**（WP-18）：檔位改成照牌組算
+   * （`@ulr/arbiter-engine` 的 `tierForTotal` / `bandForTotal`）。舊設定檔裡
+   * 那兩個值不搬過來，也不留在物件上 —— 它們**進配對鍵**，一個沒有 UI 顯示
+   * 也改不掉的舊值會讓玩家排在一條沒有人的隊伍上。
    */
-  it("約定上限預設關著", () => {
-    expect(normalizeMatchPrefs({}).limitOn).toBe(false);
+  it("舊設定檔的約定檔位不搬過來 —— 檔位現在照牌組算", () => {
+    const p = normalizeMatchPrefs({ limitOn: true, limit: 62 });
+    expect(p).not.toHaveProperty("limitOn");
+    expect(p).not.toHaveProperty("limit");
   });
 
   /**
@@ -333,32 +445,22 @@ describe("這個實例要用哪一份", () => {
     expect(p).not.toHaveProperty("band");
   });
 
-  it("地點那格現在只有兩種抽法，認不得的退回亞城池", () => {
+  it("地點那格收兩種抽法與 000~013，認不得的退回亞城池", () => {
     expect(normalizeMatchPrefs({ stage: "arcadia" }).stage).toBe("arcadia");
     expect(normalizeMatchPrefs({ stage: "official" }).stage).toBe("official");
+    expect(normalizeMatchPrefs({ stage: "007" }).stage).toBe("007");
+    expect(normalizeMatchPrefs({ stage: "013" }).stage).toBe("013");
     expect(normalizeMatchPrefs({ stage: "../etc" }).stage).toBe("arcadia");
+    expect(normalizeMatchPrefs({ stage: "099" }).stage).toBe("arcadia");
     expect(normalizeMatchPrefs({ stage: 13 }).stage).toBe("arcadia");
   });
 
   /**
-   * ⚠ 舊設定檔那格是三位數的地點代號。**要搬，不能直接丟**：選過「隨機」的
-   * 那些人是明確表示過「不要插件替我抽」的，而 `014` 正是那個意思。指定過
-   * 某一張地圖的人沒有對應的新選項（那個功能拿掉了），退回預設的亞城池。
+   * ⚠ `014` 是**官方選單裡的「隨機」**，不是一張地圖。舊設定檔（與中間某一版
+   * 只有兩種抽法的設定檔）存過它，而它的意思正是「不要插件替我抽」。
    */
-  it("舊設定檔的地點代號要搬過來 —— 014 是「官方隨機」，其餘退回亞城池", () => {
+  it("舊設定檔的 014 是「官方隨機」，不是一張地圖", () => {
     expect(normalizeMatchPrefs({ stage: "014" }).stage).toBe("official");
-    expect(normalizeMatchPrefs({ stage: "000" }).stage).toBe("arcadia");
-    expect(normalizeMatchPrefs({ stage: "013" }).stage).toBe("arcadia");
-  });
-
-  /**
-   * ⚠ 約定檔位**進配對鍵**，而配對鍵是 `toFixed(2)` 算的。多一位小數的話
-   * 「畫面上寫 62.005」與「實際比的 62.01」會是兩個數字，症狀是配不到人。
-   */
-  it("約定檔位夾到兩位小數，壞值退回預設", () => {
-    expect(normalizeMatchPrefs({ limit: 62.005 }).limit).toBe(62.01);
-    expect(normalizeMatchPrefs({ limit: -1 }).limit).toBe(DEFAULT_MATCH_PREFS.limit);
-    expect(normalizeMatchPrefs({ limit: "五十七" }).limit).toBe(DEFAULT_MATCH_PREFS.limit);
   });
 });
 

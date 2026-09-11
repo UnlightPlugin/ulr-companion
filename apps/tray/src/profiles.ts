@@ -27,12 +27,17 @@ export type {
   ProfileStore,
 } from "./profiles-core.js";
 export {
+  clientLabel,
+  DEFAULT_APPLY_DELAY_SECONDS,
   DEFAULT_COST_RULE_MODE,
   DEFAULT_EDIT_STEP,
   DEFAULT_MATCH_PREFS,
   defaultPortFor,
   EDIT_STEPS,
   EDIT_UNITS,
+  MAX_APPLY_DELAY_SECONDS,
+  MIN_APPLY_DELAY_SECONDS,
+  normalizeApplyDelaySeconds,
   normalizeEditStep,
   normalizeEditUnit,
   normalizeMatchPrefs,

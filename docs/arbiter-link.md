@@ -312,7 +312,8 @@ hazard 判成 false（不縮短），方向是安全的。
 ## 托盤程式
 
 ```powershell
-npm run tray                      # 上次用的那份配置
+npm run tray                      # 開發預設：第一份**網頁版**配置
+npm run tray -- --kind desktop    # 第一份桌面版配置
 npm run tray -- --profile <id>    # 指定配置
 npm run tray -- --port 59222       # 相容用法
 ```

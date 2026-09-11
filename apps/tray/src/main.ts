@@ -4,7 +4,9 @@
  * 一個托盤圖示管**一個**遊戲客戶端。要管兩個就開兩份 —— 設定頁的「配置」
  * 那一欄按「開新實例」，或沿用舊的命令列：
  *
- *     npm run tray                      上次用的那份配置
+ *     npm run tray                      開發時預設接 **Chrome**（見 `scripts/run-tray.mjs`）
+ *     npm run tray -- --kind edge       第一份 Edge 的配置
+ *     npm run tray -- --kind desktop    第一份桌面版的配置
  *     npm run tray -- --profile <id>    指定配置
  *     npm run tray -- --port 59222       相容用法：對得上就用那份，對不上開臨時的
  *
@@ -51,30 +53,44 @@ import {
   ruleTag,
 } from "@ulr/arbiter-link";
 import {
-  ARCADIA_STAGES,
   canAffordDuel,
-  CHANNEL_NAMES,
   costTiersFor,
   DEBUG_PORT_SWITCH_AUTO,
   duelApCost,
   HIDDEN_STAGES,
   resolveDebugPort,
   ROOM_ERROR_AP_SHORT,
-  ROOM_ERROR_DECK_INVALID,
-  STAGES,
+  SELECTABLE_STAGES,
 } from "@ulr/cdp-adapter";
 import type {
+  DeckEditReport,
+  DeckSnapshot,
   DuelAffordability,
   HiddenStageStatus,
+  InventorySnapshot,
   LobbyQuickPressed,
   LobbyTierCount,
   MatchContext,
-  RoomEntry,
+  RoomGateReport,
 } from "@ulr/cdp-adapter";
+import type { DeckContent, RoomKind } from "@ulr/deck-library";
 import {
-  buildRoomName,
-  checkOwnDeck,
-  formatBand,
+  deckContentFromFlat,
+  deckContentHash,
+  deckContentToPayload,
+  displayName,
+  emptyDeckContent,
+  findDeck,
+  findShortages,
+  guardDeck1,
+  isEmptyDeck,
+  listDecks,
+  parseDeckContent,
+  ROOM_KINDS,
+  ROOM_LABELS,
+} from "@ulr/deck-library";
+import {
+  bandForTotal,
   MatchPairing,
   ROOM_MULTI,
   teamCostCenti,
@@ -96,6 +112,24 @@ import {
   toIndexTable,
 } from "@ulr/rule-schema";
 import { readCatalog, writeCatalog } from "./catalog-store.js";
+import type { DeckSession } from "./deck-core.js";
+import {
+  applyLanded,
+  applyReport,
+  autoSave,
+  deckEditStateOf,
+  enterRoom,
+  roomDeckPreloadOf,
+  expireNotice,
+  isApplyDue,
+  migrateServerDecks,
+  newSession,
+  resolveActive,
+  resolveAll,
+  seedAllRooms,
+  withNotice,
+} from "./deck-core.js";
+import { backupOnce, readLibrary, writeLibrary } from "./deck-store.js";
 import { bundledRulePath, resolveDefaultRule } from "./default-rule.js";
 import type { TierRef } from "./lobby-counts.js";
 import { displayCounts, tierOf } from "./lobby-counts.js";
@@ -111,6 +145,9 @@ import {
   EDIT_UNITS,
   loadStore,
   markUsed,
+  MAX_APPLY_DELAY_SECONDS,
+  MIN_APPLY_DELAY_SECONDS,
+  normalizeApplyDelaySeconds,
   normalizeEditStep,
   normalizeEditUnit,
   normalizeMatchPrefs,
@@ -454,123 +491,44 @@ interface Snapshot {
    * 回報是「選了沒反應」：錯誤只寫進了記錄，而記錄在另一頁。
    */
   costRuleError: CostRuleFailure | null;
-  limits: { minSeconds: number; maxSeconds: number; minSpeed: number; maxSpeed: number };
-}
-
-// ---------------------------------------------------------------------------
-// 配對頁的狀態
-//
-// ⚠ 這一份**不放進 `Snapshot`**。Snapshot 是每次狀態變動就整份推給畫面的，
-// 而配對狀態要跟遊戲要（兩次 CDP 往返），塞進去等於每個無關的變動都去戳一次
-// 遊戲。配對頁自己在開著的時候輪詢。
-// ---------------------------------------------------------------------------
-
-interface MatchRuleInfo {
-  name: string;
-  version: string;
-  /** 跟對手核對的 8 碼。`null` = 裸 COST 表，沒有可核對的碼。 */
-  shortHash: string | null;
-  entries: number;
-  /**
-   * 規則族（`publisherSlug/ruleSlug`）。
-   *
-   * ⚠ **配對是照這個分的，不是照 shortHash。** 同一個 ruleSetId 的不同版本
-   * 會排在同一條佇列，能不能開打由語義驗算決定 —— UI 要講出這件事，否則
-   * 玩家會以為「核對碼不一樣就是配不到」。
-   */
-  ruleSetId: string;
-}
-
-/** 我這副牌在自訂規則下算起來多少。⚠ 跟伺服器算的原版 COST 是兩個數字。 */
-interface MyDeckCost {
-  /** 自訂規則算的總和，兩位小數字串。讀不到牌組時是 `null`。 */
-  total: string | null;
-  /** 規則裡沒定價、被當成 99 的卡數。不是 0 就要顯示警告。 */
-  unknown: number;
-  /**
-   * 這副牌在**目前約定的那一檔**裡嗎。沒設檔位、或讀不到牌組時是 `null`。
-   *
-   * ⚠ 這是「按下去之前就看得到」的那一格。少了它，玩家只能按了開始才知道
-   * 自己這副牌不合檔 —— 而那是一個要回遊戲改牌組、再回來按一次的來回。
-   */
-  fit: "ok" | "over" | "under" | null;
-}
-
-interface MatchPageState {
-  connected: boolean;
-  context: MatchContext | null;
-  rooms: RoomEntry[];
-  /** 房間清單的推播序號。0 = 一筆都還沒收到。 */
-  seq: number;
-  rule: MatchRuleInfo | null;
-  /** 用自訂規則算的自己牌組總和。沒選規則時是 `null`。 */
-  myCost: MyDeckCost | null;
-  /**
-   * 目前頻道的官方 COST 階層，**已經處理過 duel 借 ranked 的那層**
-   * （見 `@ulr/cdp-adapter` 的 `costTiersFor`）。沒進頻道是 `null`。
-   *
-   * ⚠ 只是**快速選單**。自訂 COST 配對仍然可以填任何數字 —— 這幾個值只是
-   * 「平常對戰最常約的那幾檔」，省得每次自己打。
-   *
-   * ⚠ **每週二遊戲更新會變**，所以一律現讀，不快取也不寫進設定檔。
-   */
-  costTiers: number[] | null;
-  /** 自動配對的狀態。沒在配對時 phase 是 `idle`。 */
-  pairing: PairingStatus;
-  /**
-   * 玩家記在配置裡的配對設定（地點抽法、約定檔位）。
-   *
-   * ⚠ 畫面**從這裡取初始值**，不要自己留一份預設 —— 兩份預設一定會漂，
-   * 而漂掉的症狀是「我明明改過設定，重開又變回去」。
-   */
-  match: MatchPrefs;
-  /**
-   * 配到人時會開出來的房名，**主程序組好的**。沒選規則時是 `null`。
-   *
-   * ⚠ 畫面**不准自己組一份**。房名同時是 host 在清單裡認出自己那間房的依據
-   * （`findOwnRoom` 拿它比對），畫面組的跟開房用的漂掉一個字，症狀是
-   * 「開好房卻找不到自己那間」—— 而那看起來完全像是遊戲那邊的問題。
-   */
-  roomName: string | null;
-  /** 目前約定的那一檔收多少（`56.01～57.00`）。沒設檔位是 `null`。 */
-  band: string | null;
-  /** 頻道編號 → 顯示名稱。遊戲的 `channels` 物件裡沒有名稱。 */
-  channelNames: Readonly<Record<number, string>>;
-  /**
-   * 官方的對戰地點清單、官方選單沒有的那四張、亞城池。
-   *
-   * ⚠ `stages` 與 `hiddenStages` 現在**只給「這一場抽到哪」那一行查名字**
-   * （`stageLabel`），不再是一個下拉選單 —— 玩家選不到地圖了。
-   *
-   * ⚠ 遊戲的 `COST_RANGES`（±0～±5）**不在這裡**：插件開房永遠不設那一格
-   * （`@ulr/arbiter-engine` 的 `ROOM_DECK_COST_BAND`），畫面上沒有東西要列它。
-   */
-  statics: {
-    stages: readonly { value: string; name: string }[];
-    hiddenStages: readonly { value: string; name: string }[];
-    /** 「亞城隨機」會抽到的那幾張。畫面拿它講清楚池子有多大、含哪幾張。 */
-    arcadiaStages: readonly string[];
+  limits: {
+    minSeconds: number;
+    maxSeconds: number;
+    minSpeed: number;
+    maxSpeed: number;
+    /** 「等候套用」秒數的上下限。**畫面不自己寫死**，跟其他限制同一個理由。 */
+    minApplyDelay: number;
+    maxApplyDelay: number;
   };
+  /**
+   * 「對戰地點」那個下拉選單裡的地圖（`000`~`013`，含官方選單沒有的四張）。
+   *
+   * ⚠ **畫面不自己編一份。** 代號與名字住在 `@ulr/cdp-adapter`
+   * （`SELECTABLE_STAGES`），而那個代號會被送進開房封包 —— 兩份清單漂開的話，
+   * 玩家選的跟開出來的會是不同的地圖，而畫面上完全看不出來。
+   *
+   * ⚠ 它是常數，卻放進每次都整份重送的快照裡：14 個小物件，跟 COST 表那 1186
+   * 筆不是同一個量級（見 `preload.ts` 對 `editor.load` 的說明）。
+   */
+  selectableStages: readonly { value: string; name: string }[];
 }
 
-/**
- * `ulr:match-prefs` 回的東西。
- *
- * ⚠ 房名與檔位區間**跟著一起回**，因為它們是從 `match` 算出來的，而畫面必須
- * 在玩家改完的當下就看到新的值。算它們的地方仍然只有主程序（見那支 handler）。
- */
+// ---------------------------------------------------------------------------
+// 對戰地點那一頁（WP-18）
+//
+// ⚠ **這一頁沒有狀態要跟遊戲要了。** 它只有一格「這一場開在哪」，而那一格
+// 記在配置裡（`profile.match.stage`），跟著 `Snapshot` 一起走。
+//
+// 以前這裡是「自動配對」頁：排隊狀態、房間清單、頻道資訊、兩份 COST 對照、
+// 開始／停止。那一整套搬回遊戲裡了 —— 迪特赫姆大廳那顆「快速比賽」按鈕
+// （WP-17）跟亞城那顆是同一種東西，而玩家人本來就在遊戲畫面上。托盤這邊
+// 留一張要滑三頁的表，只是讓「按一顆按鈕就開打」看起來像要先填一張表。
+// ---------------------------------------------------------------------------
+
+/** `ulr:match-prefs` 回的東西。**只有設定** —— 這一頁沒有別的要算了。 */
 interface MatchPrefsResult {
   match: MatchPrefs;
-  roomName: string | null;
-  band: string | null;
 }
-
-/** 從客戶端抄回來的官方設定。畫面不自己編一份，避免兩邊對不上。 */
-const MATCH_STATICS: MatchPageState["statics"] = {
-  stages: STAGES,
-  hiddenStages: HIDDEN_STAGES,
-  arcadiaStages: ARCADIA_STAGES,
-};
 
 // ---------------------------------------------------------------------------
 // 隱藏地圖那一頁的狀態
@@ -599,77 +557,76 @@ async function stageStatus(): Promise<HiddenStageStatus | null> {
 }
 
 /**
- * 「開始自動配對」帶的東西。
- *
- * ⚠ `channel` 與**設定裡的約定檔位**進配對鍵（`matchKey`），也就是說：兩邊填得
- * 不一樣就物理上配不到對方。3vs3 那一格也在鍵裡，但它現在是**固定值**
- * （`@ulr/arbiter-engine` 的 `ROOM_MULTI`），沒有人填得到。地點不進 —— 它是配對
- * 成立**之後**才協商的（`negotiateStage`）。房名也不進，那是系統照規則與檔位
- * 組出來的。
- *
- * ⚠ 開房要用的那幾格（地點抽法、約定檔位）**不從這裡送** —— 它們記在配置裡
- * （`profile.match`），主程序自己讀。畫面送過來的話會有兩份真相，而
- * 「我改了設定但開出來的是舊的」這種 bug 完全看不出來。
- */
-interface MatchQueueOptions {
-  channel: number;
-}
-
-function matchRuleInfo(): MatchRuleInfo | null {
-  if (costRule === null) return null;
-  return {
-    name: costRule.name,
-    version: costRule.version,
-    shortHash: costRule.shortHash,
-    entries: costRule.entries,
-    ruleSetId: costRule.ruleSetId,
-  };
-}
-
-/**
  * 自動配對。**同時只會有一個** —— 一個托盤視窗管一個遊戲客戶端，
  * 而一個客戶端同時只能排一條隊。
+ *
+ * ⚠ **沒有一份 `pairingStatus` 快取了**（WP-18）。它以前存在只是為了餵托盤那
+ * 一頁，而那一頁沒有配對狀態了 —— 玩家看的是遊戲裡的等待視窗。狀態的去處現在
+ * 只有兩個：記錄檔（`onLog`）與遊戲畫面（`pushLobbyState`）。留一份沒有人讀的
+ * 快取，下一個人會以為它是真相來源。
  */
 let pairing: MatchPairing | null = null;
-let pairingStatus: PairingStatus = {
-  phase: "idle",
-  linked: false,
-  waiting: 0,
-  role: null,
-  compatibility: null,
-  myTotal: null,
-  overLimit: false,
-  underLimit: false,
-  band: null,
-  skipped: 0,
-  stage: null,
-  message: "沒在配對。",
-};
+
+/** 我這副牌排進哪一檔。`custom` = 官方檔位裡沒有它，插件自己算的。 */
+interface DeckTier {
+  /** 這副牌在自訂規則下的總和，**整數百分之一**。 */
+  totalCenti: number;
+  /** 有上限的那一檔（官方檔位或自訂檔）。開口檔時是 `null`。 */
+  costLimit: number | null;
+  /** 開口檔（`COST90+`）的下限。其餘一律 `null`。 */
+  costFloor: number | null;
+  /** 這一檔是照牌組算出來的，官方那三檔／開口檔裡沒有它。 */
+  custom: boolean;
+}
 
 /**
- * 我這副牌用**自訂規則**算起來多少。
+ * 我這副牌排進哪一檔（WP-18）。**大廳那顆按鈕與左下那幾行共用這一支。**
  *
- * ⚠ 這跟 `context.deckCost`（伺服器算的原版 COST）是**兩個不同的數字**，
- * 畫面上一定要並排標明白。約戰約定的上限是用這一個判的，遊戲自己的
- * 「牌組Cost限制 ±N」是用另一個判的 —— 混在一起看會做出完全錯誤的決定。
+ * ```
+ *   落在官方三檔／開口檔裡 → 那一檔（跟亞城一樣，左下本來就有那一行）
+ *   落在外面               → 這副牌自己那一檔（bandForTotal），左下多一行標 ★
+ * ```
+ *
+ * ⚠ **兩個呼叫端一定要用同一支。** 一個決定「我排進哪條佇列」，另一個決定
+ * 「畫面上那一行寫的是哪一檔」—— 各算各的話，症狀是人已經在排隊，而畫面上
+ * 那一行永遠寫著 0。
+ *
+ * ⚠ 這跟 `context.deckCost`（伺服器算的原版 COST）是**兩個不同的數字**。
+ * 遊戲自己的「牌組Cost限制 ±N」判的是那一個，這裡算的是自訂規則那一個。
+ *
+ * ⚠ 讀不到牌組回 `null`，**不是回一個 0C 的檔** —— 一個算錯的檔位會把玩家
+ * 排進一條沒有人的佇列，而畫面上看起來完全正常。
  */
-function myDeckCost(context: MatchContext | null): MyDeckCost | null {
-  if (costRuleFull === null) return null;
-  const keys = context?.deckKeys ?? null;
-  if (keys === null) return { total: null, unknown: 0, fit: null };
+function myDeckTier(context: MatchContext | null, openTier: number | null): DeckTier | null {
+  if (costRuleFull === null || context === null) return null;
+  const keys = context.deckKeys;
+  if (keys === null) return null;
   const deck = deckFromKeys(keys);
-  if (deck.characters.length === 0) return { total: null, unknown: 0, fit: null };
-  // ⚠ 算兩次是刻意的：`total` 要的是「這副牌多少 C」（跟檔位無關，沒設檔位時
-  // 也要顯示），`fit` 要的是「在不在這一檔」。把上限塞進第一次呼叫的話，沒設
-  // 檔位的人就拿不到總和了。
-  const check = checkOwnDeck(costRuleFull, deck, null);
-  const limit = profile.match.limitOn ? profile.match.limit : null;
-  const banded = limit === null ? null : checkOwnDeck(costRuleFull, deck, limit);
+  if (deck.characters.length === 0) return null;
+
+  const totalCenti = teamCostCenti(costRuleFull, deck);
+  // ⚠ 現讀，不快取 —— 每週二遊戲更新會變（見 `costTiersFor`）。
+  const tiers =
+    context.channel === null ? [] : (costTiersFor(context.channels, context.channel) ?? []);
+  const pick = tierForTotal(totalCenti, tiers, openTier);
+  if (pick === null) {
+    // 官方檔位對不上 —— 用這副牌自己那一檔。以前這裡是把玩家擋下來，理由與
+    // 取捨見 `@ulr/arbiter-engine` 的 `bandForTotal`。
+    return { totalCenti, costLimit: bandForTotal(totalCenti), costFloor: null, custom: true };
+  }
   return {
-    total: check.total,
-    unknown: check.unknown.length,
-    fit: banded === null ? null : banded.over ? "over" : banded.under ? "under" : "ok",
+    totalCenti,
+    costLimit: pick.kind === "band" ? pick.tier : null,
+    costFloor: pick.kind === "open" ? pick.tier : null,
+    custom: false,
   };
+}
+
+/** 一檔在記錄檔與畫面上叫什麼 —— `COST57`、`COST90+`。 */
+function tierLabel(t: { costLimit: number | null; costFloor: number | null }): string {
+  if (t.costLimit !== null) return `COST${t.costLimit}`;
+  if (t.costFloor !== null) return `COST${t.costFloor}+`;
+  return "COST自由";
 }
 
 /**
@@ -694,12 +651,11 @@ function affordDuel(context: MatchContext): DuelAffordability {
  * ⚠⚠ 這支會一路走到**開房**（消耗 AP 5）或**進房**（直接開打），所以它只能
  * 由玩家親手按下的動作觸發 —— 任何輪詢、重試、狀態同步都不准叫它。
  *
- * 兩個呼叫端的差別只有檔位怎麼來：
+ * ⚠ **入口只剩一個了**（WP-18）：遊戲大廳裡那顆「快速比賽」。托盤那一頁不再
+ * 有開始／停止 —— 玩家人在遊戲畫面上，而亞城那顆按鈕就在那裡。
  *
- * | 呼叫端           | 檔位                                              |
- * | ---------------- | ------------------------------------------------- |
- * | 托盤的配對頁     | 玩家自己在設定裡填的那一格                        |
- * | 大廳的「快速比賽」| **照牌組自動判**（`tierForTotal`，亞城就是這樣） |
+ * 檔位一律**照牌組算**（`myDeckTier`），玩家填不到。理由見
+ * `profiles-core.ts` 的 `MatchPrefs`：填得跟對手不一樣會物理上配不到人。
  */
 async function startPairing(args: {
   channel: number;
@@ -748,18 +704,14 @@ async function startPairing(args: {
     },
     driver,
     onStatus: (s) => {
-      pairingStatus = s;
-      // ⚠ 停下來就把物件放掉。留著的話玩家再按「開始配對」只會收到
-      // 「已經在配對中了」，而畫面上明明寫著已停止 —— 那是最讓人以為插件
-      // 壞掉的一種狀態。
+      // ⚠ 停下來就把物件放掉。留著的話玩家再按一次大廳那顆按鈕只會被當成
+      // 「取消」，而他其實是想重新排一次 —— 那是最讓人以為插件壞掉的狀態。
       //
       // `idle` 跟 `blocked` 都要放：配對成功走到底（對手進房、對戰開始）
       // 之後狀態機會自己回到 idle，而那正是玩家最可能馬上想再排一次的時候。
       if (s.phase === "blocked" || s.phase === "idle") pairing = null;
-      // ⚠ 配對頁是**自己輪詢**的（見 `MatchPageState` 的說明），所以這裡
-      // 不 pushState —— 那會把整份 Snapshot 推給畫面，而配對狀態不在裡面。
-      //
-      // 但**遊戲畫面那一行要立刻跟上**：玩家人在遊戲裡，托盤視窗多半是收著的。
+      // ⚠ **遊戲畫面要立刻跟上。** 玩家人在遊戲裡，托盤視窗多半是收著的 ——
+      // 而托盤那一頁本來就沒有配對狀態可以更新了（WP-18）。
       void pushLobbyState();
     },
     onLog: (line) => log(line),
@@ -904,7 +856,13 @@ async function pushLobbyState(options: { refreshCounts?: boolean } = {}): Promis
     stopLobbyWatch();
     lobbySpecs = [];
     lobbyByKey.clear();
-    await engine.setLobbyState({ counts: null, matching: pairing !== null });
+    // ⚠ 人數藏起來，**標記還是要送** —— 排隊中的那個框在哪一檔，跟「這台機器
+    // 該不該看到人數」是兩件事。
+    await engine.setLobbyState({
+      counts: null,
+      matching: pairing !== null,
+      badge: matchingBadge(),
+    });
     return;
   }
 
@@ -935,15 +893,49 @@ async function pushLobbyState(options: { refreshCounts?: boolean } = {}): Promis
   await engine.setLobbyState({
     // ⚠ 推出去的不是中間人那份原始數字，是**把「我自己」放到對的位置之後**
     // 的那一份。理由整段寫在 `lobby-counts.ts` 的檔頭。
-    counts: displayCounts({
-      counts: currentCounts(),
-      fetchedWhileIn: lobbyCountsSelf,
-      nowIn: selfTier(),
-    }),
+    counts: withoutEmptyCustom(
+      displayCounts({
+        counts: currentCounts(),
+        fetchedWhileIn: lobbyCountsSelf,
+        nowIn: selfTier(),
+      }),
+    ),
     // ⚠ 配對中就跳**遊戲自己的等待視窗**（有計時、有 cancel），不是在 INFO
     // 那一區多寫一行字 —— 亞城按下快速比賽之後跳的就是那個框。
     matching: pairing !== null,
+    badge: matchingBadge(),
   });
+}
+
+/**
+ * 自訂檔那一行**沒有人在等就拿掉**（玩家 2026-08-21 的決定）。
+ *
+ * 官方那幾行寫 0 是有意義的（「這一檔現在沒人」是一句關於頻道的話），自訂檔
+ * 不是 —— 它是「**我**這副牌這一檔」，而那一檔本來就只有壓到同一格的人排得
+ * 進來。一行永遠寫著 0 的字只是把玩家的注意力留在一個他改不了的數字上。
+ *
+ * ⚠ 我自己排著的時候一定 ≥ 1（`displayCounts` 保證），所以這條規則不會把
+ * 「我正在排隊」那一行藏掉。
+ */
+function withoutEmptyCustom(counts: LobbyTierCount[] | null): LobbyTierCount[] | null {
+  if (counts === null) return null;
+  return counts.filter((c) => c.custom !== true || c.waiting > 0);
+}
+
+/**
+ * 等待視窗上那一行標記 —— `★ COST48 · 夾擠式罰C`。沒在排隊是 `null`。
+ *
+ * ⚠ **這是自訂檔唯一看得見的地方。** 左下那幾行寫的是官方階層，而自訂檔在
+ * 那份模板裡沒有位置（見 `patch-lobby.ts` 的 `LobbyState.badge`）。少了這一行，
+ * 玩家排在一個他從頭到尾沒看過的數字上。
+ *
+ * 規則名跟著一起寫：同一台機器可以換規則，而換了規則就是換一條佇列。
+ */
+function matchingBadge(): string | null {
+  if (pairing === null || pairingTier === null) return null;
+  const tier = pairingTier.open ? `COST${pairingTier.tier}+` : `COST${pairingTier.tier}`;
+  const name = costRule?.name ?? null;
+  return name === null ? `★ ${tier}` : `★ ${tier} · ${name}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1001,6 +993,18 @@ function defaultRuleHash(): string | null {
 interface TierSpec {
   tier: number;
   open: boolean;
+  /**
+   * 這是**自訂檔**嗎 —— 我這副牌算出來落在官方階層之外，插件自己開的那一檔。
+   *
+   * ⚠ 它跟官方那幾檔**不是同一種東西**：官方那三檔是「這個頻道有這幾條佇列」，
+   * 自訂檔是「**我**這副牌現在排在這一條」。換一副牌就換一條，所以它會跟著
+   * 牌組變（`setLobbySpecs` 認鍵，換了就重訂閱）。
+   *
+   * ⚠ 成本：它是**第五把鍵**，也就是大廳裡多一條推播連線（`QueueWatcher` 一把
+   * 鍵一條），而玩家在遊戲裡換牌組時那條會重連一次。`/qn` 那邊沒問題 ——
+   * 一個請求問完所有鍵，而中間人的上限是 8（`MAX_COUNT_KEYS`）。
+   */
+  custom: boolean;
   key: string;
   /** `ruleTag(key, contentHash(規則))`。⚠ **拌過配對鍵，所以一檔一個。** */
   tag: string;
@@ -1015,6 +1019,9 @@ interface TierSpec {
  * ⚠ 回 `null` 是**這一次算不出來**（還沒接上遊戲、讀不到頻道），不是「這個
  * 玩家不該看到人數」—— 後者由呼叫端先擋掉（規則內容跟預設那份不一樣）。
  * 兩者混在一起的話，遊戲畫面會在一次 CDP 逾時之後把那幾行清空。
+ *
+ * ⚠ **最後可能多一檔**：我這副牌落在官方階層之外時（WP-18），那一檔在畫面上
+ * 沒有自己的一行 —— 而那正是玩家要看的那一行。見 `myDeckTier`。
  */
 async function tierSpecs(openTier: number | null): Promise<TierSpec[] | null> {
   if (costRuleFull === null || engine === null) return null;
@@ -1031,7 +1038,12 @@ async function tierSpecs(openTier: number | null): Promise<TierSpec[] | null> {
   if (channel === null) return null;
   // ⚠ 現讀，不快取 —— 每週二遊戲更新會變（見 `costTiersFor`）。
   const tiers = costTiersFor(context.channels, channel) ?? [];
-  if (tiers.length === 0 && openTier === null) return null;
+
+  // 我這副牌排在哪一檔。官方階層裡有的話下面那幾行本來就會畫到它，只有落在
+  // 外面時才要多開一條。
+  const mine = myDeckTier(context, openTier);
+  const custom = mine !== null && mine.custom && mine.costLimit !== null ? mine.costLimit : null;
+  if (tiers.length === 0 && openTier === null && custom === null) return null;
 
   const ruleSetId = costRuleFull.ruleSetId;
   const ruleHash = costRuleHash ?? contentHash(costRuleFull);
@@ -1039,6 +1051,7 @@ async function tierSpecs(openTier: number | null): Promise<TierSpec[] | null> {
     ...tiers.map((tier) => ({
       tier,
       open: false,
+      custom: false,
       key: matchKey({ ruleSetId, channel, multi: ROOM_MULTI, costLimit: tier }),
     })),
     ...(openTier === null
@@ -1047,6 +1060,7 @@ async function tierSpecs(openTier: number | null): Promise<TierSpec[] | null> {
           {
             tier: openTier,
             open: true,
+            custom: false,
             key: matchKey({
               ruleSetId,
               channel,
@@ -1054,6 +1068,16 @@ async function tierSpecs(openTier: number | null): Promise<TierSpec[] | null> {
               costLimit: null,
               costFloor: openTier,
             }),
+          },
+        ]),
+    ...(custom === null
+      ? []
+      : [
+          {
+            tier: custom,
+            open: false,
+            custom: true,
+            key: matchKey({ ruleSetId, channel, multi: ROOM_MULTI, costLimit: custom }),
           },
         ]),
   ];
@@ -1100,6 +1124,7 @@ function currentCounts(): LobbyTierCount[] | null {
     tier: s.tier,
     waiting: lobbyByKey.get(s.key) ?? 0,
     ...(s.open ? { open: true } : {}),
+    ...(s.custom ? { custom: true } : {}),
   }));
 }
 
@@ -1187,8 +1212,8 @@ function lobbyPushSoon(): void {
  * ```
  *
  * ⚠ **檔位是算出來的，不是玩家選的。** 亞歷山卓城的快速比賽就是這樣：按下去
- * 之後伺服器照你的牌組把你放進某一檔。托盤那一頁仍然可以自己指定檔位 ——
- * 那是「約戰」的用法，兩者刻意不同。
+ * 之後伺服器照你的牌組把你放進某一檔。托盤那一頁**也沒有那一格了**（WP-18）
+ * —— 兩個入口填出不一樣的數字時，兩邊都只寫著「排隊中」而永遠配不到。
  */
 async function onLobbyQuick(press: LobbyQuickPressed): Promise<void> {
   if (engine === null) return;
@@ -1242,41 +1267,28 @@ async function onLobbyQuick(press: LobbyQuickPressed): Promise<void> {
     return;
   }
 
-  const keys = context.deckKeys;
-  const deck = keys === null ? null : deckFromKeys(keys);
-  if (deck === null || deck.characters.length === 0) {
-    await engine.showLobbyError(null, "讀不到你的牌組，切一次牌組再試。");
-    return;
-  }
-
-  const total = teamCostCenti(costRuleFull, deck);
   const status = await engine.lobbyStatus();
-  const tiers = costTiersFor(context.channels, channel) ?? [];
-  const pick = tierForTotal(total, tiers, status?.openTier ?? null);
-
-  if (pick === null) {
-    // ⚠ **用遊戲自己那句話。** 玩家在亞城帶一副不合檔的牌時看到的就是它，
-    // 而這整個功能的目的正是讓迪城跟那邊一樣。
-    await engine.showLobbyError(ROOM_ERROR_DECK_INVALID);
-    log(
-      `· 大廳快速比賽被擋下：牌組 ${formatCentiCost(total)}C 不在任何一檔裡` +
-        `（${tiers.join("／")}${status?.openTier === undefined || status.openTier === null ? "" : `／${status.openTier}+`}）`,
-    );
+  const mine = myDeckTier(context, status?.openTier ?? null);
+  if (mine === null) {
+    // ⚠ 這裡**只剩「讀不到牌組」**這一種擋法了。以前還有「牌組不在任何一檔裡」
+    // （`room_error[7]`），而那條路現在走 `bandForTotal` —— 自訂規則算出來的
+    // 數字本來就沒有義務落在伺服器的官方階層上。
+    await engine.showLobbyError(null, "讀不到你的牌組，切一次牌組再試。");
     return;
   }
 
   const result = await startPairing({
     channel,
-    costLimit: pick.kind === "band" ? pick.tier : null,
-    costFloor: pick.kind === "open" ? pick.tier : null,
+    costLimit: mine.costLimit,
+    costFloor: mine.costFloor,
   });
   if (!result.ok) {
     await engine.showLobbyError(null, result.reason);
     return;
   }
   log(
-    `▶ 大廳快速比賽：牌組 ${formatCentiCost(total)}C → ` +
-      `${pick.kind === "open" ? `COST${pick.tier}+` : `COST${pick.tier}`}` +
+    `▶ 大廳快速比賽：牌組 ${formatCentiCost(mine.totalCenti)}C → ${tierLabel(mine)}` +
+      `${mine.custom ? "（自訂檔）" : ""}` +
       `（${afford.byStar ? "用免費對戰星星" : `AP ${context.ap ?? "?"}／需要 ${afford.cost}`}）`,
   );
   // 剛排進去，這一檔的人數就多了自己一個。
@@ -1284,6 +1296,834 @@ async function onLobbyQuick(press: LobbyQuickPressed): Promise<void> {
   // `q-count` 回來（我自己也是那條佇列的「看的人」）。多問這一次不只是白花
   // 一個請求，還很可能問在 `q-hello` 還在飛的那一刻，答案裡沒有我。
   await pushLobbyState({ refreshCounts: lobbyWatcher?.allLive !== true });
+}
+
+// ---------------------------------------------------------------------------
+// 本地牌組庫（WP-18）
+//
+// 伺服器只給三副而且擴不出第四副，所以牌組存在本地、**Deck1 當唯一的工作槽**，
+// 玩家在遊戲的牌組編輯畫面點一副就即時覆寫 Deck1（`@ulr/deck-library` 檔頭）。
+//
+// ⚠ **托盤視窗一個字都不加**（規格 §3）。這一整段沒有任何一頁、任何一個 IPC
+// ——玩家看得到的東西全部畫在遊戲裡。托盤這邊只負責：讀 Deck1、算庫、存檔、
+// 把狀態推過去。玩家在托盤唯一會看到的是記錄頁上的那幾行。
+// ---------------------------------------------------------------------------
+
+/**
+ * 多久看一眼玩家在不在牌組編輯畫面。
+ *
+ * ⚠ 這一拍**只是一次 `Runtime.evaluate`**（問頁面裝了沒、掛上了沒），不碰
+ * 伺服器。真的去讀 Deck1 只發生在玩家人就在那個畫面的時候 —— 見 `deckTick()`。
+ */
+const DECK_TICK_MS = 4_000;
+
+/**
+ * 庫存快取多久重讀一次。
+ *
+ * 庫存只有在玩家抽到新卡時才會變，而換牌組是連續動作（試三副牌就是三次）——
+ * 每次都重讀等於每次換牌組多三趟 WebSocket。
+ */
+const INVENTORY_TTL_MS = 5 * 60_000;
+
+let deckTimer: ReturnType<typeof setInterval> | null = null;
+/**
+ * 「排著的那一副等夠久了沒」多久看一眼。
+ *
+ * ⚠ 一定要比等候秒數密得多，否則玩家設 3 秒實際等到的是這個拍子的倍數。
+ * 這一拍沒有 pending 時只是一個布林判斷，不碰網路。
+ */
+const DECK_APPLY_TICK_MS = 500;
+let deckApplyTimer: ReturnType<typeof setInterval> | null = null;
+/** 牌組庫的全部狀態。`null` = 還沒讀到帳號指紋（遊戲還沒登入完成）。 */
+let deck: DeckSession | null = null;
+/** 這份 session 是哪個帳號的。**換帳號登入要整份重來。** */
+let deckAccount: string | null = null;
+/** `player.deck_check` 的原值。寫回去時照帶，不動玩家的 UI 偏好。 */
+let deckCheck = true;
+/** 卡片庫存的快取，見 {@link INVENTORY_TTL_MS}。 */
+let inventoryCache: { at: number; data: InventorySnapshot } | null = null;
+/**
+ * 還沒替這條連線讀過帳號指紋。
+ *
+ * ⚠ 斷線就要重設 —— 玩家關掉遊戲再開有可能**換一個帳號登入**，而牌組庫是
+ * 跟著帳號走的。沿用上一個帳號的庫會把 A 的牌組存進 B 的檔案裡。
+ */
+let deckPending = true;
+/** 「還在等遊戲登入」這句話講過了沒。每條連線只講一次。 */
+let deckWaitLogged = false;
+/** 上一拍玩家在不在 Edit 畫面。true → false 那一拍要補存一次他剛改的東西。 */
+let deckMounted = false;
+/**
+ * **上一次我們讀到的 Deck1。** 自動存檔的比較基準，見 `autoSave()`。
+ *
+ * ⚠ 少了它，「寫入失敗」會被誤判成「玩家改過牌」，然後把玩家那副牌覆蓋掉。
+ * `null` = 還沒觀察過，那時候一律不存。
+ */
+let deckLastSeen: DeckContent | null = null;
+/** 正在處理一則回報。玩家連點時後面那幾則直接丟掉，不要交錯跑。 */
+let deckBusy = false;
+
+/**
+ * **Deck1 現在真正的內容。**
+ *
+ * ```
+ *   玩家人在牌組編輯畫面 → 客戶端記憶體（他正在排的那一副）
+ *   不在                → 伺服器（`db_deck1`）
+ * ```
+ *
+ * ⚠⚠ 這個順序不能顛倒。遊戲要等玩家**離開**編輯畫面才把 Deck1 送上伺服器，
+ * 所以他人還在那裡時，伺服器上的是舊的。只讀伺服器的話，「改完牌直接按 ◀▶
+ * 換牌組」會讓插件判定「沒有編輯要存」，然後把目標牌組蓋進 Deck1 ——
+ * **他剛排好的牌當場消失，而且一句話都沒有**。
+ */
+async function currentDeck1(): Promise<{
+  current: DeckContent;
+  snap: DeckSnapshot | null;
+  /** 這一份是從哪裡讀來的。⚠ 自動存畫要看它，見 {@link mayAutoSave}。 */
+  where: "edit" | "room" | "server";
+} | null> {
+  if (engine === null) return null;
+  const live = await engine.readEditDeck();
+  // ⚠ 快路徑：拿到記憶體那一份就**不要再去讀伺服器**。讀一次是四趟 WebSocket，
+  // 而換牌組跟每一拍輪詢都會走這裡 —— 那正是「換牌組好慢」的來源。
+  if (live !== null) return { current: parseDeckContent(live.deck), snap: null, where: live.where };
+  try {
+    const snap = await engine.readDecks();
+    return { current: deckContentFromFlat(snap.decks[0] ?? {}), snap, where: "server" };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * **這一份 Deck1 可以拿去自動存檔嗎？**
+ *
+ * ## ⚠⚠ 房間場景裡看到的變動不是玩家的編輯
+ *
+ * `autoSave()` 的用途是「玩家在牌組編輯畫面改了牌，庫裡那一副要跟上」。但
+ * Deck1 會變的地方不只那裡 —— `patch-room-gate` 的 preload **每次進房都會把
+ * Deck1 換成那一房的牌**，而那是我們自己做的事。
+ *
+ * 兩者分不出來的話，會發生這件事（2026-09-10 實機）：
+ *
+ * ```
+ *   人在任務房，Deck1 = 任務那一副
+ *   直達跳到渦房 → 頁面 preload 把 Deck1 換成渦房那一副
+ *   托盤的 4 秒拍子：Deck1 變了 → 存回 active[session.room]
+ *   而 session.room 還停在上一房 → 渦房的牌被存進任務那一副（或反過來）
+ * ```
+ *
+ * 實際災情是庫裡 raid 的第 3 副整個被任務那一副覆蓋，而 autoSave 從不出聲，
+ * 記錄檔上一個字都沒有。這也正是 `autoSave` 檔頭那段「2026-08-27 弄丟兩副牌」
+ * 的同一類事故 —— 那次補的是 `lastSeen` 那道閘，這次補的是「從哪個畫面讀的」。
+ *
+ * ## 為什麼 `server` 可以存
+ *
+ * 讀到伺服器那條路，表示玩家**不在任何一個有牌組列的畫面**（Edit／Quest／Raid／
+ * Match 都會走快路徑）。而那正是「他剛離開編輯畫面、遊戲自己把 Deck1 送上伺服器」
+ * 的那一刻 —— 玩家最後一次編輯只有在這裡收得到。房間的 preload 碰不到這條路，
+ * 因為 preload 只發生在房間場景裡，而那時候一定走快路徑。
+ */
+function mayAutoSave(where: "edit" | "room" | "server"): boolean {
+  return where !== "room";
+}
+
+/** `db_deck*` 帶回來的 cost。伺服器自己會算，帶原值只是少一次畫面跳動。 */
+function deckCostOf(flat: Record<string, unknown> | undefined): number {
+  const cost = flat?.cost;
+  return typeof cost === "number" && Number.isFinite(cost) ? cost : 0;
+}
+
+/** 把庫存讀出來（有快取）。讀不到回 `null` —— 呼叫端**必須**當成「不准寫」。 */
+async function deckInventory(): Promise<InventorySnapshot | null> {
+  if (engine === null) return null;
+  const now = Date.now();
+  if (inventoryCache !== null && now - inventoryCache.at < INVENTORY_TTL_MS) {
+    return inventoryCache.data;
+  }
+  try {
+    const data = await engine.readInventory();
+    inventoryCache = { at: now, data };
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function saveDeckLibrary(): void {
+  if (deck === null) return;
+  try {
+    writeLibrary(APP_DIR, deck.library);
+  } catch (err) {
+    log(`✗ 牌組庫存檔失敗：${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+async function pushDeckState(): Promise<void> {
+  if (engine === null || deck === null) return;
+  await engine.setDeckEditState(deckEditStateOf(deck));
+  // ⚠ 每一房「進去要用哪一副」也要跟著更新。玩家換了選擇之後不重推的話，
+  // 進房時頁面塞的還是上一次那副 —— 而它會**贏過**托盤隨後寫進來的那一份
+  // （頁面是在 create() 之前動手的，比較早）。見 `RoomDeckPreload`。
+  await engine.setRoomDecks(roomDeckPreloadOf(deck));
+}
+
+/**
+ * 第一次接上（或換了帳號）時把牌組庫準備好。
+ *
+ * ```
+ *   讀三副 + 帳號指紋 → 沒有存檔就把原本那三副收進庫裡 → 備份 → 推到畫面上
+ * ```
+ *
+ * ⚠ **讀不到不是錯誤。** 遊戲還在標題畫面時沒有任何場景有 socket + 玩家 id，
+ * 那正是玩家的正常開機順序（先開插件再開遊戲）。所以這裡安靜重試，只講一次。
+ */
+async function initDeckLibrary(): Promise<void> {
+  if (engine === null) return;
+  let snap: DeckSnapshot;
+  try {
+    snap = await engine.readDecks();
+  } catch {
+    if (!deckWaitLogged) {
+      deckWaitLogged = true;
+      log("· 牌組庫在等遊戲登入完成 —— 進到大廳就會自己接上");
+    }
+    return;
+  }
+  deckWaitLogged = false;
+  deckPending = false;
+  deckCheck = snap.deckCheck;
+
+  const current = deckContentFromFlat(snap.decks[0] ?? {});
+  const label = snap.accountLabel ?? undefined;
+  const { library, dropped, existed } = readLibrary(APP_DIR, snap.account, label);
+  let lib = library;
+
+  if (!existed) {
+    // 第一次用這個帳號：先把 Deck1 收進來（Deck2/Deck3 由下面的搬遷處理，
+    // 它們要落在**固定的第 2、3 格**）。
+    //
+    // ⚠ **四房各收一份**（2026-09-09 改）。原本只收進迪特赫姆，結果其他三房
+    // 一副都沒有 —— 而「進到那一房就自動套用那一套」在空的房間裡完全不會有
+    // 動作，玩家看到的是「這功能對我沒作用」。四房各一份複本之後，他在哪一房
+    // 都馬上有得選，再自己改成那一房要用的。
+    if (!isEmptyDeck(current)) lib = seedAllRooms(lib, current);
+  }
+
+  deckAccount = snap.account;
+  deckLastSeen = current;
+  deck = { ...newSession(lib), active: resolveAll(lib, current) };
+
+  try {
+    if (backupOnce(APP_DIR, snap))
+      log("· 已把你原本的三副牌組備份起來（decks 資料夾，插件不會再動它）");
+  } catch (err) {
+    log(`✗ 牌組備份失敗：${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // ⚠ 搬遷要在存檔之前，這樣第一次跑就只寫一次檔。
+  await adoptServerDecks(snap);
+
+  // ⚠ 上面那個 await 中間可能斷線（`deck` 會被重設）。重讀一次，不要沿用
+  // await 之前的那個參照。
+  const settled = deck;
+  if (settled === null) return;
+  // ⚠ 先把卡片庫存暖起來。換牌組要驗庫存，而冷的快取是三趟 WebSocket ——
+  // 不暖的話「開遊戲之後第一次切換」會比之後每一次都慢上一秒，而玩家只會
+  // 記得「這東西有時候很慢」。這裡不等它，失敗也無所謂（換牌組時會再讀）。
+  void deckInventory();
+
+  const total = ROOM_KINDS.reduce((n, r) => n + listDecks(settled.library, r).length, 0);
+  log(`✓ 牌組庫已接上（${total} 副）—— 在遊戲的牌組編輯畫面點左下角那個牌盒`);
+  if (dropped > 0) log(`⚠ 存檔裡有 ${dropped} 副壞掉的記錄，已跳過`);
+  saveDeckLibrary();
+  await pushDeckState();
+}
+
+/**
+ * **把伺服器的 Deck2／Deck3 收進牌組庫，然後在伺服器上清空它們。**
+ *
+ * 2026-08-28 的決定：伺服器那三格只留 Deck1 當工作槽。
+ *
+ * ```
+ *   伺服器 Deck2 ─▶ 自訂牌組第 2 格 ─┐
+ *   伺服器 Deck3 ─▶ 自訂牌組第 3 格 ─┴─▶ 伺服器只剩 Deck1
+ * ```
+ *
+ * ## ⚠ 為什麼「清空」不只是整理
+ *
+ * 卡片庫存是**三副共扣同一個池子**。Deck2/Deck3 佔著卡的時候，把同一張卡再
+ * 寫進 Deck1 就是同一張用兩次 —— 伺服器會收下 `db_editdeck` 卻不照做，
+ * 而插件只看得到一個 ack。2026-08-27 玩家回報的「選了牌組沒反應」就是這個。
+ * 清空之後那些卡回到池子，每一副自訂牌組才都用得到它們。
+ *
+ * ## ⚠ 順序不能顛倒
+ *
+ * **先搬進庫、存檔，再清伺服器。** 反過來的話，清完到存檔之間任何一個閃失
+ * （斷線、當掉）都會讓那兩副牌同時從伺服器和庫裡消失。備份檔是最後一道網，
+ * 不是第一道。
+ */
+async function adoptServerDecks(snap: DeckSnapshot): Promise<void> {
+  if (engine === null || deck === null) return;
+
+  const flat2 = snap.decks[1] ?? {};
+  const flat3 = snap.decks[2] ?? {};
+  const deck2 = deckContentFromFlat(flat2);
+  const deck3 = deckContentFromFlat(flat3);
+  const has2 = !isEmptyDeck(deck2);
+  const has3 = !isEmptyDeck(deck3);
+  if (!has2 && !has3) return;
+
+  // 1. 先搬進庫並落地
+  deck = migrateServerDecks(deck, has2 ? deck2 : null, has3 ? deck3 : null);
+  saveDeckLibrary();
+
+  // 2. 再清伺服器。Deck1 原樣帶回去 —— `db_editdeck` 一次覆寫三副。
+  const empty = deckContentToPayload(emptyDeckContent(), 0);
+  const current = deckContentFromFlat(snap.decks[0] ?? {});
+  try {
+    const result = await engine.applyDecks(
+      [deckContentToPayload(current, deckCostOf(snap.decks[0])), empty, empty],
+      deckCheck,
+    );
+    if (!result.ack) {
+      log("⚠ 想清空伺服器的 Deck2／Deck3，但伺服器沒回應 —— 牌組已經收進庫裡了，下次再試");
+      return;
+    }
+    // 讀回來對過才算數（跟換牌組同一條規矩）
+    const after = await engine.readDecks();
+    const left = after.decks
+      .slice(1)
+      .filter((f) => !isEmptyDeck(deckContentFromFlat(f as Record<string, unknown>))).length;
+    if (left > 0) {
+      log(`⚠ Deck2／Deck3 沒清乾淨（還剩 ${left} 副）—— 牌組已經收進庫裡了，下次再試`);
+      return;
+    }
+    deckLastSeen = deckContentFromFlat(after.decks[0] ?? {});
+    inventoryCache = null; // 卡回到池子了，庫存要重讀
+    log(
+      `✓ 伺服器的 Deck${has2 && has3 ? "2、Deck3" : has2 ? "2" : "3"} 已收進牌組庫並清空 ——` +
+        " 那些卡回到池子，現在每一副自訂牌組都用得到",
+    );
+  } catch (err) {
+    log(`⚠ 清空 Deck2／Deck3 失敗：${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/**
+ * 真的把一副牌寫進 Deck1。回 `null` = 成功，回字串 = 拒絕或失敗的理由。
+ *
+ * 四道關卡，順序不能換：
+ *
+ * ```
+ *   1. guardDeck1  —— 第一格空的會讓玩家卡死在牌組編輯畫面（兩個出口都被擋）
+ *   2. 庫存        —— 只送玩家真的有的卡。讀不到庫存就**不寫**
+ *   3. ack         —— 沒有 ack 就是沒寫進去
+ *   4. 讀回來對過  —— ⚠⚠ 有 ack **也不代表寫進去了**
+ * ```
+ *
+ * ## ⚠⚠ 第 4 道是 2026-08-27 用血換來的
+ *
+ * 實機上撞到：`ack === true`、記錄檔一行錯誤都沒有、**伺服器上的牌組完全沒變**。
+ * 那時候只驗到第 3 道，於是插件以為換成功了 —— 接著自動存檔看到「Deck1 跟
+ * 套用中那一副對不起來」，把 Deck1 的內容存進了玩家那副牌，**當場毀掉兩副**。
+ *
+ * ack 只證明伺服器**回了話**（`sock.once("db_editdeck")` 收到同名事件就算），
+ * 不證明它**照做了**。唯一算數的證據是重新讀一次，看內容真的變了。
+ */
+/**
+ * 寫到哪裡為止。
+ *
+ * ```
+ *   front   只寫客戶端記憶體（玩家人在 Edit 畫面時）。**一次網路都不跑。**
+ *           寫不到就回 null 當成功 —— 那不是失敗，只是他不在那個畫面。
+ *   commit  一路寫到伺服器。等候秒數到了、或開戰前才走這條。
+ * ```
+ *
+ * ⚠ 這個分法就是「只在前端看得到，不套用給後端」那條規格（2026-09-09）。
+ */
+type WriteMode = "front" | "commit";
+
+async function writeDeck1(
+  content: DeckContent,
+  snapshot: DeckSnapshot | null,
+  mode: WriteMode = "commit",
+  label?: string,
+): Promise<string | null> {
+  if (engine === null) return "還沒接上遊戲。";
+
+  const guard = guardDeck1(content);
+  if (guard !== null) return guard;
+
+  // ⚠ 讀不到庫存時**拒絕**而不是放行。放行的代價是可能送出玩家沒有的卡，
+  // 而拒絕的代價只是玩家再點一次 —— 兩邊不對等。
+  const inventory = await deckInventory();
+  if (inventory === null) return "讀不到你的卡片庫存，先不換 —— 再點一次試試。";
+  const shortages = findShortages(content, inventory);
+  if (shortages.length > 0) {
+    return `這副牌有 ${shortages.length} 張卡你手上沒有，沒有換過去。`;
+  }
+
+  // ── 快路徑：玩家人就在編輯畫面 → 只換記憶體並重畫，一次網路都不跑 ────────
+  //
+  // 這是原版 ◀▶ 的做法（見 `deck-write.ts` 的 buildEditDeckWriteExpression）。
+  // 走伺服器的話一次切換是 8~11 趟 WebSocket，玩家按下去要等一秒以上；
+  // 走這裡是一次 `Runtime.evaluate`，跟原版一樣即時。
+  //
+  // ⚠ 這裡**不寫伺服器**，而那是對的：遊戲在玩家離開編輯畫面時會自己送
+  // `db_editdeck`，帶的就是我們剛換進去的 deck1。
+  try {
+    const fast = await engine.writeEditDeck(deckContentToPayload(content, 0), label);
+    // 編輯畫面：寫完就結束。遊戲會在玩家離開時自己把它送上伺服器。
+    if (fast === "ok") {
+      deckLastSeen = content;
+      return null;
+    }
+    // ⚠⚠ 房間場景（任務／渦／對戰房）：畫面已經換好了，但**沒有人會把它送上
+    // 伺服器** —— 遊戲只在離開 Edit 時送。所以只有 `front` 模式可以在這裡收工；
+    // `commit` 模式一定要繼續走下去，否則開戰時伺服器上還是舊的那一副，
+    // 而畫面看起來完全正常。
+    if (fast === "ok-room") {
+      deckLastSeen = content;
+      if (mode === "front") return null;
+    } else if (fast !== "not-active") {
+      return `換不過去：${fast}`;
+    } else if (mode === "front") {
+      // 玩家不在任何有牌組列的畫面，沒有記憶體可以換。**這不是失敗**：
+      // 那一副還排在隊伍裡，等候秒數到了或他按開戰時才會真的寫出去。
+      return null;
+    }
+  } catch (err) {
+    return `換不過去：${err instanceof Error ? err.message : String(err)}`;
+  }
+
+  // ── 慢路徑：編輯畫面沒開著 → 只能寫伺服器 ────────────────────────────────
+  const snap = snapshot ?? (await engine.readDecks());
+
+  // ⚠ Deck2/Deck3 照原樣帶回去 —— `db_editdeck` 一次覆寫三副，不帶就是清空。
+  const result = await engine.applyDecks(
+    [
+      deckContentToPayload(content, deckCostOf(snap.decks[0])),
+      deckContentToPayload(deckContentFromFlat(snap.decks[1] ?? {}), deckCostOf(snap.decks[1])),
+      deckContentToPayload(deckContentFromFlat(snap.decks[2] ?? {}), deckCostOf(snap.decks[2])),
+    ],
+    deckCheck,
+  );
+  if (!result.ack) return "伺服器沒有回應，牌組沒有換過去 —— 再點一次試試。";
+
+  // 第 4 道：讀回來對過才算數（見上面那段 ⚠⚠）。
+  let landed: DeckContent;
+  try {
+    const after = await engine.readDecks();
+    landed = deckContentFromFlat(after.decks[0] ?? {});
+  } catch {
+    return "換完之後讀不回來，不確定有沒有成功 —— 重開一次牌組畫面看看。";
+  }
+  if (deckContentHash(landed) !== deckContentHash(content)) {
+    // ⚠ 這一行要寫得夠具體，否則玩家只會看到「沒反應」。最可能的原因是
+    // Deck2/Deck3 還佔著同一張卡 —— 三副共扣同一個卡片池。
+    log("✗ 換牌組：伺服器收下了但牌組沒有真的變（Deck2／Deck3 可能還佔著同一張卡）");
+    return "伺服器收下了卻沒換 —— 多半是 Deck2／Deck3 還佔著同一張卡，清空它們再試。";
+  }
+  deckLastSeen = landed;
+  return null;
+}
+
+/**
+ * 玩家在牌組編輯畫面點了什麼。
+ *
+ * ⚠ **先讀一次 Deck1 現況**，理由是自動存檔：玩家很可能剛排完牌就直接按 ◀▶，
+ * 那些改動只存在客戶端記憶體裡。不先存回去的話，下一副牌一換進來就沒了 ——
+ * 而症狀是「我排的牌自己不見了」。
+ *
+ * ⚠ **不要在這裡讀伺服器。** 人就在編輯畫面時 `currentDeck1()` 走記憶體，
+ * 整條路徑只剩三次 `Runtime.evaluate`；換成讀伺服器的話每按一次 ◀▶ 都是
+ * 八到十一趟 WebSocket，而那正是玩家回報的「換自訂牌組好慢」。
+ * 換帳號的偵測交給輪詢那一拍（它離開畫面時本來就會讀伺服器）。
+ */
+async function onDeckReport(report: DeckEditReport): Promise<void> {
+  if (engine === null || deck === null || deckBusy) return;
+  deckBusy = true;
+  try {
+    const now = await currentDeck1();
+    if (now === null) {
+      deck = withNotice(deck, "讀不到你的牌組 —— 再點一次試試。");
+      await pushDeckState();
+      return;
+    }
+    const { current, snap } = now;
+    // 換帳號登入了 —— 這一則屬於上一個人的庫，丟掉，下一拍整份重來。
+    if (snap !== null && snap.account !== deckAccount) {
+      deckPending = true;
+      deckLastSeen = null;
+      inventoryCache = null;
+      return;
+    }
+    if (snap !== null) deckCheck = snap.deckCheck;
+
+    // ⚠ 房間場景看到的變動是 preload 做的，不是玩家的編輯 —— 見 mayAutoSave。
+    const saved = mayAutoSave(now.where)
+      ? autoSave(deck, current, deckLastSeen)
+      : { session: deck, saved: false };
+    deckLastSeen = current;
+
+    // ⚠ 房裡那組 ◀▶ 切的是**玩家人在的那一房**，不是選單看的那一房。
+    //
+    // 兩者平常一致（進房時選單會自動跟隨），但玩家可以人在任務房、卻把選單
+    // 切去看迪城的牌組 —— 那時候按房裡的箭頭必須切任務房的那幾副。少了這一
+    // 步的後果是**拿錯牌組上場**，而畫面上完全看不出來。
+    let base = saved.session;
+    if (
+      report.type === "deck-cycle" &&
+      report.from === "room" &&
+      base.here !== null &&
+      base.here !== base.room
+    ) {
+      base = { ...base, room: base.here };
+    }
+
+    const outcome = applyReport(base, report, current);
+    // ⚠ 訊息要自己寫進記錄。遊戲畫面上那行紅字移掉之後（見 `DeckEditState`），
+    // `applyReport()` 交出來的訊息就只剩這一個出口 —— 少了這一步，「這一房還
+    // 沒有牌組」「已刪除…」這些話會完全消失。
+    if (outcome.session.notice !== null && outcome.session.notice !== base.notice) {
+      log(`· ${outcome.session.notice}`);
+    }
+    deck = outcome.session;
+
+    // ⚠⚠ **只寫前端**（2026-09-09 起）。伺服器那一份等等候秒數到了、或者
+    // 玩家按下開戰時才寫 —— 見 `PendingApply` 與 `patch-room-gate.ts`。
+    await frontApplyPending(current, snap);
+    saveDeckLibrary();
+    await syncGatePending();
+    await pushDeckState();
+  } finally {
+    deckBusy = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 等候套用與開戰閘門（WP-19）
+// ---------------------------------------------------------------------------
+
+/** 上一次推給頁面的 pending 旗標。**只在變動時推**，不然每 500ms 一次 evaluate。 */
+let gatePendingPushed: boolean | null = null;
+
+/** 一副牌在記錄與訊息裡要叫什麼。找不到就用位置編號（跟選單裡一致）。 */
+function deckLabel(session: DeckSession, room: RoomKind, id: string): string {
+  const entry = findDeck(session.library, room, id);
+  if (entry === null) return "那一副";
+  const index = listDecks(session.library, room).findIndex((d) => d.id === id);
+  return displayName(entry, index < 0 ? 0 : index);
+}
+
+/**
+ * 把「有沒有東西還沒寫進伺服器」推給頁面的閘門。
+ *
+ * ⚠ 旗標是 `false` 時閘門完全不作用，開戰的 emit 原樣直通 —— 那是常態路徑，
+ * 一次額外的延遲都沒有。
+ */
+async function syncGatePending(): Promise<void> {
+  if (engine === null) return;
+  const want = deck !== null && deck.pending !== null;
+  if (want === gatePendingPushed) return;
+  gatePendingPushed = want;
+  await engine.setRoomGatePending(want);
+}
+
+/**
+ * **把排著隊的那一副立刻換到玩家眼前。** 只動客戶端記憶體，一次網路都不跑。
+ *
+ * ## 為什麼「排隊」跟「看得見」要分開
+ *
+ * 排隊那三秒（{@link PendingApply}）擋的是**寫伺服器** —— 玩家連按 ◀▶ 找牌組
+ * 時每一下都上傳一次的話，他等的是「按幾下 × 一秒」。但**畫面**沒有理由跟著
+ * 等：換記憶體是一次 `Runtime.evaluate`，跟原版那兩個箭頭一樣即時。
+ *
+ * ⚠⚠ 2026-09-09 回報：**進了任務房，畫面上還是渦房那副牌，要等三秒才換。**
+ * 原因就是進房那條路（`onRoomGate` 的 `room-changed`）只排隊、沒有走這裡，
+ * 於是玩家看到的是三秒後伺服器那條慢路徑把畫面換過去。人在哪一房就該看到
+ * 那一房的牌，這件事不能有延遲 —— 延遲期間他看到的是**上一房**的牌，而那正
+ * 是他最容易誤按 START 打下去的東西。
+ *
+ * ⚠ 寫不進去（庫存不足、第一格是空的…）就**把隊伍清掉**，不要留著等三秒後
+ * 再失敗一次。同時把 `active` 重算回來 —— 那一副沒有換成，黃字不該指著它。
+ *
+ * ⚠ `fronted` 記的是「已經換到眼前了」，這支靠它避免重複寫。它**不表示**已經
+ * 寫進伺服器 —— 那是 {@link commitPending} 的事。
+ */
+async function frontApplyPending(
+  current: DeckContent,
+  snapshot: DeckSnapshot | null,
+): Promise<void> {
+  if (deck === null) return;
+  const pending = deck.pending;
+  if (pending === null || pending.fronted) return;
+
+  // 名字要一起送過去：房裡那行小字原本寫死「Deck1」，而工作槽永遠是 1，
+  // 那個字對玩家已經沒有意義了 —— 要顯示的是他自己那副牌的名字。
+  const failure = await writeDeck1(
+    pending.content,
+    snapshot,
+    "front",
+    deckLabel(deck, pending.room, pending.id),
+  );
+  if (failure !== null) {
+    deck = withNotice(
+      {
+        ...deck,
+        pending: null,
+        active: {
+          ...deck.active,
+          [pending.room]: resolveActive(deck.library, pending.room, current),
+        },
+      },
+      failure,
+    );
+    log(`✗ 換牌組：${failure}`);
+    return;
+  }
+  // 前端換好了，玩家眼睛已經看到新的牌。
+  if (deck.pending !== null) deck = { ...deck, pending: { ...deck.pending, fronted: true } };
+}
+
+/**
+ * **把排著隊的那一副真的寫進伺服器。** 回 `true` 表示寫成了（或本來就不必寫）。
+ *
+ * ⚠ 這支是唯一會走慢路徑的地方。它有三個呼叫端：等候秒數到了、玩家按下開戰、
+ * 以及玩家離開遊戲前的收尾。
+ */
+async function commitPending(reason: "dwell" | "battle"): Promise<boolean> {
+  if (engine === null || deck === null) return true;
+  const pending = deck.pending;
+  if (pending === null) return true;
+
+  // ⚠⚠ **這裡一定要看伺服器，不能用 `currentDeck1()`。**
+  //
+  // `currentDeck1()` 回的是「玩家眼前那一副」，而在房間場景那正是我們自己剛
+  // 寫進去的 pending —— 拿它來判斷「要不要提交」的話**永遠都會相等**，於是
+  // 一次都不會真的寫到伺服器，而開戰時用的是舊的那一副。畫面看起來完全正常，
+  // 這是最難發現的那一種。
+  let snap: DeckSnapshot;
+  try {
+    snap = await engine.readDecks();
+  } catch {
+    // 讀不到就不寫 —— 沒有比較基準時動 Deck1 是這個專案付過代價的事。
+    return false;
+  }
+  const server = deckContentFromFlat(snap.decks[0] ?? {});
+
+  // 伺服器上已經是那一副了（玩家自己在遊戲裡換的、或離開 Edit 時遊戲自己送上
+  // 去的）→ 沒有東西要做。
+  if (deckContentHash(server) === deckContentHash(pending.content)) {
+    deck = applyLanded(deck, pending);
+    deckLastSeen = server;
+    saveDeckLibrary();
+    await syncGatePending();
+    await pushDeckState();
+    return true;
+  }
+
+  // ⚠ 名字要帶。房裡那行小字原本寫死「Deck1」，而工作槽永遠是 1 —— 少了它，
+  // 走這條路換過去的那一副會頂著上一副的名字。（選單掛著時 `redraw()` 也會
+  // 把它改對，但玩家不在有牌組列的畫面時只有這裡管得到。）
+  const failure = await writeDeck1(
+    pending.content,
+    snap,
+    "commit",
+    deckLabel(deck, pending.room, pending.id),
+  );
+  if (failure !== null) {
+    // ⚠ 寫不進去就把隊伍清掉，**不要留著反覆重試**。留著的話玩家每按一次
+    // 開戰都會被攔一下再失敗一次，而他看到的是「這遊戲卡卡的」。
+    deck = withNotice({ ...deck, pending: null }, failure);
+    log(`✗ ${reason === "battle" ? "開戰前換牌組" : "套用牌組"}：${failure}`);
+    await syncGatePending();
+    await pushDeckState();
+    return false;
+  }
+
+  deck = applyLanded(deck, pending);
+  const label = deckLabel(deck, pending.room, pending.id);
+  log(
+    reason === "battle"
+      ? `✓ 開戰前已套用「${label}」（${ROOM_LABELS[pending.room]}）`
+      : `✓ 已套用「${label}」（${ROOM_LABELS[pending.room]}）`,
+  );
+  saveDeckLibrary();
+  await syncGatePending();
+  await pushDeckState();
+  return true;
+}
+
+/**
+ * 每半秒看一眼排著的那一副等夠久了沒。
+ *
+ * ⚠ 這一拍**不碰網路**，除非真的到期要寫 —— 沒有 pending 時它只是一個
+ * 布林判斷。
+ */
+async function deckApplyTick(): Promise<void> {
+  if (engine === null || deck === null || deckBusy) return;
+  if (deck.pending === null) return;
+  if (!isApplyDue(deck, applyDelayMs())) return;
+  deckBusy = true;
+  try {
+    await commitPending("dwell");
+  } finally {
+    deckBusy = false;
+  }
+}
+
+/** 玩家設的等候秒數，換算成毫秒。 */
+function applyDelayMs(): number {
+  return Math.round(profile.applyDelaySeconds * 1000);
+}
+
+/**
+ * 頁面回報：換房了，或者開戰被攔下來了。
+ *
+ * ⚠⚠ **`room-gate-hold` 一定要放行。** 玩家的畫面在被攔的那一刻已經是「已
+ * 開始」而且點不動任何東西 —— 這裡每一條路徑（包含失敗）都必須走到
+ * `releaseRoomGate()`。頁面自己有 8 秒的看門狗兜底，但那條路會讓玩家用舊牌組
+ * 上場。
+ */
+async function onRoomGate(report: RoomGateReport): Promise<void> {
+  if (engine === null || deck === null) return;
+
+  if (report.type === "room-changed") {
+    const now = await currentDeck1();
+    if (now === null) return;
+    const before = deck.pending?.id ?? null;
+    // ⚠ `preloaded` 一定要傳下去。它是 true 時客戶端記憶體已經是新的、而伺服器
+    // 還是舊的 —— 不傳的話 `queueApply` 會判定「一樣，不必寫」，於是開戰時用的
+    // 是上一房的牌，而畫面完全正常。見 `RoomChangedReport`。
+    deck = enterRoom(deck, report.room, now.current, Date.now(), {
+      preloaded: report.preloaded === true,
+    });
+    if (report.room !== null && deck.pending !== null && deck.pending.id !== before) {
+      // ⚠ 這裡**只寫記錄，不放訊息到畫面上**。原本會在遊戲畫面印一行紅字
+      // 「正要換成「X」」，2026-09-09 移除：它會壓到渦房的「輸入Raid代碼」，
+      // 而且左下那行字本來就寫著同一個名字。
+      log(
+        `· 進了${ROOM_LABELS[report.room]} —— 排上「${deckLabel(deck, report.room, deck.pending.id)}」`,
+      );
+    }
+
+    // ⚠⚠ **畫面要當場換過去，不能等等候秒數。**
+    //
+    // 排隊那幾秒擋的是寫伺服器；畫面沒有理由跟著等（見 frontApplyPending）。
+    // 少了這一步，玩家進了任務房看到的是**渦房那副牌**，三秒後才變 —— 而那
+    // 三秒裡他按 START 打下去的正是上一房的牌組。
+    //
+    // ⚠ 要拿 `deckBusy`：這支是頁面輪詢叫進來的，而 `onDeckReport` 可能正在
+    // 寫。等不到就算了 —— 那一副還排在隊伍裡，等候秒數到了或按開戰時照樣會
+    // 寫出去，只是畫面晚一點換。
+    if (deck.pending !== null && !deck.pending.fronted && (await waitForDeckIdle(1_000))) {
+      deckBusy = true;
+      try {
+        await frontApplyPending(now.current, now.snap);
+        saveDeckLibrary();
+      } catch (err) {
+        log(`✗ 進房換牌組出錯：${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        deckBusy = false;
+      }
+    }
+
+    await syncGatePending();
+    await pushDeckState();
+    return;
+  }
+
+  if (report.type === "room-gate-hold") {
+    // ⚠ 這條路徑**不能被 `deckBusy` 擋掉**（那是「玩家連點時丟掉後面幾則」用
+    // 的）。開戰只有這一次機會，丟掉的話玩家就是用舊牌組上場。所以這裡是等它
+    // 讓出來，不是直接放棄 —— 但也不能無限等，頁面的看門狗只給 8 秒。
+    const waited = await waitForDeckIdle(3_000);
+    deckBusy = true;
+    try {
+      if (!waited) log("⚠ 開戰前換牌組：上一個動作還沒做完，先照現在的牌組打");
+      // 開戰前這一次一定要寫到伺服器，等候秒數在這裡不算數。
+      else await commitPending("battle");
+    } catch (err) {
+      log(`✗ 開戰前換牌組出錯：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      deckBusy = false;
+      // ⚠ **無論如何都要放行。** 見這支的檔頭。
+      await engine?.releaseRoomGate();
+    }
+  }
+}
+
+/** 等 `deckBusy` 讓出來。逾時回 `false` —— 呼叫端要自己決定怎麼辦。 */
+async function waitForDeckIdle(timeoutMs: number): Promise<boolean> {
+  const until = Date.now() + timeoutMs;
+  while (deckBusy) {
+    if (Date.now() >= until) return false;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return true;
+}
+
+/**
+ * 每一拍：把介面補回去、把玩家剛改的牌存起來、把過期的訊息清掉。
+ *
+ * ⚠ **只有玩家人就在牌組編輯畫面（或剛離開）時才去讀 Deck1。** 那是唯一會有
+ * 變動的時機，而每一次讀都是四趟 WebSocket。剛離開那一拍也要讀，是因為遊戲
+ * 自己會在離開 Edit 時把 Deck1 存回伺服器 —— 那正是玩家最後一次改動。
+ */
+async function deckTick(): Promise<void> {
+  if (engine === null || latest?.connected !== true) return;
+  if (deckPending) {
+    await initDeckLibrary();
+    return;
+  }
+  if (deck === null || deckBusy) return;
+
+  // ⚠ 這支順便把「遊戲重載過、介面被沖掉了」補回來（見 engine 的 deckEditStatus）。
+  const status = await engine.deckEditStatus();
+  const mounted = status?.mounted === true;
+  const wasMounted = deckMounted;
+  deckMounted = mounted;
+
+  let dirty = false;
+  const aged = expireNotice(deck);
+  if (aged.changed) {
+    deck = aged.session;
+    dirty = true;
+  }
+
+  if (mounted || wasMounted) {
+    try {
+      const now = await currentDeck1();
+      if (now !== null) {
+        // 換帳號只有走到伺服器那條路才驗得到（記憶體裡沒有帳號指紋）。
+        // ⚠ 那不是漏洞：玩家一離開編輯畫面就會走到那條路（`snap !== null`），
+        // 而換帳號一定得先離開。
+        if (now.snap !== null && now.snap.account !== deckAccount) {
+          deckPending = true;
+          deckLastSeen = null;
+          inventoryCache = null;
+          return;
+        }
+        // ⚠ 同上：房間場景那一份不能拿來存（見 mayAutoSave）。這一拍是災情
+        //   最常發生的地方 —— 玩家什麼都沒做，光是換房就會走到這裡。
+        const saved = mayAutoSave(now.where)
+          ? autoSave(deck, now.current, deckLastSeen)
+          : { session: deck, saved: false };
+        deckLastSeen = now.current;
+        if (saved.saved) {
+          deck = saved.session;
+          saveDeckLibrary();
+          dirty = true;
+        }
+      }
+    } catch {
+      // 連線正在死。下一拍再說。
+    }
+  }
+
+  if (dirty) await pushDeckState();
 }
 
 function snapshot(): Snapshot {
@@ -1309,7 +2149,10 @@ function snapshot(): Snapshot {
       maxSeconds: MOVE_PHASE_TOTAL_SECONDS,
       minSpeed: MIN_SPEED_FACTOR,
       maxSpeed: MAX_SPEED_FACTOR,
+      minApplyDelay: MIN_APPLY_DELAY_SECONDS,
+      maxApplyDelay: MAX_APPLY_DELAY_SECONDS,
     },
+    selectableStages: SELECTABLE_STAGES,
   };
 }
 
@@ -1403,6 +2246,10 @@ async function quit(): Promise<void> {
   probeTimer = null;
   if (lobbyTimer !== null) clearInterval(lobbyTimer);
   lobbyTimer = null;
+  if (deckTimer !== null) clearInterval(deckTimer);
+  deckTimer = null;
+  if (deckApplyTimer !== null) clearInterval(deckApplyTimer);
+  deckApplyTimer = null;
   // 大廳人數的推播線。⚠ 不收的話 Electron 退不乾淨（那幾條 socket 還活著）。
   stopLobbyWatch();
   // ⚠ 排隊中就關掉插件的話，要先把自己從佇列上拿掉、順手收掉開了一半的房 ——
@@ -2166,7 +3013,17 @@ app.whenReady().then(() => {
     onStatus: (status) => {
       // ⚠ 斷線就把「這條連線自動重載過了」忘掉。玩家關掉遊戲再開是家常便飯，
       // 而那是一個全新的頁面 —— 沿用上一條連線的旗標會讓新的那次救不回來。
-      if (latest?.connected === true && !status.connected) autoReloadedThisAttach = false;
+      if (latest?.connected === true && !status.connected) {
+        autoReloadedThisAttach = false;
+        // ⚠ 牌組庫也要重新確認帳號。玩家關掉遊戲再開很可能**換一個帳號登入**，
+        // 而牌組庫是跟著帳號走的 —— 沿用上一個人的庫會把 A 的牌組存進 B 的檔案。
+        deckPending = true;
+        deckMounted = false;
+        // ⚠ 比較基準也要丟掉。留著上一條連線看到的 Deck1，重連後第一次比對
+        // 會把「這段期間玩家在別處改的牌」誤判成他剛剛的編輯。
+        deckLastSeen = null;
+        inventoryCache = null;
+      }
       latest = status;
       pushState();
       refreshTray();
@@ -2307,6 +3164,24 @@ app.whenReady().then(() => {
    * 一份時建的）不在清單裡，`editProfile` 對它是完全的空操作 —— 症狀是「改了
    * 幅度，下一次重畫又跳回去」。跟 `ulr:set-tint`、`ulr:match-prefs` 同一招。
    */
+  /**
+   * 改「等候套用」的秒數並記進配置。
+   *
+   * ⚠ 跟 `ulr:editor-step` 同一招（`profile = {...}` 而不是 `editProfile`）：
+   * 臨時配置不在清單裡，`editProfile` 對它是空操作 —— 症狀是「改了秒數，下一次
+   * 重畫又跳回去」。
+   *
+   * ⚠ **不必去通知頁面**。閘門那邊只認「有沒有東西沒寫」這個布林，秒數是托盤
+   * 這一端在算的（`deckApplyTick`）。
+   */
+  ipcMain.handle("ulr:deck-apply-delay", (_event, raw: unknown): number => {
+    const next = normalizeApplyDelaySeconds(raw);
+    profile = { ...profile, applyDelaySeconds: next };
+    if (!ephemeral) store = updateProfile(profile.id, { applyDelaySeconds: next });
+    pushState();
+    return next;
+  });
+
   ipcMain.handle("ulr:editor-step", (_event, raw: unknown): number => {
     const next = normalizeEditStep(raw);
     profile = { ...profile, editStep: next };
@@ -2398,103 +3273,32 @@ app.whenReady().then(() => {
   });
 
   // -------------------------------------------------------------------------
-  // 配對（WP-16）
+  // 對戰地點（WP-18）
   //
-  // ⚠ 這一組跟其他 handler 不一樣：**它們會替玩家操作遊戲**（開房會消耗 AP、
-  // 進房會直接開打）。所以每一支都必須是玩家明確按下去才會走到，絕不能放進
-  // 任何輪詢或自動重試裡。
+  // ⚠ **只剩一支，而且它不碰遊戲。** `match-state` 與 `match-queue-start`／`stop`
+  // 拿掉了：排隊的入口在**遊戲大廳那顆按鈕**（WP-17），而那條路從頭到尾
+  // 都在主程序裡（`onLobbyQuick`）。畫面這邊只剩下「這一場開在哪」一格。
   // -------------------------------------------------------------------------
 
-  ipcMain.handle("ulr:match-state", async (): Promise<MatchPageState> => {
-    const limit = profile.match.limitOn ? profile.match.limit : null;
-    const base = {
-      rule: matchRuleInfo(),
-      pairing: pairingStatus,
-      channelNames: CHANNEL_NAMES,
-      statics: MATCH_STATICS,
-      match: profile.match,
-      // ⚠ 沒選規則就沒有房名可組 —— 而沒選規則本來就開始不了配對，畫面那邊
-      // 已經有一句更該講的話（「先去選一份規則」）。
-      roomName: costRuleFull === null ? null : buildRoomName(costRuleFull.name, limit),
-      band: formatBand(limit),
-    };
-    const off = {
-      connected: false as const,
-      context: null,
-      rooms: [],
-      seq: 0,
-      myCost: null,
-      costTiers: null,
-    };
-    const driver = await engine?.matchDriver().catch(() => null);
-    if (!driver) return { ...off, ...base };
-    try {
-      const [context, snap] = await Promise.all([driver.matchContext(), driver.roomSnapshot()]);
-      return {
-        connected: true,
-        context,
-        rooms: snap.rooms,
-        seq: snap.seq,
-        myCost: myDeckCost(context),
-        // ⚠ **現讀，不快取。** 這幾個數字每週二遊戲更新會變，存起來的話玩家會
-        // 照著上週的數字去約戰，而對手的插件讀的是這週的 —— 兩邊算出不同的
-        // 配對鍵，症狀是「明明都選 57 卻永遠配不到」。
-        costTiers: costTiersFor(context.channels, context.channel),
-        ...base,
-      };
-    } catch {
-      return { ...off, ...base };
-    }
-  });
-
   /**
-   * 開始自動配對（WP-16）。
+   * 改「這一場開在哪」並**記進配置**。
    *
-   * ⚠ 這一支會一路走到**開房**（消耗 AP）或**進房**（直接開打）。它只能綁在
-   * 玩家親手按下的按鈕上 —— 任何輪詢、重試、狀態同步都不准叫它。
-   */
-  ipcMain.handle("ulr:match-queue-start", async (_event, options: MatchQueueOptions) => {
-    // ⚠ 托盤這條路的檔位**從配置讀**，不從畫面收。畫面送過來的話會有兩份
-    // 真相，而「我改了設定但開出來的是舊的」這種 bug 完全看不出來。
-    const m = profile.match;
-    return await startPairing({
-      channel: options.channel,
-      costLimit: m.limitOn ? m.limit : null,
-      costFloor: null,
-    });
-  });
-
-  ipcMain.handle("ulr:match-queue-stop", async () => {
-    await pairing?.stop();
-    pairing = null;
-    void pushLobbyState();
-    return { ok: true as const, status: pairingStatus };
-  });
-
-  /**
-   * 改配對設定（地點抽法、約定檔位）並**記進配置**。
-   *
-   * ⚠ 這一支跟上面兩支不一樣：它**不碰遊戲**，只是存偏好。所以畫面可以在
-   * 每一次輸入之後就叫它，不必等玩家按什麼按鈕。
+   * ⚠ 它**不碰遊戲**，只是存偏好。所以畫面可以在玩家一改就叫，不必等按什麼
+   * 按鈕（改完就生效，下一次配對用的就是新的）。
    *
    * ⚠ 走 `profile = {...}` 而不是 `editProfile`：臨時配置（`--port` 對不上
    * 任何一份時建的）不在清單裡，`editProfile` 對它是完全的空操作 —— 症狀是
    * 「改了設定，下一次重畫又跳回去」。跟 `ulr:set-tint` 同一招。
    *
-   * ⚠ **回的不只是 `MatchPrefs`。** 房名與檔位區間是從這幾格算出來的，而畫面
-   * 一改就要看到新的 —— 只回 prefs 的話那兩行會停在舊值直到下一次輪詢（3 秒），
-   * 而玩家會以為「我改了檔位，房名卻沒跟著改」。算的地方仍然只有主程序一處。
+   * ⚠ 回主程序整理過的那一份，畫面拿它蓋回去 —— 認不得的值會被夾成預設，
+   * 而畫面自己留一份的話會跟設定檔漂開。
    */
   ipcMain.handle("ulr:match-prefs", (_event, patch: unknown): MatchPrefsResult => {
     const next = normalizeMatchPrefs({ ...profile.match, ...(patch as object) });
     profile = { ...profile, match: next };
     if (!ephemeral) store = updateProfile(profile.id, { match: next });
-    const limit = next.limitOn ? next.limit : null;
-    return {
-      match: next,
-      roomName: costRuleFull === null ? null : buildRoomName(costRuleFull.name, limit),
-      band: formatBand(limit),
-    };
+    pushState();
+    return { match: next };
   });
 
   // -------------------------------------------------------------------------
@@ -2585,6 +3389,17 @@ app.whenReady().then(() => {
   // 中間人的節奏由 `pushLobbyState()` 自己把關（`LOBBY_COUNT_MS`，外加「剛進
   // 頻道」那一次）。只有玩家真的坐在 duel 頻道的大廳時才會送請求。
   lobbyTimer = setInterval(() => void pushLobbyState(), LOBBY_TICK_MS);
+
+  // 牌組庫。⚠ 跟大廳那顆按鈕一樣，**點下去的是玩家**：`onDeckEdit` 收到的
+  // 每一則都是他親手點的，而寫進 Deck1 只發生在他點了某一副牌組的時候。
+  engine.onDeckEdit((report) => void onDeckReport(report));
+  deckTimer = setInterval(() => void deckTick(), DECK_TICK_MS);
+
+  // 進了哪一房、開戰前先套牌組（WP-19）。
+  // ⚠ 這一拍要比 `DECK_TICK_MS`（4 秒）密 —— 等候秒數預設 3 秒，用 4 秒的拍子
+  // 去量「停了 3 秒沒」，玩家實際等到的會是 4 到 8 秒。
+  engine.onRoomGate((report) => void onRoomGate(report));
+  deckApplyTimer = setInterval(() => void deckApplyTick(), DECK_APPLY_TICK_MS);
 
   void engine.start();
   // 靜默下載、安全的時機才套用。細節與那個「安全」的定義見 updater.ts。
