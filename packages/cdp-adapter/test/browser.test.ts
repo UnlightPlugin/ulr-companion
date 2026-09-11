@@ -59,10 +59,14 @@ describe("findBrowser", () => {
   }
 
   it("找得到 Chrome", () => {
-    const root = fakeInstall("Google\\Chrome\\Application\\chrome.exe");
+    const rel = "Google\\Chrome\\Application\\chrome.exe";
+    const root = fakeInstall(rel);
     const found = findBrowser({ ProgramFiles: root } as NodeJS.ProcessEnv);
     expect(found?.name).toBe("Chrome");
-    expect(found?.path).toBe(join(root, "Google", "Chrome", "Application", "chrome.exe"));
+    // ⚠ 期望值要跟 findBrowser 一樣用 join(root, rel) 組，不能拆成四段再 join：
+    // CI 跑在 Linux，那裡反斜線不是分隔符，拆段 join 出來的是 `/`、findBrowser
+    // 拿到的是原樣的 `\`，兩者永遠不相等。Windows 上兩種寫法結果一樣。
+    expect(found?.path).toBe(join(root, rel));
   });
 
   it("兩個都在時 Chrome 優先於 Edge", () => {
