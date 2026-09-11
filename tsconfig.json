@@ -31,6 +31,7 @@
       "@ulr/rule-schema": ["packages/rule-schema/src/index.ts"],
       "@ulr/api-contract": ["packages/api-contract/src/index.ts"],
       "@ulr/cost-engine": ["packages/cost-engine/src/index.ts"],
+      "@ulr/deck-library": ["packages/deck-library/src/index.ts"],
       "@ulr/cdp-adapter": ["packages/cdp-adapter/src/index.ts"],
       "@ulr/arbiter-link": ["packages/arbiter-link/src/index.ts"],
       // 子路徑：**只有純函式的那兩支**。雲端中間人（apps/link-worker）走這裡，

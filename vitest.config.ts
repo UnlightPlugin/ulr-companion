@@ -12,6 +12,7 @@ export default defineConfig({
       "@ulr/api-contract": r("./packages/api-contract/src/index.ts"),
       "@ulr/cost-engine": r("./packages/cost-engine/src/index.ts"),
       "@ulr/cdp-adapter": r("./packages/cdp-adapter/src/index.ts"),
+      "@ulr/deck-library": r("./packages/deck-library/src/index.ts"),
       // ⚠ 子路徑要排在根路徑**前面**。Vite 的 alias 是前綴比對
       // （`@ulr/arbiter-link` 也會吃到 `@ulr/arbiter-link/rooms`），排後面的話
       // 會被改寫成 `.../src/index.ts/rooms` 這種不存在的路徑。
