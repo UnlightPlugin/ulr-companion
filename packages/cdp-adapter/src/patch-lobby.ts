@@ -53,6 +53,17 @@ export interface LobbyTierCount {
   waiting: number;
   /** 這是 `COST90+` 那一檔嗎。⚠ 最多一個，而且一定排在最後。 */
   open?: boolean;
+  /**
+   * 這是**自訂檔**嗎 —— 牌組算出來落在官方三檔之外，插件自己開的那一檔。
+   *
+   * ⚠ 官方那幾行是遊戲自己的模板（`PLAYER_COUNT`）填出來的，而自訂檔在那份
+   * 模板裡**沒有位置**。所以它自己一行，前面加 `★` 標出來：畫面上一定要
+   * 分得出「這是官方的檔位」跟「這是插件照你的牌組算的檔位」。
+   *
+   * ⚠ **沒有人在等就不要送過來**（送 `waiting: 0` 也一樣會畫）。一行永遠寫著
+   * 0 的字對玩家沒有用，而這一行的全部價值就是「現在有人在你這一檔等」。
+   */
+  custom?: boolean;
 }
 
 /** Node 推給頁面的狀態。**畫面上的每一個字都由這裡決定。** */
@@ -73,6 +84,18 @@ export interface LobbyState {
    * 視窗，在「我到底在不在排隊」這件事上完全不是同一個東西。
    */
   matching: boolean;
+  /**
+   * 等待視窗上要多寫的那一行（`★ COST 48 · 夾擠式罰C`）。`null`／沒給 = 不加。
+   *
+   * ⚠ **這是「這個框不是官方的」那個標記。** 我們照抄了亞城的等待視窗，抄到
+   * 一模一樣 —— 那對「看起來像遊戲自己的東西」是對的，對「我到底在排哪一檔」
+   * 就不是了：自訂檔在左下那幾行裡沒有數字（見 {@link LobbyTierCount.custom}），
+   * 玩家除了這一行之外沒有別的地方看得到自己排的是什麼。
+   *
+   * ⚠ 只在 `showWaiting()` 的當下讀一次。排隊途中檔位不會變（配對鍵是按下去
+   * 那一刻算的），所以不必跟著推播更新。
+   */
+  badge?: string | null;
 }
 
 export interface LobbyPatchOptions {
@@ -90,7 +113,7 @@ export const DEFAULT_LOBBY_POLL_MS = 500;
  * ⚠ 這支跟 `patch-stage` 一樣是「先拆再裝」，所以不靠版本號決定要不要重裝；
  * 版本號是回報用的 —— 玩家回報怪狀況時一眼看得出他頁面上跑的是哪一版。
  */
-export const LOBBY_SCRIPT_VERSION = 3;
+export const LOBBY_SCRIPT_VERSION = 4;
 
 const FLAG = "__ulrLobby";
 
@@ -391,8 +414,24 @@ export function buildLobbyPatchScript(options: LobbyPatchOptions): string {
     var timerText = sc.add.text(cx, cy + 10, "00:00", STYLE).setOrigin(0.5, 0.5);
     var cancel = new kit.button(sc, cx, cy + 40, label);
 
+    // ⚠ **這一行是「這不是官方的快速比賽」那個標記。** 整個視窗是照抄的，
+    // 抄到一模一樣 —— 少了這一行，玩家分不出自己排的是官方檔位還是插件照
+    // 牌組算出來的自訂檔，而自訂檔在左下那幾行裡沒有數字。
+    //
+    // 位置在面板上緣（cy − 52）：波浪那幾個字會往下跳 8px（cy − 28 起跳），
+    // 疊在一起的話兩行都看不清楚。
+    var badge = null;
+    if (st.state && typeof st.state.badge === "string" && st.state.badge.length > 0) {
+      badge = sc.add
+        .text(cx, cy - 52, st.state.badge, {
+          fontFamily: "font_light", fontSize: 12, resolution: 2
+        })
+        .setOrigin(0.5, 0.5);
+    }
+
     var box = sc.add.container(0, 0);
     box.add([panel].concat(letters).concat([timerText, cancel]));
+    if (badge !== null) box.add(badge);
     box.setDepth(500);
 
     var seconds = 0;
@@ -487,30 +526,69 @@ export function buildLobbyPatchScript(options: LobbyPatchOptions): string {
     var tpl = countsTemplate(panel);
     var open = null;
     var band = [];
+    var custom = [];
     for (var n = 0; n < counts.length; n++) {
-      if (counts[n].open === true) open = counts[n];
+      if (counts[n].custom === true) custom.push(counts[n]);
+      else if (counts[n].open === true) open = counts[n];
       else band.push(counts[n]);
     }
 
+    var out = null;
     if (tpl !== null && band.length >= 3) {
-      var out = tpl;
+      out = tpl;
       for (var i = 0; i < 3; i++) {
         out = out.replace("__COST" + (i + 1) + "__", String(band[i].tier));
         out = out.replace("__LENGTH" + (i + 1) + "__", String(band[i].waiting));
       }
-      if (open !== null) return out.replace("__LENGTH4__", String(open.waiting));
       // ⚠ 吃掉的是「換行 + 那一整行」。留著沒填的 __LENGTH4__ 會讓玩家在畫面上
       // 看到一串佔位符。
-      return out.replace(/\\n?COST[0-9]+\\+:__LENGTH4__[^\\n]*/, "");
+      out = open !== null
+        ? out.replace("__LENGTH4__", String(open.waiting))
+        : out.replace(/\\n?COST[0-9]+\\+:__LENGTH4__[^\\n]*/, "");
+    } else {
+      // 模板拿不到（改版了？）→ 自己組，格式照抄那一行。
+      var lines = [];
+      for (var j = 0; j < band.length; j++) {
+        lines.push("COST" + band[j].tier + ":" + band[j].waiting + "位玩家等待中。");
+      }
+      if (open !== null) lines.push("COST" + open.tier + "+:" + open.waiting + "位玩家等待中。");
+      out = lines.join("\\n");
     }
 
-    // 模板拿不到（改版了？）→ 自己組，格式照抄那一行。
-    var lines = [];
-    for (var j = 0; j < counts.length; j++) {
-      var label = "COST" + counts[j].tier + (counts[j].open === true ? "+" : "");
-      lines.push(label + ":" + counts[j].waiting + "位玩家等待中。");
+    // ⚠ **自訂檔接在最後，而且是照那幾行的句型組的**（把第一行的檔位與人數
+    // 換掉）—— 自己寫一句「N 位玩家等待中」會在換語言時露出繁中，而整支腳本
+    // 的原則就是「畫面上的字一律用遊戲自己的」（見檔頭的三個照抄）。
+    for (var c = 0; c < custom.length; c++) {
+      var line = customLine(tpl, custom[c]);
+      if (line !== null) out = out === "" ? line : out + "\\n" + line;
     }
-    return lines.join("\\n");
+    return out;
+  }
+
+  /**
+   * 自訂檔那一行 —— ★COST48:1位玩家等待中。
+   *
+   * 句型從模板的**第一行**借（COST__COST1__:__LENGTH1__位玩家等待中。），
+   * 只把檔位與人數換掉。模板拿不到就退回自己組的那個格式。
+   *
+   * ⚠ 那顆 ★ 是**我們加的**，而且一定要加：這一檔不是遊戲的檔位，是插件照
+   * 牌組算出來的。少了它，畫面上會出現一個看起來像官方階層、實際上只有裝了
+   * 插件的人排得到的數字。
+   *
+   * ⚠ 這段註解裡不能出現反引號（整支腳本住在一個 template literal 裡）。
+   */
+  function customLine(tpl, count) {
+    var body = null;
+    if (tpl !== null) {
+      var first = String(tpl).split("\\n")[0];
+      if (first && first.indexOf("__COST1__") !== -1 && first.indexOf("__LENGTH1__") !== -1) {
+        body = first
+          .replace("__COST1__", String(count.tier))
+          .replace("__LENGTH1__", String(count.waiting));
+      }
+    }
+    if (body === null) body = "COST" + count.tier + ":" + count.waiting + "位玩家等待中。";
+    return "★" + body;
   }
 
   /**
@@ -686,7 +764,7 @@ export function buildLobbyPatchScript(options: LobbyPatchOptions): string {
     wait: null,
     timer: null,
     reason: null,
-    state: { counts: null, matching: false }
+    state: { counts: null, matching: false, badge: null }
   };
   window[FLAG] = st;
 
@@ -696,7 +774,9 @@ export function buildLobbyPatchScript(options: LobbyPatchOptions): string {
       var next = JSON.parse(json);
       st.state = {
         counts: next && next.counts ? next.counts : null,
-        matching: !!(next && next.matching)
+        matching: !!(next && next.matching),
+        // ⚠ 舊的 Node 端不會送這一格 —— 沒有就是「不加那一行」，不是錯誤。
+        badge: next && typeof next.badge === "string" ? next.badge : null
       };
       paint(st);
       return "ok";

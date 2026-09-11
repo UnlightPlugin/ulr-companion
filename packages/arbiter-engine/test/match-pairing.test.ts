@@ -13,6 +13,7 @@ import type { CreateRoomOptions, MatchContext, RoomEntry } from "@ulr/cdp-adapte
 import type { MatchQueueClientOptions, QueueStatus } from "@ulr/arbiter-link";
 import { ARCADIA_STAGES } from "@ulr/cdp-adapter";
 import {
+  bandForTotal,
   buildRoomName,
   checkOwnDeck,
   costBand,
@@ -263,10 +264,11 @@ describe("COST 檔位", () => {
 });
 
 /**
- * 檔位由牌組自己決定（WP-17）。
+ * 檔位由牌組自己決定（WP-17／WP-18）。
  *
- * ⚠ 這是**遊戲大廳那顆「快速比賽」**用的判斷：亞城按下去之後伺服器照你的牌組
- * 把你放進某一檔，迪城那顆要一樣。托盤的配對頁仍然是玩家自己填檔位。
+ * ⚠ 這是**遊戲大廳那顆「快速比賽」**用的判斷，而它現在是唯一的入口：亞城按下
+ * 去之後伺服器照你的牌組把你放進某一檔，迪城那顆要一樣。托盤那一頁沒有「約定
+ * 檔位」那一格了。
  */
 describe("檔位由牌組決定", () => {
   const TIERS = [54, 61, 77];
@@ -278,13 +280,43 @@ describe("檔位由牌組決定", () => {
     expect(tierForTotal(6050, TIERS)).toEqual({ kind: "band", tier: 61 });
   });
 
-  it("⚠⚠ 不在任何一檔裡就是不合法，不會幫他挑最接近的", () => {
-    // 48C：比最低檔的下限還低 —— 亞城那邊看到的就是「這個牌組不符合遊戲規則」。
+  it("⚠⚠ 不在任何一檔裡就是不在，不會幫他挑最接近的", () => {
+    // 48C：比最低檔的下限還低。
     expect(tierForTotal(4800, TIERS)).toBeNull();
     // 61.50：兩檔之間的縫。
     expect(tierForTotal(6150, TIERS)).toBeNull();
     // 80C：最高檔以上、但還沒到開口檔。
     expect(tierForTotal(8000, TIERS, 90)).toBeNull();
+  });
+
+  /**
+   * 官方階層對不上時的那一檔（WP-18）。
+   *
+   * ⚠ 這條路存在的理由：57／66／78 是伺服器照**原版 COST** 下發的，跟自訂規則
+   * 算出來的數字沒有關係。一份罰得重的規則會讓整個牌池落在官方檔位之外，而以前
+   * 那些人**一個都排不了隊**。
+   */
+  it("官方檔位對不上 → 用這副牌自己那一檔，一檔仍然寬 1.00C", () => {
+    expect(bandForTotal(4800)).toBe(48); // 48.00 → 48 檔（47.01～48.00）
+    expect(bandForTotal(4801)).toBe(49); // 剛好跨過上限就進下一檔
+    expect(bandForTotal(4701)).toBe(48); // 下限那一格還在 48 檔裡
+    expect(bandForTotal(6150)).toBe(62);
+  });
+
+  /** ⚠ 夾到至少一檔寬 —— 0 會算出一個收不下任何東西的檔。 */
+  it("算成 0C 的牌組不會拿到一個 0 檔", () => {
+    expect(bandForTotal(0)).toBe(1);
+    expect(bandForTotal(1)).toBe(1);
+  });
+
+  /** ⚠ 每一檔都要收得下算出它的那副牌，否則玩家會被自己那一檔擋在門外。 */
+  it("算出來的那一檔一定收得下算出它的那副牌", () => {
+    for (const total of [1, 100, 4701, 4800, 4801, 5650, 9000, 12345]) {
+      const band = costBand(bandForTotal(total));
+      expect(band).not.toBeNull();
+      expect(total).toBeGreaterThanOrEqual(band!.floor);
+      expect(total).toBeLessThanOrEqual(band!.cap);
+    }
   });
 
   it("開口檔（COST90+）收下限以上的全部", () => {
@@ -828,9 +860,10 @@ describe("狀態機：對戰開始就結束任務", () => {
 /**
  * 對戰地點。
  *
- * ⚠ **玩家選不到「哪一張地圖」了** —— 只選「誰來抽」。開房的只有 host，所以
- * 指定地圖對另一邊永遠是被決定的；舊的協商（從雙方選的兩張裡抽一張）只是把
- * 那個不對稱換成擲骰子。取代亞城的東西不該讓人先填一張表。
+ * **優先權：亞城隨機 ＞ 官方隨機 ＞ 指定的地圖。**
+ *
+ * ⚠ 指定一張**不等於**就開在那張：開房的只有 host，所以任何一方指定的地圖對
+ * 另一邊都是單方面的。兩邊各指一張時擲骰子 —— 那是唯一不偏袒任何一方的解法。
  */
 describe("對戰地點：negotiateStage", () => {
   const always = (n: number) => () => n;
@@ -842,12 +875,37 @@ describe("對戰地點：negotiateStage", () => {
   it("對手沒說（舊版插件／中間人不轉發）就用我的", () => {
     expect(ARCADIA_STAGES).toContain(negotiateStage("arcadia", null, always(0.5)));
     expect(negotiateStage("official", null, always(0.5))).toBe(RANDOM_STAGE);
+    expect(negotiateStage("007", null, always(0.5))).toBe("007");
   });
 
-  it("⚠ 有一邊選官方隨機就走官方隨機 —— 亞城池裡有一張官方選單沒有的地圖", () => {
-    expect(negotiateStage("arcadia", "official", always(0))).toBe(RANDOM_STAGE);
-    expect(negotiateStage("official", "arcadia", always(0))).toBe(RANDOM_STAGE);
+  it("⚠ 一個人選亞城隨機就整場走亞城隨機 —— 那是最高的優先權", () => {
+    expect(ARCADIA_STAGES).toContain(negotiateStage("arcadia", "official", always(0)));
+    expect(ARCADIA_STAGES).toContain(negotiateStage("official", "arcadia", always(0)));
+    expect(ARCADIA_STAGES).toContain(negotiateStage("007", "arcadia", always(0)));
+    expect(ARCADIA_STAGES).toContain(negotiateStage("arcadia", "013", always(0)));
+  });
+
+  it("沒人選亞城隨機、有人選官方隨機 → 官方隨機", () => {
     expect(negotiateStage("official", "official", always(0))).toBe(RANDOM_STAGE);
+    expect(negotiateStage("official", "007", always(0))).toBe(RANDOM_STAGE);
+    expect(negotiateStage("007", "official", always(0))).toBe(RANDOM_STAGE);
+  });
+
+  it("兩邊指同一張就開那一張", () => {
+    expect(negotiateStage("007", "007", always(0))).toBe("007");
+    expect(negotiateStage("013", "013", always(0.99))).toBe("013");
+  });
+
+  /**
+   * ⚠ **擲骰子，不是「開房那一方說了算」。** 後者等於誰先被配到誰決定地點，
+   * 而那正是這支存在的理由的反面。
+   */
+  it("兩邊指不同張 → 擲骰子二選一，而且只會是那兩張其中一張", () => {
+    expect(negotiateStage("003", "007", always(0))).toBe("003");
+    expect(negotiateStage("003", "007", always(0.9))).toBe("007");
+    for (const r of [0, 0.1, 0.5, 0.499, 0.5, 0.999]) {
+      expect(["003", "007"]).toContain(negotiateStage("003", "007", always(r)));
+    }
   });
 
   it("⚠ 抽到的一定在亞城池裡，而且抽不到「隨機」那個代號", () => {
@@ -868,24 +926,33 @@ describe("對戰地點：negotiateStage", () => {
     expect(parsePrefBody("不是 JSON")).toBeNull();
     expect(parsePrefBody(JSON.stringify({ s: "abc" }))).toBeNull();
     expect(parsePrefBody(JSON.stringify({ s: 7 }))).toBeNull();
+    // ⚠ 認不得的三位數字也要擋。這個值會被送進開房封包。
+    expect(parsePrefBody(JSON.stringify({ s: "099" }))).toBeNull();
   });
 
-  it("送出去再收回來是同一種抽法", () => {
+  it("送出去再收回來是同一個選擇", () => {
     expect(parsePrefBody(encodePrefBody({ stage: "arcadia" }))).toEqual({ stage: "arcadia" });
     expect(parsePrefBody(encodePrefBody({ stage: "official" }))).toEqual({ stage: "official" });
+    expect(parsePrefBody(encodePrefBody({ stage: "007" }))).toEqual({ stage: "007" });
+    expect(parsePrefBody(encodePrefBody({ stage: "013" }))).toEqual({ stage: "013" });
   });
 
   /**
-   * ⚠ 舊版插件的 `parsePrefBody` 只收三位數字。`official` 送 `"014"` 而不是
-   * `"official"`，舊版才讀得懂 —— 它當 host 時也會開隨機房。
+   * ⚠ 舊版插件的 `parsePrefBody` 只收 `"arcadia"` 與三位數字。`official` 送
+   * `"014"` 而不是 `"official"`，舊版才讀得懂 —— 它當 host 時也會開隨機房。
    */
   it("⚠ 官方隨機送的是舊版讀得懂的 014", () => {
     expect(JSON.parse(encodePrefBody({ stage: "official" }))).toEqual({ s: RANDOM_STAGE });
   });
 
-  it("⚠ 舊版送來的三位數字一律當官方隨機 —— 新版沒有「指定某一張」了", () => {
-    expect(parsePrefBody(JSON.stringify({ s: "007" }))).toEqual({ stage: "official" });
+  /**
+   * ⚠ `014` 是「隨機」不是地圖，所以它一律折成 `official`。舊版只送得出
+   * `"arcadia"` 與 `"014"`，於是收到別的三位數字就代表對面是新版 —— 照著他
+   * 指定的那張參與協商是對的。
+   */
+  it("014 是官方隨機，其餘認得的代號就是那張地圖", () => {
     expect(parsePrefBody(JSON.stringify({ s: "014" }))).toEqual({ stage: "official" });
+    expect(parsePrefBody(JSON.stringify({ s: "007" }))).toEqual({ stage: "007" });
   });
 });
 
@@ -922,15 +989,15 @@ describe("狀態機：地點協商走到開房", () => {
     };
   }
 
-  it("對手的抽法到了 → 用協商的結果開房", async () => {
+  it("對手的地點到了 → 用協商的結果開房", async () => {
     const { create, driver } = openable();
-    // 我亞城池、對手官方隨機 → 走官方隨機
+    // 我指定 007、對手官方隨機 → 沒人選亞城隨機，走官方隨機
     const { p, link } = pairing(
-      { room: ROOM("arcadia"), stageWaitMs: 200, roll: () => 0, handoffPollMs: 10_000 },
+      { room: ROOM("007"), stageWaitMs: 200, roll: () => 0, handoffPollMs: 10_000 },
       driver,
     );
     await p.start();
-    await link.matched("host", link.tag); // 卡在等對手的抽法
+    await link.matched("host", link.tag); // 卡在等對手回報地點
     expect(create).not.toHaveBeenCalled();
 
     await link.peerPref(encodePrefBody({ stage: "official" }));

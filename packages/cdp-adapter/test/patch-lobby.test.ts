@@ -502,6 +502,67 @@ describe("大廳快速比賽補丁", () => {
     expect(shown).not.toContain("__LENGTH4__");
   });
 
+  /**
+   * 自訂檔那一列（WP-18）。
+   *
+   * ⚠ 檔位改成照牌組算之後，落在官方階層之外的那一檔在遊戲自己的模板裡
+   * **沒有位置**（模板寫死三檔 + 一個開口檔）。它自己一行，而且前面要有 ★ ——
+   * 少了那個記號，畫面上會出現一個看起來像官方階層、實際上只有裝了插件的人
+   * 排得到的數字。
+   */
+  it("自訂檔多畫一列，接在官方那幾行後面而且標著 ★", () => {
+    const game = makeGame({ channel: 2 });
+    install(game);
+    run(
+      game,
+      buildLobbyStateExpression({
+        counts: [
+          { tier: 54, waiting: 1 },
+          { tier: 61, waiting: 0 },
+          { tier: 77, waiting: 2 },
+          { tier: 90, waiting: 3, open: true },
+          { tier: 48, waiting: 1, custom: true },
+        ],
+        matching: false,
+      }),
+    );
+
+    expect(texts(game)).toContain(
+      "COST54:1位玩家等待中。\nCOST61:0位玩家等待中。\nCOST77:2位玩家等待中。" +
+        "\nCOST90+:3位玩家等待中。\n★COST48:1位玩家等待中。",
+    );
+  });
+
+  /**
+   * ⚠ 句型是**從模板借的**，不是插件自己寫死的中文 —— 自己組一句「N 位玩家
+   * 等待中」的話，玩家把客戶端換成別的語言就會在畫面上看到一行繁中。
+   */
+  it("自訂檔那一列用的是模板的句型，只換掉檔位與人數", () => {
+    const original = FakePanelBase.PLAYER_COUNT;
+    FakePanelBase.PLAYER_COUNT = {
+      tcn: [
+        "__NAME__",
+        "COST__COST1__ waits __LENGTH1__\nCOST__COST2__ waits __LENGTH2__\n" +
+          "COST__COST3__ waits __LENGTH3__\nCOST90+ waits __LENGTH4__",
+      ],
+    };
+    try {
+      const game = makeGame({ channel: 2 });
+      install(game);
+      run(
+        game,
+        buildLobbyStateExpression({
+          counts: [{ tier: 48, waiting: 2, custom: true }],
+          matching: false,
+        }),
+      );
+
+      expect(texts(game)).toContain("★COST48 waits 2");
+    } finally {
+      FakePanelBase.PLAYER_COUNT = original;
+    }
+  });
+
   it("問不到人數（null）時那幾行是空的 —— 不能畫成 0 位", () => {
     const game = makeGame({ channel: 2 });
     install(game);
@@ -727,6 +788,39 @@ describe("等待視窗", () => {
     expect(game.sceneObjects.some((o) => o.text === "00:00")).toBe(true);
     // cancel 鈕用的是遊戲自己的字串表。
     expect(buttons.map((b) => b.label)).toEqual(["cancel"]);
+  });
+
+  /**
+   * ⚠ 這一行是「**這個框不是官方的**」那個記號。整個視窗是照抄的，抄到一模
+   * 一樣 —— 而自訂檔在大廳左下沒有官方的那一行，玩家除了這裡之外沒有別的
+   * 地方看得到自己排的是什麼。
+   */
+  it("送了標記就在等待視窗上多一行", () => {
+    const game = makeGame({ channel: 2 });
+    install(game);
+    withWebpack(game);
+
+    run(
+      game,
+      buildLobbyStateExpression({
+        counts: null,
+        matching: true,
+        badge: "★ COST48 · 夾擠式罰C",
+      }),
+    );
+
+    expect(game.sceneObjects.some((o) => o.text === "★ COST48 · 夾擠式罰C")).toBe(true);
+  });
+
+  /** ⚠ 舊的 Node 端不會送這一格 —— 沒有就是「不加那一行」，不是錯誤。 */
+  it("沒送標記就不加那一行", () => {
+    const game = makeGame({ channel: 2 });
+    install(game);
+    withWebpack(game);
+
+    run(game, buildLobbyStateExpression({ counts: null, matching: true }));
+
+    expect(game.sceneObjects.some((o) => String(o.text).startsWith("★"))).toBe(false);
   });
 
   it("按 cancel 等於再按一次快速比賽（同一條回報路徑）", () => {

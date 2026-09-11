@@ -16,6 +16,7 @@ export {
 export type { CostPhase, CostState, EngineOptions, EngineStatus } from "./engine.js";
 
 export {
+  bandForTotal,
   buildRoomName,
   checkOwnDeck,
   COST_BAND_WIDTH,
@@ -44,6 +45,7 @@ export {
   ROOM_MULTI,
   ROOM_NAME_FALLBACK,
   STAGE_WAIT_MS,
+  stagePickLabel,
   teamCostCenti,
   tierForTotal,
 } from "./match-pairing.js";

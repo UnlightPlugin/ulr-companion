@@ -306,6 +306,55 @@ export const ARCADIA_STAGES: readonly string[] = [
 ];
 
 /**
+ * 玩家在插件裡指得到名字的那幾張地圖 —— 官方選單的 `000`~`009` 加上隱藏的
+ * `010`~`013`。
+ *
+ * ⚠ **不含 `014`**：那不是地圖，是「叫伺服器自己抽」。它在配對頁是另一個選項
+ * （「官方隨機」），不是這串裡的一張。
+ *
+ * ⚠ 這是**型別的來源**（`StagePick` 的地圖那一半就是這個 union），所以代號寫在
+ * 這裡一份。名字不重寫，一律去 {@link STAGES} / {@link HIDDEN_STAGES} 查 ——
+ * 兩處各抄一份的話，改了一邊的譯名另一邊會安靜地留著舊的。
+ */
+export const STAGE_CODES = [
+  "000",
+  "001",
+  "002",
+  "003",
+  "004",
+  "005",
+  "006",
+  "007",
+  "008",
+  "009",
+  "010",
+  "011",
+  "012",
+  "013",
+] as const;
+
+/** 三位數的地點代號。`"014"` **不在**裡面（見 {@link STAGE_CODES}）。 */
+export type StageCode = (typeof STAGE_CODES)[number];
+
+/** 這個字串是認得的地點代號嗎。⚠ 開房參數會用它，所以一律驗過再送。 */
+export function isStageCode(value: unknown): value is StageCode {
+  return typeof value === "string" && (STAGE_CODES as readonly string[]).includes(value);
+}
+
+/**
+ * 配對頁那個下拉選單的地圖那一段 —— 代號 + 名字，`000` 到 `013`。
+ *
+ * 名字是**查出來的**，不是這裡編的（見 {@link STAGE_CODES}）。查不到就退回
+ * 代號本身 —— 少一個譯名不該讓整個選單少一張圖。
+ */
+export const SELECTABLE_STAGES: readonly { value: StageCode; name: string }[] = STAGE_CODES.map(
+  (value) => ({
+    value,
+    name: [...STAGES, ...HIDDEN_STAGES].find((s) => s.value === value)?.name ?? value,
+  }),
+);
+
+/**
  * 「牌組Cost限制」可以填的值。照抄 `Match.COST_RANGES`。
  *
  * ⚠ 只有 0~5，不是任意數字。它是**容差**（房間對話框寫「± 5」），

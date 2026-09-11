@@ -144,7 +144,10 @@ export {
   duelApCost,
   findOwnRoom,
   HIDDEN_STAGES,
+  isStageCode,
   ROOM_NAME_MAX_LENGTH,
+  SELECTABLE_STAGES,
+  STAGE_CODES,
   STAGES,
   MATCH_ROOM_INSTALL_EXPRESSION,
   MATCH_ROOM_UNINSTALL_EXPRESSION,
@@ -158,6 +161,7 @@ export type {
   MatchContext,
   RoomDeck,
   RoomEntry,
+  StageCode,
 } from "./match-room.js";
 
 export {

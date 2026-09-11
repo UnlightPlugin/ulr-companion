@@ -76,8 +76,8 @@ import type {
   QueueRole,
   QueueStatus,
 } from "@ulr/arbiter-link";
-import { ARCADIA_STAGES, ROOM_NAME_MAX_LENGTH } from "@ulr/cdp-adapter";
-import type { MatchContext } from "@ulr/cdp-adapter";
+import { ARCADIA_STAGES, isStageCode, ROOM_NAME_MAX_LENGTH } from "@ulr/cdp-adapter";
+import type { MatchContext, StageCode } from "@ulr/cdp-adapter";
 import type { MatchDriver, PreflightResult, Sleep } from "./match-session.js";
 import { guestJoinRoom, hostOpenRoom, preflight } from "./match-session.js";
 
@@ -145,27 +145,41 @@ export const LOBBY_WATCH_MS = 5_000;
 export const RANDOM_STAGE = "014";
 
 /**
- * 玩家能選的地點 —— **只有兩種，沒有「指定某一張」這回事。**
+ * 玩家能選的地點。**兩種抽法，加上十四張指定的地圖。**
  *
- * 自動配對是拿來取代亞歷山卓城的快速比賽的，而那邊不讓人挑地圖。挑地圖在
- * 這裡也沒有意義：開房的只有 host，所以「我指定 007」對 guest 而言是單方面
- * 被決定的，而協商（從雙方選的兩張裡抽一張）只是把那個不對稱換成擲骰子。
+ * | 值                | 誰決定           | 決定成什麼                         |
+ * | ----------------- | ---------------- | ---------------------------------- |
+ * | `arcadia`         | **插件**         | {@link ARCADIA_STAGES}（000~010）  |
+ * | `official`        | **遊戲伺服器**   | 它自己那份（我們看不到，也管不著） |
+ * | `000`~`013`       | **玩家**         | 就那一張                           |
  *
- * | 值         | 誰抽             | 抽哪些                             |
- * | ---------- | ---------------- | ---------------------------------- |
- * | `arcadia`  | **插件**         | {@link ARCADIA_STAGES}（000~010）  |
- * | `official` | **遊戲伺服器**   | 它自己那份（我們看不到，也管不著） |
+ * 兩種隨機的差別**不是**「哪個比較隨機」，是抽的池子不同 —— `arcadia` 一定會抽
+ * 到那十一張裡的一張（含官方選單沒有的 010），`official` 抽的是官方那份。
  *
- * 兩者的差別**不是**「哪個比較隨機」，是抽的池子不同 —— `arcadia` 一定會抽到
- * 那十一張裡的一張（含官方選單沒有的 010），`official` 抽的是官方那份。
+ * ⚠ **指定一張不等於就開在那張。** 開房的只有 host，所以任何一方指定的地圖對
+ * 另一邊都是單方面的 —— 兩邊指了不同張時走擲骰子（見 {@link negotiateStage}）。
  */
-export type StagePick = "arcadia" | "official";
+export type StagePick = "arcadia" | "official" | StageCode;
 
 /** 認不得的值一律回這個。取代亞城的預設就是亞城的池子。 */
 export const DEFAULT_STAGE_PICK: StagePick = "arcadia";
 
 export function normalizeStagePick(raw: unknown): StagePick {
-  return raw === "official" ? "official" : DEFAULT_STAGE_PICK;
+  if (raw === "official") return "official";
+  if (isStageCode(raw)) return raw;
+  return DEFAULT_STAGE_PICK;
+}
+
+/**
+ * 記錄檔裡怎麼稱呼一個選擇。**指定的地圖就印代號**，那是遊戲自己的說法。
+ *
+ * ⚠ 不查中文名。名字住在 `@ulr/cdp-adapter` 的 `STAGES`／`HIDDEN_STAGES`，
+ * 而記錄檔是拿來比對兩台機器的 —— 代號兩邊一定一樣，譯名不一定。
+ */
+export function stagePickLabel(pick: StagePick): string {
+  if (pick === "arcadia") return "亞城隨機";
+  if (pick === "official") return "官方隨機";
+  return `地點 ${pick}`;
 }
 
 /**
@@ -182,53 +196,77 @@ export function pickArcadiaStage(roll: () => number = Math.random): string {
 }
 
 /**
- * 兩邊各選了一種抽法，這一場開在哪（回傳的是**具體的地點代號**）。
+ * 兩邊各選了一個地點，這一場開在哪（回傳的是**具體的地點代號**）。
  *
- * | 我       | 對手               | 結果                     |
- * | -------- | ------------------ | ------------------------ |
- * | arcadia  | arcadia            | 從 000~010 抽一張        |
- * | arcadia  | **沒說**（舊版）   | 從 000~010 抽一張        |
- * | arcadia  | official           | **`014`**（官方隨機）    |
- * | official | 任何               | **`014`**                |
+ * **優先權：亞城隨機 ＞ 官方隨機 ＞ 指定的地圖。**
  *
- * ⚠ **只要有一邊選了「官方隨機」就走官方隨機。** 那一邊等於說了「我不要插件
- * 替我抽」—— 而亞城池裡有一張官方選單沒有的 010（見 {@link ARCADIA_STAGES}），
- * 硬把他丟過去是拿他沒同意的東西去改變這一場。反過來則沒有這個問題：官方隨機
- * 抽到的一定是官方認得的地圖。
+ * | 我       | 對手               | 結果                        |
+ * | -------- | ------------------ | --------------------------- |
+ * | arcadia  | 任何（含沒說）     | 從 000~010 抽一張           |
+ * | 任何     | arcadia            | 從 000~010 抽一張           |
+ * | official | 官方隨機／地圖／沒說 | **`014`**（官方隨機）     |
+ * | 地圖     | official           | **`014`**                   |
+ * | `007`    | `007`              | `007`                       |
+ * | `003`    | `007`              | **擲骰子二選一**            |
+ * | `007`    | **沒說**（舊版）   | `007`                       |
+ *
+ * ⚠ **一個人選亞城隨機就整場走亞城隨機。** 這條優先權是玩家指定的：亞城池是
+ * 這個玩法的預設樣子，而「有人想要那個池子」比「另一邊想要別的」更值得成立。
+ *
+ * ⚠ 代價要講清楚：亞城池裡有一張官方選單沒有的 `010`（見 {@link ARCADIA_STAGES}），
+ * 所以選了官方隨機或指定地圖的人**也可能**被抽到 010。不想碰它就得兩邊都不選
+ * 亞城隨機。
+ *
+ * ⚠ 兩邊各指定了不同的一張時**擲骰子**，不是「開房那一方說了算」——
+ * 後者等於誰先被配到誰決定，而那是這支存在的理由的反面。
  *
  * ⚠ 對手沒說（舊版插件、或中間人不轉發 `q-pref`）時用**我的** —— 地點協商是
  * 加分，不是開打的前提。
+ *
+ * ⚠ 這支**只有 host 會叫**（開房的是他），所以兩邊算出不一樣的答案不會出事：
+ * 擲骰子那條路本來就不保證兩邊同時算得出同一張。
  */
 export function negotiateStage(
   mine: StagePick,
   theirs: StagePick | null,
   roll: () => number = Math.random,
 ): string {
-  if (mine === "arcadia" && theirs !== "official") return pickArcadiaStage(roll);
-  return RANDOM_STAGE;
+  if (mine === "arcadia" || theirs === "arcadia") return pickArcadiaStage(roll);
+  if (mine === "official" || theirs === "official") return RANDOM_STAGE;
+  // 到這裡兩邊都是指定的地圖（或對手沒說）。
+  if (theirs === null || theirs === mine) return mine;
+  return roll() < 0.5 ? mine : theirs;
 }
 
 /**
  * `q-pref` 的內容。**只有開房偏好**，沒有身分、沒有牌組、沒有規則。
  *
- * ⚠ `official` 送的是舊版認得的 `"014"` 而不是 `"official"`。舊版插件的
- * `parsePrefBody` 只收三位數字，收到 `"official"` 會當成「他沒說」——
- * 而 `"014"` 它讀得懂，於是舊版當 host 時也會開隨機房。`arcadia` 沒有這種
- * 對應值（舊版沒有那個概念），送過去被當成沒說，舊版就用他自己的 —— 那是
- * 正確的退化。
+ * ```
+ *   arcadia      → {"s":"arcadia"}
+ *   official     → {"s":"014"}      ← 舊版看得懂的寫法
+ *   007（地圖）  → {"s":"007"}
+ * ```
+ *
+ * ⚠ `official` 送的是 `"014"` 而不是 `"official"`。舊版插件的 `parsePrefBody`
+ * 只收 `"arcadia"` 與三位數字，收到 `"official"` 會當成「他沒說」—— 而 `"014"`
+ * 它讀得懂，於是舊版當 host 時也會開隨機房。
+ *
+ * ⚠ **指定的地圖送過去，舊版會讀成「官方隨機」**（它把所有三位數字都折成
+ * `official`）。那是可以接受的退化：只有 host 那一邊的算法算數，而舊版 host
+ * 拿到「官方隨機」時開的是 `014` —— 一張雙方都沒指定的中立地圖。
  */
 export function encodePrefBody(pref: { stage: StagePick }): string {
-  return JSON.stringify({ s: pref.stage === "official" ? RANDOM_STAGE : "arcadia" });
+  return JSON.stringify({ s: pref.stage === "official" ? RANDOM_STAGE : pref.stage });
 }
 
 /**
- * 解析對手的 `q-pref`。壞掉一律 `null` —— 那等同「他沒說」，用我自己的抽法。
+ * 解析對手的 `q-pref`。壞掉一律 `null` —— 那等同「他沒說」，用我自己的選擇。
  *
- * ⚠ 要驗格式。這個值會決定開房參數，而開房參數是送進遊戲封包的東西。
+ * ⚠ 要驗格式。這個值會決定開房參數，而開房參數是送進遊戲封包的東西 ——
+ * 認得的代號只有 {@link STAGE_CODES} 那十四個加上 `014`。
  *
- * ⚠ **舊版送來的三位數字一律當成 `official`。** 新版沒有「指定某一張」這個
- * 概念了，照著他指定的那張開等於讓一個舊版客戶端單方面決定地點；退回官方隨機
- * 是雙方都沒挑的中立結果，而且他那版看得懂 `014`。
+ * ⚠ `"014"` 一律當成 `official`。舊版只送得出 `"arcadia"` 與 `"014"`，所以
+ * 收到別的三位數字就代表對面是新版，照著他指定的那張參與協商是對的。
  */
 export function parsePrefBody(body: string): { stage: StagePick } | null {
   try {
@@ -237,7 +275,8 @@ export function parsePrefBody(body: string): { stage: StagePick } | null {
     const stage = (parsed as Record<string, unknown>)["s"];
     if (typeof stage !== "string") return null;
     if (stage === "arcadia") return { stage: "arcadia" };
-    if (/^\d{3}$/.test(stage)) return { stage: "official" };
+    if (stage === RANDOM_STAGE) return { stage: "official" };
+    if (isStageCode(stage)) return { stage };
     return null;
   } catch {
     return null;
@@ -504,6 +543,31 @@ export function tierForTotal(
     return { kind: "open", tier: openTier };
   }
   return null;
+}
+
+/**
+ * 這副牌**自己那一檔**的上限 —— 56.50C → `57`（WP-18）。
+ *
+ * `tierForTotal` 問的是「這副牌落在官方那幾檔的哪一檔」，答不出來時（48C、
+ * 61.5C…）以前是把玩家擋下來。但那條規矩是**官方頻道的**：57／66／78 是伺服器
+ * 照原版 COST 下發的階層，而自訂規則算出來的數字跟它沒有關係 —— 一份罰重的
+ * 規則會讓整個牌池落在官方檔位之外，於是「自動配對」對那份規則等於不能用。
+ *
+ * 所以官方檔位對不上時就用**這副牌自己的檔**：一樣 1.00C 寬（見
+ * {@link COST_BAND_WIDTH}），一樣有下限，只是那個上限是算出來的而不是伺服器
+ * 給的。壓 C 的設計空間完全保留 —— 想跟人配到，兩邊得壓進同一格。
+ *
+ * ⚠ **這一檔在大廳左下沒有自己的一行**（那幾行是官方檔位），所以畫面上要另外
+ * 標出來：多一列「自訂檔」的人數，等待視窗上也多一行（見 `patch-lobby.ts`）。
+ *
+ * ⚠ 夾到至少一檔寬。`0` 會算出上限 0，而 `costBand(0)` 的下限是 0 —— 一個
+ * 收不下任何東西的檔。牌組真的算成 0C 是讀不到卡的徵兆，不是一個檔位。
+ *
+ * @param totalCenti 這副牌在約定規則下的總和，**整數百分之一**
+ */
+export function bandForTotal(totalCenti: number): number {
+  const width = toCentiCost(COST_BAND_WIDTH);
+  return Math.max(COST_BAND_WIDTH, Math.ceil(totalCenti / width));
 }
 
 /** 命中的檔位。`band` = 有上限的那幾檔，`open` = `COST90+`。 */
@@ -1428,19 +1492,14 @@ export class MatchPairing {
 
     const theirs = this.#peerStage;
     const stage = negotiateStage(mine, theirs, this.#options.roll ?? Math.random);
-    const label = (pick: StagePick): string => (pick === "arcadia" ? "亞城隨機" : "官方隨機");
     if (theirs === null) {
-      this.#log(`· 對手沒有回報抽法（舊版插件？），用我選的${label(mine)}`);
+      this.#log(`· 對手沒有回報地點（舊版插件？），用我選的${stagePickLabel(mine)}`);
     } else if (theirs === mine) {
-      this.#log(`· 雙方都選${label(mine)}`);
+      this.#log(`· 雙方都選${stagePickLabel(mine)}`);
     } else {
-      this.#log(`· 抽法不同（我${label(mine)} / 對手${label(theirs)}）→ 走官方隨機`);
+      this.#log(`· 地點不同：我${stagePickLabel(mine)}，對手${stagePickLabel(theirs)}`);
     }
-    this.#log(
-      stage === RANDOM_STAGE
-        ? "· 這一場的地點交給伺服器抽"
-        : `· 這一場抽到地點 ${stage}（亞城池 ${ARCADIA_STAGES.length} 張）`,
-    );
+    this.#log(stage === RANDOM_STAGE ? "· 這一場的地點交給伺服器抽" : `· 這一場的地點是 ${stage}`);
     return stage;
   }
 

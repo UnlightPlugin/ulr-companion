@@ -10,7 +10,10 @@ import { equipmentKey, eventCardKey } from "@ulr/rule-schema";
 import {
   COST_RANGES,
   HIDDEN_STAGES,
+  isStageCode,
   MATCH_ROOM_INSTALL_EXPRESSION,
+  SELECTABLE_STAGES,
+  STAGE_CODES,
   STAGES,
   buildCreateRoomExpression,
   buildJoinRoomExpression,
@@ -715,6 +718,52 @@ describe("官方常數（照抄客戶端 bundle，不是自己編的）", () => 
     for (const v of [...STAGES, ...HIDDEN_STAGES].map((s) => s.value)) {
       expect(v).toMatch(/^\d{3}$/);
     }
+  });
+
+  /**
+   * 配對頁那個下拉選單的地圖那一段（WP-18）。
+   *
+   * ⚠ **不含 `014`**：那不是地圖，是「叫伺服器自己抽」。它在選單裡是另一個
+   * 選項（「官方隨機」），混進這一串的話玩家會在同一個選單裡看到兩個隨機。
+   */
+  it("選得到的地圖是 000~013，不含 014", () => {
+    expect(STAGE_CODES).toEqual([
+      "000",
+      "001",
+      "002",
+      "003",
+      "004",
+      "005",
+      "006",
+      "007",
+      "008",
+      "009",
+      "010",
+      "011",
+      "012",
+      "013",
+    ]);
+    expect(STAGE_CODES as readonly string[]).not.toContain("014");
+  });
+
+  /** ⚠ 名字是**查出來的**，兩處各抄一份的話改了譯名另一邊會安靜地留著舊的。 */
+  it("每一張選得到的地圖都查得到名字，而且跟官方／隱藏那兩張表一致", () => {
+    const byValue = new Map([...STAGES, ...HIDDEN_STAGES].map((s) => [s.value, s.name]));
+    expect(SELECTABLE_STAGES.map((s) => s.value)).toEqual([...STAGE_CODES]);
+    for (const s of SELECTABLE_STAGES) {
+      expect(s.name).toBe(byValue.get(s.value));
+    }
+  });
+
+  /** ⚠ 這個值會被送進開房封包，所以認不得的一律要擋。 */
+  it("isStageCode 只認那十四個", () => {
+    expect(isStageCode("000")).toBe(true);
+    expect(isStageCode("013")).toBe(true);
+    expect(isStageCode("014")).toBe(false);
+    expect(isStageCode("099")).toBe(false);
+    expect(isStageCode("arcadia")).toBe(false);
+    expect(isStageCode(13)).toBe(false);
+    expect(isStageCode(null)).toBe(false);
   });
 });
 
