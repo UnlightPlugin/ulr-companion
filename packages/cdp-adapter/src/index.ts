@@ -133,6 +133,17 @@ export type {
 } from "./patch-lobby.js";
 
 export {
+  buildPresentPatchScript,
+  DEFAULT_PRESENT_MAX,
+  DEFAULT_PRESENT_POLL_MS,
+  parsePresentStatus,
+  PRESENT_SCRIPT_VERSION,
+  PRESENT_STATUS_EXPRESSION,
+  PRESENT_UNINSTALL_EXPRESSION,
+} from "./patch-present.js";
+export type { PresentPatchOptions, PresentStatus } from "./patch-present.js";
+
+export {
   ARCADIA_STAGES,
   buildCreateRoomExpression,
   buildJoinRoomExpression,

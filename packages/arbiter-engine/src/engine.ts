@@ -65,6 +65,7 @@ import type {
   OkPatchReport,
   PenaltyBand,
   PenaltyPatchReport,
+  PresentStatus,
   RoomDeckPreload,
   RoomGateReport,
   RoomGateStatus,
@@ -83,6 +84,7 @@ import {
   HIDDEN_STAGES,
   LOBBY_SCRIPT_VERSION,
   normalizeTint,
+  PRESENT_SCRIPT_VERSION,
   resolveDebugPort,
 } from "@ulr/cdp-adapter";
 
@@ -638,6 +640,41 @@ export class ArbiterEngine {
       if (!status.installed) this.#log(`· 大廳快速比賽還沒裝上：${status.reason ?? "原因不明"}`);
     } catch (err) {
       this.#log(`✗ 大廳快速比賽注入失敗：${describe(err)}`);
+    }
+  }
+
+  /**
+   * 好友面板左上角的贈送次數現在在頁面上的狀態。沒接上遊戲時是 `null`。
+   *
+   * ⚠ 跟 `lobbyStatus()` 同一套：**頁面說「沒裝」或「不是這一版」就當場補裝**。
+   * 這支是 `evaluate` 裝的，遊戲一重載就整份消失，而重載**不會**斷 CDP 連線。
+   */
+  async presentStatus(): Promise<PresentStatus | null> {
+    const adapter = this.#adapter;
+    if (adapter === null) return null;
+    try {
+      const status = await adapter.presentStatus();
+      if (status.installed && status.version === PRESENT_SCRIPT_VERSION) return status;
+      return await adapter.installPresentPatch();
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 把贈送次數的補丁裝上去。**每次接上遊戲與遊戲重載後都會自己叫一次。**
+   *
+   * ⚠ `mounted: false` 幾乎一定會發生（這時玩家還沒開贈送面板），那**不是
+   * 錯誤** —— 腳本會自己盯著。所以那條路不寫 log。
+   */
+  async #syncPresent(): Promise<void> {
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    try {
+      const status = await adapter.installPresentPatch();
+      if (!status.installed) this.#log(`· 贈送次數還沒裝上：${status.reason ?? "原因不明"}`);
+    } catch (err) {
+      this.#log(`✗ 贈送次數注入失敗：${describe(err)}`);
     }
   }
 
@@ -1364,6 +1401,9 @@ export class ArbiterEngine {
         // 裝一次就夠 —— 玩家進頻道時按鈕會自己出現。
         adapter.onLobbyReport((r) => this.#onLobbyReport(r));
         await this.#syncLobby();
+        // 好友面板的贈送次數同理（腳本自己輪詢等玩家開面板）。⚠ 這支不必推
+        // 任何狀態下去 —— 數字是伺服器送的，頁面自己問得到。
+        await this.#syncPresent();
         // 牌組庫的介面同理（也是輪詢等玩家進 Edit 畫面）。⚠ 這時候多半還沒有
         // 狀態可以裝 —— 托盤要先讀到帳號指紋才知道載哪一份庫，而那要等遊戲
         // 起來。真正裝上去的是托盤那邊的 `setDeckEditState()`。
@@ -1514,6 +1554,9 @@ export class ArbiterEngine {
       // 沒出現」—— 而「有時候」正好就是**我們自己重載過**的那些時候
       // （卡片價格要套用時會重載一次），所以它比看起來常見得多。
       await this.#syncLobby();
+      // ⚠ 贈送次數也是。症狀是「那個數字有時候不見」，而「有時候」正好是
+      // 我們自己重載過的那些時候。
+      await this.#syncPresent();
       // ⚠ 牌組庫的介面也是。少了這一行，症狀是「牌盒點不開了」，而玩家同樣
       // 不會把它跟「剛剛重載過」連在一起。
       await this.#syncDeckEdit();

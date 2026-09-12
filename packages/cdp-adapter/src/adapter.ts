@@ -64,6 +64,13 @@ import {
   LOBBY_UNINSTALL_EXPRESSION,
   parseLobbyStatus,
 } from "./patch-lobby.js";
+import type { PresentStatus } from "./patch-present.js";
+import {
+  buildPresentPatchScript,
+  parsePresentStatus,
+  PRESENT_STATUS_EXPRESSION,
+  PRESENT_UNINSTALL_EXPRESSION,
+} from "./patch-present.js";
 import type { HiddenStage, HiddenStageStatus } from "./patch-stage.js";
 import {
   buildHiddenStageScript,
@@ -851,6 +858,34 @@ export class CdpAdapter {
 
   async uninstallLobbyPatch(): Promise<string> {
     return await this.evaluate<string>(LOBBY_UNINSTALL_EXPRESSION);
+  }
+
+  // ── 好友面板的「今日還能送幾張地圖」 ─────────────────────────────────────
+
+  /**
+   * 把贈送次數畫到好友面板左上角。
+   *
+   * ⚠ 這支**不回報任何東西給 Node**，也不需要 Node 推狀態 —— 數字是伺服器
+   * 自己送的（`db_quest.pre_remain`），頁面問得到。所以沒有 binding。
+   *
+   * ⚠ 跟大廳那支一樣走 `Runtime.evaluate`：不必重載遊戲，但**遊戲一重載就會
+   * 被沖掉**，重連時要再裝一次。
+   *
+   * ⚠ 回傳的 `mounted` 常常是 `false`，那**不是失敗**：玩家沒開贈送面板時
+   * 面板根本不存在。腳本會自己盯著，開了就掛上。
+   */
+  async installPresentPatch(): Promise<PresentStatus> {
+    const raw = await this.evaluate<string>(buildPresentPatchScript());
+    return parsePresentStatus(raw);
+  }
+
+  async presentStatus(): Promise<PresentStatus> {
+    const raw = await this.evaluate<string>(PRESENT_STATUS_EXPRESSION);
+    return parsePresentStatus(raw);
+  }
+
+  async uninstallPresentPatch(): Promise<string> {
+    return await this.evaluate<string>(PRESENT_UNINSTALL_EXPRESSION);
   }
 
   /**
