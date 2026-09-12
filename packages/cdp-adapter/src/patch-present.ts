@@ -61,7 +61,7 @@
  * ⚠ 扣完**還是要再 fetch 一次**。本機遞減只是為了讓數字立刻動（送出到
  * 伺服器回話中間有幾百毫秒），真相一律以 `pre_remain` 為準。
  *
- * ## 畫面：跟右邊的好友數對稱，就這樣
+ * ## 畫面：跟右邊的好友數成一對
  *
  * 面板右上角有遊戲自己的 `friend_max`：
  *
@@ -72,13 +72,31 @@
  *       padding: { bottom: 3 } }).setOrigin(0, 1);
  * ```
  *
- * 我們畫的是它的鏡像：**同一個 y、同一套字體、`x` 取負、origin 改成靠右**，
- * 於是兩個計數各據面板上緣一角。字型與大小完全照抄 —— 自己挑一個會立刻
- * 看出來是外面貼上去的。
+ * 我們在同一條基線的左端放 `Presents 5/5`：
  *
- * ⚠⚠ **面板上只放四個字**（`剩5/5`）。說明放 hover tooltip，不放面板上。
- * 好友面板 528×408 裡已經塞了分頁、格線、排序、分頁器，多一句完整說明會
- * 擠掉原本的資訊，而且一眼就像外掛。這是使用者 2026-09-12 直接要求的。
+ * ```
+ *   ┌─ 面板上緣 ────────────────────────────────────────────┐
+ *   │ Presents 5/5                        Friends 171/200  │
+ *   │ ┌────┐ ┌────┐ ┌────┐ ┌────┐ ┌────┐                   │
+ *   │ │ 好 │ │ 友 │ │ 的 │ │ 格 │ │ 子 │                   │
+ *   └─↑─────────────────────────────────────────────────────┘
+ *     └ 開頭切齊格線左緣（x = list_background.x），不是 friend_max 的鏡像
+ * ```
+ *
+ * 三件事都是照抄，不是自己決定的：
+ *
+ * 1. **`y` 跟 friend_max 同一條基線**，兩行才讀得出是一對。
+ * 2. **`x` 切齊好友格線左緣**（origin 靠左）。取 `-friend_max.x` 的左右鏡像
+ *    會讓開頭落在格線裡面幾十 px，看起來像隨便放的。
+ * 3. **字體大小完全照抄 friend_max**，自己挑一個會立刻看出是外面貼上去的。
+ *
+ * ⚠ **`Presents` 每種語言都是英文，不翻譯。** 它的對照組 `Friends 171/200`
+ * 在 ja/en/kr/scn/tcn 全部都是英文（實測：那個字串在建構子裡寫死）。
+ * 翻成中文的話左邊中文、右邊英文，一眼就看得出左邊是外面加的。
+ *
+ * ⚠⚠ **面板上只放這一行，不放說明。** 說明走 hover tooltip。好友面板
+ * 528×408 裡已經塞了分頁、格線、排序、分頁器，多一句完整說明會擠掉原本的
+ * 資訊，而且一眼就像外掛。這是使用者 2026-09-12 直接要求的。
  *
  * ## ⚠ 面板是**每次開都重新 new 的**
  *
@@ -111,7 +129,7 @@ const FLAG = "__ulrPresent";
  * 這支跟 `patch-lobby` 一樣是「先拆再裝」，所以不靠版本號決定要不要重裝；
  * 版本號是回報用的 —— 玩家回報怪狀況時一眼看得出他頁面上跑的是哪一版。
  */
-export const PRESENT_SCRIPT_VERSION = 1;
+export const PRESENT_SCRIPT_VERSION = 2;
 
 /** 盯著 `friend_panel` 換人沒有的間隔。跟 patch-lobby 一樣 500ms。 */
 export const DEFAULT_PRESENT_POLL_MS = 500;
@@ -125,6 +143,17 @@ export const DEFAULT_PRESENT_POLL_MS = 500;
  * 一個永遠說謊的 `/5`）。
  */
 export const DEFAULT_PRESENT_MAX = 5;
+
+/**
+ * 好友格線左緣的面板局部座標 —— **這一格的左邊要跟第一張好友卡切齊**。
+ *
+ * 值是 2026-09-12 從跑著的客戶端量的（present 分頁的 `list_background`：
+ * `Rectangle x=-232 y=-132 w=464 h=264`，origin 0，所以左緣就是 -232）。
+ *
+ * ⚠ 這只是**後路**。正常路徑是當場去讀 `panel.tab.list_background.x` ——
+ * 官方調整格線時我們跟著動，而寫死的數字會靜靜地偏掉幾 px。
+ */
+const GRID_LEFT_X = -232;
 
 export interface PresentPatchOptions {
   pollIntervalMs?: number;
@@ -151,18 +180,16 @@ export interface PresentStatus {
 // ---------------------------------------------------------------------------
 
 /**
- * 面板上那四個字。`__N__` 是剩餘、`__MAX__` 是上限。
+ * 面板上那一行。`__N__` 是剩餘、`__MAX__` 是上限。
  *
- * ⚠ **不要加標點、不要加單位、不要超過四個字。** 對照組是遊戲自己的
- * `Friends 171/200` —— 一行、無說明、無標點。
+ * ⚠ **每種語言都是這一句，不翻譯。** 它的對照組是遊戲自己的 `friend_max`
+ * ——`Friends 171/200` 在 ja/en/kr/scn/tcn **全部都是英文**（實測客戶端，
+ * 那個字串在建構子裡寫死）。跟著用英文，兩行才是同一種東西；翻成中文的話
+ * 左邊是中文、右邊是英文，一眼就看得出左邊是外面加的。
+ *
+ * ⚠ 不加標點、不加單位、不加說明。說明在 {@link TOOLTIP}。
  */
-const LABEL: Record<string, string> = {
-  ja: "残__N__/__MAX__",
-  en: "__N__/__MAX__",
-  kr: "남__N__/__MAX__",
-  scn: "剩__N__/__MAX__",
-  tcn: "剩__N__/__MAX__",
-};
+const LABEL = "Presents __N__/__MAX__";
 
 /** hover 才出現的說明。面板上放不下的話都放這裡。 */
 const TOOLTIP: Record<string, string> = {
@@ -214,6 +241,7 @@ export function buildPresentPatchScript(options: PresentPatchOptions = {}): stri
     max: options.max ?? DEFAULT_PRESENT_MAX,
     label: LABEL,
     tooltip: TOOLTIP,
+    gridLeft: GRID_LEFT_X,
   };
 
   return `(function () {
@@ -306,10 +334,18 @@ export function buildPresentPatchScript(options: PresentPatchOptions = {}): stri
   // -------------------------------------------------------------------------
 
   function labelText(st) {
-    var lang = gameLang();
-    return pick(CFG.label, lang)
+    return CFG.label
       .replace("__N__", String(st.remain))
       .replace("__MAX__", String(st.max));
+  }
+
+  /** 好友格線的左緣。讀得到就讀，讀不到才用量好的那個數字。 */
+  function gridLeft(panel) {
+    try {
+      var bg = panel.tab && panel.tab.list_background;
+      if (bg && typeof bg.x === "number") return bg.x;
+    } catch (e) {}
+    return CFG.gridLeft;
   }
 
   function paint(st) {
@@ -324,8 +360,9 @@ export function buildPresentPatchScript(options: PresentPatchOptions = {}): stri
   /**
    * 把字掛到面板上。
    *
-   * ⚠ 位置是 friend_max 的鏡像：同一個 y、x 取負、origin 改成靠右。
-   * 字體那幾個值是從遊戲自己的 friend_max 抄的，不要自己挑。
+   * ⚠ **y 跟 friend_max 同一條基線，x 切齊好友格線的左緣**（origin 靠左）。
+   * 不是 friend_max 的左右鏡像 —— 那會讓開頭落在格線裡面幾十 px，看起來像
+   * 隨便放的。字體那幾個值是從遊戲自己的 friend_max 抄的，不要自己挑。
    */
   function mount(st, panel) {
     var sc = sceneOf("Friend");
@@ -339,14 +376,14 @@ export function buildPresentPatchScript(options: PresentPatchOptions = {}): stri
       padding: { bottom: 3 }
     };
     if (src && src.style) {
-      // 官方哪天改了字體，跟著改 —— 對稱才成立。
+      // 官方哪天改了字體，跟著改 —— 兩行是一對，字體要一樣。
       if (src.style.fontFamily) style.fontFamily = src.style.fontFamily;
       if (src.style.fontSize) style.fontSize = src.style.fontSize;
     }
-    var x = src && typeof src.x === "number" ? -src.x : -180;
+    var x = gridLeft(panel);
     var y = src && typeof src.y === "number" ? src.y : -140;
 
-    var text = sc.add.text(x, y, "", style).setOrigin(1, 1);
+    var text = sc.add.text(x, y, "", style).setOrigin(0, 1);
     panel.add(text);
     st.mine.push(text);
     st.text = text;

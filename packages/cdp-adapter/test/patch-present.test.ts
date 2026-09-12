@@ -26,7 +26,7 @@
  * 1. 面板每開一次都是新物件 —— 掛在舊物件上的東西會跟著死
  * 2. 重裝時 `quest_present_code` 的監聽會變兩份 → 送一次扣兩次
  * 3. 只有 code 0 才扣（3/4 是「根本沒送成」，次數沒被消耗）
- * 4. 面板上的字**不能超過四個字**
+ * 4. 開頭要切齊好友格線左緣 —— 取 friend_max 的左右鏡像會偏進格線裡面
  */
 
 import { describe, expect, it } from "vitest";
@@ -134,9 +134,16 @@ class FakeContainer extends FakeObject {
   }
 }
 
+/** 分頁。`refresh_tab` 每次都重建它，但**面板本身不重建**。 */
+interface FakeTab {
+  /** 好友格線的底圖。實測 present 分頁：`x=-232 y=-132 w=464 h=264`，origin 0。 */
+  list_background: { x: number };
+}
+
 /** 好友面板。⚠ 每次 `open_panel()` 都是一個新的 —— 這正是坑 1。 */
 class FakePanel extends FakeContainer {
   friend_max: FakeText;
+  tab: FakeTab = { list_background: { x: -232 } };
   active = true;
   constructor(public tab_name: string) {
     super(380, 300);
@@ -303,7 +310,7 @@ function tooltip(game: FakeGame): FakeContainer | undefined {
 // ---------------------------------------------------------------------------
 
 describe("好友面板的贈送次數", () => {
-  it("present 分頁上畫出剩餘次數，位置是 friend_max 的鏡像", async () => {
+  it("present 分頁上畫出剩餘次數，開頭切齊好友格線左緣", async () => {
     const game = makeGame();
     game.serverRemain = 4;
     game.openPanel("present");
@@ -312,18 +319,32 @@ describe("好友面板的贈送次數", () => {
 
     const text = ourText(game);
     expect(text).toBeDefined();
-    // 同一個 y、x 取負、origin 靠右 —— 跟右邊的好友數對稱。
-    const src = game.friend.friend_panel!.friend_max;
-    expect(text!.y).toBe(src.y);
-    expect(text!.x).toBe(-src.x);
-    expect(text!.originX).toBe(1);
+    const panel = game.friend.friend_panel!;
+    // 跟 friend_max 同一條基線 —— 兩行是一對。
+    expect(text!.y).toBe(panel.friend_max.y);
+    // ⚠ 開頭切齊格線左緣，**不是** friend_max 的左右鏡像。
+    expect(text!.x).toBe(panel.tab.list_background.x);
+    expect(text!.x).not.toBe(-panel.friend_max.x);
+    expect(text!.originX).toBe(0);
     expect(text!.originY).toBe(1);
     // 字體照抄，不自己挑。
-    expect(text!.style.fontFamily).toBe(src.style.fontFamily);
-    expect(text!.style.fontSize).toBe(src.style.fontSize);
+    expect(text!.style.fontFamily).toBe(panel.friend_max.style.fontFamily);
+    expect(text!.style.fontSize).toBe(panel.friend_max.style.fontSize);
   });
 
-  it("面板上的字不超過四個字，而且沒有標點或說明", async () => {
+  it("讀不到格線時退回量好的座標，而不是擺到面板中間", async () => {
+    const game = makeGame();
+    game.serverRemain = 4;
+    const panel = game.openPanel("present");
+    // 分頁還沒建好（refresh_tab 之前的那一瞬間）。
+    panel.tab = undefined as unknown as FakeTab;
+    install(game);
+    await flush();
+
+    expect(ourText(game)!.x).toBe(-232);
+  });
+
+  it("面板上只有計數那一行，沒有標點也沒有說明", async () => {
     const game = makeGame();
     game.serverRemain = 4;
     game.openPanel("present");
@@ -331,10 +352,10 @@ describe("好友面板的贈送次數", () => {
     await flush();
 
     const shown = ourText(game)!.text;
-    expect(shown).toBe("剩4/5");
-    // ⚠ 這條是使用者直接要求的，放寬前先問過他。
-    expect([...shown].length).toBeLessThanOrEqual(4);
+    expect(shown).toBe("Presents 4/5");
     expect(shown).not.toMatch(/[（）()。，、：:]/);
+    // 純 ASCII —— 對照組 Friends 171/200 在每種語言也都是英文。
+    expect(shown).toMatch(/^[\x20-\x7e]+$/);
   });
 
   it("說明只出現在 tooltip，而且預設是收起來的", async () => {
@@ -380,7 +401,7 @@ describe("好友面板的贈送次數", () => {
     await flush();
 
     expect(game.fetches).toBeGreaterThan(0);
-    expect(ourText(game)!.text).toBe("剩2/5");
+    expect(ourText(game)!.text).toBe("Presents 2/5");
     expect(status(game).remain).toBe(2);
   });
 
@@ -391,7 +412,7 @@ describe("好友面板的贈送次數", () => {
     await flush();
 
     expect(game.fetches).toBe(0);
-    expect(ourText(game)!.text).toBe("剩3/5");
+    expect(ourText(game)!.text).toBe("Presents 3/5");
     // 問不到伺服器不算錯誤 —— 快照就是拿來墊這個空檔的。
     expect(status(game).reason).toBeNull();
   });
@@ -402,19 +423,19 @@ describe("好友面板的贈送次數", () => {
     game.openPanel("present");
     install(game);
     await flush();
-    expect(ourText(game)!.text).toBe("剩5/5");
+    expect(ourText(game)!.text).toBe("Presents 5/5");
 
     // 3 = AP 不足、4 = 對方任務欄滿 —— 這一次根本沒送成。
     game.friend.events.emit("quest_present_code", 3);
     game.friend.events.emit("quest_present_code", 4);
     await flush();
-    expect(ourText(game)!.text).toBe("剩5/5");
+    expect(ourText(game)!.text).toBe("Presents 5/5");
 
     // 0 = 送成了。伺服器同時也少一次。
     game.serverRemain = 4;
     game.friend.events.emit("quest_present_code", 0);
     await flush();
-    expect(ourText(game)!.text).toBe("剩4/5");
+    expect(ourText(game)!.text).toBe("Presents 4/5");
   });
 
   it("伺服器說今天不能再送就直接歸零，而且變紅", async () => {
@@ -429,7 +450,7 @@ describe("好友面板的贈送次數", () => {
     game.friend.events.emit("quest_present_code", 5);
     await flush();
 
-    expect(ourText(game)!.text).toBe("剩0/5");
+    expect(ourText(game)!.text).toBe("Presents 0/5");
     expect(ourText(game)!.style.color).toBe("#a01010");
   });
 
@@ -470,7 +491,7 @@ describe("好友面板的贈送次數", () => {
     expect(first.active).toBe(false);
     const second = ourText(game)!;
     expect(second).not.toBe(firstText);
-    expect(second.text).toBe("剩5/5");
+    expect(second.text).toBe("Presents 5/5");
   });
 
   it("面板關了就收掉，但次數記著 —— 再開時不必先空一下", async () => {
@@ -492,9 +513,9 @@ describe("好友面板的贈送次數", () => {
     game.openPanel("present");
     tick();
     // 先畫記著的那個數字（不空一下），fetch 回來才改口。
-    expect(ourText(game)!.text).toBe("剩2/5");
+    expect(ourText(game)!.text).toBe("Presents 2/5");
     await flush();
-    expect(ourText(game)!.text).toBe("剩1/5");
+    expect(ourText(game)!.text).toBe("Presents 1/5");
   });
 
   it("切到別的分頁會收掉，切回 present 再出現", async () => {
@@ -513,7 +534,7 @@ describe("好友面板的贈送次數", () => {
     panel.tab_name = "present";
     tick();
     await flush();
-    expect(ourText(game)!.text).toBe("剩5/5");
+    expect(ourText(game)!.text).toBe("Presents 5/5");
   });
 
   it("伺服器給的數字比預設上限大時，分母跟著頂上去", async () => {
@@ -523,7 +544,7 @@ describe("好友面板的贈送次數", () => {
     install(game);
     await flush();
 
-    expect(ourText(game)!.text).toBe("剩8/8");
+    expect(ourText(game)!.text).toBe("Presents 8/8");
     expect(status(game).max).toBe(8);
   });
 
@@ -563,22 +584,34 @@ describe("好友面板的贈送次數", () => {
     expect(run(game, PRESENT_UNINSTALL_EXPRESSION)).toBe("not-installed");
   });
 
-  it("每種語言都有自己的短標籤，而且都不超過四個字", async () => {
-    for (const [lang, expected] of [
-      ["ja", "残4/5"],
-      ["en", "4/5"],
-      ["kr", "남4/5"],
-      ["scn", "剩4/5"],
-      ["tcn", "剩4/5"],
-    ] as const) {
+  it("每種語言都一樣是英文 —— 跟右邊的 Friends 同一種東西", async () => {
+    for (const lang of ["ja", "en", "kr", "scn", "tcn"] as const) {
       const game = makeGame();
       game.window.lang = lang;
       game.serverRemain = 4;
       game.openPanel("present");
       install(game);
       await flush();
-      expect(ourText(game)!.text).toBe(expected);
-      expect([...expected].length).toBeLessThanOrEqual(4);
+      // ⚠ 對照組 friend_max 在每種語言都是英文（客戶端寫死的），跟著它走。
+      expect(ourText(game)!.text).toBe("Presents 4/5");
+    }
+  });
+
+  it("tooltip 才跟著語言走", async () => {
+    for (const [lang, expected] of [
+      ["ja", "本日残りのクエスト送信回数"],
+      ["en", "Quest gifts left today"],
+      ["kr", "오늘 남은 퀘스트 전송 횟수"],
+      ["scn", "今日剩余赠送任务次数"],
+      ["tcn", "今日剩餘贈送任務次數"],
+    ] as const) {
+      const game = makeGame();
+      game.window.lang = lang;
+      game.openPanel("present");
+      install(game);
+      await flush();
+      const tipText = tooltip(game)!.list.find((o): o is FakeText => o instanceof FakeText)!;
+      expect(tipText.text).toBe(expected);
     }
   });
 
