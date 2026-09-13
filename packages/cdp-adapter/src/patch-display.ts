@@ -136,7 +136,7 @@ import { embedJson } from "./embed.js";
 const FLAG = "__ulrDisplay";
 
 /** 腳本版本。**改動注入腳本裡任何一行就 +1**。 */
-export const DISPLAY_SCRIPT_VERSION = 2;
+export const DISPLAY_SCRIPT_VERSION = 4;
 
 export const DEFAULT_DISPLAY_POLL_MS = 500;
 
@@ -331,8 +331,43 @@ const LAYOUT = {
   tipGap: 6,
 };
 
+/**
+ * 字烤在圖裡的按鈕，高解析度時用遊戲字型重畫一張 K 倍的來源。
+ *
+ * 2026-09-13 回報「使用也要變清楚」：物品欄的 `btn_use` 是 80×24 的點陣圖、字畫在
+ * 圖裡，原圖就只有 1 倍 —— 緩衝放大、補 resolution 都救不了。實機量過的構造：
+ *
+ * ```
+ *   圖集 320×48，一列 4 格：ja「使用する」、en/kr「Use」（同一格）、scn「使用」、tcn「使用」
+ *   上一列 _1 常態：底 #016285、字 #b6b6b6、深色陰影
+ *   下一列 _2 hover：底 #01b2f1、字 #fcfeff、青色光暈 #38fdff
+ *   四角各缺 1px，底色水平一致（每一列只有一個顏色）
+ * ```
+ *
+ * 重畫法：底照原圖（內部每一列拿 x=2 那一格的顏色塗滿，把字抹掉；角落照抄），字用
+ * 遊戲自己的 font_bold（跟原圖並排比過四種字型，這個最像）。字型、顏色都是遊戲的。
+ */
+const HD_BUTTONS = [
+  {
+    key: "btn_use",
+    cellW: 80,
+    cellH: 24,
+    /** 格子左上角 x → 字。en 與 kr 共用一格。 */
+    labels: { "0": "使用する", "80": "Use", "160": "使用", "240": "使用" } as Record<
+      string,
+      string
+    >,
+    font: "font_bold",
+    fontSize: 13,
+    /** 第二列（y ≥ cellH）是 hover。 */
+    normal: { color: "#b6b6b6", shadow: "#01405e", blur: 2, offset: 0.5, passes: 1 },
+    hover: { color: "#fcfeff", shadow: "#38fdff", blur: 4, offset: 0, passes: 3 },
+  },
+];
+
 export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
   const config = {
+    hdButtons: HD_BUTTONS,
     version: DISPLAY_SCRIPT_VERSION,
     bindingName: options.bindingName,
     pollIntervalMs: options.pollIntervalMs ?? DEFAULT_DISPLAY_POLL_MS,
@@ -399,6 +434,8 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
     hook: null,
     texts: [],
     pending: [],
+    /** 換過來源的烤字按鈕：key → { source, orig, k }（見 syncHdButtons）。 */
+    hd: {},
     wrapped: [],
     addHooks: [],
     postRender: null,
@@ -657,8 +694,23 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
     var orig = proto.renderWebGL;
     proto.__ulrRenderWebGL = orig;
     proto.renderWebGL = function (renderer, src, camera, parentMatrix) {
-      try { checkText(src || this, camera, parentMatrix); } catch (e) {}
-      return orig.apply(this, arguments);
+      var t = src || this;
+      try { checkText(t, camera, parentMatrix); } catch (e) {}
+      var k = croppedBoost(t);
+      if (k === 1) return orig.apply(this, arguments);
+      // 裁切過的字：畫的這一下把裁切框換成畫布像素、縮放倒過來補，畫完原樣還原。
+      var c = t._crop, ox = t._displayOriginX, oy = t._displayOriginY, sx = t._scaleX, sy = t._scaleY;
+      var cx = c.x, cy = c.y, cw = c.width, ch = c.height;
+      c.x = cx * k; c.y = cy * k; c.width = cw * k; c.height = ch * k;
+      t._displayOriginX = ox * k; t._displayOriginY = oy * k;
+      t._scaleX = sx / k; t._scaleY = sy / k;
+      try {
+        return orig.apply(this, arguments);
+      } finally {
+        c.x = cx; c.y = cy; c.width = cw; c.height = ch;
+        t._displayOriginX = ox; t._displayOriginY = oy;
+        t._scaleX = sx; t._scaleY = sy;
+      }
     };
     st.wrapped.push({ proto: proto, orig: orig, hadOwn: hadOwn });
   }
@@ -679,17 +731,34 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
     return Math.max(Math.sqrt(m.a * m.a + m.b * m.b), Math.sqrt(m.c * m.c + m.d * m.d));
   }
 
+  /**
+   * 裁切過的字被我們補了幾倍解析度（沒補、沒裁切 → 1）。
+   *
+   * ⚠ Phaser 3.87 的 batchTexture 畫 crop 過的物件時，拿 _crop.x/width **當畫布
+   * 像素取 UV**，又拿**同一組數字當四邊形大小**（物件單位）。解析度 1 時兩者相等；
+   * 補到 2 就變成「取左上 1/4 的畫布、畫成原本大小」＝兩倍大的字（2026-09-13 回報
+   * 物品欄「效果」變太大，那格是 rexUI textArea，內文靠 crop 捲動）。只跳過不補的話
+   * 它又糊（同日回報）。
+   *
+   * 所以畫的那一下：crop ×k（變回畫布像素）、displayOrigin ×k、scale ÷k —— 四邊形
+   * 經過縮放後大小與位置跟原本一模一樣，取樣的卻是 k 倍的畫布。畫完還原，
+   * rexUI 自己讀到的 crop 永遠是它寫進去的那組數字。
+   * 用「現在 ÷ 原值」而不是現在的解析度：官方本來就不是 1 的，保持官方原樣。
+   */
+  function croppedBoost(t) {
+    if (!t || !t.isCropped || !t._crop || !t.style || t.__ulrRes0 === undefined) return 1;
+    var k = (t.style.resolution || 1) / (t.__ulrRes0 || 1);
+    return k > 1 ? k : 1;
+  }
+
   function checkText(src, camera, parentMatrix) {
     if (!src || !src.style) return;
     var scale = currentScale();
     var original = src.__ulrRes0;
     if (scale <= 1 && original === undefined) return;
     var want = 0;
-    // ⚠ 被 setCrop 過的字不碰。WebGL 畫 crop 過的 Text 是拿 crop 矩形（畫布像素，
-    // 已乘 resolution）當四邊形大小，resolution 2 就是兩倍大的字 —— 物品欄「效果」
-    // 那格是 rexUI textArea，內文靠 crop 捲動，2026-09-13 回報「說明文字變太大」
-    // 就是它。這種字補了也白補，交回原值。
-    if (scale > 1 && !src.isCropped) {
+    // 被 setCrop 過的字也補，但畫的時候要換算，見 croppedBoost。
+    if (scale > 1) {
       var ws = Math.max(Math.abs(src.scaleX || 0), Math.abs(src.scaleY || 0));
       if (parentMatrix) ws *= matrixScale(parentMatrix);
       if (camera && camera.zoom) ws *= camera.zoom;
@@ -703,7 +772,109 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
     st.pending.push(src);
   }
 
+  // -------------------------------------------------------------------------
+  // 字烤在圖裡的按鈕（HD_BUTTONS）：換成 K 倍重畫的來源
+  //
+  // TextureSource 的 width/height 維持原值 —— UV 是拿 cut ÷ source.width 算的，
+  // 四邊形大小是 cutWidth，兩個都不變；只有 GL 貼圖本身換成 K 倍的畫布。遊戲 hover
+  // 時 setTexture("btn_use", "tcn_2") 照舊走同一個 Texture，不必碰任何按鈕物件。
+  // 在 postrender 換（跟文字一樣），不要在批次畫到一半時換掉綁著的貼圖。
+  // -------------------------------------------------------------------------
+
+  function hdFactor() {
+    var s = currentScale();
+    return s > 1 ? Math.min(CFG.maxScale, Math.ceil(s)) : 1;
+  }
+
+  function drawHdButton(spec, img, K) {
+    var W = img.width, H = img.height;
+    var src = document.createElement("canvas");
+    src.width = W; src.height = H;
+    var sx = src.getContext("2d");
+    sx.drawImage(img, 0, 0);
+    var sd = sx.getImageData(0, 0, W, H).data;
+    var hd = document.createElement("canvas");
+    hd.width = W * K; hd.height = H * K;
+    var h = hd.getContext("2d");
+    var cw = spec.cellW, ch = spec.cellH;
+    for (var cy = 0; cy + ch <= H; cy += ch) {
+      for (var cx = 0; cx + cw <= W; cx += cw) {
+        for (var y = 0; y < ch; y++) {
+          for (var x = 0; x < cw; x++) {
+            var ix = (x >= 3 && x <= cw - 4 && y >= 3 && y <= ch - 4) ? 2 : x;
+            var i = ((cy + y) * W + (cx + ix)) * 4;
+            if (sd[i + 3] === 0) continue;
+            h.fillStyle = "rgba(" + sd[i] + "," + sd[i + 1] + "," + sd[i + 2] + "," + (sd[i + 3] / 255) + ")";
+            h.fillRect((cx + x) * K, (cy + y) * K, K, K);
+          }
+        }
+        var label = spec.labels[String(cx)];
+        if (typeof label !== "string") continue;
+        var look = cy >= ch ? spec.hover : spec.normal;
+        h.save();
+        h.font = (spec.fontSize * K) + "px " + spec.font;
+        h.textAlign = "center";
+        h.textBaseline = "middle";
+        h.fillStyle = look.color;
+        h.shadowColor = look.shadow;
+        h.shadowBlur = look.blur * K;
+        h.shadowOffsetX = look.offset * K;
+        h.shadowOffsetY = look.offset * K;
+        for (var p = 0; p < look.passes; p++) h.fillText(label, (cx + cw / 2) * K, (cy + ch / 2 + 0.5) * K);
+        h.restore();
+      }
+    }
+    return hd;
+  }
+
+  function swapSource(g, source, image) {
+    var r = g.renderer;
+    var old = source.glTexture;
+    source.image = image;
+    source.glTexture = r.createTextureFromSource(image, source.width, source.height, source.scaleMode);
+    try { if (old) r.deleteTexture(old); } catch (e) {}
+  }
+
+  function syncHdButtons() {
+    var g = window.game;
+    if (!g || !g.textures || !g.renderer || typeof g.renderer.createTextureFromSource !== "function") return;
+    var K = hdFactor();
+    for (var n = 0; n < CFG.hdButtons.length; n++) {
+      var spec = CFG.hdButtons[n];
+      var rec = st.hd[spec.key];
+      var tex = g.textures.exists(spec.key) ? g.textures.get(spec.key) : null;
+      var source = tex && tex.source && tex.source[0];
+      // 貼圖被重新載入過（換了一個 Texture）：舊紀錄作廢，不去還原一個已經沒人用的來源
+      if (rec && (!source || rec.source !== source)) { delete st.hd[spec.key]; rec = null; }
+      if (!source) continue;
+      var want = K > 1 ? K : 1;
+      if ((rec ? rec.k : 1) === want) continue;
+      // 還沒載完的圖（寬 0）下一格再來
+      var orig = rec ? rec.orig : source.image;
+      if (!orig || !(orig.width > 0) || orig.width !== source.width) continue;
+      try {
+        if (want === 1) {
+          swapSource(g, source, orig);
+          delete st.hd[spec.key];
+        } else {
+          swapSource(g, source, drawHdButton(spec, orig, want));
+          st.hd[spec.key] = { source: source, orig: orig, k: want };
+        }
+      } catch (e) { fail(e); }
+    }
+  }
+
+  function restoreHdButtons() {
+    var g = window.game;
+    for (var key in st.hd) {
+      var rec = st.hd[key];
+      try { if (g && g.renderer) swapSource(g, rec.source, rec.orig); } catch (e) {}
+    }
+    st.hd = {};
+  }
+
   function onPostRender() {
+    try { syncHdButtons(); } catch (e) {}
     if (st.pending.length === 0) return;
     var list = st.pending;
     st.pending = [];
@@ -1617,6 +1788,7 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
     st.shellWin = null;
     try { resetSize(keepWindow); } catch (e) {}
     restoreTexts();
+    restoreHdButtons();
     removeTextHooks();
     unhook(st.hook);
     st.hook = null;
