@@ -136,7 +136,7 @@ import { embedJson } from "./embed.js";
 const FLAG = "__ulrDisplay";
 
 /** 腳本版本。**改動注入腳本裡任何一行就 +1**。 */
-export const DISPLAY_SCRIPT_VERSION = 4;
+export const DISPLAY_SCRIPT_VERSION = 5;
 
 export const DEFAULT_DISPLAY_POLL_MS = 500;
 
@@ -332,7 +332,7 @@ const LAYOUT = {
 };
 
 /**
- * 字烤在圖裡的按鈕，高解析度時用遊戲字型重畫一張 K 倍的來源。
+ * 字烤在圖裡的按鈕，高解析度時用遊戲字型重畫一張 K 倍的來源（btn_use、raid_code）。
  *
  * 2026-09-13 回報「使用也要變清楚」：物品欄的 `btn_use` 是 80×24 的點陣圖、字畫在
  * 圖裡，原圖就只有 1 倍 —— 緩衝放大、補 resolution 都救不了。實機量過的構造：
@@ -352,16 +352,43 @@ const HD_BUTTONS = [
     key: "btn_use",
     cellW: 80,
     cellH: 24,
-    /** 格子左上角 x → 字。en 與 kr 共用一格。 */
+    /** 格子左上角 x → 字。en 與 kr 共用一格。這張圖四種語言排在同一列。 */
     labels: { "0": "使用する", "80": "Use", "160": "使用", "240": "使用" } as Record<
       string,
       string
     >,
+    langLabels: null as Record<string, string> | null,
+    /** 格子裡要蓋掉字的範圍 [x0, y0, x1, y1]（含），與拿來鋪的直條 [x0, x1)。單色底，1px 就夠。 */
+    interior: [3, 3, 76, 20],
+    strip: [2, 3],
+    textX: 40,
+    textY: 12.5,
     font: "font_bold",
     fontSize: 13,
     /** 第二列（y ≥ cellH）是 hover。 */
     normal: { color: "#b6b6b6", shadow: "#01405e", blur: 2, offset: 0.5, passes: 1 },
     hover: { color: "#fcfeff", shadow: "#38fdff", blur: 4, offset: 0, passes: 3 },
+  },
+  {
+    /**
+     * 渦房左下「輸入Raid代碼」（128×24 兩格：常態、hover）。石紋底加 1px 亮邊、下方陰影。
+     * ⚠ 這張圖**只有一種語言的字**，是照遊戲語言載的 —— 只有實機看過字的語言才重畫，
+     * 其他語言維持原圖（寫錯字比糊更糟）。
+     */
+    key: "raid_code",
+    cellW: 128,
+    cellH: 24,
+    labels: null as Record<string, string> | null,
+    langLabels: { tcn: "輸入Raid代碼" } as Record<string, string> | null,
+    /** 字左邊 x=4..21 那段沒有字，鋪過去；石紋是直向漸層，橫向鋪看不出接縫。 */
+    interior: [3, 3, 124, 18],
+    strip: [4, 22],
+    textX: 64,
+    textY: 11.5,
+    font: "font_bold",
+    fontSize: 11,
+    normal: { color: "#e3e3e3", shadow: "#141619", blur: 1.5, offset: 0.7, passes: 2 },
+    hover: { color: "#ffffff", shadow: "#1c2029", blur: 1.5, offset: 0.7, passes: 2 },
   },
 ];
 
@@ -786,31 +813,43 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
     return s > 1 ? Math.min(CFG.maxScale, Math.ceil(s)) : 1;
   }
 
-  function drawHdButton(spec, img, K) {
-    var W = img.width, H = img.height;
-    var src = document.createElement("canvas");
-    src.width = W; src.height = H;
-    var sx = src.getContext("2d");
-    sx.drawImage(img, 0, 0);
-    var sd = sx.getImageData(0, 0, W, H).data;
+  /** 這一個語言有沒有字可畫。只給 langLabels 的圖（單一語言的圖）才可能沒有。 */
+  function hdLabelReady(spec, lang) {
+    return !spec.langLabels || typeof spec.langLabels[lang] === "string";
+  }
+
+  /**
+   * 畫一張 K 倍的來源。每一格：底照原圖、內部用「沒有字的那段直條」（spec.strip）
+   * 橫向鋪滿把字蓋掉，整張平滑放大（跟 GPU 原本線性放大的樣子一樣），字用遊戲字型
+   * 畫在 K 倍上。石紋底（raid_code）靠鋪直條，單色底（btn_use）的直條寬 1px。
+   */
+  function drawHdButton(spec, img, K, lang) {
+    var W = img.width, H = img.height, cw = spec.cellW, ch = spec.cellH;
+    var byLang = spec.langLabels ? spec.langLabels[lang] : null;
+    var base = document.createElement("canvas");
+    base.width = W; base.height = H;
+    var b = base.getContext("2d");
+    b.drawImage(img, 0, 0);
+    var r = spec.interior, s = spec.strip, sw = s[1] - s[0], rh = r[3] - r[1] + 1;
+    for (var cy = 0; cy + ch <= H; cy += ch) {
+      for (var cx = 0; cx + cw <= W; cx += cw) {
+        for (var x = r[0]; x <= r[2]; x += sw) {
+          var w = Math.min(sw, r[2] - x + 1);
+          b.drawImage(base, cx + s[0], cy + r[1], w, rh, cx + x, cy + r[1], w, rh);
+        }
+      }
+    }
     var hd = document.createElement("canvas");
     hd.width = W * K; hd.height = H * K;
     var h = hd.getContext("2d");
-    var cw = spec.cellW, ch = spec.cellH;
-    for (var cy = 0; cy + ch <= H; cy += ch) {
-      for (var cx = 0; cx + cw <= W; cx += cw) {
-        for (var y = 0; y < ch; y++) {
-          for (var x = 0; x < cw; x++) {
-            var ix = (x >= 3 && x <= cw - 4 && y >= 3 && y <= ch - 4) ? 2 : x;
-            var i = ((cy + y) * W + (cx + ix)) * 4;
-            if (sd[i + 3] === 0) continue;
-            h.fillStyle = "rgba(" + sd[i] + "," + sd[i + 1] + "," + sd[i + 2] + "," + (sd[i + 3] / 255) + ")";
-            h.fillRect((cx + x) * K, (cy + y) * K, K, K);
-          }
-        }
-        var label = spec.labels[String(cx)];
+    h.imageSmoothingEnabled = true;
+    h.imageSmoothingQuality = "high";
+    h.drawImage(base, 0, 0, W * K, H * K);
+    for (var cy2 = 0; cy2 + ch <= H; cy2 += ch) {
+      for (var cx2 = 0; cx2 + cw <= W; cx2 += cw) {
+        var label = typeof byLang === "string" ? byLang : spec.labels && spec.labels[String(cx2)];
         if (typeof label !== "string") continue;
-        var look = cy >= ch ? spec.hover : spec.normal;
+        var look = cy2 >= ch ? spec.hover : spec.normal;
         h.save();
         h.font = (spec.fontSize * K) + "px " + spec.font;
         h.textAlign = "center";
@@ -820,7 +859,7 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
         h.shadowBlur = look.blur * K;
         h.shadowOffsetX = look.offset * K;
         h.shadowOffsetY = look.offset * K;
-        for (var p = 0; p < look.passes; p++) h.fillText(label, (cx + cw / 2) * K, (cy + ch / 2 + 0.5) * K);
+        for (var p = 0; p < look.passes; p++) h.fillText(label, (cx2 + spec.textX) * K, (cy2 + spec.textY) * K);
         h.restore();
       }
     }
@@ -839,6 +878,7 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
     var g = window.game;
     if (!g || !g.textures || !g.renderer || typeof g.renderer.createTextureFromSource !== "function") return;
     var K = hdFactor();
+    var lang = typeof window.lang === "string" ? window.lang : "en";
     for (var n = 0; n < CFG.hdButtons.length; n++) {
       var spec = CFG.hdButtons[n];
       var rec = st.hd[spec.key];
@@ -847,8 +887,9 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
       // 貼圖被重新載入過（換了一個 Texture）：舊紀錄作廢，不去還原一個已經沒人用的來源
       if (rec && (!source || rec.source !== source)) { delete st.hd[spec.key]; rec = null; }
       if (!source) continue;
-      var want = K > 1 ? K : 1;
-      if ((rec ? rec.k : 1) === want) continue;
+      // ⚠ 這個語言沒有字就維持原圖（1）—— 不能每一幀去畫一張畫不出字的圖
+      var want = K > 1 && hdLabelReady(spec, lang) ? K : 1;
+      if ((rec ? rec.k : 1) === want && (!rec || rec.lang === lang)) continue;
       // 還沒載完的圖（寬 0）下一格再來
       var orig = rec ? rec.orig : source.image;
       if (!orig || !(orig.width > 0) || orig.width !== source.width) continue;
@@ -857,8 +898,8 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
           swapSource(g, source, orig);
           delete st.hd[spec.key];
         } else {
-          swapSource(g, source, drawHdButton(spec, orig, want));
-          st.hd[spec.key] = { source: source, orig: orig, k: want };
+          swapSource(g, source, drawHdButton(spec, orig, want, lang));
+          st.hd[spec.key] = { source: source, orig: orig, k: want, lang: lang };
         }
       } catch (e) { fail(e); }
     }
