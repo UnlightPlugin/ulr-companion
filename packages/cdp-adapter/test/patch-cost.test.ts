@@ -11,14 +11,21 @@
 
 import vm from "node:vm";
 import { describe, expect, it } from "vitest";
-import type { CostPatchApplied, CostPatchReport, CostTableId } from "@ulr/cdp-adapter";
+import type {
+  CostPatchApplied,
+  CostPatchEnabledResult,
+  CostPatchReport,
+  CostTableId,
+} from "@ulr/cdp-adapter";
 import {
   buildCostPatchCoverageExpression,
+  buildCostPatchEnabledExpression,
   buildCostPatchScript,
   costsStamp,
   InvalidCostOverrideError,
   isCostPatchReport,
   normalizeCostTables,
+  parseCostPatchEnabledResult,
 } from "@ulr/cdp-adapter";
 
 const BINDING = "__ulrCompanionReport";
@@ -637,5 +644,273 @@ describe("補丁把指紋留在頁面上", () => {
     const flag = page.window["__ulrCostPatch"] as { stamp?: string };
     expect(flag.stamp).toBe(costsStamp(first));
     expect(flag.stamp).not.toBe(costsStamp(second));
+  });
+});
+
+describe("不重載切換自訂價 ↔ 原價", () => {
+  /**
+   * 把「已經載進快取的資料」與「Edit 場景的 structuredClone 副本」都擺好，
+   * 再跑切換運算式。副本是刻意 **另一個物件**（跟真的客戶端一樣），只換一份
+   * 的話這裡會抓到。
+   */
+  function setup(enabled: boolean | undefined = undefined) {
+    const page = createFakePage();
+    page.installPhaser();
+    const cc = ccAsset();
+    const item = {
+      avatar: [{ frame: 0, cost: 0 }],
+      weapon: [
+        { frame: 0, cost: 0 },
+        { frame: 1, cost: 1 },
+      ],
+    };
+    const cache = new Map<string, unknown>([
+      ["cc_asset", cc],
+      ["avatar_item", item],
+    ]);
+    const editClone = { ccInfo: structuredClone(cc), itemInfo: structuredClone(item) };
+    const reflesh: number[] = [];
+    page.window["game"] = {
+      cache: { json: { has: (k: string) => cache.has(k), get: (k: string) => cache.get(k) } },
+      scene: {
+        keys: {
+          Edit: {
+            ...editClone,
+            scene: { isActive: () => true },
+            edit_reflesh: () => reflesh.push(1),
+          },
+        },
+      },
+    };
+    return { page, cc, item, editClone, reflesh, cache, enabled };
+  }
+
+  function toggle(page: FakePage, enabled: boolean): CostPatchEnabledResult {
+    const sandbox = { window: page.window };
+    vm.createContext(sandbox);
+    const raw = vm.runInContext(buildCostPatchEnabledExpression(enabled), sandbox) as string;
+    return parseCostPatchEnabledResult(raw);
+  }
+
+  const costs = { characters: { cc078_04: 30, cc078_r04: 33 }, equipment: { "1": 5 } };
+
+  it("補丁記下原價；切到官方就換回去，再切回來又是自訂價", async () => {
+    const { page, cc, item, reflesh } = setup();
+    await runScript(page, buildCostPatchScript({ costs, bindingName: BINDING, pollIntervalMs: 1 }));
+    page.makeFile("cc_asset", cc).onProcess();
+    page.makeFile("avatar_item", item).onProcess();
+    expect(cc.frames.map((f) => f.cost)).toEqual([8, 30, 33]);
+    // 場景副本模擬「進 Edit 時從快取 clone」：切換前先同步成自訂價
+    const edit = (page.window["game"] as { scene: { keys: { Edit: Record<string, unknown> } } })
+      .scene.keys.Edit;
+    edit["ccInfo"] = structuredClone(cc);
+    edit["itemInfo"] = structuredClone(item);
+
+    const off = toggle(page, false);
+    expect(off).toEqual({ installed: true, enabled: false, swapped: 3, redrawn: true });
+    expect(cc.frames.map((f) => f.cost)).toEqual([8, 19, 21]);
+    expect(item.weapon.map((w) => w.cost)).toEqual([0, 1]);
+    // ⚠ 副本也要換 —— 格線上的卡讀的是它
+    expect((edit["ccInfo"] as typeof cc).frames.map((f) => f.cost)).toEqual([8, 19, 21]);
+    expect((edit["itemInfo"] as typeof item).weapon.map((w) => w.cost)).toEqual([0, 1]);
+    expect(reflesh).toHaveLength(1);
+
+    const on = toggle(page, true);
+    expect(on.enabled).toBe(true);
+    expect(cc.frames.map((f) => f.cost)).toEqual([8, 30, 33]);
+    expect((edit["ccInfo"] as typeof cc).frames.map((f) => f.cost)).toEqual([8, 30, 33]);
+    expect(reflesh).toHaveLength(2);
+  });
+
+  it("enabled:false 裝上去 → 掛鉤照攔、照記原價，但數字不動；之後切得回自訂", async () => {
+    const { page, cc } = setup();
+    await runScript(
+      page,
+      buildCostPatchScript({ costs, bindingName: BINDING, pollIntervalMs: 1, enabled: false }),
+    );
+    page.makeFile("cc_asset", cc).onProcess();
+    expect(cc.frames.map((f) => f.cost)).toEqual([8, 19, 21]);
+    // 回報與旗標跟開著時一樣 —— 「來得及嗎」那支才不會把它判成沒蓋到
+    expect(appliedReport(page).applied).toBe(2);
+    const flag = page.window["__ulrCostPatch"] as { characters?: number; enabled?: boolean };
+    expect(flag.characters).toBe(2);
+    expect(flag.enabled).toBe(false);
+
+    expect(toggle(page, true).swapped).toBe(2);
+    expect(cc.frames.map((f) => f.cost)).toEqual([8, 30, 33]);
+  });
+
+  it("規則沒動到的卡一律不碰（原價表裡沒有它）", async () => {
+    const { page, cc } = setup();
+    await runScript(page, buildCostPatchScript({ costs, bindingName: BINDING, pollIntervalMs: 1 }));
+    page.makeFile("cc_asset", cc).onProcess();
+    cc.frames[0]!.cost = 99; // 遊戲自己（或別的補丁）改了一張我們不管的
+    toggle(page, false);
+    expect(cc.frames[0]!.cost).toBe(99);
+    toggle(page, true);
+    expect(cc.frames[0]!.cost).toBe(99);
+  });
+
+  it("掛鉤還沒攔到任何一張表 → installed 但 swapped 0（頁面本來就是原價）", async () => {
+    const { page } = setup();
+    await runScript(page, buildCostPatchScript({ costs, bindingName: BINDING, pollIntervalMs: 1 }));
+    expect(toggle(page, false)).toEqual({
+      installed: true,
+      enabled: false,
+      swapped: 0,
+      redrawn: true,
+    });
+  });
+
+  it("頁面上沒有補丁 → installed:false，什麼都不動", () => {
+    const { page } = setup();
+    expect(toggle(page, false)).toEqual({
+      installed: false,
+      enabled: false,
+      swapped: 0,
+      redrawn: false,
+    });
+  });
+
+  it("⚠ 右欄資訊格的 COST 也要跟著換 —— edit_reflesh() 不重畫它", async () => {
+    const { page, cc } = setup();
+    await runScript(page, buildCostPatchScript({ costs, bindingName: BINDING, pollIntervalMs: 1 }));
+    page.makeFile("cc_asset", cc).onProcess();
+    const edit = (page.window["game"] as { scene: { keys: { Edit: Record<string, unknown> } } })
+      .scene.keys.Edit;
+    edit["ccInfo"] = structuredClone(cc);
+    const box = {
+      text: "30",
+      visible: true,
+      setText(t: string) {
+        this.text = t;
+        return this;
+      },
+    };
+    edit["chara_cost"] = box;
+    edit["compotype"] = "card";
+    edit["compo_index"] = 1; // cc078_04：自訂 30、原價 19
+
+    toggle(page, false);
+    expect(box.text).toBe("19");
+    toggle(page, true);
+    expect(box.text).toBe("30");
+
+    // 格子看不見（沒選卡）就不碰
+    box.visible = false;
+    box.text = "stale";
+    toggle(page, false);
+    expect(box.text).toBe("stale");
+  });
+
+  // ── 排列用的是成本 → 切換要重排，不只重畫（2026-09-12）───────────────────
+  //
+  // edit_reflesh() 只照 card_index 現在的順序畫；排序住在遊戲模組私有的 v()
+  // 裡，唯一的入口是排列選單的 child.down（翻一面 + 重排 + 重畫）。
+
+  /** 照遊戲的 child.down handler 做一個假的排列選單與格線。 */
+  function editWithSort(edit: Record<string, unknown>, option: string, page: number) {
+    const cc = edit["ccInfo"] as { frames: { cost: number }[] };
+    const events: string[] = [];
+    edit["category"] = "card";
+    edit["sort_option_card"] = option;
+    edit["page_card"] = page;
+    edit["sort_name"] = { text: "成本" };
+    edit["sort_options"] = [{ label_tcn: "ID" }, { label_tcn: "等級" }, { label_tcn: "成本" }];
+    edit["card_index"] = [{ charaIndex: 0 }, { charaIndex: 1 }, { charaIndex: 2 }];
+    edit["edit_reflesh"] = () => events.push("reflesh");
+    edit["sort_panel"] = {
+      emit(name: string, child: { name: string }) {
+        if (name !== "child.down") return;
+        events.push(`down:${child.name}`);
+        const s = (edit["sort_options"] as { label_tcn: string }[]).findIndex(
+          (o) => o.label_tcn === child.name,
+        );
+        edit["sort_option_card"] = edit["sort_option_card"] === `${s}A` ? `${s}B` : `${s}A`;
+        const desc = (edit["sort_option_card"] as string).endsWith("B");
+        (edit["card_index"] as { charaIndex: number }[]).sort((a, b) => {
+          const d = cc.frames[a.charaIndex]!.cost - cc.frames[b.charaIndex]!.cost;
+          return desc ? -d : d;
+        });
+        (edit["edit_reflesh"] as () => void)();
+      },
+    };
+    return { events };
+  }
+
+  it("排列(成本) 時切換會照遊戲自己的排序重排，選項、頁碼都不動", async () => {
+    const { page, cc } = setup();
+    await runScript(page, buildCostPatchScript({ costs, bindingName: BINDING, pollIntervalMs: 1 }));
+    page.makeFile("cc_asset", cc).onProcess(); // 自訂價：[8, 30, 33]
+    const edit = (page.window["game"] as { scene: { keys: { Edit: Record<string, unknown> } } })
+      .scene.keys.Edit;
+    edit["ccInfo"] = structuredClone(cc);
+    const { events } = editWithSort(edit, "2B", 4);
+
+    toggle(page, false); // 原價：[8, 19, 21]
+    expect(edit["sort_option_card"]).toBe("2B");
+    expect(edit["page_card"]).toBe(4);
+    expect((edit["card_index"] as { charaIndex: number }[]).map((c) => c.charaIndex)).toEqual([
+      2, 1, 0,
+    ]);
+    // 只走一次 handler、只重畫一次 —— 不是自己 edit_reflesh 再加一次
+    expect(events).toEqual(["down:成本", "reflesh"]);
+
+    (edit["card_index"] as { charaIndex: number }[]).reverse(); // 弄亂，看它會不會再排
+    toggle(page, true);
+    expect(edit["sort_option_card"]).toBe("2B");
+    expect((edit["card_index"] as { charaIndex: number }[]).map((c) => c.charaIndex)).toEqual([
+      2, 1, 0,
+    ]);
+    expect(events).toEqual(["down:成本", "reflesh", "down:成本", "reflesh"]);
+  });
+
+  it("排列不是成本 → 只重畫，不去碰排列選單", async () => {
+    const { page, cc } = setup();
+    await runScript(page, buildCostPatchScript({ costs, bindingName: BINDING, pollIntervalMs: 1 }));
+    page.makeFile("cc_asset", cc).onProcess();
+    const edit = (page.window["game"] as { scene: { keys: { Edit: Record<string, unknown> } } })
+      .scene.keys.Edit;
+    edit["ccInfo"] = structuredClone(cc);
+    const { events } = editWithSort(edit, "0A", 3);
+    toggle(page, false);
+    expect(edit["sort_option_card"]).toBe("0A");
+    expect(edit["page_card"]).toBe(3);
+    expect(events).toEqual(["reflesh"]);
+  });
+
+  it("排列選單沒接 handler（遊戲改版）→ 選項放回原樣、退回只重畫", async () => {
+    const { page, cc } = setup();
+    await runScript(page, buildCostPatchScript({ costs, bindingName: BINDING, pollIntervalMs: 1 }));
+    page.makeFile("cc_asset", cc).onProcess();
+    const edit = (page.window["game"] as { scene: { keys: { Edit: Record<string, unknown> } } })
+      .scene.keys.Edit;
+    edit["ccInfo"] = structuredClone(cc);
+    const { events } = editWithSort(edit, "2A", 2);
+    edit["sort_panel"] = { emit: () => undefined };
+    toggle(page, false);
+    expect(edit["sort_option_card"]).toBe("2A");
+    expect(events).toEqual(["reflesh"]);
+  });
+
+  it("不在 Edit 畫面 → 快取照換、只是不重畫", async () => {
+    const { page, cc } = setup();
+    await runScript(page, buildCostPatchScript({ costs, bindingName: BINDING, pollIntervalMs: 1 }));
+    page.makeFile("cc_asset", cc).onProcess();
+    (page.window["game"] as { scene: { keys: Record<string, unknown> } }).scene.keys = {};
+    const r = toggle(page, false);
+    expect(r.redrawn).toBe(false);
+    expect(r.swapped).toBe(2);
+    expect(cc.frames.map((f) => f.cost)).toEqual([8, 19, 21]);
+  });
+
+  it("parseCostPatchEnabledResult 讀不懂就當成沒裝", () => {
+    expect(parseCostPatchEnabledResult("nope")).toEqual({
+      installed: false,
+      enabled: false,
+      swapped: 0,
+      redrawn: false,
+    });
+    expect(parseCostPatchEnabledResult(undefined).installed).toBe(false);
   });
 });

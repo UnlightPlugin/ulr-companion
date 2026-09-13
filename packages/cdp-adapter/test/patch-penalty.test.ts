@@ -14,6 +14,7 @@ import {
   buildPenaltyPatchScript,
   InvalidPenaltyBandError,
   isPenaltyPatchReport,
+  PENALTY_UNINSTALL_EXPRESSION,
 } from "@ulr/cdp-adapter";
 import type { PenaltyBand } from "@ulr/cdp-adapter";
 import { calculateTeamCost } from "@ulr/cost-engine";
@@ -299,6 +300,18 @@ describe("⚠ 出站封包必須是原版數字（§12 硬規則 4）", () => {
     expect(script).toContain('event.indexOf("db_deck") !== 0');
     // "db_editdeck" 不是以 "db_deck" 開頭 —— 這一條是這個判斷成立的前提
     expect("db_editdeck".indexOf("db_deck")).not.toBe(0);
+  });
+});
+
+describe("房間換牌要問得到遊戲自己的算法（room-cost.ts）", () => {
+  it("裝上時在頁面上留 costOf = Deck.getCost().total", () => {
+    const src = buildPenaltyPatchScript({ bands: OFFICIAL, bindingName: "__test" });
+    expect(src).toContain("costOf: function (deck)");
+    expect(src).toContain("new Deck(deck).getCost().total");
+  });
+
+  it("⚠ 拆掉時 costOf 要留著 —— 那時它算的是原版，房間換牌還是要靠它", () => {
+    expect(PENALTY_UNINSTALL_EXPRESSION).toContain("costOf: f.costOf");
   });
 });
 

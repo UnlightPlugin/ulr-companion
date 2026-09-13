@@ -471,7 +471,13 @@ export function buildPenaltyPatchScript(options: PenaltyPatchOptions): string {
       installed: true,
       moduleId: moduleId,
       badgeModuleId: badgeModuleId,
-      socketPatched: socketPatched
+      socketPatched: socketPatched,
+      // 房間場景換牌時用來把 deck1.cost 算對（見 room-cost.ts）。就是遊戲自己
+      // 的 Deck.getCost()：補丁裝著算的是自訂價、拆掉之後算的是原版 —— 所以
+      // 拆的時候要留著它。
+      costOf: function (deck) {
+        try { return new Deck(deck).getCost().total; } catch (e) { return null; }
+      }
     };
     report({
       type: "penalty-patch",
@@ -575,7 +581,9 @@ export const PENALTY_UNINSTALL_EXPRESSION = `(function () {
             }
           } catch (e) {}
         }
-        window.__ulrPenaltyPatch = { installed: false, moduleId: f.moduleId };
+        // ⚠ costOf 留著：它此刻算的是原版 getCost，房間換牌還是要靠它把
+        // cost:NN 算成跟遊戲一樣的數字。
+        window.__ulrPenaltyPatch = { installed: false, moduleId: f.moduleId, costOf: f.costOf };
         try {
           var sc = window.game.scene.keys.Edit;
           if (sc && sc.scene.isActive()) sc.edit_reflesh();

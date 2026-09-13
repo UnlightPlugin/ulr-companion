@@ -115,6 +115,19 @@ export const COST_TABLE_TARGETS: Readonly<
   eventCards: { assetKey: EVENT_INFO_JSON_KEY, field: "frames", keyMode: "index" },
 };
 
+/**
+ * 牌組編輯畫面在 `create()` 時把四份資料 **`structuredClone` 了一份**掛在
+ * 自己身上（2026-09-12 從跑著的客戶端讀到：`this.ccInfo=structuredClone(t)`…）。
+ * 格線上每張卡的數字讀的是這份副本，總和（`costcheck()`）讀的才是快取。
+ * 不重載切換價格時兩份都要換 —— 對照表放這裡，快取鍵 → 場景屬性名。
+ */
+export const EDIT_SCENE_CLONES: Readonly<Record<string, string>> = {
+  [CC_ASSET_KEY]: "ccInfo",
+  [MC_ASSET_KEY]: "mcInfo",
+  [AVATAR_ITEM_KEY]: "itemInfo",
+  [EVENT_INFO_JSON_KEY]: "eventInfo",
+};
+
 export interface CostPatchOptions {
   /**
    * 要套的表。
@@ -137,6 +150,14 @@ export interface CostPatchOptions {
   pollIntervalMs?: number;
   /** 等不到就放棄並回報。無上限的輪詢會在頂層 frame 永遠空轉。 */
   maxWaitMs?: number;
+  /**
+   * 一開始要不要**套上**自訂價格。預設 `true`。
+   *
+   * `false` 時掛鉤照樣攔、照樣記下原價與對照，只是不把數字換掉 ——
+   * 之後 {@link buildCostPatchEnabledExpression} 隨時切得回來。這是「牌組
+   * 畫面上那個開關」的基礎：切換不重載。
+   */
+  enabled?: boolean;
 }
 
 export const DEFAULT_POLL_INTERVAL_MS = 50;
@@ -292,6 +313,8 @@ export function buildCostPatchScript(options: CostPatchOptions): string {
     // 這一份規則的指紋。⚠ 它留在頁面上是為了讓「來得及嗎」那支問得出
     // **是哪一份**規則蓋上去的，見 `costsStamp()`。
     stamp: costsStamp(options.costs),
+    enabled: options.enabled ?? true,
+    editClones: EDIT_SCENE_CLONES,
   };
 
   return `(function () {
@@ -308,7 +331,24 @@ export function buildCostPatchScript(options: CostPatchOptions): string {
   // 「來得及嗎」那支（看 stamp）去觸發。早退時舊的 stamp 因此要留著，
   // 那正是它判斷得出「頁面上是別份規則」的依據。
   if (window[FLAG]) return;
-  window[FLAG] = { installed: false, applied: 0, stamp: CFG.stamp };
+  window[FLAG] = {
+    installed: false,
+    applied: 0,
+    stamp: CFG.stamp,
+    // 現在畫面上是自訂價（true）還是原價（false）。setEnabled() 切。
+    enabled: !!CFG.enabled,
+    // 每張表「鍵 → 原價」。**只有規則有動到的那幾筆**，所以切回原價時
+    // 不必知道整份資料長什麼樣。
+    originals: {},
+    // 每張表「鍵 → 自訂價」，就是規則本身。跟 originals 成對：牌組選單
+    // （patch-deck-edit）要**同時**畫官方與自訂兩個總和，而快取裡任一時刻
+    // 只躺著其中一種價 —— 另一種只能從這兩份查。
+    customs: {},
+    setEnabled: setEnabled
+  };
+  for (var tk in CFG.targets) {
+    if (has.call(CFG.targets, tk)) window[FLAG].customs[CFG.targets[tk].table] = CFG.targets[tk].costs;
+  }
 
   function report(payload) {
     try {
@@ -317,6 +357,12 @@ export function buildCostPatchScript(options: CostPatchOptions): string {
     } catch (e) {
       // 回報不了就算了，絕不能因此影響遊戲。
     }
+  }
+
+  /** 這一筆的鍵：filename 型的表用它自己的 filename，索引型的用位置。 */
+  function rowKey(spec, row, i) {
+    if (spec.keyMode !== "filename") return String(i);
+    return row && typeof row.filename === "string" ? row.filename : "";
   }
 
   /**
@@ -340,23 +386,24 @@ export function buildCostPatchScript(options: CostPatchOptions): string {
     var byFilename = spec.keyMode === "filename";
     var index = byFilename ? [] : null;
     var seen = Object.create(null);
+    var originals = Object.create(null);
+    var enabled = window[FLAG].enabled;
     var applied = 0;
 
     for (var i = 0; i < rows.length; i++) {
       var row = rows[i];
-      var name;
+      var name = rowKey(spec, row, i);
       if (byFilename) {
         // 保留空位（沒有 filename）照樣要佔一格 —— index 的位置就是封包裡的
         // charaIndex，跳過一筆會讓後面全部偏移。
-        name = row && typeof row.filename === "string" ? row.filename : "";
         index.push(name);
         if (name === "") continue;
-      } else {
-        name = String(i);
       }
       seen[name] = true;
       if (!row || !has.call(costs, name)) continue;
-      row.cost = costs[name];
+      // ⚠ 原價一定要先記，不管現在套不套 —— 這是之後切回官方價唯一的依據。
+      originals[name] = row.cost;
+      if (enabled) row.cost = costs[name];
       applied++;
     }
 
@@ -367,6 +414,7 @@ export function buildCostPatchScript(options: CostPatchOptions): string {
 
     window[FLAG].applied += applied;
     window[FLAG][spec.table] = applied;
+    window[FLAG].originals[spec.table] = originals;
     report({
       type: "cost-patch",
       table: spec.table,
@@ -376,6 +424,128 @@ export function buildCostPatchScript(options: CostPatchOptions): string {
       unknownKeys: unknown,
       index: index
     });
+  }
+
+  /** 把一組 rows 裡規則有動到的那幾筆換成自訂價或原價。回換了幾筆。 */
+  function swapRows(spec, rows, originals, enabled) {
+    if (!rows || typeof rows.length !== "number") return 0;
+    var n = 0;
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      if (!row) continue;
+      var name = rowKey(spec, row, i);
+      if (name === "" || !has.call(originals, name)) continue;
+      row.cost = enabled ? spec.costs[name] : originals[name];
+      n++;
+    }
+    return n;
+  }
+
+  /**
+   * 不重載，把畫面上的價格在「自訂」與「原價」之間切換。
+   *
+   * 兩份資料都要換：Phaser 快取那份（costcheck() 算總和讀的是它 ——
+   * Chara.charaAsset 就是同一個物件），以及牌組編輯畫面在 create() 時
+   * structuredClone 出來的那份（格線上每張卡的數字讀的是它）。只換一份的
+   * 症狀是「總和變了、卡上的數字沒變」或反過來。
+   *
+   * 只有掛鉤真的攔到過的表才切得動（originals 有那一張）。攔不到的那幾張
+   * 本來就是原價、而且只有重載救得回來 —— 那是「來得及嗎」那支的事。
+   */
+  function setEnabled(enabled) {
+    var st = window[FLAG];
+    st.enabled = !!enabled;
+    var swapped = 0;
+    var g = window.game;
+    var cache = g && g.cache && g.cache.json;
+    var edit = g && g.scene && g.scene.keys && g.scene.keys.Edit;
+    for (var key in CFG.targets) {
+      if (!has.call(CFG.targets, key)) continue;
+      var spec = CFG.targets[key];
+      var originals = st.originals[spec.table];
+      if (!originals) continue;
+      try {
+        var data = cache && cache.has(key) ? cache.get(key) : null;
+        swapped += swapRows(spec, data ? data[spec.field] : null, originals, st.enabled);
+      } catch (e) {}
+      try {
+        var prop = CFG.editClones[key];
+        var clone = edit && prop ? edit[prop] : null;
+        // ⚠ 只在它真的是另一份時才動；同一個物件就是上面已經換過的那份。
+        if (clone && (!cache || !cache.has(key) || clone !== cache.get(key))) {
+          swapRows(spec, clone[spec.field], originals, st.enabled);
+        }
+      } catch (e) {}
+    }
+    var redrawn = false;
+    try {
+      if (edit && edit.scene.isActive() && typeof edit.edit_reflesh === "function") {
+        redrawEdit(edit);
+        redrawn = true;
+        refreshViewInfo(edit);
+      }
+    } catch (e) {}
+    return { enabled: st.enabled, swapped: swapped, redrawn: redrawn };
+  }
+
+  /**
+   * 重畫牌組編輯畫面 —— 格線「排列」用的是成本時要**重排**，不只重畫。
+   *
+   * edit_reflesh() 只照 card_index 現在的順序畫（2026-09-12 實機讀到：它不排
+   * 序，排序住在模組私有的 v() 裡，場景碰不到）。價格換了、順序沒換的話，
+   * 「排列(降序) 成本」的格線會變成 30、19、29、28… 這種亂的。
+   *
+   * 遊戲自己重排的入口是排列選單的 child.down：拿選項名字找索引 s，然後把
+   * sort_option_(category) 在 sA / sB 之間**翻一面**、重排、edit_reflesh()。
+   * 所以先把選項自己翻到另一面、再送一次同名的 child.down，落回原本那一面，
+   * 只重排重畫一次。頁碼在 edit_reflesh() 裡不會動（只有超出最後一頁才夾回去
+   * —— 重排不改張數，所以第 4 頁還是第 4 頁）。
+   *
+   * 「2」= 成本是 v() 寫死的（0 ID、1 等級、2 成本、3 HP…）。只有 card 與
+   * mons 兩類有排列；其他類別、或排的不是成本，照常只重畫。
+   */
+  function redrawEdit(sc) {
+    var cat = sc.category;
+    var key = "sort_option_" + cat;
+    var opt = (cat === "card" || cat === "mons") ? sc[key] : null;
+    var byCost = typeof opt === "string" && opt.length === 2 && opt.charAt(0) === "2";
+    if (byCost && sc.sort_panel && typeof sc.sort_panel.emit === "function" &&
+        sc.sort_name && typeof sc.sort_name.text === "string") {
+      sc[key] = "2" + (opt.charAt(1) === "A" ? "B" : "A");
+      sc.sort_panel.emit("child.down", { name: sc.sort_name.text });
+      // 落回原本那一面 = 遊戲的 handler 跑過了（重排 + 重畫都在裡面）。
+      if (sc[key] === opt) return;
+      // 沒有 handler 接（遊戲改版？）：把選項放回去，退回只重畫。
+      sc[key] = opt;
+    }
+    sc.edit_reflesh();
+  }
+
+  /**
+   * 右邊資訊欄的 COST 那一格。
+   *
+   * edit_reflesh() 不重畫它 —— 那一格是玩家點卡片時 set_view_info() 寫進去
+   * 的，之後就停在那裡（2026-09-12 實機：切換後右欄還是舊數字，重點一次卡片
+   * 才變）。所以照遊戲自己的對照補寫：compotype 說現在選的是哪一類、
+   * compo_index 是它在那張表裡的索引，格子的名字跟 reset_view_info() 裡的
+   * 一樣。只在那格看得見時才動，其他一律不碰。
+   */
+  function refreshViewInfo(sc) {
+    try {
+      var i = sc.compo_index;
+      if (typeof i !== "number") return;
+      var box = null, rows = null;
+      switch (sc.compotype) {
+        case "card":   box = sc.chara_cost;  rows = sc.ccInfo && sc.ccInfo.frames; break;
+        case "mons":   box = sc.chara_cost;  rows = sc.mcInfo && sc.mcInfo.frames; break;
+        case "weapon": box = sc.weapon_cost; rows = sc.itemInfo && sc.itemInfo.weapon; break;
+        case "event":  box = sc.event_cost;  rows = sc.eventInfo && sc.eventInfo.frames; break;
+        default: return;
+      }
+      if (!box || !box.visible || typeof box.setText !== "function") return;
+      var row = rows && rows[i];
+      if (row && typeof row.cost === "number") box.setText(String(row.cost));
+    } catch (e) {}
   }
 
   function install(proto) {
@@ -573,5 +743,67 @@ export function parseCostPatchCoverage(raw: unknown): CostPatchCoverage {
     return { missed: str(o.missed), covered: str(o.covered) };
   } catch {
     return empty;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 不重載，切換「自訂價 ↔ 原價」
+// ---------------------------------------------------------------------------
+
+/** `buildCostPatchEnabledExpression` 的結果。 */
+export interface CostPatchEnabledResult {
+  /** 頁面上有沒有這支補丁。沒有的話什麼都沒切（畫面本來就是原價）。 */
+  installed: boolean;
+  /** 切完之後畫面上是自訂價（true）還是原價（false）。 */
+  enabled: boolean;
+  /** 換了幾筆快取資料。0 而 `installed` 是 true = 掛鉤還沒攔到任何一張表。 */
+  swapped: number;
+  /** 牌組編輯畫面開著，而且已經重畫過了。 */
+  redrawn: boolean;
+}
+
+/**
+ * 產生「把畫面切成自訂價／原價」的運算式。**立刻生效，不重載。**
+ *
+ * 靠的是補丁在改寫時記下的原價（`window.__ulrCostPatch.originals`），所以
+ * 只對「掛鉤真的攔到過」的表有效 —— 插件比遊戲晚接上、資料已經在快取裡的
+ * 那幾張，這支救不回來，仍然要靠「來得及嗎」那條路重載一次。
+ *
+ * ⚠ 這支**不動壓 C 罰則**。罰則另有自己的裝／拆（`patch-penalty.ts`），
+ * 呼叫端要一起切，否則會出現「官方價格配自訂罰則」這種不存在的規則。
+ */
+export function buildCostPatchEnabledExpression(enabled: boolean): string {
+  return `(function () {
+  try {
+    var st = window["${COST_PATCH_FLAG}"];
+    if (!st || typeof st.setEnabled !== "function") {
+      return JSON.stringify({ installed: false, enabled: false, swapped: 0, redrawn: false });
+    }
+    var r = st.setEnabled(${enabled ? "true" : "false"});
+    return JSON.stringify({ installed: true, enabled: r.enabled, swapped: r.swapped, redrawn: r.redrawn });
+  } catch (e) {
+    return JSON.stringify({ installed: false, enabled: false, swapped: 0, redrawn: false });
+  }
+})()`;
+}
+
+export function parseCostPatchEnabledResult(raw: unknown): CostPatchEnabledResult {
+  const off: CostPatchEnabledResult = {
+    installed: false,
+    enabled: false,
+    swapped: 0,
+    redrawn: false,
+  };
+  if (typeof raw !== "string") return off;
+  try {
+    const o = JSON.parse(raw) as Record<string, unknown>;
+    return {
+      installed: o.installed === true,
+      enabled: o.enabled === true,
+      swapped: typeof o.swapped === "number" ? o.swapped : 0,
+      redrawn: o.redrawn === true,
+    };
+  } catch {
+    return off;
   }
 }
