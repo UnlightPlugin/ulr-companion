@@ -1,11 +1,11 @@
 /**
- * 打包成 Windows 安裝檔（WP-08）
- * ===============================
+ * 打包成可發布的 Windows zip（WP-08）
+ * ====================================
  * `docs/release.md` 的落地。跑 `npm run dist`，產出在 `out/release/`。
  *
  * ```
  *   apps/tray/src ──esbuild──▶ apps/tray/dist ──┐
- *                                                ├──▶ out/app ──▶ NSIS 安裝檔
+ *                                                ├──▶ out/app ──▶ ULR Companion-<版本>-win.zip
  *   程式現畫的圖示 ─────────▶ out/app/icon.ico ─┘
  * ```
  *
@@ -125,4 +125,4 @@ const builder = spawnSync(
   { stdio: "inherit", cwd: root },
 );
 if (builder.status !== 0) process.exit(builder.status ?? 1);
-console.log(`\n✓ 安裝檔在 ${release}`);
+console.log(`\n✓ zip 在 ${release}`);

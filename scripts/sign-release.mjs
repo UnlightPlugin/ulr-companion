@@ -2,12 +2,16 @@
  * 簽一份發布清單
  * ================
  *
- *     npm run release:sign -- --version 0.2.0 \
- *       --file "out/release/ULR Companion Setup 0.2.0.exe" \
- *       --url  "https://github.com/UnlightPlugin/ulr-companion/releases/download/v0.2.0/ULR.Companion.Setup.0.2.0.exe" \
+ *     npm run release:sign -- --version 2.1.0 \
+ *       --file out/release/ULR-Companion-2.1.0-win.zip \
+ *       --url  "https://github.com/UnlightPlugin/ulr-companion/releases/download/v2.1.0/ULR-Companion-2.1.0-win.zip" \
  *       [--notes "一行說明"] [--key <私鑰路徑>]
  *
- * 它會算安裝檔的 SHA-256、用私鑰簽名，然後把整段印出來讓你貼進
+ * ⚠ **只發 zip**（2026-09-14 起不再出 exe）。上傳前先把 electron-builder 產出的
+ * `ULR Companion-<版本>-win.zip` 複製成上面那個不帶空白的檔名 —— GitHub 會把
+ * 空白換成點，網址就對不上了。
+ *
+ * 它會算 zip 的 SHA-256、用私鑰簽名，然後把整段印出來讓你貼進
  * `apps/link-worker/src/release.ts`。
  *
  * ⚠ **簽的是 `canonicalize(manifest)` 的 UTF-8 位元組** —— WP-01 那套 JCS 正規化

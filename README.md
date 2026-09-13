@@ -78,8 +78,7 @@ UNLIGHT:Revive 的玩家社群輔助工具 —— **自訂 COST 規則**、**遊
 
 ## 安裝（給玩家）
 
-1. 到 [Releases](https://github.com/UnlightPlugin/ulr-companion/releases/latest) 下載 **zip**
-   （不要下載 exe —— 瀏覽器常把未簽章的 exe 標成危險甚至直接擋掉）。
+1. 到 [Releases](https://github.com/UnlightPlugin/ulr-companion/releases/latest) 下載 **zip**。
 
    > 解壓縮**之前**，在 zip 上按右鍵 →「內容」→ 勾「解除封鎖」→ 確定。
    > 解出來的檔案不帶 Mark-of-the-Web，執行時不會跳 SmartScreen。
@@ -242,7 +241,7 @@ npm run verify      # format + lint + typecheck + test
 | `npm run verify`                            | 提交前跑這個；全綠就代表環境沒問題                                           |
 | `npm test` / `npm run test:watch`           | 只跑測試                                                                     |
 | `npm run tray`                              | 建置並啟動開發版托盤（預設接 Chrome，見 [docs/tray.md](docs/tray.md)）       |
-| `npm run dist`                              | 打包成可發布的 zip／安裝檔                                                   |
+| `npm run dist`                              | 打包成可發布的 zip                                                           |
 | `npx tsx apps/companion/src/index.ts <cmd>` | 命令列工具（`probe` `cost` `watch` `arbiter` `web` `pack`…，不帶參數看說明） |
 
 試算一份規則：

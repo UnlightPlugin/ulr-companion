@@ -47,16 +47,13 @@ npx tsx apps/companion/src/index.ts arbiter --port 59222 --phase-seconds 15
 npm run dist        # → out/release/
 ```
 
-主力發布物是 **zip**（WP-17 起），安裝檔是次要的。理由與 zip 版的自我更新見
-[release.md](release.md)。
-
-NSIS、`oneClick`、`perMachine: false`（裝到 `%LOCALAPPDATA%`，更新不需要 UAC ——
-裝到 `Program Files` 的話**每次更新都會跳 UAC**，玩家會以為中毒）。
-圖示是程式現畫的漩渦，repo 裡沒有 `.ico`。
+發布物**只有 zip**（2026-09-14 起；NSIS 安裝檔發到 v2.0.0 為止）。理由與 zip 版的
+自我更新見 [release.md](release.md)。用安裝器裝過的人一樣會收到 zip 更新，在原本的
+安裝目錄換檔。圖示是程式現畫的漩渦，repo 裡沒有 `.ico`。
 
 ### 大小
 
-安裝檔約 **82 MB**，解壓後 284 MB。這個大小幾乎全部是 Electron 自己：
+zip 約 **116 MB**，解壓後 284 MB。這個大小幾乎全部是 Electron 自己：
 
 |                            | 大小       |
 | -------------------------- | ---------- |
@@ -76,8 +73,8 @@ NSIS、`oneClick`、`perMachine: false`（裝到 `%LOCALAPPDATA%`，更新不需
 
 ### 程式碼簽章
 
-⚠ **還沒有程式碼簽章**，首次執行會跳 Windows SmartScreen「不明的發行者」。
-後續更新不會再跳（安裝器由已安裝的程式啟動，不帶 Mark-of-the-Web）。
+⚠ **還沒有程式碼簽章**，zip 沒先「解除封鎖」就解壓的話，首次執行會跳 Windows
+SmartScreen「不明的發行者」。後續更新不會再跳（更新是程式自己下載、換檔，不帶 Mark-of-the-Web）。
 下載頁要老實揭露這件事並附 SHA-256，**不要教玩家關掉系統防護**。
 zip 版「解除封鎖」那條路與簽章的行情分析在 [release.md](release.md) §5。
 

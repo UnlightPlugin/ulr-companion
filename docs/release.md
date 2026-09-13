@@ -72,6 +72,13 @@ publish:
 **不要用 portable target。** Portable exe 沒有安裝器，electron-updater
 無法自我替換，等於放棄自動更新。
 
+### ⚠⚠ 2026-09-14 起：**只發 zip，不再出安裝檔**
+
+`electron-builder.yml` 的 target 只剩 `zip`，`scripts/installer.nsh` 也拿掉了（都在
+git 歷史裡）。NSIS 安裝檔發到 v2.0.0 為止。用安裝器裝過的人不受影響：清單指 zip，
+`updater.ts` 就在他們的安裝目錄（`%LOCALAPPDATA%\Programs\…`，寫得進去）換檔。
+下面幾節講 NSIS 的部分是當時的設計紀錄。
+
 ### ⚠ 2026-08-18 起：**主力是 zip，不是安裝檔**（WP-17）
 
 一位玩家因為「exe 下載被瀏覽器標成危險」而放棄安裝。這件事分兩關，
@@ -305,11 +312,11 @@ const fallbackWindow = new BrowserWindow({ show: false });
 
 ### 要發布的只有一個檔
 
-| 檔案                                  | 發？ |                                       |
-| ------------------------------------- | ---- | ------------------------------------- |
-| `ULR Companion Setup <版本>.exe`      | ✅   | 唯一要發的                            |
-| `latest.yml` / `*.blockmap`           | ❌   | electron-updater 的機制，**我們沒用** |
-| `builder-debug.yml` / `win-unpacked/` | ❌   | 建置中間產物                          |
+| 檔案                                  | 發？ |                                         |
+| ------------------------------------- | ---- | --------------------------------------- |
+| `ULR Companion-<版本>-win.zip`        | ✅   | 唯一要發的（2026-09-14 起；之前是 exe） |
+| `latest.yml` / `*.blockmap`           | ❌   | electron-updater 的機制，**我們沒用**   |
+| `builder-debug.yml` / `win-unpacked/` | ❌   | 建置中間產物                            |
 
 加上一份**自己寫的清單 JSON**，位置由環境變數 `ULR_UPDATE_FEED` 指定：
 

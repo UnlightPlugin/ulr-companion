@@ -7,14 +7,15 @@
  * ## 發一版的完整流程
  *
  * 1. `apps/tray/package.json` 的 `version` 往上跳
- * 2. `npm run dist` → `out/release/ULR Companion Setup <版本>.exe`
- * 3. 把安裝檔上傳到 GitHub Releases
+ * 2. `npm run dist` → `out/release/ULR Companion-<版本>-win.zip`
+ * 3. 複製成 `ULR-Companion-<版本>-win.zip`（不帶空白）上傳到 GitHub Releases。
+ *    ⚠ **只發 zip，不再附 exe**（2026-09-14 起）。
  * 4. 簽它（順便算 SHA-256）：
  *
  *    ```
- *    npm run release:sign -- --version 0.2.0 \
- *      --file "out/release/ULR Companion Setup 0.2.0.exe" \
- *      --url  "https://github.com/…/ULR.Companion.Setup.0.2.0.exe"
+ *    npm run release:sign -- --version 2.1.0 \
+ *      --file out/release/ULR-Companion-2.1.0-win.zip \
+ *      --url  "https://github.com/…/releases/download/v2.1.0/ULR-Companion-2.1.0-win.zip"
  *    ```
  *
  * 5. 把它印出來的那一段貼到下面，`npm --workspace apps/link-worker run deploy`
@@ -28,9 +29,9 @@
 
 export interface ReleaseManifest {
   version: string;
-  /** 安裝檔的網址。 */
+  /** 發布檔的網址（2.0.0 起是 zip；客戶端照副檔名選套用方式）。 */
   url: string;
-  /** 安裝檔的 SHA-256（64 個十六進位字元，小寫）。 */
+  /** 發布檔的 SHA-256（64 個十六進位字元，小寫）。 */
   sha256: string;
   /** 會被寫進玩家的記錄頁，一行就好。 */
   notes?: string;
@@ -79,8 +80,8 @@ export const CURRENT_RELEASE: SignedRelease | null = {
 //
 // export const CURRENT_RELEASE: SignedRelease | null = {
 //   manifest: {
-//     version: "0.2.0",
-//     url: "https://github.com/UnlightPlugin/ulr-companion/releases/download/v0.2.0/ULR.Companion.Setup.0.2.0.exe",
+//     version: "2.1.0",
+//     url: "https://github.com/UnlightPlugin/ulr-companion/releases/download/v2.1.0/ULR-Companion-2.1.0-win.zip",
 //     sha256: "……64 個十六進位字元……",
 //     notes: "中間人改用雲端；Steam 啟動選項教學",
 //   },

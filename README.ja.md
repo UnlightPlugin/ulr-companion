@@ -80,8 +80,7 @@ Windows のタスクトレイに常駐し、Chrome DevTools Protocol（CDP）で
 
 ## インストール（プレイヤー向け）
 
-1. [Releases](https://github.com/UnlightPlugin/ulr-companion/releases/latest) から **zip** をダウンロードしてください
-   （exe は避けてください —— 署名のない exe はブラウザに危険と判定され、ブロックされることがあります）。
+1. [Releases](https://github.com/UnlightPlugin/ulr-companion/releases/latest) から **zip** をダウンロードしてください。
 
    > 展開する**前に**、zip を右クリック →「プロパティ」→「許可する」にチェック → OK。
    > 展開したファイルに Mark-of-the-Web が付かなくなり、SmartScreen の警告が出ません。
@@ -252,7 +251,7 @@ npm run verify      # format + lint + typecheck + test
 | `npm run verify`                            | コミット前に実行。すべて通れば環境は問題ありません                                           |
 | `npm test` / `npm run test:watch`           | テストのみ実行                                                                               |
 | `npm run tray`                              | 開発版トレイをビルドして起動（既定では Chrome に接続。[docs/tray.md](docs/tray.md) 参照）    |
-| `npm run dist`                              | 配布用の zip／インストーラーを作成                                                           |
+| `npm run dist`                              | 配布用の zip を作成                                                                          |
 | `npx tsx apps/companion/src/index.ts <cmd>` | コマンドラインツール（`probe` `cost` `watch` `arbiter` `web` `pack` など。引数なしでヘルプ） |
 
 ルールを試しに計算する：
