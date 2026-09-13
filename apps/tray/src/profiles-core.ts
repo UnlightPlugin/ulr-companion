@@ -249,6 +249,13 @@ export interface Profile {
    */
   applyDelaySeconds: number;
   /**
+   * 牌組庫存到雲端、同一個角色在不同電腦上同步（`deck-sync.ts`）。預設**開**。
+   *
+   * 玩家 2026-09-13：「使用的牌組要存到雲端，不同電腦登入同個角色時，要同步。用角色 ID。」
+   * 雲端上的鍵是角色 id 的雜湊、文件裡沒有玩家名字。舊設定檔沒有這一欄 → 開。
+   */
+  deckCloudSync: boolean;
+  /**
    * 渦擊破結算的 OK 面板怎麼演：`all` 官方原樣一頁一頁按、`once` 一張摘要
    * 一顆 OK、`none` 不演（記錄檔照記）。預設 `once`。
    *
@@ -500,6 +507,8 @@ export function normalizeProfile(raw: unknown): Profile | null {
     editUnit: normalizeEditUnit(r["editUnit"]),
     // 舊設定檔沒有這一欄 → 3 秒。
     applyDelaySeconds: normalizeApplyDelaySeconds(r["applyDelaySeconds"]),
+    // 舊設定檔沒有這一欄 → 開（玩家訂的預設）。
+    deckCloudSync: r["deckCloudSync"] !== false,
     // 舊設定檔沒有這一欄 → once（一張摘要）。
     raidRewardMode: isRaidRewardMode(r["raidRewardMode"])
       ? r["raidRewardMode"]
@@ -570,6 +579,7 @@ export function defaultProfile(kind: ClientKind = "desktop"): Profile {
     editUnit: 0,
     // 停三秒才寫伺服器。見 `applyDelaySeconds`。
     applyDelaySeconds: DEFAULT_APPLY_DELAY_SECONDS,
+    deckCloudSync: true,
     raidRewardMode: DEFAULT_RAID_REWARD_MODE,
     raidShare: true,
     raidTeamShare: true,

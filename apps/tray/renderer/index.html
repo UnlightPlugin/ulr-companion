@@ -3653,9 +3653,34 @@
                         style="width:5em" value="${seconds}" /> 秒
                </span>
              </div>
-           </div>`
+           </div>` +
+          deckSyncCard()
         );
       };
+
+      const DECK_SYNC_TIP =
+        "牌組庫存到插件的雲端，同一個角色在另一台電腦登入時自動同步（新增、改牌、改名、刪除、排序都會過去）。" +
+        "雲端上的鍵是角色 id 的雜湊，文件裡沒有玩家名字；每一台電腦「這一房上次選哪一副」各自記。" +
+        "兩台同時改同一副時，後改的那一邊贏。雲端連不上就只用這台電腦的，不會把牌組清掉。";
+
+      function deckSyncCard() {
+        const on = snap?.profile.deckCloudSync !== false;
+        const st = snap?.deckSync ?? null;
+        const when = st ? new Date(st.at).toLocaleTimeString() : "";
+        const line = !on
+          ? "已關閉"
+          : st === null
+            ? "等牌組庫接上"
+            : `${st.ok ? "✓" : "⚠"} ${esc(st.text)}（${when}）`;
+        return `<div class="card">
+            <label class="toggle">
+              <input type="checkbox" id="deckCloudSyncOn" ${on ? "checked" : ""} />
+              <span><b>牌組雲端同步</b>${info(DECK_SYNC_TIP)}
+                <div class="hint">${line}</div>
+              </span>
+            </label>
+          </div>`;
+      }
 
       // --- 設置 › 配置 ------------------------------------------------------
       //
@@ -3928,6 +3953,12 @@
           return void window.ulr.setReadyTint(parseInt(t.value.slice(1), 16)).then(apply);
         }
         if (t.name === "raidRewardMode" && t.checked) return void applyRaidRewardMode(t.value);
+        if (t.id === "deckCloudSyncOn") {
+          return void window.ulr.deck.cloudSync(t.checked).then((saved) => {
+            if (snap !== null) snap.profile.deckCloudSync = saved;
+            renderBody();
+          });
+        }
         if (t.id === "raidShareOn") {
           return void window.ulr.raid.share(t.checked).then((s) => {
             rstate = s;

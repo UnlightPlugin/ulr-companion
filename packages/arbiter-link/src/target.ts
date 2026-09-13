@@ -94,6 +94,9 @@ export const DEFAULT_RAID_SHARE_URL = `${SERVICE_ORIGIN}/raids`;
 /** 打渦隊伍的看板（同一台 Worker、同一個看板實例）。 */
 export const DEFAULT_RAID_TEAMS_URL = `${SERVICE_ORIGIN}/raid-teams`;
 
+/** 雲端牌組庫（見 `deck-sync.ts`）。鍵接在後面：`/decks/<key>`。 */
+export const DEFAULT_DECK_SYNC_URL = `${SERVICE_ORIGIN}/decks`;
+
 /**
  * 開發者用的關鍵字：不要雲端，改用同一台電腦上的 broker。
  *

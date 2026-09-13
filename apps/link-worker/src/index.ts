@@ -23,6 +23,7 @@
  * 協商規則（max／min／and）也對稱到根本分不出誰是誰。
  */
 
+import { MAX_DECK_SYNC_BODY_BYTES, parseDeckSyncPath } from "@ulr/arbiter-link/deck-sync";
 import { LINK_PROTOCOL_VERSION } from "@ulr/arbiter-link/protocol";
 import {
   MAX_RAID_SHARE_BODY_BYTES,
@@ -48,11 +49,13 @@ import { CURRENT_RULE_SET } from "./rules.js";
 export { LinkRoom } from "./room.js";
 export { MatchQueueRoom } from "./queue.js";
 export { RaidBoardRoom } from "./raid-board.js";
+export { DeckVaultRoom } from "./deck-vault.js";
 
 interface Env {
   ROOMS: DurableObjectNamespace;
   QUEUES: DurableObjectNamespace;
   RAIDS: DurableObjectNamespace;
+  DECKS: DurableObjectNamespace;
 }
 
 export default {
@@ -138,6 +141,20 @@ export default {
         // ⚠ 不快取：人數的全部價值就是它是現在的。
         { headers: { "cache-control": "no-store" } },
       );
+    }
+
+    // 雲端牌組庫（見 `@ulr/arbiter-link/deck-sync`）。一個角色一個實例。
+    // ⚠ 路徑上是角色 id 的雜湊，不是 id —— 形狀不對一律 404，不透露有沒有這條路。
+    if (url.pathname.startsWith("/decks/")) {
+      const key = parseDeckSyncPath(url.pathname);
+      if (key === null) return new Response("not found", { status: 404 });
+      const length = Number(request.headers.get("content-length") ?? "0");
+      if (length > MAX_DECK_SYNC_BODY_BYTES) return new Response("too big", { status: 413 });
+      try {
+        return await env.DECKS.getByName(key).fetch(request);
+      } catch {
+        return new Response("vault unavailable", { status: 503 });
+      }
     }
 
     // 共享渦狀態（見 `@ulr/arbiter-link/raid-share`）。全世界一塊看板，一個實例。

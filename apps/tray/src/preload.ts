@@ -126,6 +126,8 @@ contextBridge.exposeInMainWorld("ulr", {
    */
   deck: {
     applyDelay: (seconds: number) => ipcRenderer.invoke("ulr:deck-apply-delay", seconds),
+    /** 牌組庫的雲端同步開關（同一個角色在不同電腦上同步）。 */
+    cloudSync: (on: boolean) => ipcRenderer.invoke("ulr:deck-cloud-sync", on),
   },
 
   /** 渦：獎勵標記的狀態與結算通知的模式。 */

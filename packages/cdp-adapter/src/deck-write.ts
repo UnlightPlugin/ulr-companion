@@ -162,7 +162,19 @@ const FINGERPRINT_SNIPPET = `
   var __buf = await crypto.subtle.digest("SHA-256", __enc);
   var __fp = Array.from(new Uint8Array(__buf)).slice(0, 4)
     .map(function (b) { return b.toString(16).padStart(2, "0"); }).join("");
+  var __sbuf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(${JSON.stringify(
+    "ulr-deck-sync\n",
+  )} + String(pid)));
+  var __sync = Array.from(new Uint8Array(__sbuf))
+    .map(function (b) { return b.toString(16).padStart(2, "0"); }).join("");
 `;
+
+/**
+ * 雲端牌組庫的鍵用的前綴。**必須**跟 `@ulr/arbiter-link` 的 `DECK_SYNC_KEY_SALT`
+ * 一字不差（托盤的測試會對一次）—— 兩邊不同的話每台電腦都拿到一份空的雲端庫，
+ * 而且沒有任何錯誤訊息。這個 package 不依賴 arbiter-link，所以抄一份。
+ */
+export const DECK_SYNC_SALT = "ulr-deck-sync\n";
 
 /** 讀回來的一份快照。 */
 export interface DeckSnapshot {
@@ -197,6 +209,12 @@ export interface DeckSnapshot {
   decks: FlatDeck[];
   /** 這次用的是哪個 game 端點，診斷用。 */
   endpoint: string;
+  /**
+   * 雲端牌組庫的鍵：`SHA-256(DECK_SYNC_SALT + 角色 id)` 的 64 hex。同一個角色在
+   * 哪台電腦都一樣，反推不回 id（見 `@ulr/arbiter-link` 的 `deck-sync.ts`）。
+   * 舊版頁面腳本沒有這一欄 → `null`（不同步，不是錯誤）。
+   */
+  syncKey: string | null;
 }
 
 /** 讀出三副牌組與帳號指紋。 */
@@ -209,6 +227,7 @@ export const DECK_READ_EXPRESSION = `(async function () {
     for (var n = 1; n <= 3; n++) decks.push(await sock.fetch("db_deck" + n, pid));
     return JSON.stringify({
       account: __fp,
+      syncKey: __sync,
       accountLabel: (player && player.name) || null,
       deckNow: player && typeof player.deck === "number" ? player.deck : null,
       favorite: (player && player.favorite) || null,
@@ -246,6 +265,8 @@ export function parseDeckSnapshot(raw: string): DeckSnapshot {
     deckCheck: rec.deckCheck !== false,
     decks,
     endpoint: typeof rec.endpoint === "string" ? rec.endpoint : "",
+    syncKey:
+      typeof rec.syncKey === "string" && /^[0-9a-f]{64}$/.test(rec.syncKey) ? rec.syncKey : null,
   };
 }
 

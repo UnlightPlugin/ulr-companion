@@ -78,6 +78,7 @@ export type { LinkClientOptions, LinkStatus } from "./link-client.js";
 
 // 階段 3：中間人的位址從「一個埠號」變成「一個字串」，兩種傳輸共用同一份解析。
 export {
+  DEFAULT_DECK_SYNC_URL,
   DEFAULT_LINK_TARGET,
   DEFAULT_RAID_SHARE_URL,
   DEFAULT_RAID_TEAMS_URL,
@@ -175,3 +176,16 @@ export type {
   SharedTeamsPlayer,
   SharedTeamsUpload,
 } from "./raid-share.js";
+
+export {
+  DECK_SYNC_KEY_LENGTH,
+  DECK_SYNC_KEY_SALT,
+  DECK_SYNC_PATH,
+  decideDeckSync,
+  isDeckSyncKey,
+  MAX_DECK_SYNC_BODY_BYTES,
+  parseDeckSyncPath,
+  parseVersionHeader,
+  versionEtag,
+} from "./deck-sync.js";
+export type { DeckSyncDecision, DeckSyncRecord } from "./deck-sync.js";

@@ -42,6 +42,7 @@ import {
 import type { EngineStatus } from "@ulr/arbiter-engine";
 import { ArbiterEngine } from "@ulr/arbiter-engine";
 import type { LinkPrefs } from "@ulr/arbiter-link";
+import { DEFAULT_DECK_SYNC_URL } from "@ulr/arbiter-link";
 import {
   matchKey,
   MAX_SPEED_FACTOR,
@@ -135,6 +136,7 @@ import {
   withNotice,
 } from "./deck-core.js";
 import { backupOnce, readLibrary, writeLibrary } from "./deck-store.js";
+import { syncDeckLibrary, type FetchLike } from "./deck-sync.js";
 import { bundledRulePath, resolveDefaultRule } from "./default-rule.js";
 import type { TierRef } from "./lobby-counts.js";
 import { displayCounts, tierOf } from "./lobby-counts.js";
@@ -517,6 +519,16 @@ interface Snapshot {
    * 筆不是同一個量級（見 `preload.ts` 對 `editor.load` 的說明）。
    */
   selectableStages: readonly { value: string; name: string }[];
+  /** 雲端牌組庫上一輪的結果。`null` = 這次開機還沒同步過。 */
+  deckSync: DeckSyncStatus | null;
+}
+
+interface DeckSyncStatus {
+  /** `Date.now()`。 */
+  at: number;
+  ok: boolean;
+  /** 給人看的一句話。 */
+  text: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -1483,12 +1495,120 @@ async function deckInventory(): Promise<InventorySnapshot | null> {
   }
 }
 
-function saveDeckLibrary(): void {
+function saveDeckLibrary(options: { sync?: boolean } = {}): void {
   if (deck === null) return;
   try {
     writeLibrary(APP_DIR, deck.library);
   } catch (err) {
     log(`✗ 牌組庫存檔失敗：${err instanceof Error ? err.message : String(err)}`);
+  }
+  // 本機動過就排一次雲端同步（同步自己落地的那次不排，否則會自己追自己）。
+  if (options.sync !== false) scheduleDeckSync(DECK_SYNC_DEBOUNCE_MS);
+}
+
+// ---------------------------------------------------------------------------
+// 雲端牌組庫（見 deck-sync.ts）
+// ---------------------------------------------------------------------------
+
+/** 本機存檔之後停多久才推 —— 玩家在編輯畫面連續改牌時只推最後那一次。 */
+const DECK_SYNC_DEBOUNCE_MS = 8_000;
+/** 沒動靜時多久去雲端看一次（另一台電腦改的東西要靠這一拍過來）。 */
+const DECK_SYNC_INTERVAL_MS = 2 * 60_000;
+/** 這個角色的雲端鍵。`null` = 還沒讀到（或頁面是舊版腳本）。 */
+let deckSyncKey: string | null = null;
+let deckSyncTimer: ReturnType<typeof setTimeout> | null = null;
+let deckSyncRunning = false;
+let deckSyncStatus: DeckSyncStatus | null = null;
+/** 上一輪失敗過 —— 失敗只講一次，恢復時再講一次。 */
+let deckSyncFailing = false;
+
+function scheduleDeckSync(delayMs: number): void {
+  if (!profile.deckCloudSync || deckSyncKey === null) return;
+  if (deckSyncTimer !== null) clearTimeout(deckSyncTimer);
+  deckSyncTimer = setTimeout(() => {
+    deckSyncTimer = null;
+    void runDeckSync();
+  }, delayMs);
+}
+
+/**
+ * 跟雲端同步一輪。
+ *
+ * ⚠ 三種情況這一輪不落地、晚點再來：
+ * - 有一副排著隊還沒寫進伺服器（`pending`）—— 合併可能把它刪掉，隊伍會指向空氣
+ * - 同步進行中玩家又改了牌（`deck.library` 換了一份）—— 合併結果是舊的基準算的
+ * - 等待期間換了帳號 —— 結果屬於上一個人
+ */
+async function runDeckSync(): Promise<void> {
+  if (!profile.deckCloudSync || deckSyncRunning) return;
+  const key = deckSyncKey;
+  const start = deck;
+  if (key === null || start === null) return;
+  if (start.pending !== null) {
+    scheduleDeckSync(DECK_SYNC_DEBOUNCE_MS);
+    return;
+  }
+  deckSyncRunning = true;
+  const account = deckAccount;
+  try {
+    const r = await syncDeckLibrary(start.library, {
+      baseUrl: DEFAULT_DECK_SYNC_URL,
+      key,
+      fetch: globalThis.fetch as unknown as FetchLike,
+    });
+    if (!r.ok) {
+      deckSyncStatus = { at: Date.now(), ok: false, text: r.reason };
+      if (!deckSyncFailing) log(`⚠ 牌組雲端同步：${r.reason}（先用本機的，稍後再試）`);
+      deckSyncFailing = true;
+      pushState();
+      return;
+    }
+    if (deckSyncFailing) log("✓ 牌組雲端同步恢復了");
+    deckSyncFailing = false;
+
+    const now = deck;
+    if (now === null || deckAccount !== account || deckSyncKey !== key) return;
+    if (now.library !== start.library || now.pending !== null) {
+      // 同步期間本機又動了：下一輪用新的基準重來（雲端那份已經推上去也無妨）。
+      scheduleDeckSync(DECK_SYNC_DEBOUNCE_MS);
+      return;
+    }
+
+    const parts: string[] = [];
+    if (r.pulled > 0) parts.push(`拉下 ${r.pulled} 副`);
+    if (r.deleted > 0) parts.push(`刪掉 ${r.deleted} 副`);
+    if (r.pushed) parts.push("已推上雲端");
+    deckSyncStatus = {
+      at: Date.now(),
+      ok: true,
+      text: parts.length > 0 ? parts.join("、") : "跟雲端一致",
+    };
+
+    if (r.localChanged) {
+      // active 是用內容算的，合併之後重算；還沒觀察過 Deck1 就只清掉被刪掉的那幾副。
+      const active =
+        deckLastSeen !== null
+          ? resolveAll(r.library, deckLastSeen)
+          : (Object.fromEntries(
+              ROOM_KINDS.map((room) => {
+                const id = now.active[room];
+                return [room, id !== null && findDeck(r.library, room, id) !== null ? id : null];
+              }),
+            ) as DeckSession["active"]);
+      deck = { ...now, library: r.library, active };
+      saveDeckLibrary({ sync: false });
+      log(`· 牌組雲端同步：${deckSyncStatus.text}（另一台電腦改過的已經合進來）`);
+      await pushDeckState();
+    }
+    pushState();
+  } catch (err) {
+    deckSyncStatus = {
+      at: Date.now(),
+      ok: false,
+      text: err instanceof Error ? err.message : String(err),
+    };
+  } finally {
+    deckSyncRunning = false;
   }
 }
 
@@ -1544,6 +1664,7 @@ async function initDeckLibrary(): Promise<void> {
   }
 
   deckAccount = snap.account;
+  deckSyncKey = snap.syncKey;
   deckLastSeen = current;
   deck = { ...newSession(lib), active: resolveAll(lib, current) };
 
@@ -1569,8 +1690,10 @@ async function initDeckLibrary(): Promise<void> {
   const total = ROOM_KINDS.reduce((n, r) => n + listDecks(settled.library, r).length, 0);
   log(`✓ 牌組庫已接上（${total} 副）—— 在遊戲的牌組編輯畫面點左下角那個牌盒`);
   if (dropped > 0) log(`⚠ 存檔裡有 ${dropped} 副壞掉的記錄，已跳過`);
-  saveDeckLibrary();
+  saveDeckLibrary({ sync: false });
   await pushDeckState();
+  // 一接上就跟雲端對一次：另一台電腦在這段期間改的牌組要馬上過來。
+  if (profile.deckCloudSync && deckSyncKey !== null) void runDeckSync();
 }
 
 /**
@@ -2178,6 +2301,16 @@ async function deckTickOnce(): Promise<void> {
   }
   if (deck === null || deckBusy) return;
 
+  // 雲端牌組庫：沒動靜時也要定期看一眼（另一台電腦改的東西靠這一拍過來）。
+  if (
+    profile.deckCloudSync &&
+    deckSyncTimer === null &&
+    !deckSyncRunning &&
+    Date.now() - (deckSyncStatus?.at ?? 0) > DECK_SYNC_INTERVAL_MS
+  ) {
+    void runDeckSync();
+  }
+
   // ⚠ 這支順便把「遊戲重載過、介面被沖掉了」補回來（見 engine 的 deckEditStatus）。
   const status = await engine.deckEditStatus();
   const mounted = status?.mounted === true;
@@ -2269,6 +2402,7 @@ function snapshot(): Snapshot {
       maxApplyDelay: MAX_APPLY_DELAY_SECONDS,
     },
     selectableStages: SELECTABLE_STAGES,
+    deckSync: deckSyncStatus,
   };
 }
 
@@ -3342,6 +3476,25 @@ app.whenReady().then(() => {
     if (!ephemeral) store = updateProfile(profile.id, { applyDelaySeconds: next });
     pushState();
     return next;
+  });
+
+  /** 雲端牌組同步開關。打開時馬上同步一輪。 */
+  ipcMain.handle("ulr:deck-cloud-sync", (_event, on: unknown): boolean => {
+    if (typeof on === "boolean") {
+      // 跟 `ulr:stages-set` 同一招：先改記憶體、非臨時配置才落地。
+      profile = { ...profile, deckCloudSync: on };
+      if (!ephemeral) store = updateProfile(profile.id, { deckCloudSync: on });
+      if (on) {
+        log("· 牌組雲端同步已開啟");
+        void runDeckSync();
+      } else {
+        if (deckSyncTimer !== null) clearTimeout(deckSyncTimer);
+        deckSyncTimer = null;
+        log("· 牌組雲端同步已關閉（只用這台電腦的）");
+      }
+      pushState();
+    }
+    return profile.deckCloudSync;
   });
 
   ipcMain.handle("ulr:editor-step", (_event, raw: unknown): number => {

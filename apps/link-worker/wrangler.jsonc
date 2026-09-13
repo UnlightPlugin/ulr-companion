@@ -27,6 +27,8 @@
       { "name": "QUEUES", "class_name": "MatchQueueRoom" },
       // 共享渦狀態的看板（raid-board.ts）。全世界一個實例、只放記憶體。
       { "name": "RAIDS", "class_name": "RaidBoardRoom" },
+      // 雲端牌組庫（deck-vault.ts）。一個角色一個實例，寫 storage。
+      { "name": "DECKS", "class_name": "DeckVaultRoom" },
     ],
   },
 
@@ -41,6 +43,7 @@
     { "tag": "v1", "new_sqlite_classes": ["LinkRoom"] },
     { "tag": "v2", "new_sqlite_classes": ["MatchQueueRoom"] },
     { "tag": "v3", "new_sqlite_classes": ["RaidBoardRoom"] },
+    { "tag": "v4", "new_sqlite_classes": ["DeckVaultRoom"] },
   ],
 
   // console.log 會進 Cloudflare 的觀測後台。⚠ 因此 log 一律只印截短的房號，

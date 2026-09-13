@@ -11,7 +11,8 @@
     "./protocol": "./src/protocol.ts",
     "./rooms": "./src/rooms.ts",
     "./match-queue": "./src/match-queue.ts",
-    "./raid-share": "./src/raid-share.ts"
+    "./raid-share": "./src/raid-share.ts",
+    "./deck-sync": "./src/deck-sync.ts"
   },
   "dependencies": {
     "ws": "^8.21.1"
