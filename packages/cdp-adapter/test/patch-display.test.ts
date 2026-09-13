@@ -26,10 +26,13 @@ import {
   DISPLAY_UNINSTALL_EXPRESSION,
   isDisplayFullscreenReport,
   isDisplaySettingsReport,
+  isDisplayWindowReport,
   parseDisplayStatus,
   parseWindowFillOutput,
+  planBrowserWindow,
+  sameSize,
 } from "@ulr/cdp-adapter";
-import type { DisplayState } from "@ulr/cdp-adapter";
+import type { DisplayState, DisplayWindowReport } from "@ulr/cdp-adapter";
 
 const BINDING = "__ulrCompanionReport";
 
@@ -196,6 +199,11 @@ interface Harness {
   texts: FakeText[];
   Text: ReturnType<typeof makeTextClass>;
   reports: unknown[];
+  windows: DisplayWindowReport[];
+  doc: {
+    documentElement: { style: Record<string, string> };
+    body: { style: Record<string, string> };
+  };
   timers: (() => void)[];
   /** 觸發 window 的 resize 事件（腳本靠它重算 auto 倍率）。 */
   resize: () => void;
@@ -218,6 +226,7 @@ function makeHarness(opts: { dpr?: number; withGame?: boolean } = {}): Harness {
     textures,
   };
   const reports: unknown[] = [];
+  const windows: DisplayWindowReport[] = [];
   const listeners: (() => void)[] = [];
   const doc = {
     documentElement: {
@@ -261,6 +270,7 @@ function makeHarness(opts: { dpr?: number; withGame?: boolean } = {}): Harness {
     [BINDING]: (payload: string) => {
       const parsed: unknown = JSON.parse(payload);
       if (isDisplaySettingsReport(parsed)) reports.push(parsed);
+      if (isDisplayWindowReport(parsed)) windows.push(parsed);
     },
   };
   // window.parent === window → 網頁版路徑（不去摸外殼）
@@ -274,6 +284,8 @@ function makeHarness(opts: { dpr?: number; withGame?: boolean } = {}): Harness {
     texts,
     Text,
     reports,
+    windows,
+    doc,
     timers: [],
     resize: () => {
       for (const fn of [...listeners]) fn();
@@ -494,6 +506,103 @@ describe("buildDisplayPatchScript — 生命週期", () => {
     const option = h.game.scene.keys["Option"] as FakeOption;
     expect(Object.keys(option.CATEGORY)).toEqual(["sound", "language", "profile"]);
     expect(status(h)).toMatchObject({ tab: false, mounted: false });
+  });
+});
+
+describe("buildDisplayPatchScript — 網頁版的畫面大小", () => {
+  it("zoom 套在 html 不是 canvas（rexUI 輸入框才跟得上）；清掉官方白邊；請 Node 調視窗", () => {
+    const h = makeHarness();
+    install(h, { render: "auto", size: "x1.25" });
+    expect(h.doc.documentElement.style["zoom"]).toBe("1.25");
+    expect(h.canvas.style["zoom"] ?? "").toBe("");
+    expect(h.doc.body.style).toMatchObject({
+      margin: "0px",
+      padding: "0px",
+      justifyItems: "start",
+      alignContent: "start",
+    });
+    expect(h.windows.at(-1)).toMatchObject({
+      type: "display-window",
+      width: 950,
+      height: 850,
+      innerWidth: 818,
+      innerHeight: 760,
+      availWidth: 2294,
+    });
+  });
+
+  it("上一版留在 canvas 上的 zoom 重裝時清掉（不然放大兩次）", () => {
+    const h = makeHarness();
+    h.canvas.style["zoom"] = "1.25";
+    install(h, { render: "auto", size: "x1.25" });
+    expect(h.canvas.style["zoom"]).toBe("");
+    expect(h.doc.documentElement.style["zoom"]).toBe("1.25");
+  });
+
+  it("換大小再回報一次；拆掉還原成官方外殼、不再回報", () => {
+    const h = makeHarness();
+    install(h, { render: "auto", size: "x1" });
+    expect(h.windows.at(-1)).toMatchObject({ width: 760, height: 680 });
+    run(h, buildDisplayStateExpression({ render: "auto", size: "x2" }));
+    expect(h.windows.at(-1)).toMatchObject({ width: 1520, height: 1360 });
+    const n = h.windows.length;
+    run(h, DISPLAY_UNINSTALL_EXPRESSION);
+    expect(h.doc.documentElement.style["zoom"]).toBe("");
+    expect(h.doc.body.style).toMatchObject({
+      margin: "",
+      padding: "",
+      justifyItems: "",
+      alignContent: "",
+    });
+    expect(h.windows).toHaveLength(n);
+  });
+});
+
+describe("planBrowserWindow", () => {
+  // 2026-09-13 實機：外框 1030×908、內容區 1015×780（Chrome 的分頁列＋網址列 128px）
+  const report = (w: number, h: number): DisplayWindowReport => ({
+    type: "display-window",
+    width: w,
+    height: h,
+    innerWidth: 1015,
+    innerHeight: 780,
+    availLeft: 0,
+    availTop: 0,
+    availWidth: 2294,
+    availHeight: 934,
+  });
+
+  it("外框 = 外框 + (要的內容區 − 現在的內容區)，位置不動", () => {
+    expect(
+      planBrowserWindow({ left: 264, top: 0, width: 1030, height: 908 }, report(950, 850)),
+    ).toEqual({
+      left: 264,
+      top: 0,
+      width: 965,
+      height: 978,
+    });
+  });
+
+  it("調大會跑出工作區時才往回推，推不回去就貼齊工作區左上", () => {
+    const next = planBrowserWindow(
+      { left: 1800, top: 100, width: 1030, height: 908 },
+      report(1520, 1360),
+    );
+    expect(next).toEqual({ left: 2294 - 1535, top: 0, width: 1535, height: 1488 });
+    expect(next.top).toBe(0);
+  });
+
+  it("差 1px 以內當成一樣，不重調", () => {
+    const a = { left: 1, top: 2, width: 965, height: 978 };
+    expect(sameSize(a, { ...a, width: 966 })).toBe(true);
+    expect(sameSize(a, { ...a, width: 967 })).toBe(false);
+    expect(sameSize(a, { ...a, left: 2 })).toBe(false);
+  });
+
+  it("回報欄位缺一個就不收", () => {
+    const { availHeight: _, ...partial } = report(760, 680);
+    expect(isDisplayWindowReport(partial)).toBe(false);
+    expect(isDisplayWindowReport(report(760, 680))).toBe(true);
   });
 });
 

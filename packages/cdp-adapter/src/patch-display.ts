@@ -100,8 +100,24 @@
  * ⚠ 全螢幕要使用者手勢。從下拉選單點的那一下有；插件啟動時照配置補套時沒有
  * —— 那時等玩家在遊戲裡點第一下再進去。
  *
- * 網頁版（遊戲是頂層頁面）：zoom 套在 canvas 上，全螢幕是瀏覽器原生的。
- * ⚠ 網頁版這段 2026-09-13 還沒實機驗過。
+ * ### 網頁版（遊戲是頂層頁面）
+ *
+ * 2026-09-13 實機量（Chrome 152、書籤開的分頁）：
+ *
+ * | 手段                            | 結果                                                    |
+ * | ------------------------------- | ------------------------------------------------------- |
+ * | zoom 套在 canvas                | 點擊對，但 rexUI 輸入框（DOM）不跟著放大、位置偏上偏左   |
+ * | zoom 套在 html                  | 點擊對、輸入框落在框裡 —— 跟桌面版外殼同一種做法         |
+ * | 頁面 `resizeTo`                 | ✗ 一般分頁不吃                                          |
+ * | CDP `Browser.setWindowBounds`   | ✓ 由 Node 調（回報 `display-window`）                   |
+ *
+ * 所以 zoom 套在 html；官方 `style-steam.css` 給 body 的 `padding: 50px`、
+ * 置中（`justify-items: center`）與預設 8px margin 清掉，畫面貼齊左上角、
+ * 底色黑，視窗調成剛好 760N×680N。全螢幕是瀏覽器原生的，置中跟桌面版一樣用
+ * body padding。
+ *
+ * ⚠ 量點擊時要等 Phaser 重算 `displayScale`（它自己每 500ms 看一次 canvas
+ * 大小）—— 換完 zoom 立刻送滑鼠事件會量到還沒更新的值，看起來像點擊偏了。
  *
  * ## ③ plugin 分頁
  *
@@ -136,7 +152,7 @@ import { embedJson } from "./embed.js";
 const FLAG = "__ulrDisplay";
 
 /** 腳本版本。**改動注入腳本裡任何一行就 +1**。 */
-export const DISPLAY_SCRIPT_VERSION = 5;
+export const DISPLAY_SCRIPT_VERSION = 6;
 
 export const DEFAULT_DISPLAY_POLL_MS = 500;
 
@@ -212,6 +228,45 @@ export function isDisplayFullscreenReport(value: unknown): value is DisplayFulls
     typeof o["active"] === "boolean" &&
     (o["host"] === "desktop" || o["host"] === "web")
   );
+}
+
+/**
+ * 網頁版要把瀏覽器視窗調成剛好裝下畫面。頁面自己的 `resizeTo` 對一般分頁
+ * 無效（只對 `window.open` 開的視窗有效），所以回報給 Node，由 CDP 的
+ * `Browser.setWindowBounds` 調（見 `browser-window.ts`）。
+ *
+ * 單位都是頁面的 CSS px。`innerWidth/innerHeight` 是**回報當下**的內容區，
+ * Node 拿「視窗外框 − 內容區」算出瀏覽器自己的框（分頁列、網址列）有多厚。
+ */
+export interface DisplayWindowReport {
+  type: "display-window";
+  /** 想要的內容區：760×倍率、680×倍率。 */
+  width: number;
+  height: number;
+  innerWidth: number;
+  innerHeight: number;
+  /** 工作區（DIP）。調大之後別讓視窗跑出去。 */
+  availLeft: number;
+  availTop: number;
+  availWidth: number;
+  availHeight: number;
+}
+
+export function isDisplayWindowReport(value: unknown): value is DisplayWindowReport {
+  if (typeof value !== "object" || value === null) return false;
+  const o = value as Record<string, unknown>;
+  if (o["type"] !== "display-window") return false;
+  const nums = [
+    "width",
+    "height",
+    "innerWidth",
+    "innerHeight",
+    "availLeft",
+    "availTop",
+    "availWidth",
+    "availHeight",
+  ];
+  return nums.every((k) => typeof o[k] === "number" && Number.isFinite(o[k]));
 }
 
 export interface DisplayStatus {
@@ -1099,25 +1154,71 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
     return g && g.canvas ? logicalSize(g) : { w: 760, h: 680 };
   }
 
-  /** 桌面版能放多大還塞得進工作區。網頁版不限。 */
+  /**
+   * 能放多大還塞得進工作區。網頁版的框（分頁列＋網址列）每次現量：瀏覽器沒有
+   * 桌面版那個「resize 中 outer/inner 不同步」的問題，量不到（全螢幕）就不限。
+   */
   function maxZoom(sh) {
-    if (sh.kind !== "desktop") return 99;
-    var s = screenSize(sh.win), f = frameDelta(sh.win), b = baseInner(sh);
+    var s = screenSize(sh.win), b = baseInner(sh), f;
+    if (sh.kind === "desktop") f = frameDelta(sh.win);
+    else {
+      f = { w: sh.win.outerWidth - sh.win.innerWidth, h: sh.win.outerHeight - sh.win.innerHeight };
+      if (!(f.w >= 0 && f.h > 0) || fullscreenElement(sh)) return 99;
+    }
     return Math.min((s.aw - f.w) / b.w, (s.ah - f.h) / b.h);
   }
 
+  /** 兩邊都放大整頁（桌面版是外殼頁、網頁版是遊戲頁本身），理由見檔頭的表。 */
   function zoomTarget(sh) {
-    return sh.kind === "desktop" ? sh.doc.documentElement : (window.game && window.game.canvas);
+    return sh.doc.documentElement;
   }
 
   function setZoom(sh, z) {
     var el = zoomTarget(sh);
-    if (!el) return;
+    if (!el || !el.style) return;
     var v = Math.abs(z - 1) < 0.001 ? "" : String(Math.round(z * 1000) / 1000);
     if (el.style.zoom !== v) el.style.zoom = v;
-    if (v) sh.doc.documentElement.setAttribute(DATA_ZOOM, v);
-    else sh.doc.documentElement.removeAttribute(DATA_ZOOM);
+    // 上一版網頁版把 zoom 套在 canvas 上。重裝時不清掉會放大兩次。
+    var c = window.game && window.game.canvas;
+    if (c && c.style && c.style.zoom) c.style.zoom = "";
+    if (typeof el.setAttribute === "function") {
+      if (v) el.setAttribute(DATA_ZOOM, v);
+      else el.removeAttribute(DATA_ZOOM);
+    }
     st.zoom = z;
+  }
+
+  /**
+   * 網頁版：清掉官方外殼那圈白邊，畫面貼齊左上角。拆掉時還原成官方樣式 ——
+   * 官方頁面本來沒有 inline style（實測 body 的 style 屬性是 null），所以
+   * 清成空字串就是還原，不必記原值（記在實例上的話重裝會把改過的當原值）。
+   */
+  function webFrame(sh, on) {
+    if (sh.kind !== "web") return;
+    var body = sh.doc.body, html = sh.doc.documentElement;
+    if (body && body.style) {
+      body.style.margin = on ? "0px" : "";
+      body.style.padding = on ? "0px" : "";
+      body.style.justifyItems = on ? "start" : "";
+      // ⚠ body 是 grid，兩列：Phaser 的 DOM 容器（放輸入框，margin-bottom 負 680
+      // 疊在 canvas 上）與 canvas。視窗比畫面高時 grid 會把多的高度平分給兩列，
+      // canvas 被往下推、輸入框留在原地 —— 字飄到框上面（2026-09-13 實測 ×1.2
+      // 差 14px）。多的空間要留在最底下。
+      body.style.alignContent = on ? "start" : "";
+    }
+    if (html && html.style) html.style.background = on ? "#000" : "";
+  }
+
+  /** 網頁版：請 Node 把瀏覽器視窗的內容區調成剛好 760z×680z。 */
+  function requestWebWindow(sh, z) {
+    if (sh.kind !== "web" || fullscreenElement(sh)) return;
+    var b = baseInner(sh), s = screenSize(sh.win);
+    report({
+      type: "display-window",
+      width: Math.round(b.w * z), height: Math.round(b.h * z),
+      innerWidth: sh.win.innerWidth, innerHeight: sh.win.innerHeight,
+      availLeft: s.ax, availTop: s.ay, availWidth: s.aw, availHeight: s.ah
+    });
   }
 
   /** 把視窗內容區調成 760z×680z（resizeTo 吃的是外框，所以加上邊框）。 */
@@ -1139,7 +1240,9 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
   function centerPadding(sh, z) {
     var body = sh.doc.body;
     if (!body) return;
-    if (z === null) { body.style.paddingLeft = ""; body.style.paddingTop = ""; return; }
+    // 網頁版的「沒有 padding」是 0（webFrame 蓋掉官方的 50px），清成空字串會露回來
+    var none = sh.kind === "web" ? "0px" : "";
+    if (z === null) { body.style.paddingLeft = none; body.style.paddingTop = none; return; }
     var s = logicalSize(window.game || { canvas: { width: 760, height: 680 } });
     body.style.paddingLeft = Math.max(0, Math.floor((sh.win.innerWidth / z - s.w) / 2)) + "px";
     body.style.paddingTop = Math.max(0, Math.floor((sh.win.innerHeight / z - s.h) / 2)) + "px";
@@ -1156,7 +1259,7 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
     var z = Math.min(sh.win.innerWidth / s.w, sh.win.innerHeight / s.h);
     if (!(z > 0)) return;
     setZoom(sh, z);
-    if (sh.kind === "desktop") centerPadding(sh, z);
+    centerPadding(sh, z);
   }
 
   function reportFullscreen(sh, active) {
@@ -1190,7 +1293,7 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
       try { sh.doc.exitFullscreen(); } catch (e) {}
     }
     st.fullscreen = false;
-    if (sh.kind === "desktop") centerPadding(sh, null);
+    centerPadding(sh, null);
   }
 
   function watchFullscreen(sh) {
@@ -1202,8 +1305,8 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
       var byUs = st.fsLeaving;
       st.fsLeaving = false;
       st.fullscreen = false;
-      // 退出時 Electron 自己把視窗還原（樣式與位置都是它在進去時記的）
-      if (sh.kind === "desktop") centerPadding(sh, null);
+      // 退出時 Electron／瀏覽器自己把視窗還原（樣式與位置都是它在進去時記的）
+      centerPadding(sh, null);
       reportFullscreen(sh, false);
       // 玩家按 Esc 離開：設定跟著退回上一個大小，並回報讓配置也改掉
       if (!byUs && st.state.size === "fullscreen") {
@@ -1244,6 +1347,7 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
     var sh = shell();
     st.host = sh.kind;
     watchFullscreen(sh);
+    webFrame(sh, true);
     var mode = st.state.size;
     if (mode === "fullscreen") {
       watchClick();
@@ -1259,6 +1363,10 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
     var z = zoomOf(mode);
     setZoom(sh, z);
     if (sh.kind === "desktop") resizeDesktop(sh, z);
+    // ⚠ 全螢幕剛退出時瀏覽器正在還原視窗，這時回報會量到還原中的 inner。
+    // requestWebWindow 自己擋掉仍在全螢幕的情形；Esc 離開那條路走到這裡時
+    // fullscreenElement 已經是 null，量到的是瀏覽器還原後的值。
+    requestWebWindow(sh, z);
   }
 
   function resetSize(keepWindow) {
@@ -1271,6 +1379,10 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
     if (sh.kind === "desktop") {
       centerPadding(sh, null);
       resizeDesktop(sh, 1);
+    } else {
+      // 還原官方外殼；視窗大小留給玩家（拆掉通常是插件關了，不該去動他的瀏覽器）
+      if (sh.doc.body && sh.doc.body.style) { sh.doc.body.style.paddingLeft = ""; sh.doc.body.style.paddingTop = ""; }
+      webFrame(sh, false);
     }
   }
 
@@ -1656,6 +1768,8 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
     var inputText = sc.add.text(inputX, L.sizeButtonY, "", {
       fontFamily: "font_light", fontSize: 15, resolution: 2, color: "black", fixedWidth: L.inputW - 10
     }).setOrigin(0.5, 0.5);
+    // 舊實例留下的輸入元素先清掉（見 sweepInputs）
+    sweepInputs(sc, inputX, L.sizeButtonY, null);
     var editor = sc.rexUI.add.textEdit(inputText, {
       enterClose: true, selectAll: true,
       onOpen: function () { inputBase.setFillStyle(0xffffff, 1); },
@@ -1671,6 +1785,7 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
     function openCustom() {
       st.customOpen = true;
       paintPage();
+      sweepInputs(sc, inputX, L.sizeButtonY, editor.inputText || null);
       try { editor.open(); } catch (e) {}
     }
 
@@ -1682,7 +1797,7 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
     st.page = {
       scene: sc, objects: objects, size: size, check: check,
       renderLabel: renderLabel, sizeLabel: sizeLabel,
-      inputBase: inputBase, inputText: inputText, editor: editor,
+      inputBase: inputBase, inputText: inputText, editor: editor, inputX: inputX,
       renderTip: renderTip, sizeTip: sizeTip, onRefresh: onRefresh
     };
     st.page.objects.push(renderTip, sizeTip);
@@ -1702,6 +1817,31 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
       try { if (alive(p.objects[i])) p.objects[i].destroy(); } catch (e) {}
     }
     st.page = null;
+    // rexUI 的 close 是延遲做的，那時文字物件已經拆了 —— 輸入元素會留在場景上
+    var sc = p.scene, x = p.inputX, y = L.sizeButtonY;
+    sweepInputs(sc, x, y, null);
+    setTimeout(function () { sweepInputs(sc, x, y, null); }, 300);
+  }
+
+  /**
+   * 拆掉疊在「自訂」輸入框位置上的 rexInputText（HTML 輸入元素）。
+   *
+   * ⚠ 2026-09-13 玩家回報「輸入框有不明疊字」：編輯器開著時分頁被卸載（重裝
+   * 腳本、換分頁），rexUI 延遲關閉時文字物件已經不在，它建的 rexInputText 就
+   * 留在 Option 場景上，下一次打開的新輸入元素疊在它上面。那個殘骸還掛在場景的
+   * 顯示清單裡，所以「沒有 Phaser 物件的 input」這種判斷抓不到它 —— 用位置抓：
+   * 跟我們輸入框同一點的只會是我們建的（官方簡介框在別處）。
+   */
+  function sweepInputs(sc, x, y, keep) {
+    try {
+      var list = (sc && sc.children && sc.children.list) || [];
+      for (var i = list.length - 1; i >= 0; i--) {
+        var o = list[i];
+        if (!o || o === keep || o.type !== "rexInputText") continue;
+        if (Math.abs(o.x - x) > 1 || Math.abs(o.y - y) > 1) continue;
+        try { o.destroy(); } catch (e) {}
+      }
+    } catch (e) {}
   }
 
   // =========================================================================

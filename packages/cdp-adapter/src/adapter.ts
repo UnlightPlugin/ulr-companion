@@ -57,6 +57,7 @@ import type {
   DisplaySettingsReport,
   DisplayState,
   DisplayStatus,
+  DisplayWindowReport,
 } from "./patch-display.js";
 import {
   buildDisplayPatchScript,
@@ -65,8 +66,11 @@ import {
   DISPLAY_UNINSTALL_EXPRESSION,
   isDisplayFullscreenReport,
   isDisplaySettingsReport,
+  isDisplayWindowReport,
   parseDisplayStatus,
 } from "./patch-display.js";
+import type { BrowserWindowResult, WindowBounds } from "./browser-window.js";
+import { planBrowserWindow, sameSize } from "./browser-window.js";
 import type { WindowFillResult } from "./window-fill.js";
 import { fillGameWindow } from "./window-fill.js";
 import type { NavReport, NavStatus } from "./patch-nav.js";
@@ -332,6 +336,7 @@ export class CdpAdapter {
   #costToggleHandlers = new Set<(report: CostToggleReport) => void>();
   #displayHandlers = new Set<(report: DisplaySettingsReport) => void>();
   #displayFullscreenHandlers = new Set<(report: DisplayFullscreenReport) => void>();
+  #displayWindowHandlers = new Set<(report: DisplayWindowReport) => void>();
   #navHandlers = new Set<(report: NavReport) => void>();
   #raidSurrenderHandlers = new Set<(report: RaidSurrenderReport) => void>();
   #assetRepairHandlers = new Set<(report: AssetRepairReport) => void>();
@@ -1123,6 +1128,58 @@ export class CdpAdapter {
     return () => this.#displayFullscreenHandlers.delete(handler);
   }
 
+  /** 網頁版要把瀏覽器視窗調成剛好裝下畫面（交給 {@link resizeBrowserWindow}）。 */
+  onDisplayWindow(handler: (report: DisplayWindowReport) => void): () => void {
+    this.#displayWindowHandlers.add(handler);
+    return () => this.#displayWindowHandlers.delete(handler);
+  }
+
+  /**
+   * 照頁面的回報調整遊戲分頁所在的瀏覽器視窗。理由與算法見 `browser-window.ts`。
+   * 全螢幕中不動；最大化／最小化先設回一般再調。
+   */
+  async resizeBrowserWindow(report: DisplayWindowReport): Promise<BrowserWindowResult> {
+    const client = this.#client;
+    const session = this.#session;
+    if (client === null || session === null) throw new NotConnectedError();
+    const win = await client.send<{ windowId?: unknown; bounds?: Partial<WindowBounds> }>(
+      "Browser.getWindowForTarget",
+      { targetId: session.targetId },
+    );
+    if (typeof win.windowId !== "number" || win.bounds === undefined) {
+      return { ok: false, bounds: null, reason: "查不到遊戲分頁所在的視窗" };
+    }
+    const windowId = win.windowId;
+    let bounds = win.bounds;
+    if (bounds.windowState === "fullscreen") {
+      return { ok: false, bounds: null, reason: "全螢幕中，不調視窗" };
+    }
+    if (bounds.windowState === "maximized" || bounds.windowState === "minimized") {
+      await client.send("Browser.setWindowBounds", { windowId, bounds: { windowState: "normal" } });
+      const again = await client.send<{ bounds?: Partial<WindowBounds> }>(
+        "Browser.getWindowBounds",
+        { windowId },
+      );
+      if (again.bounds === undefined)
+        return { ok: false, bounds: null, reason: "還原視窗後讀不到大小" };
+      bounds = again.bounds;
+    }
+    const { left, top, width, height } = bounds;
+    if (
+      typeof left !== "number" ||
+      typeof top !== "number" ||
+      typeof width !== "number" ||
+      typeof height !== "number"
+    ) {
+      return { ok: false, bounds: null, reason: "視窗大小讀不懂" };
+    }
+    const current = { left, top, width, height };
+    const next = planBrowserWindow(current, report);
+    if (sameSize(current, next)) return { ok: true, bounds: current, reason: null };
+    await client.send("Browser.setWindowBounds", { windowId, bounds: next });
+    return { ok: true, bounds: next, reason: null };
+  }
+
   /** 客戶端主程序的 pid（`SystemInfo.getProcessInfo`，browser 層級）。 */
   async browserProcessId(): Promise<number | null> {
     const client = this.#client;
@@ -1634,6 +1691,10 @@ export class CdpAdapter {
     }
     if (isDisplayFullscreenReport(parsed)) {
       dispatch(this.#displayFullscreenHandlers, parsed);
+      return;
+    }
+    if (isDisplayWindowReport(parsed)) {
+      dispatch(this.#displayWindowHandlers, parsed);
       return;
     }
     if (isNavReport(parsed)) {

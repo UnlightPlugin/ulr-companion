@@ -79,6 +79,7 @@ import type {
   DisplaySettingsReport,
   DisplayState,
   DisplayStatus,
+  DisplayWindowReport,
   EditDeckRead,
   GateRoom,
   HiddenStageStatus,
@@ -1202,6 +1203,21 @@ export class ArbiterEngine {
     }
   }
 
+  /**
+   * 網頁版換了畫面大小（或剛裝上）：把瀏覽器視窗調成剛好裝下畫面。頁面自己的
+   * `resizeTo` 對一般分頁無效，見 `browser-window.ts`。
+   */
+  async #onDisplayWindow(report: DisplayWindowReport): Promise<void> {
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    try {
+      const r = await adapter.resizeBrowserWindow(report);
+      if (!r.ok) this.#log(`· 瀏覽器視窗沒調：${r.reason ?? "原因不明"}`);
+    } catch (err) {
+      this.#log(`✗ 瀏覽器視窗調不動：${describe(err)}`);
+    }
+  }
+
   #onDisplaySettings(report: DisplaySettingsReport): void {
     this.#display = { render: report.render, size: report.size };
     for (const h of this.#displayHandlers) {
@@ -2283,6 +2299,7 @@ export class ArbiterEngine {
         // 畫面設定（解析度／畫面大小）＋ Option 的 plugin 分頁：腳本自己等 game 建好。
         adapter.onDisplaySettings((r) => this.#onDisplaySettings(r));
         adapter.onDisplayFullscreen((r) => void this.#onDisplayFullscreen(r));
+        adapter.onDisplayWindow((r) => void this.#onDisplayWindow(r));
         await this.#syncDisplay();
         // 牌組庫的介面同理（也是輪詢等玩家進 Edit 畫面）。⚠ 這時候多半還沒有
         // 狀態可以裝 —— 托盤要先讀到帳號指紋才知道載哪一份庫，而那要等遊戲

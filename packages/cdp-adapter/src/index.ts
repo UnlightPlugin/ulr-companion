@@ -113,6 +113,7 @@ export {
   DISPLAY_UNINSTALL_EXPRESSION,
   isDisplayFullscreenReport,
   isDisplaySettingsReport,
+  isDisplayWindowReport,
   isRenderMode,
   isSizeMode,
   MAX_RENDER_SCALE,
@@ -124,10 +125,13 @@ export {
 } from "./patch-display.js";
 export { fillGameWindow, parseWindowFillOutput } from "./window-fill.js";
 export type { WindowFillResult } from "./window-fill.js";
+export { planBrowserWindow, sameSize } from "./browser-window.js";
+export type { BrowserWindowResult, WindowBounds } from "./browser-window.js";
 export type {
   DisplayFullscreenReport,
   DisplayPatchOptions,
   DisplaySettingsReport,
+  DisplayWindowReport,
   DisplayState,
   DisplayStatus,
   RenderMode,
