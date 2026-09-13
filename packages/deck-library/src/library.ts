@@ -246,13 +246,18 @@ export function pickDeckForBoss(library: DeckLibrary, boss: RaidBoss): DeckEntry
  * 搬動一副到第 `toIndex` 個位置（規格 §10 的長按拖曳）。
  *
  * `toIndex` 是**搬完之後**它該在的位置，會夾在 `0..長度-1`。找不到 id 就原樣
- * 回傳。
+ * 回傳；位置沒變也原樣回傳。
+ *
+ * ⚠ 被搬的那副 `updatedAt` 會往前推到 `now`。順序本身沒有時間戳，雲端同步是看
+ * 「這一房最近誰動過」決定順序照誰的（`merge.ts`）—— 不推的話拖曳排序永遠傳
+ * 不到另一台電腦。hash 不含時間，所以這不會讓它被當成「內容改過」。
  */
 export function moveDeck(
   library: DeckLibrary,
   room: RoomKind,
   id: string,
   toIndex: number,
+  now: Date = new Date(),
 ): DeckLibrary {
   const current = [...(library.collections[room] ?? [])];
   const from = current.findIndex((d) => d.id === id);
@@ -263,7 +268,8 @@ export function moveDeck(
 
   current.splice(from, 1);
   const clamped = Math.max(0, Math.min(toIndex, current.length));
-  current.splice(clamped, 0, moved);
+  if (clamped === from) return library;
+  current.splice(clamped, 0, { ...moved, updatedAt: now.toISOString() });
   return replaceRoom(library, room, current);
 }
 

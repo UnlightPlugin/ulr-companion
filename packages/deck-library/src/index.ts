@@ -73,6 +73,15 @@ export { isSyncNeeded, planSync, summarize } from "./sync.js";
 export type { DeckRef, DeckStamp, LibrarySummary, SyncPlan } from "./sync.js";
 
 export {
+  libraryFromSyncDocument,
+  mergeLibraries,
+  parseSyncDocument,
+  syncDocumentText,
+  toSyncDocument,
+} from "./merge.js";
+export type { MergeResult, SyncDocument } from "./merge.js";
+
+export {
   deckContentFromFlat,
   deckContentToPayload,
   isAccountFingerprint,
