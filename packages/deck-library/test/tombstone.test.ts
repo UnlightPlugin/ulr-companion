@@ -5,6 +5,7 @@ import {
   decksForBoss,
   listDecks,
   listTombstones,
+  pickDeckForBoss,
   pruneTombstones,
   removeDeck,
   setDeckBosses,
@@ -172,6 +173,29 @@ describe("渦 BOSS 標籤（規格 §12）", () => {
     expect(decksForBoss(lib, "fish").map((d) => d.name)).toEqual(["甲", "丙"]);
     expect(decksForBoss(lib, "sea").map((d) => d.name)).toEqual(["乙"]);
     expect(decksForBoss(lib, "turtle")).toEqual([]);
+  });
+
+  it("自動切牌組挑標籤最少的，一樣多取排在前面的；沒有就是 null", () => {
+    let lib = emptyLibrary("4858c81f");
+    lib = addDeck(lib, "raid", { name: "龜海", bosses: ["sea", "turtle"], now: NOW }).library;
+    lib = addDeck(lib, "raid", { name: "龜甲", bosses: ["turtle"], now: NOW }).library;
+    lib = addDeck(lib, "raid", { name: "龜乙", bosses: ["turtle"], now: NOW }).library;
+    lib = addDeck(lib, "raid", {
+      name: "魚蟲狗",
+      bosses: ["fish", "bug", "dog"],
+      now: NOW,
+    }).library;
+
+    expect(pickDeckForBoss(lib, "turtle")?.name).toBe("龜甲");
+    expect(pickDeckForBoss(lib, "sea")?.name).toBe("龜海");
+    expect(pickDeckForBoss(lib, "dog")?.name).toBe("魚蟲狗");
+    // 沒有任何一副掛這個標籤 → null，呼叫端據此「不換」
+    lib = addDeck(emptyLibrary("4858c81f"), "raid", {
+      name: "海",
+      bosses: ["sea"],
+      now: NOW,
+    }).library;
+    expect(pickDeckForBoss(lib, "turtle")).toBeNull();
   });
 
   it("存檔往返之後標籤還在，而且順序正規化過", () => {

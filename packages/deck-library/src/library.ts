@@ -219,11 +219,27 @@ export function setDeckBosses(
 /**
  * 這一房裡掛了某個 BOSS 標籤的牌組，照現在的排列順序。
  *
- * 「點了 BOSS 自動切牌組」就是拿第一副 —— 玩家用拖曳排序決定優先順序
- * （規格 §10），所以這裡**不要**自作聰明排序。
+ * 這裡**不排序**，順序就是玩家拖曳排的（規格 §10）。「點了 BOSS 自動切牌組」
+ * 另外有挑選規則，見 {@link pickDeckForBoss}。
  */
 export function decksForBoss(library: DeckLibrary, boss: RaidBoss): DeckEntry[] {
   return (library.collections.raid ?? []).filter((d) => d.bosses.includes(boss));
+}
+
+/**
+ * 「點了 BOSS 自動切牌組」要切到哪一副。沒有任何一副掛這個標籤就回 `null`
+ * —— 那時候**不換**（玩家 2026-09-13 定）。
+ *
+ * 規則（玩家 2026-09-13 定）：**標籤最少的優先，一樣多就取排在前面的。**
+ * 標籤少代表這副是專打這隻的，「龜」比「龜海魚」更像是為這隻組的牌。
+ */
+export function pickDeckForBoss(library: DeckLibrary, boss: RaidBoss): DeckEntry | null {
+  let best: DeckEntry | null = null;
+  for (const d of decksForBoss(library, boss)) {
+    // 嚴格小於：一樣多時留著先看到的（排在前面的）。
+    if (best === null || d.bosses.length < best.bosses.length) best = d;
+  }
+  return best;
 }
 
 /**

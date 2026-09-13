@@ -15,6 +15,7 @@ export {
   EVENT_SLOTS_PER_CHARA,
   RAID_BOSSES,
   RAID_BOSS_LABELS,
+  ROOM_COST_DISPLAY,
   ROOM_KINDS,
   ROOM_LABELS,
   emptyDeckContent,
@@ -28,6 +29,7 @@ export type {
   DeckEntry,
   DeckLibrary,
   RaidBoss,
+  RoomCostDisplay,
   RoomKind,
   Tombstone,
 } from "./types.js";
@@ -54,6 +56,7 @@ export {
   listTombstones,
   makeDeckId,
   moveDeck,
+  pickDeckForBoss,
   pruneTombstones,
   removeDeck,
   renameDeck,

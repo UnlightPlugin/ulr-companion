@@ -170,8 +170,14 @@ export interface DeckEntry {
  */
 export type RoomKind = "raid" | "alexandria" | "quest" | "dietherm";
 
-/** 四種房型的固定順序 —— 選單與「房間」鈕的循環都照這個順序。 */
-export const ROOM_KINDS: readonly RoomKind[] = ["raid", "alexandria", "quest", "dietherm"] as const;
+/**
+ * 四種房型的固定順序 —— 「房間」下拉選單由上而下就是這個順序。
+ *
+ * 2026-09-12 玩家定的：任務 → 渦 → 亞歷山卓城 → 迪特赫姆（先 PVE 再 PVP，
+ * 最常用的迪城在最下面、離牌組列最近）。⚠ 存檔不靠這個順序（`collections`
+ * 是按房名的物件），改順序不影響舊存檔。
+ */
+export const ROOM_KINDS: readonly RoomKind[] = ["quest", "raid", "alexandria", "dietherm"] as const;
 
 /** 房型的顯示名稱（繁中）。 */
 export const ROOM_LABELS: Record<RoomKind, string> = {
@@ -179,6 +185,27 @@ export const ROOM_LABELS: Record<RoomKind, string> = {
   alexandria: "亞歷山卓城",
   quest: "任務",
   dietherm: "迪特赫姆",
+};
+
+/**
+ * 牌組選單裡每一副旁邊要畫哪一種總 COST。
+ *
+ * ```
+ *   quest / raid   none      PVE。沒有 COST 上限，畫一個數字只是噪音。
+ *   alexandria     official  頻道 1（ranked）用的是**官方**規則。
+ *   dietherm       custom    頻道 2（duel）是插件約戰的地方，用的是**自訂**規則。
+ * ```
+ *
+ * 2026-09-12 玩家定的。原本四房都畫「官方 N 自訂 N」兩個數字，而其中一半
+ * 在那一房根本用不到 —— 玩家要對的永遠只有「這一房用的那一種」。
+ */
+export type RoomCostDisplay = "none" | "official" | "custom";
+
+export const ROOM_COST_DISPLAY: Record<RoomKind, RoomCostDisplay> = {
+  quest: "none",
+  raid: "none",
+  alexandria: "official",
+  dietherm: "custom",
 };
 
 /**
