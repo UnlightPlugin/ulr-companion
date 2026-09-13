@@ -59,19 +59,19 @@ export interface SignedRelease {
  * 就當作「這次沒更新」然後安靜結束 —— 那正是我們要的行為。回一份 version 是
  * 空字串的清單反而會讓它每小時判定一次「有新版」。
  */
-// ⚠ **1.1.0 的 url 還是 .exe，即使這一版的主力下載是 zip。** 1.0.0 的客戶端
-// 只認得 exe（它會把 zip 下載回來、驗完雜湊，然後 `spawn(zip, ["/S"])` 失敗），
-// 而那批人正是要靠這份清單升上來的人。zip 給新玩家從 Release 頁自己抓。
-// 等大家都在 1.1.0 以上之後，下一版才可以只發 zip。詳見 docs/release.md §2。
+// ⚠ **2.0.0 起 url 指 .zip。** 1.1.0 起的客戶端照副檔名選路，兩種都吃；而指 exe
+// 的話，解 zip 安裝的人會被 NSIS 裝到 %LOCALAPPDATA% 另一份、原本那份永遠停在舊版。
+// 代價是還停在 1.0.0 的人（只認得 exe）收不到這一版、要手動下載一次 ——
+// Release notes 有寫。詳見 docs/release.md §2。
 export const CURRENT_RELEASE: SignedRelease | null = {
   manifest: {
-    version: "1.1.0",
-    url: "https://github.com/UnlightPlugin/ulr-companion/releases/download/v1.1.0/ULR-Companion-Setup-1.1.0.exe",
-    sha256: "3fae8df48ddd5c42a8440909cc27ea0fd4a4d0ebb623ec5a4ea8a288eb7941a8",
-    notes: "迪城大廳多一顆快速比賽、裝上就有預設 COST 表、戰鬥結束後不再留著握手",
+    version: "2.0.0",
+    url: "https://github.com/UnlightPlugin/ulr-companion/releases/download/v2.0.0/ULR-Companion-2.0.0-win.zip",
+    sha256: "e12e7b69c60cdc0429c8569f5f5f8d8a878ccccaf41ac747c5f409a906432892",
+    notes: "牌組庫與雲端同步、渦的獎勵標記與結算通知、畫面設定、Chrome／Edge 網頁版",
   },
   signature:
-    "WpsowY7hNoCAPD1oeVAS4kYhY0kc9WInUktmJre4sa9WOAGtG0tZ238POiq38TRc91UdsHWD2S2R4dA2x1CbAg==",
+    "nluXDZehbblBkBmXsdbcJbSaX36Y/ZCV0vyAXGBIavloJR+gz7+UYBESpadzsTcXDzzvX2k5HJAuJgPEsWXBDw==",
 };
 
 // 發版時把上面那行換成 `npm run release:sign` 印出來的那一段（形狀如下，
