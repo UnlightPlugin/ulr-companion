@@ -136,7 +136,7 @@ import { embedJson } from "./embed.js";
 const FLAG = "__ulrDisplay";
 
 /** 腳本版本。**改動注入腳本裡任何一行就 +1**。 */
-export const DISPLAY_SCRIPT_VERSION = 1;
+export const DISPLAY_SCRIPT_VERSION = 2;
 
 export const DEFAULT_DISPLAY_POLL_MS = 500;
 
@@ -152,7 +152,10 @@ export type RenderMode = (typeof RENDER_MODES)[number];
 
 /** 下拉選單列出來的倍率。自訂輸入的倍率也是 `x<數字>` 這個形狀。 */
 export const SIZE_PRESETS = ["x1", "x1.25", "x1.5", "x1.75", "x2"] as const;
-/** 畫面放大倍率的上下限（自訂輸入夾在這裡面；桌面版另外夾在塞得進工作區）。 */
+/**
+ * 畫面放大倍率的上下限。自訂輸入**只**夾在這裡面 —— 不夾工作區（玩家 2026-09-13
+ * 定）；桌面版塞不進工作區的部分會被 Chromium 切掉，下拉清單則只列塞得進的。
+ */
 export const MIN_SIZE_ZOOM = 1;
 export const MAX_SIZE_ZOOM = 4;
 export type SizeMode = `x${number}` | "fullscreen";
@@ -682,7 +685,11 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
     var original = src.__ulrRes0;
     if (scale <= 1 && original === undefined) return;
     var want = 0;
-    if (scale > 1) {
+    // ⚠ 被 setCrop 過的字不碰。WebGL 畫 crop 過的 Text 是拿 crop 矩形（畫布像素，
+    // 已乘 resolution）當四邊形大小，resolution 2 就是兩倍大的字 —— 物品欄「效果」
+    // 那格是 rexUI textArea，內文靠 crop 捲動，2026-09-13 回報「說明文字變太大」
+    // 就是它。這種字補了也白補，交回原值。
+    if (scale > 1 && !src.isCropped) {
       var ws = Math.max(Math.abs(src.scaleX || 0), Math.abs(src.scaleY || 0));
       if (parentMatrix) ws *= matrixScale(parentMatrix);
       if (camera && camera.zoom) ws *= camera.zoom;
@@ -906,10 +913,13 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
     var win = sh.win, f = frameDelta(win), b = baseInner(sh);
     var w = Math.round(b.w * z) + f.w, h = Math.round(b.h * z) + f.h;
     win.resizeTo(w, h);
-    // 放大後別讓視窗跑出工作區
+    // 放大後別讓視窗跑出工作區。⚠ 用實際拿到的尺寸算，不用要求的 —— 要的比
+    // 工作區大時 Chromium 會夾小，照要求的算會把視窗推到負座標。
     var s = screenSize(win);
-    var x = Math.max(s.ax, Math.min(win.screenX, s.ax + s.aw - w));
-    var y = Math.max(s.ay, Math.min(win.screenY, s.ay + s.ah - h));
+    var ow = win.outerWidth > 0 ? Math.min(w, win.outerWidth) : w;
+    var oh = win.outerHeight > 0 ? Math.min(h, win.outerHeight) : h;
+    var x = Math.max(s.ax, Math.min(win.screenX, s.ax + s.aw - ow));
+    var y = Math.max(s.ay, Math.min(win.screenY, s.ay + s.ah - oh));
     if (x !== win.screenX || y !== win.screenY) win.moveTo(x, y);
   }
 
@@ -1031,7 +1041,10 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
     }
     st.lastSize = mode;
     if (st.fullscreen || fullscreenElement(sh)) leaveFullscreen(sh);
-    var z = Math.min(zoomOf(mode), Math.max(1, maxZoom(sh)));
+    // ⚠ 不夾在工作區裡（玩家 2026-09-13 定：「上限請設 ×4」）。1440 高的螢幕扣掉
+    // 工作列剛好 ×2，原本夾了之後打 2.1 也只會得到 2。超過的部分 Chromium 仍會把
+    // 視窗夾在工作區、畫面被切掉 —— 那是玩家自己選的；下拉清單照樣只列塞得進的。
+    var z = zoomOf(mode);
     setZoom(sh, z);
     if (sh.kind === "desktop") resizeDesktop(sh, z);
   }
@@ -1334,7 +1347,8 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
   function parseZoomInput(text) {
     var n = parseFloat(String(text).replace(/[^0-9.]/g, ""));
     if (!(n > 0)) return null;
-    n = Math.max(CFG.minZoom, Math.min(CFG.maxZoom, maxZoom(shell()), n));
+    // 只夾 1〜4，不夾工作區（理由見 applySize）。
+    n = Math.max(CFG.minZoom, Math.min(CFG.maxZoom, n));
     n = Math.round(n * 100) / 100;
     return "x" + String(n);
   }

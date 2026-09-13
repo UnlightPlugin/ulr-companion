@@ -113,7 +113,7 @@ export const DEFAULT_LOBBY_POLL_MS = 500;
  * ⚠ 這支跟 `patch-stage` 一樣是「先拆再裝」，所以不靠版本號決定要不要重裝；
  * 版本號是回報用的 —— 玩家回報怪狀況時一眼看得出他頁面上跑的是哪一版。
  */
-export const LOBBY_SCRIPT_VERSION = 4;
+export const LOBBY_SCRIPT_VERSION = 5;
 
 const FLAG = "__ulrLobby";
 
@@ -717,9 +717,35 @@ export function buildLobbyPatchScript(options: LobbyPatchOptions): string {
   }
 
   /** 一輪檢查：該掛就掛、該拆就拆。**回 true = 現在掛著**。 */
+  /**
+   * ⚠ 官方 bug 的墊片：Match 的物品欄鈕按下去會炸。
+   *
+   * 2026-09-13 從跑著的客戶端讀的 Match.create()：
+   *
+   *   btn_item.on("pointerdown", () => { friend_btn.disableInteractive();
+   *     btn_item.disableInteractive(); this.rule_btn.disableInteractive(); tweens.add(…) })
+   *
+   * 而 rule_btn 只在欄位宣告裡出現，35 支 bundle 沒有任何地方指定它 —— 永遠是
+   * undefined。所以第三句一定丟 TypeError：兩顆鈕已經 disable 了、視窗的 tween
+   * 沒加上，好友與物品欄從此都按不動（玩家回報「對戰房內右下方好友、物品欄打
+   * 不開」）。任務房／渦房沒這一行，只有 Match 有。
+   *
+   * 給它一個什麼都不做的假鈕就好。關窗那邊還會對 create 時抓的
+   * [friend_btn, btn_item, undefined] 逐一 setInteractive()，前兩顆先恢復、第三
+   * 個 undefined 才丟 —— 那個閉包碰不到，留一句 console 錯誤，鈕已經能按了。
+   */
+  function shimRuleButton(sc) {
+    if (sc.rule_btn !== undefined) return;
+    var stub = { __ulrStub: true };
+    stub.disableInteractive = function () { return stub; };
+    stub.setInteractive = function () { return stub; };
+    sc.rule_btn = stub;
+  }
+
   function sync(st) {
     var sc = matchScene();
     if (sc === null) { st.reason = "還沒載到對戰大廳"; return false; }
+    try { shimRuleButton(sc); } catch (e) {}
 
     var panel = sc.channel_panel;
     var ok = !!panel && panel.scene !== undefined && duelChannel(sc);
@@ -902,6 +928,12 @@ export const LOBBY_UNINSTALL_EXPRESSION = `(function () {
     }
     // ⚠ 等待視窗的兩個計時器要收 —— 它們抓著剛剛被 destroy 的 text 物件。
     try { if (st.wait) { st.wait.counter.remove(); st.wait.wave.remove(); } } catch (e) {}
+    // 官方 rule_btn 那個墊片是我們放的才拿掉（見 shimRuleButton）。
+    try {
+      var keys = window.game && window.game.scene && window.game.scene.keys;
+      var sc = keys && keys.Match;
+      if (sc && sc.rule_btn && sc.rule_btn.__ulrStub === true) sc.rule_btn = undefined;
+    } catch (e) {}
     delete window.${FLAG};
     return "uninstalled";
   } catch (e) { return "error: " + String((e && e.message) || e); }

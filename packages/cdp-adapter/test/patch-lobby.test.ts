@@ -662,6 +662,34 @@ describe("大廳快速比賽補丁", () => {
     expect(status.installed).toBe(false);
     expect(status.buttonReady).toBe(false);
   });
+
+  it("⚠ 官方 bug 的墊片：Match 沒有 rule_btn，物品欄鈕的 handler 會炸 —— 補一顆假的", () => {
+    // 還沒進頻道也要補：那顆物品欄鈕在頻道選單那一頁就按得到。
+    const game = makeGame();
+    expect(game.scene["rule_btn"]).toBeUndefined();
+    install(game);
+    const stub = game.scene["rule_btn"] as {
+      disableInteractive(): unknown;
+      setInteractive(): unknown;
+    };
+    expect(typeof stub.disableInteractive).toBe("function");
+    expect(typeof stub.setInteractive).toBe("function");
+    // 遊戲自己那三句就是這樣呼叫的，不能丟
+    expect(() => stub.disableInteractive()).not.toThrow();
+    expect(() => stub.setInteractive()).not.toThrow();
+
+    // 遊戲哪天真的補上了就不動它
+    const real = { disableInteractive: () => "real" };
+    game.scene["rule_btn"] = real;
+    tick(game);
+    expect(game.scene["rule_btn"]).toBe(real);
+
+    // 拆掉時只收自己放的那顆
+    game.scene["rule_btn"] = undefined;
+    tick(game);
+    expect(run(game, LOBBY_UNINSTALL_EXPRESSION)).toBe("uninstalled");
+    expect(game.scene["rule_btn"]).toBeUndefined();
+  });
 });
 
 /**
