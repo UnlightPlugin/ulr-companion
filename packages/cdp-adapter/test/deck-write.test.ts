@@ -1,3 +1,4 @@
+import vm from "node:vm";
 import { describe, expect, it } from "vitest";
 import {
   DECK_READ_EXPRESSION,
@@ -171,6 +172,116 @@ describe("讀取用的表達式", () => {
   });
 });
 
+describe("⚠⚠ 快取的 game 連線要還連著才重用（2026-09-13）", () => {
+  // 實機：遊戲斷線一次之後，__ulrDeckSock 自己重連、WebSocket 開著，卻卡在
+  // REGISTERING 永遠等不到 __connected —— 每次 fetch 都逾時，換牌組全部被
+  // 「讀不到庫存」擋下來。
+
+  /** 假的 WSClient：記錄自己被建了幾條、有沒有被拆，事件照 on/emit 走。 */
+  class FakeSock {
+    static made: FakeSock[] = [];
+    disconnected = false;
+    listeners: Record<string, (() => void)[]> = {};
+    constructor(public url: string) {
+      FakeSock.made.push(this);
+    }
+    on(ev: string, fn: () => void): void {
+      (this.listeners[ev] ??= []).push(fn);
+    }
+    fire(ev: string): void {
+      for (const fn of this.listeners[ev] ?? []) fn();
+    }
+    disconnect(): void {
+      this.disconnected = true;
+    }
+    fetch(): Promise<unknown> {
+      return Promise.resolve({});
+    }
+  }
+
+  function sandboxWith(win: Record<string, unknown>): Record<string, unknown> {
+    FakeSock.made = [];
+    const host = { socket: new FakeSock("game-scene"), id: "pid" };
+    FakeSock.made = [];
+    const sandbox = {
+      window: { game: { scene: { keys: { Raid: host } } }, ...win },
+      UL_CONFIG: { domains: { game: { urls: ["https://x"], ports: [11002] } } },
+    };
+    vm.createContext(sandbox);
+    return sandbox;
+  }
+
+  async function readInventory(sandbox: Record<string, unknown>): Promise<string> {
+    return (await vm.runInContext(INVENTORY_READ_EXPRESSION, sandbox)) as string;
+  }
+
+  const win = (sb: Record<string, unknown>) => sb["window"] as Record<string, unknown>;
+
+  it("舊版留下、沒有連線記號的那一條 → 拆掉換新的", async () => {
+    const stuck = new FakeSock("stuck");
+    const sb = sandboxWith({ __ulrDeckSock: stuck });
+    const out = await readInventory(sb);
+    expect(JSON.parse(out).error).toBeUndefined();
+    expect(stuck.disconnected).toBe(true);
+    expect(FakeSock.made).toHaveLength(1);
+    expect(win(sb)["__ulrDeckSock"]).toBe(FakeSock.made[0]);
+  });
+
+  it("連著的那一條照常重用，不會每次都開新的", async () => {
+    const sb = sandboxWith({});
+    await readInventory(sb);
+    const first = FakeSock.made[0]!;
+    first.fire("connect");
+    // 就算建立時間已經很久以前，連著就是連著
+    win(sb)["__ulrDeckSockAt"] = 0;
+    await readInventory(sb);
+    expect(FakeSock.made).toHaveLength(1);
+    expect(first.disconnected).toBe(false);
+  });
+
+  it("剛開、還在握手的那一條也重用 —— 連按兩下不能開出兩條", async () => {
+    const sb = sandboxWith({});
+    await readInventory(sb);
+    await readInventory(sb);
+    expect(FakeSock.made).toHaveLength(1);
+  });
+
+  it("斷線後自己重連卻一直沒連上 → 過了寬限時間就換新的", async () => {
+    const sb = sandboxWith({});
+    await readInventory(sb);
+    const first = FakeSock.made[0]!;
+    first.fire("connect");
+    first.fire("close");
+    // 剛斷：還在寬限內，給 WSClient 自己重連的機會
+    await readInventory(sb);
+    expect(FakeSock.made).toHaveLength(1);
+    // 卡住很久了
+    win(sb)["__ulrDeckSockAt"] = 0;
+    await readInventory(sb);
+    expect(first.disconnected).toBe(true);
+    expect(FakeSock.made).toHaveLength(2);
+  });
+
+  it("被換掉的舊連線晚到的 close／connect，不能動到新那條的記號", async () => {
+    const sb = sandboxWith({});
+    await readInventory(sb);
+    const first = FakeSock.made[0]!;
+    first.fire("connect");
+    first.fire("close");
+    win(sb)["__ulrDeckSockAt"] = 0;
+    await readInventory(sb);
+    const second = FakeSock.made[1]!;
+    second.fire("connect");
+    // disconnect() 之後舊的那條才把事件發出來
+    first.fire("close");
+    first.fire("connect");
+    expect(win(sb)["__ulrDeckSockLive"]).toBe(second);
+    win(sb)["__ulrDeckSockAt"] = 0;
+    await readInventory(sb);
+    expect(FakeSock.made).toHaveLength(2);
+  });
+});
+
 describe("讀編輯中的那一副（客戶端記憶體）", () => {
   it("畫面沒開著回 null —— 那時候伺服器才是真相", () => {
     expect(parseEditDeck(JSON.stringify({ active: false }))).toBeNull();
@@ -298,5 +409,216 @@ describe("換牌組的快路徑（只動記憶體）", () => {
 
   it("deck_now 釘 1 —— 牌組庫只用 Deck1 這個工作槽", () => {
     expect(buildEditDeckWriteExpression(deck)).toContain("sc.deck_now = 1");
+  });
+});
+
+/**
+ * 空牌組的快路徑（2026-09-12）—— **真的跑起來**驗，不比字串。
+ *
+ * 玩家在 Edit 選了一副空的，要幫他按 reset：寫進記憶體、重畫。房間場景不收，
+ * 否則畫面三格空的、開戰卻用伺服器那副舊的。
+ */
+describe("空牌組只有 Edit 收（等於幫玩家按 reset）", () => {
+  /** 一個「有在畫牌組」的假場景：deck1 有東西、遊戲自己的重畫函式都在。 */
+  function sceneOf(active: boolean) {
+    const calls: string[] = [];
+    return {
+      calls,
+      scene: {
+        scene: { isActive: () => active },
+        deck_now: 2,
+        deck1: payload(684),
+        edit_reflesh: () => calls.push("edit_reflesh"),
+        deck_card: () => calls.push("deck_card"),
+      },
+    };
+  }
+
+  function run(keys: Record<string, unknown>, deck: DeckPayload): string {
+    const sandbox = { window: { game: { scene: { keys } } } };
+    vm.createContext(sandbox);
+    return vm.runInContext(buildEditDeckWriteExpression(deck), sandbox) as string;
+  }
+
+  it("Edit 開著：空的照寫、照重畫，回 ok —— 跟 reset 鈕一樣", () => {
+    const edit = sceneOf(true);
+    expect(run({ Edit: edit.scene }, payload(null))).toBe("ok");
+    expect(edit.scene.deck1.charaIndex).toEqual([null, null, null]);
+    expect(edit.scene.deck_now).toBe(1);
+    expect(edit.calls).toEqual(["edit_reflesh"]);
+  });
+
+  it("⚠ 房間場景：空的不寫、不重畫，回 empty-room", () => {
+    const quest = sceneOf(true);
+    expect(run({ Edit: sceneOf(false).scene, Quest: quest.scene }, payload(null))).toBe(
+      "empty-room",
+    );
+    // 記憶體要原封不動 —— 寫進去的話畫面會變成三格空的
+    expect(quest.scene.deck1.charaIndex).toEqual([684, null, null]);
+    expect(quest.scene.deck_now).toBe(2);
+    expect(quest.calls).toEqual([]);
+  });
+
+  it("房間場景：有牌的照原本走，回 ok-room", () => {
+    const quest = sceneOf(true);
+    expect(run({ Quest: quest.scene }, payload(90))).toBe("ok-room");
+    expect(quest.scene.deck1.charaIndex).toEqual([90, null, null]);
+    expect(quest.calls).toEqual(["deck_card"]);
+  });
+
+  it("哪個畫面都沒開：回 not-active", () => {
+    expect(run({ Edit: sceneOf(false).scene }, payload(null))).toBe("not-active");
+  });
+});
+
+/**
+ * 房間場景換牌後要把 COST 算對（2026-09-12 亞城回報）。
+ *
+ * 大廳的 `cost:NN` 讀的是 `deck1.cost`，遊戲不重算；payload 帶的 cost 一律 0，
+ * 所以換完會叫 `__ulrDeckEdit.costFor()` 把官方 COST 補進去。
+ */
+describe("房間換牌後補上正確的官方 COST", () => {
+  /** 一個房間場景 + 記錄 change_deck 時看到的 cost。 */
+  function roomScene() {
+    const seen: Array<number | undefined> = [];
+    return {
+      seen,
+      scene: {
+        scene: { isActive: () => true },
+        deck_now: 2,
+        deck1: payload(90),
+        deck_name: {
+          text: "",
+          setText(t: string) {
+            this.text = t;
+            return this;
+          },
+        },
+        change_deck(this: { deck1: { cost?: number } }) {
+          seen.push(this.deck1.cost);
+        },
+      },
+    };
+  }
+
+  function runWith(
+    scene: unknown,
+    deck: DeckPayload,
+    api: unknown,
+  ): { result: string; deck1: { cost?: number } } {
+    const sandbox = {
+      window: { game: { scene: { keys: { Match: scene } } }, __ulrDeckEdit: api },
+    };
+    vm.createContext(sandbox);
+    const result = vm.runInContext(buildEditDeckWriteExpression(deck), sandbox) as string;
+    return { result, deck1: (scene as { deck1: { cost?: number } }).deck1 };
+  }
+
+  it("有 costFor：把它算出來的官方 COST 填進 deck1.cost，再重畫", () => {
+    const room = roomScene();
+    const api = { costFor: (_c: unknown, custom: boolean) => (custom ? 79 : 53) };
+    const { result, deck1 } = runWith(room.scene, payload(90), api);
+    expect(result).toBe("ok-room");
+    // ⚠ 要官方那個數（custom=false），不是自訂 79
+    expect(deck1.cost).toBe(53);
+    // 重畫是在補完 cost 之後跑的 —— change_deck 看到的就是 53，不是 payload 的 0
+    expect(room.seen).toEqual([53]);
+  });
+
+  it("問的是官方價（custom=false）—— 大廳配對與伺服器用的就是官方", () => {
+    const room = roomScene();
+    const asked: boolean[] = [];
+    const api = {
+      costFor: (_c: unknown, custom: boolean) => {
+        asked.push(custom);
+        return 53;
+      },
+    };
+    runWith(room.scene, payload(90), api);
+    expect(asked).toEqual([false]);
+  });
+
+  it("沒有 __ulrDeckEdit（還沒掛上）：不炸，維持 payload 帶的值", () => {
+    const room = roomScene();
+    const { result, deck1 } = runWith(room.scene, payload(90), undefined);
+    expect(result).toBe("ok-room");
+    expect(deck1.cost).toBe(0); // payload() 帶的 0
+  });
+
+  it("costFor 回非數字（算不出來）：維持原值，不寫壞", () => {
+    const room = roomScene();
+    const api = { costFor: () => null };
+    const { deck1 } = runWith(room.scene, payload(90), api);
+    expect(deck1.cost).toBe(0);
+  });
+
+  /**
+   * 2026-09-12 迪城「COST 變來變去」：三個會換 deck1 的地方各算各的。現在只有
+   * 一種算法 —— 跟牌盒同一張表（迪城自訂、其餘官方），見 room-cost.ts。
+   */
+  it("⚠ 迪城（duel 頻道）問的是自訂價 —— 牌盒寫 92、畫面就要是 92", () => {
+    const room = roomScene();
+    const asked: boolean[] = [];
+    const scene = Object.assign(room.scene, {
+      channel: 2,
+      channels: { 1: { type: "ranked" }, 2: { type: "duel" } },
+    });
+    const sandbox = {
+      window: {
+        game: { scene: { keys: { Match: scene } } },
+        __ulrDeckEdit: {
+          costFor: (_c: unknown, custom: boolean) => {
+            asked.push(custom);
+            return custom ? 92 : 91;
+          },
+        },
+      },
+    };
+    vm.createContext(sandbox);
+    const result = vm.runInContext(buildEditDeckWriteExpression(payload(90)), sandbox) as string;
+    expect(result).toBe("ok-room");
+    expect(asked).toEqual([true]);
+    expect(room.seen).toEqual([92]);
+  });
+
+  it("亞城（ranked 頻道）問的是官方價，就算罰則補丁在也不拿它的自訂價", () => {
+    const room = roomScene();
+    const scene = Object.assign(room.scene, {
+      channel: 1,
+      channels: { 1: { type: "ranked" }, 2: { type: "duel" } },
+    });
+    const sandbox = {
+      window: {
+        game: { scene: { keys: { Match: scene } } },
+        __ulrDeckEdit: { costFor: (_c: unknown, custom: boolean) => (custom ? 80 : 79) },
+        __ulrPenaltyPatch: { installed: true, costOf: () => 80 },
+      },
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(buildEditDeckWriteExpression(payload(90)), sandbox);
+    expect(room.seen).toEqual([79]);
+  });
+
+  it("迪城、牌盒還沒掛上：退回罰則補丁的 costOf（它裝著時算的就是自訂價）", () => {
+    const room = roomScene();
+    const scene = Object.assign(room.scene, {
+      channel: 2,
+      channels: { 2: { type: "duel" } },
+    });
+    const sandbox = {
+      window: {
+        game: { scene: { keys: { Match: scene } } },
+        __ulrPenaltyPatch: { installed: true, costOf: () => 92 },
+      },
+    };
+    vm.createContext(sandbox);
+    vm.runInContext(buildEditDeckWriteExpression(payload(90)), sandbox);
+    expect(room.scene.deck1.cost).toBe(92);
+  });
+
+  it("慢路徑同步記憶體時也不能照抄 payload 的 cost —— 那是快照裡上一副的數字", () => {
+    const src = buildDeckApplyExpression([payload(90), payload(null), payload(null)], true);
+    expect(src).toContain("ulrRoomCostOf(cur, ulrRoomOfScene(k, sc))");
+    expect(src).not.toMatch(/cur\.cost = src\.cost;/);
   });
 });

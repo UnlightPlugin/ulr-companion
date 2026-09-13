@@ -103,6 +103,7 @@
  */
 
 import { embedJson } from "./embed.js";
+import { ROOM_COST_SNIPPET } from "./room-cost.js";
 
 /** 頁面上掛狀態的地方。 */
 const FLAG = "__ulrRoomGate";
@@ -113,7 +114,7 @@ const FLAG = "__ulrRoomGate";
  * 判斷「頁面上跑的是不是新版」只能靠它 —— 看行為會讓你去改本來正確的程式碼
  * （這個專案在 `ws-events` 與 `patch-ok` 上各栽過一次）。
  */
-export const ROOM_GATE_SCRIPT_VERSION = 4;
+export const ROOM_GATE_SCRIPT_VERSION = 5;
 
 /** 多久看一眼玩家換房沒有。 */
 export const DEFAULT_ROOM_GATE_POLL_MS = 500;
@@ -194,6 +195,27 @@ export interface RoomChangedReport {
  *
  * ⚠ Node 仍然是唯一的真相：頁面只認得「這一房用這一份」，不會自己挑、不會自己
  * 存、也不寫伺服器。庫、選擇、寫入全部還在 Node。
+ *
+ * ## 亞城／迪城是在「選頻道那一下」換的（2026-09-12）
+ *
+ * Match 場景**不能**在 `create()` 預載：亞城與迪城共用同一個場景，是哪一房要看
+ * 玩家選哪個頻道，而 `create()` 跑的時候他還沒選。原本 Match 走的是「輪詢發現
+ * `channel` 變了 → 回報 → Node 寫回來」，所以進頻道後會先看到上一房的牌約半秒
+ * （2026-09-12 回報：「亞城、迪城之間能不能快速切換牌組？在進入頻道時切換？」）。
+ *
+ * 實機讀 `Match.create()`，選頻道是 `channel_list.on("channel", (id, info) =>
+ * { this.channel = id; … this.channel_panel = new …(this, bp, info.cost) })`，
+ * 而那個面板一建出來就照 `deck1.cost` 篩房間列表。所以現在包的是 `channel_list`
+ * 實例上的 `emit`：看到 `"channel"` 先把 `deck1` 換成那一房的、`change_deck(0)`
+ * 重畫、就地回報 `room-changed`，再把事件原樣交給遊戲。玩家點頻道的那一幀看到
+ * 的就是那一房的牌，跟任務／渦房一樣一幀都不閃。
+ *
+ * 頻道→房型看 `info.type`（`duel` = 迪城，其餘 = 亞城），跟 `currentRoom()`
+ * 同一條規矩。
+ *
+ * ⚠ 這裡也要把 COST 算對：房間的 `cost:NN` 讀 `deck1.cost`、遊戲從不重算，而
+ * Node 推來的 payload 一律帶 0。哪一種價看房型（迪城自訂、其餘官方），跟牌盒
+ * 畫的同一張表，見 `room-cost.ts` —— 任務／渦的 `create()` 預載也一樣。
  */
 export interface RoomDeckPreload {
   /** 要塞進 `scene.deck1` 的東西。形狀跟遊戲自己的一樣。 */
@@ -245,6 +267,7 @@ export function isRoomGateReport(value: unknown): value is RoomGateReport {
 const SHARED = `
   var FLAG = "${FLAG}";
   var GATED = ${embedJson([...GATED_EVENTS])};
+  ${ROOM_COST_SNIPPET}
 
   function scenes() {
     var g = window.game;
@@ -281,9 +304,52 @@ const SHARED = `
    * ⚠ Match 不在裡面，而且不能加：亞城與迪城是同一個 Match 場景，是哪一房要看
    * 玩家選了哪個頻道 —— 而 create() 跑的時候他還沒選（currentRoom 在那個當下
    * 回的正是 null）。硬要在那裡挑一副，就是有一半機率把錯房的牌塞進去。
-   * Match 走原本那條路：回報換房 → Node 寫回來。
+   * Match 是在**選頻道那一下**換的，見 hookChannelList。
    */
   var PRELOAD = { Quest: "quest", Raid: "raid" };
+
+  /** 頻道資訊 → 房型鍵。跟 currentRoom 同一條規矩：看 type，不看編號。 */
+  function roomOfChannel(sc, id, info) {
+    var c = info;
+    if (!c && sc) {
+      var key = String(id);
+      c = (sc.channels && sc.channels[key]) || (sc.channels_cross && sc.channels_cross[key]);
+    }
+    if (!c) return null;
+    return c.type === "duel" ? "dietherm" : "alexandria";
+  }
+
+  /*
+   * 把 Node 推來的那一副塞進 sc.deck1。
+   *
+   * 整個物件換掉，跟遊戲自己的 reset 鈕一樣 —— 就地改欄位的話，畫面上的 cost
+   * 標籤不會跟著重算。塞的是**一份拷貝**：場景會把 deck1 當自己的東西改
+   * （card_effect 之類），而 st.decks 那份要留著給下一次進房用。
+   *
+   * ⚠ COST 要自己算出來填進去。房間的 cost:NN 讀的是 deck1.cost，遊戲從不重算，
+   * 而 Node 推來的 payload 一律帶 0 —— 不補的話進房那一幀就是「cost:0」。哪一種
+   * 價看房型（迪城自訂、其餘官方），跟牌盒畫的同一張表 —— 見 room-cost.ts。
+   */
+  function preloadDeck(sc, want, room) {
+    var src = want.deck;
+    var deck = {
+      chara: src.chara, charaIndex: src.charaIndex,
+      eventIndex: src.eventIndex, weapon: src.weapon, cost: src.cost
+    };
+    var c = ulrRoomCostOf(deck, room);
+    if (c !== null) deck.cost = c;
+    sc.deck1 = deck;
+    sc.deck_now = 1;
+  }
+
+  /** 左下那行字 —— 原版寫死「Deck1 」，牌組庫裡那一副有自己的名字。 */
+  function setDeckLabel(sc, name) {
+    try {
+      if (sc.deck_name && typeof sc.deck_name.setText === "function") {
+        sc.deck_name.setText(name + " ");
+      }
+    } catch (e) {}
+  }
 
   /** 現在有哪些 socket 值得攔（開戰的 emit 都從這幾個場景出去）。 */
   function gateTargets() {
@@ -338,6 +404,7 @@ export function buildRoomGateScript(options: RoomGateOptions): string {
     // ⚠ 舊版沒有 creates，所以要擋一下 —— 不擋的話重裝會在這裡丟例外，
     // 而整支腳本就裝不上去了。
     try { if (st.creates) unwrapCreates(st); } catch (e) {}
+    try { if (st.channelHooks) unhookChannelLists(st); } catch (e) {}
     delete window[FLAG];
   }
 
@@ -367,6 +434,8 @@ export function buildRoomGateScript(options: RoomGateOptions): string {
     wrapped: [],
     /** 被我們包住 create 的場景（見 wrapCreate）。 */
     creates: [],
+    /** 被我們包住 emit 的 Match.channel_list（見 hookChannelList）。 */
+    channelHooks: [],
     /** 每一房「進去就該用的那一副」，Node 推來的。見 RoomDeckPreload。 */
     decks: {},
     timer: null,
@@ -473,9 +542,7 @@ export function buildRoomGateScript(options: RoomGateOptions): string {
       var want = null;
       try {
         want = st.decks[key] || null;
-        // ⚠ 整個物件換掉，跟遊戲自己的 reset 鈕一樣 —— 就地改欄位的話，畫面上
-        // 的 cost 標籤不會跟著重算。
-        if (want !== null) this.deck1 = want.deck;
+        if (want !== null) preloadDeck(this, want, key);
       } catch (e) {
         want = null;
       }
@@ -490,12 +557,8 @@ export function buildRoomGateScript(options: RoomGateOptions): string {
           }
         } catch (e) {}
         if (want === null) return;
-        try {
-          self.deck_now = 1;
-          if (self.deck_name && typeof self.deck_name.setText === "function") {
-            self.deck_name.setText(want.name + " ");
-          }
-        } catch (e) {}
+        self.deck_now = 1;
+        setDeckLabel(self, want.name);
       };
       if (out !== null && out !== undefined && typeof out.then === "function") {
         try { out.then(after, after); } catch (e) { after(); }
@@ -515,6 +578,75 @@ export function buildRoomGateScript(options: RoomGateOptions): string {
       try { if (c.scene.create === c.patched) delete c.scene.create; } catch (e) {}
     }
     state.creates = [];
+  }
+
+  /*
+   * 亞城／迪城：**選頻道那一下**就把牌換好（2026-09-12）。
+   *
+   * ⚠⚠ 這一段住在 template literal 裡，不能出現反引號。完整說明在檔頭
+   * 「Match 是在選頻道那一下換的」。
+   *
+   * 實機讀到 Match.create() 是這樣接頻道的：
+   *
+   *   this.channel_list.on("channel", async (t, e, s) => {
+   *     this.channel = t; ...
+   *     case "ranked": this.channel_panel = new x(this, this.player.bp, e.cost) ...
+   *     case "duel":   this.channel_panel = new w(this) ...
+   *   })
+   *
+   * 那個面板一建出來就照 deck1 篩房間列表，所以牌要在**遊戲的處理器跑之前**
+   * 換好 —— 包的是 channel_list 實例上的 emit（自有屬性遮蔽 prototype 那顆），
+   * 看到 "channel" 事件先換牌、先回報，再把事件原樣交給遊戲。
+   *
+   * 頻道→房型看 info.type（duel = 迪城，其餘 = 亞城），跟 currentRoom 同一條
+   * 規矩；沒帶 info 時退回去查 channels / channels_cross。
+   *
+   * ⚠ channel_list 是 create() 裡 new 出來的，每次進 Match 都是新的一顆，所以
+   * 每一拍都補包一次（跟 wrapCreate 一樣）。
+   */
+  function hookChannelList(sc) {
+    var list = sc && sc.channel_list;
+    if (!list || typeof list.emit !== "function") return;
+    for (var i = 0; i < st.channelHooks.length; i++) {
+      if (st.channelHooks[i].list === list) return;
+    }
+    var orig = list.emit;
+    var patched = function (ev, id, info) {
+      if (ev === "channel") {
+        try { onChannelPicked(sc, id, info); } catch (e) { /* 換不了牌也不能擋玩家進頻道 */ }
+      }
+      return orig.apply(this, arguments);
+    };
+    list.emit = patched;
+    st.channelHooks.push({ list: list, patched: patched, orig: orig });
+  }
+
+  function onChannelPicked(sc, id, info) {
+    var key = roomOfChannel(sc, id, info);
+    if (key === null) return;
+    var want = st.decks[key] || null;
+    if (want !== null) {
+      preloadDeck(sc, want, key);
+      // Match 有自己的 change_deck(0)：重畫三張卡與 cost:NN。
+      try { if (typeof sc.change_deck === "function" && sc.deckCard) sc.change_deck(0); } catch (e) {}
+      // ⚠ 名字要在重畫**之後**設 —— change_deck 會把它寫回「Deck1 」。
+      setDeckLabel(sc, want.name);
+    }
+    // 換房要就地回報，理由跟 wrapCreate 那段 ⚠⚠ 一樣：輪詢最多晚半秒，而這半秒
+    // 裡托盤還以為玩家在上一房。
+    if (st.room !== key) {
+      st.room = key;
+      report({ type: "room-changed", room: key, preloaded: want !== null });
+    }
+  }
+
+  /** 把 channel_list 的 emit 還原回去。⚠ 只還原還是我們裝的那一顆。 */
+  function unhookChannelLists(state) {
+    var hooks = state.channelHooks || [];
+    for (var i = 0; i < hooks.length; i++) {
+      try { if (hooks[i].list.emit === hooks[i].patched) delete hooks[i].list.emit; } catch (e) {}
+    }
+    state.channelHooks = [];
   }
 
   /*
@@ -562,6 +694,13 @@ export function buildRoomGateScript(options: RoomGateOptions): string {
     if (K !== null) {
       for (var n in PRELOAD) {
         if (Object.prototype.hasOwnProperty.call(PRELOAD, n) && K[n]) wrapCreate(n, K[n]);
+      }
+      // 亞城／迪城：包住選頻道那一下。上一次進 Match 留下的那顆 channel_list 已經
+      // 被遊戲 destroy 了，不要留著 —— 每次進 Match 都是新的一顆，會無限長大。
+      if (K.Match) {
+        var cl = K.Match.channel_list;
+        st.channelHooks = st.channelHooks.filter(function (h) { return h.list === cl; });
+        hookChannelList(K.Match);
       }
     }
 
@@ -728,6 +867,11 @@ export const ROOM_GATE_UNINSTALL_EXPRESSION = `(function () {
     var cs = st.creates || [];
     for (var j = 0; j < cs.length; j++) {
       try { if (cs[j].scene.create === cs[j].patched) delete cs[j].scene.create; } catch (e) {}
+    }
+    // 選頻道那一下的包裝同理。
+    var hs = st.channelHooks || [];
+    for (var k = 0; k < hs.length; k++) {
+      try { if (hs[k].list.emit === hs[k].patched) delete hs[k].list.emit; } catch (e) {}
     }
     delete window.${FLAG};
     return "ok";

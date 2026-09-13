@@ -65,11 +65,13 @@ import {
   isRaidBoss,
   listDecks,
   moveDeck,
+  pickDeckForBoss,
   RAID_BOSS_LABELS,
   RAID_BOSSES,
   removeDeck,
   renameDeck,
   resolveSelected,
+  ROOM_COST_DISPLAY,
   ROOM_KINDS,
   ROOM_LABELS,
   setDeckBosses,
@@ -120,6 +122,10 @@ export const MAX_APPLY_DELAY_MS = 30_000;
  * ⚠ **`since` 每換一副就重算。** 玩家連按五下，只有最後停住的那一副會被寫出去
  * —— 中間四副連排隊都不算數。少了這個重算，第一副排上之後三秒就會被寫出去，
  * 而那正好是玩家最不想要的那一副。
+ *
+ * ⚠ **人在 Edit 畫面時，隊伍在換到眼前的那一刻就清掉**（2026-09-12）。那裡
+ * 沒有「N 秒後寫伺服器」這一步 —— 遊戲會在玩家離開畫面時自己送，而三秒後再
+ * 寫一次記憶體只會把他這三秒排的牌蓋回去。見 `main.ts` 的 `frontApplyPending`。
  */
 export interface PendingApply {
   /** 庫裡那一副的 id。 */
@@ -281,8 +287,8 @@ export function autoSave(
  * Deck1／Deck2／Deck3，跟玩家原本在遊戲裡看到的一樣。
  *
  * ⚠ Deck2 空、Deck3 有東西時，Deck3 會**往前補到第 2 格**，不會為了對齊位置
- * 塞一副空牌進去 —— 空牌選不動（`guardDeck1` 擋著），清單裡多一副永遠點不動
- * 的東西比位置對不上更糟。
+ * 塞一副空牌進去 —— 空牌在房間裡選不動（`guardDeck1` 擋著）、在 Edit 裡選了
+ * 等於按 reset，清單裡多一副只會把牌清掉的東西比位置對不上更糟。
  */
 export function migrateServerDecks(
   session: DeckSession,
@@ -316,8 +322,8 @@ export function migrateServerDecks(
  * ⚠ 跟 {@link migrateServerDecks} 同一個理由：只放一房的話，其他三房是空的，
  * 而空的那三房「進房自動套用」完全不會有動作。
  *
- * ⚠ 空牌組不收 —— 空的那一副選不動（`guardDeck1` 擋著），放進去只是讓每一房
- * 都多一個永遠點不動的東西。
+ * ⚠ 空牌組不收 —— 空的那一副在房間裡選不動（`guardDeck1` 擋著）、在 Edit 裡
+ * 選了等於按 reset，放進去只是讓每一房都多一個沒有牌的東西。
  */
 export function seedAllRooms(
   library: DeckLibrary,
@@ -454,6 +460,72 @@ export function enterRoom(
 }
 
 /**
+ * **進了牌組編輯畫面：選單要跟著「手上這副牌是哪一房的」。**
+ *
+ * 2026-09-12 回報：人剛從亞城出來進 Edit，手上是亞城那副，選單卻停在迪特赫姆
+ * 、黃字指著迪城的 Deck2 —— 而那副的內容跟畫面上的牌對不上（92 vs 79）。
+ * 玩家看到的是「插件記的牌跟我手上的不一樣」。
+ *
+ * 選單的 `room` 平常靠 {@link enterRoom} 跟著人走，但托盤重開過、或玩家從沒
+ * 進過任何一房（選頻道前 `room-changed` 是 null）時，它就停在預設值。這時
+ * **內容是唯一可靠的線索**：Deck1 現在裝的是哪一房的哪一副，選單就該看那一房、
+ * 黃字就該指著那一副。
+ *
+ * 挑的順序（前面的比後面的更像「他剛剛在用的」）：
+ *
+ * ```
+ *   1. 選單這一房「記住的那副」就是它      → 不動
+ *   2. 別房「記住的那副」就是它            → 換到那一房
+ *   3. 選單這一房任何一副是它              → 不動房，黃字對到它
+ *   4. 別房任何一副是它                    → 換到那一房
+ *   對不上任何一副                         → 什麼都不動
+ * ```
+ *
+ * 「記住的那副」（`selected`）排在「任何一副」前面，是因為四房一開始都是同一
+ * 副的複本（`seedAllRooms`）—— 光看內容分不出他是從哪一房出來的，而他在那一
+ * 房點過的那一副才是線索。
+ *
+ * ⚠ 對上的那副同時寫進 `selected`：畫面上正在用的就是他要的。少了這一步，
+ * 換到亞城之後黃字可能還指著亞城「記住」的另一副，同一個抱怨再來一次。
+ *
+ * ⚠ 有東西排著隊時不動 —— 那時候黃字跟的是隊伍（{@link highlightOf}），而且
+ * 隊伍落地時會自己把 active 對好。
+ */
+export function followDeckOnEdit(session: DeckSession, current: DeckContent): DeckSession {
+  if (session.pending !== null) return session;
+  const hash = deckContentHash(current);
+  const selectedMatch = (room: RoomKind): string | null => {
+    const entry = resolveSelected(session.library, room);
+    return entry !== null && deckContentHash(entry.content) === hash ? entry.id : null;
+  };
+  const anyMatch = (room: RoomKind): string | null => resolveActive(session.library, room, current);
+
+  // 選單這一房排最前面，四個層級各掃一輪。
+  const order: RoomKind[] = [session.room, ...ROOM_KINDS.filter((r) => r !== session.room)];
+  const candidates: [RoomKind, string | null][] = [
+    ...order.map((r): [RoomKind, string | null] => [r, selectedMatch(r)]),
+    ...order.map((r): [RoomKind, string | null] => [r, anyMatch(r)]),
+  ];
+  const found = candidates.find(([, hit]) => hit !== null);
+  if (found === undefined) return session;
+  const room = found[0];
+  const id = found[1];
+  if (id === null) return session;
+
+  const same =
+    room === session.room &&
+    session.active[room] === id &&
+    (session.library.selected?.[room] ?? null) === id;
+  if (same) return session;
+  return {
+    ...session,
+    room,
+    library: setSelected(session.library, room, id),
+    active: { ...session.active, [room]: id },
+  };
+}
+
+/**
  * **每一房「進去就該用的那一副」，事先給頁面。**
  *
  * 這是「進房不閃上一房的牌」那條路的資料來源 —— 頁面在房間場景的 `create()`
@@ -504,6 +576,15 @@ export function deckEditStateOf(session: DeckSession): DeckEditState {
     // ⚠ 標籤只有渦房有意義（`DeckEntry.bosses` 在其他房恆為空，這裡再擋一次
     // 是為了讓手改過的存檔也畫得乾淨）。送的是**鍵**，頁面自己查 bossOptions。
     bosses: room === "raid" ? [...d.bosses] : [],
+    // 內容下放到頁面，但**只為了畫**：選單裡每一副要有三張卡面縮圖與兩種總
+    // COST，而那些只能從內容算。⚠ 頁面永遠不會把它送回來 —— 回報裡沒有任何
+    // 帶內容的種類（見 `DeckEditReport`）。
+    content: {
+      chara: [...d.content.chara],
+      charaIndex: [...d.content.charaIndex],
+      weapon: [...d.content.weapon],
+      eventIndex: [...d.content.eventIndex],
+    },
   }));
   return {
     room,
@@ -511,8 +592,90 @@ export function deckEditStateOf(session: DeckSession): DeckEditState {
     decks,
     activeId: highlightOf(session, room),
     bossOptions: RAID_BOSSES.map((b) => ({ key: b, label: RAID_BOSS_LABELS[b] })),
+    // 這一房該畫哪一種總 COST（PVE 不畫、亞城官方、迪城自訂）—— 房型的意思
+    // 只有這邊知道，頁面照著畫就好。
+    costDisplay: ROOM_COST_DISPLAY[room],
     // ⚠ 訊息**不送給頁面**（2026-09-09 起）。遊戲畫面上不再有那行紅字，
     // 訊息走托盤的記錄 —— 見 `DeckEditState` 那邊的說明。
+  };
+}
+
+/**
+ * 遊戲的渦 BOSS（`profound_mons` 底線前那段）→ 玩家貼的標籤。
+ *
+ * 名字是 2026-09-13 從跑著的客戶端 `monsProfile` 讀的（`_01/_02/_03` 是同一
+ * 隻的渦I／II·III／IV，所以只認前綴）。放在這裡而不是牌組庫，理由見
+ * `RaidBoss` 的說明：存檔只存我們的鍵，映射錯了改這一行就好。
+ *
+ * ```
+ *   mc1003  赤死獸／黑死獸／瘟疫         狗
+ *   mc1006  啃食者／屠殺者／爬行者       蟲
+ *   mc1007  深沉之者／誘引之者／深奧之者 海
+ *   mc1008  贔屭／靈龜／玄帝             龜
+ *   mc1012  龍魚／龍鯰／龍鯉             魚
+ * ```
+ *
+ * 妖精（mc1004）、吸血女王（mc1005）、活動 BOSS 沒有標籤 → 選了不換牌。
+ */
+export const RAID_MONS_BOSS: Readonly<Record<string, RaidBoss>> = {
+  mc1003: "dog",
+  mc1006: "bug",
+  mc1007: "sea",
+  mc1008: "turtle",
+  mc1012: "fish",
+};
+
+/** `mc1008_02` → `turtle`。認不得回 `null`。 */
+export function raidBossOfMons(mons: string): RaidBoss | null {
+  const prefix = mons.split("_")[0] ?? "";
+  return Object.prototype.hasOwnProperty.call(RAID_MONS_BOSS, prefix)
+    ? (RAID_MONS_BOSS[prefix] ?? null)
+    : null;
+}
+
+/**
+ * 「在這一房用這副」：記住意圖、內容不同就排隊。點選單與渦房自動換牌共用。
+ */
+function selectDeck(
+  session: DeckSession,
+  room: RoomKind,
+  entry: { id: string; content: DeckContent },
+  current: DeckContent,
+  at: number,
+): { session: DeckSession; write: DeckContent | null } {
+  // 「我要在這一房用這副」先記下來 —— 跟寫不寫得進去無關，見
+  // `DeckLibrary.selected`。下次進這一房就是套它。
+  session = { ...session, library: setSelected(session.library, room, entry.id) };
+  // 內容一樣就不必送出去 —— 沒有任何東西會變。
+  //
+  // ⚠ **不要在這裡放訊息。** 底下那一行是紅字，玩家會把它讀成錯誤，而這
+  // 根本不是錯誤（2026-09-09 回報：「請不要出現這種紅字的錯誤提示詞」）。
+  //
+  // 2026-08-27 當初加那句話是因為「選了完全沒反應」看起來像功能壞了 ——
+  // 但那個理由已經不成立：選單的黃字現在跟的是**意圖**（`highlightOf`），
+  // 玩家一點下去它就跳過去了，回饋在那裡，不需要再說一次。
+  if (deckContentHash(entry.content) === deckContentHash(current)) {
+    return {
+      session: {
+        ...withNotice(session, null, at),
+        pending: null,
+        active: { ...session.active, [room]: entry.id },
+      },
+      write: null,
+    };
+  }
+  // ⚠⚠ **這裡不再直接寫伺服器**（2026-09-09 改）。只排隊 —— 真正寫出去
+  // 是「停滿等候秒數」或「按下開戰」，見 {@link PendingApply}。
+  //
+  // ⚠ active **不動**。它的意思是「Deck1 現在真的是哪一副」，而現在還不是。
+  // 動了它的話，自動存檔會把 Deck1 的內容存進玩家還沒換過去的那一副
+  // —— 那正是 2026-08-27 弄丟兩副牌的那條路。黃字改用 `highlightOf()`。
+  //
+  // `write` 仍然回傳內容，但呼叫端只拿它做**前端即時換牌**（人在 Edit
+  // 畫面時寫客戶端記憶體，一次網路都不跑）。
+  return {
+    session: queueApply(withNotice(session, null, at), room, entry.id, entry.content, current, at),
+    write: entry.content,
   };
 }
 
@@ -539,49 +702,43 @@ export function applyReport(
   });
 
   switch (report.type) {
+    case "raid-pick": {
+      // 渦房選中一個渦 → 換成掛了那隻 BOSS 標籤的牌組（玩家 2026-09-13 要的）。
+      // 認不得的 BOSS、或沒有任何一副掛那個標籤 → **不換**（玩家同日補充）。
+      const boss = raidBossOfMons(report.mons);
+      if (boss === null) return none(session);
+      const entry = pickDeckForBoss(session.library, boss);
+      if (entry === null) return none(session);
+      // ⚠ 牌組一律從**渦房**那一組挑，不管選單此刻看哪一房 —— 人就站在渦房。
+      // 選單順手切回渦房，理由跟 `room-switch` 一樣：active 要照內容重算。
+      const raid: DeckSession =
+        room === "raid"
+          ? session
+          : {
+              ...session,
+              room: "raid",
+              active: { ...session.active, raid: resolveActive(session.library, "raid", current) },
+            };
+      // 已經是它了（排著隊的、記住的都算）→ 不動，免得每點一次渦就重排一次隊。
+      if (highlightOf(raid, "raid") === entry.id) return none(raid);
+      const picked = selectDeck(raid, "raid", entry, current, at);
+      const index = listDecks(raid.library, "raid").findIndex((d) => d.id === entry.id);
+      return {
+        ...picked,
+        session: withNotice(
+          picked.session,
+          `渦 BOSS 是「${RAID_BOSS_LABELS[boss]}」—— 換成「${displayName(entry, index < 0 ? 0 : index)}」`,
+          at,
+        ),
+      };
+    }
+
     case "deck-select": {
       const entry = findDeck(session.library, room, report.id);
       if (entry === null) {
         return none(withNotice(session, "那副牌組不見了 —— 重開選單看看。", at));
       }
-      // 「我要在這一房用這副」先記下來 —— 跟寫不寫得進去無關，見
-      // `DeckLibrary.selected`。下次進這一房就是套它。
-      session = { ...session, library: setSelected(session.library, room, entry.id) };
-      // 內容一樣就不必送出去 —— 沒有任何東西會變。
-      //
-      // ⚠ **不要在這裡放訊息。** 底下那一行是紅字，玩家會把它讀成錯誤，而這
-      // 根本不是錯誤（2026-09-09 回報：「請不要出現這種紅字的錯誤提示詞」）。
-      //
-      // 2026-08-27 當初加那句話是因為「選了完全沒反應」看起來像功能壞了 ——
-      // 但那個理由已經不成立：選單的黃字現在跟的是**意圖**（`highlightOf`），
-      // 玩家一點下去它就跳過去了，回饋在那裡，不需要再說一次。
-      if (deckContentHash(entry.content) === deckContentHash(current)) {
-        return none({
-          ...withNotice(session, null, at),
-          pending: null,
-          active: { ...session.active, [room]: entry.id },
-        });
-      }
-      // ⚠⚠ **這裡不再直接寫伺服器**（2026-09-09 改）。只排隊 —— 真正寫出去
-      // 是「停滿等候秒數」或「按下開戰」，見 {@link PendingApply}。
-      //
-      // ⚠ active **不動**。它的意思是「Deck1 現在真的是哪一副」，而現在還不是。
-      // 動了它的話，自動存檔會把 Deck1 的內容存進玩家還沒換過去的那一副
-      // —— 那正是 2026-08-27 弄丟兩副牌的那條路。黃字改用 `highlightOf()`。
-      //
-      // `write` 仍然回傳內容，但呼叫端只拿它做**前端即時換牌**（人在 Edit
-      // 畫面時寫客戶端記憶體，一次網路都不跑）。
-      return {
-        session: queueApply(
-          withNotice(session, null, at),
-          room,
-          entry.id,
-          entry.content,
-          current,
-          at,
-        ),
-        write: entry.content,
-      };
+      return selectDeck(session, room, entry, current, at);
     }
 
     case "deck-cycle": {
@@ -620,8 +777,9 @@ export function applyReport(
     }
 
     case "deck-add": {
-      // 種子是**現在的 Deck1**，不是空牌組。空的那一副選不動（`guardDeck1`
-      // 會擋），玩家按了 + 卻換不過去，那是個死路。
+      // 種子是**現在的 Deck1**，不是空牌組。空的那一副在房間裡選不動
+      // （`guardDeck1` 會擋）、在 Edit 裡選了等於按 reset —— 玩家按了 + 卻看到
+      // 牌被清空，那不是他要的。
       const { library, entry } = addDeck(session.library, room, { content: current, now });
       return none({
         ...withNotice(session, "新增了一副 —— 內容是你現在這副，改完就自動存好。", at),
@@ -700,11 +858,27 @@ export function applyReport(
       if (next === undefined) return none(session);
       // 換房要**重算**那一房的 active：手上這副牌對不對得上那一房的某一副，
       // 是內容說了算（見檔頭）。
-      return none({
+      const moved: DeckSession = {
         ...withNotice(session, null, at),
         room: next,
         active: { ...session.active, [next]: resolveActive(session.library, next, current) },
-      });
+      };
+      // ⚠⚠ **牌組要跟著換**（2026-09-12 玩家要求）。原本只換「選單看哪一房」，
+      // 手上的牌不動 —— 於是切到任務房之後，選單列的是任務的牌，畫面上擺的
+      // 卻還是渦房那副，而玩家會以為自己已經換過去了。
+      //
+      // 挑哪一副跟 `enterRoom` 同一條規矩（`resolveSelected`），兩邊挑不一樣
+      // 的話進房時會再閃一次牌。那一房還沒有牌組時什麼都不換 —— 沒有東西可
+      // 以換，清掉排隊就好。
+      const entry = resolveSelected(session.library, next);
+      if (entry === null) return none({ ...moved, pending: null });
+      // ⚠ 只排隊、不直接寫伺服器（跟點選同一條路）。呼叫端會拿 `write` 去做
+      // 前端即時換牌，三秒後（或開戰前）才真的寫出去 —— 玩家在幾房之間來回
+      // 看一眼不該各上傳一次。
+      return {
+        session: queueApply(moved, next, entry.id, entry.content, current, at),
+        write: entry.content,
+      };
     }
 
     case "deck-ui-error":

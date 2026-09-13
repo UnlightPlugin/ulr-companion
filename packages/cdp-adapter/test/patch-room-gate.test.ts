@@ -54,6 +54,19 @@ class FakeArrow {
   }
 }
 
+/** Match.channel_list —— Phaser 容器，emit 在 prototype 上。 */
+class FakeChannelList {
+  handlers: ((...args: unknown[]) => void)[] = [];
+  on(_ev: string, fn: (...args: unknown[]) => void): void {
+    this.handlers.push(fn);
+  }
+  emit(ev: string, ...args: unknown[]): boolean {
+    if (ev !== "channel") return false;
+    for (const fn of this.handlers) fn(...args);
+    return true;
+  }
+}
+
 class FakeScene {
   socket: FakeSocket;
   active = false;
@@ -67,9 +80,15 @@ class FakeScene {
   deck_pre?: FakeArrow;
   deck_next?: FakeArrow;
   deck_now?: number;
-  deck1?: { charaIndex: (number | null)[] };
+  deck1?: { charaIndex: (number | null)[]; cost?: number };
   deck_name?: { text: string; setText: (t: string) => void };
   redrawn = 0;
+
+  /** `Match` 才有的：選頻道的清單（EventEmitter）與它自己的重畫。 */
+  channel_list?: FakeChannelList;
+  channel_panel?: { seenCost: number | undefined };
+  deckCard?: unknown[];
+  costText = "";
 
   constructor(socket: FakeSocket) {
     this.socket = socket;
@@ -97,6 +116,32 @@ class FakeScene {
   /** 任務／渦的重畫。 */
   deck_card(): void {
     this.redrawn++;
+  }
+
+  /** Match 的重畫 —— 照抄實機：名字寫回「DeckN 」、cost:NN 讀 deck1.cost。 */
+  change_deck(delta: number): void {
+    this.redrawn++;
+    this.deck_now = (this.deck_now ?? 1) + delta;
+    this.deck_name?.setText(`Deck${this.deck_now} `);
+    this.costText = `cost:${this.deck1?.cost}`;
+  }
+
+  /**
+   * 把 Match 的選頻道清單裝上去。遊戲自己的處理器也照實機掛：先記 channel、
+   * 再建面板，而面板一建出來就讀 deck1.cost（篩房間列表用）。
+   */
+  withChannelList(): this {
+    this.channel_list = new FakeChannelList();
+    this.deck_now = 1;
+    this.deck1 = { charaIndex: [684, 674, 665], cost: 77 };
+    this.deckCard = [];
+    const name = { text: "Deck1 ", setText: (t: string) => (name.text = t) };
+    this.deck_name = name;
+    this.channel_list.on("channel", (id: unknown) => {
+      this.channel = id as number;
+      this.channel_panel = { seenCost: this.deck1?.cost };
+    });
+    return this;
   }
 
   /** 把箭頭裝上去（遊戲自己的處理器也一起掛，測我們有沒有把它拆掉）。 */
@@ -704,6 +749,247 @@ describe("進房前就把牌換好", () => {
   it("沒安裝時推牌組回 not-installed，不丟例外", () => {
     const h = makeGame();
     expect(setRoomDecks(h, PRELOAD_RAID)).toBe("not-installed");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 亞城／迪城：選頻道那一下就把牌換好（2026-09-12 加）
+//
+// Match 不能在 create() 預載（那時候還不知道是哪一房），所以包的是選頻道那個
+// 事件：先換牌、先回報，再把事件交給遊戲。
+// ---------------------------------------------------------------------------
+
+const PRELOAD_MATCH = {
+  alexandria: {
+    deck: {
+      chara: ["cc001", "cc002", "cc003"],
+      charaIndex: [11, 12, 13],
+      eventIndex: Array<number | null>(18).fill(null),
+      weapon: [null, null, null],
+      cost: 0,
+    },
+    name: "亞城用",
+  },
+  dietherm: {
+    deck: {
+      chara: ["cc004", "cc005", "cc006"],
+      charaIndex: [21, 22, 23],
+      eventIndex: Array<number | null>(18).fill(null),
+      weapon: [null, null, null],
+      cost: 0,
+    },
+    name: "迪城用",
+  },
+};
+
+/** 進了 Match、還在選頻道：channel_list 已經建好，輪詢跑過一輪把它包起來。 */
+function enterMatch(h: Harness): FakeScene {
+  const m = h.scenes.Match.withChannelList();
+  m.active = true;
+  m.channels = { 1: { type: "ranked" }, 2: { type: "duel" } };
+  const poll = h.timers[h.timers.length - 1];
+  poll?.();
+  return m;
+}
+
+describe("亞城／迪城：選頻道那一下就把牌換好", () => {
+  it("包的是 channel_list 實例上的 emit，不是 prototype", () => {
+    const h = makeGame();
+    install(h);
+    const m = enterMatch(h);
+    expect(Object.prototype.hasOwnProperty.call(m.channel_list, "emit")).toBe(true);
+    expect(
+      Object.prototype.hasOwnProperty.call(Object.getPrototypeOf(m.channel_list), "emit"),
+    ).toBe(true);
+  });
+
+  it("⚠⚠ 遊戲的處理器跑到之前 deck1 就已經是那一房的 —— 面板篩房間用的就是新的 cost", () => {
+    const h = makeGame();
+    install(h);
+    setRoomDecks(h, PRELOAD_MATCH);
+    const m = enterMatch(h);
+
+    m.channel_list?.emit("channel", 2, { type: "duel" }, 0);
+
+    expect(m.deck1?.charaIndex).toEqual([21, 22, 23]);
+    expect(m.channel).toBe(2); // 遊戲自己的處理器照常跑了
+    expect(m.channel_panel?.seenCost).toBe(m.deck1?.cost); // 而且它看到的是換過之後的
+    expect(m.redrawn).toBe(1);
+    expect(m.deck_now).toBe(1);
+    // 名字是在重畫之後設的（change_deck 會把它寫回 Deck1）
+    expect(m.deck_name?.text).toBe("迪城用 ");
+  });
+
+  it("換房就地回報，帶 preloaded=true；輪詢隨後看到同一房不再重報", () => {
+    const h = makeGame();
+    install(h);
+    setRoomDecks(h, PRELOAD_MATCH);
+    const m = enterMatch(h);
+    const before = h.reports.length;
+
+    m.channel_list?.emit("channel", 1, { type: "ranked" }, 0);
+    expect(h.reports.slice(before)).toEqual([
+      { type: "room-changed", room: "alexandria", preloaded: true },
+    ]);
+
+    const poll = h.timers[h.timers.length - 1];
+    poll?.();
+    poll?.();
+    expect(h.reports.length).toBe(before + 1);
+  });
+
+  it("亞城 ↔ 迪城來回切，每一下都換到對的那一副", () => {
+    const h = makeGame();
+    install(h);
+    setRoomDecks(h, PRELOAD_MATCH);
+    const m = enterMatch(h);
+
+    m.channel_list?.emit("channel", 1, { type: "ranked" }, 0);
+    expect(m.deck1?.charaIndex).toEqual([11, 12, 13]);
+    expect(m.deck_name?.text).toBe("亞城用 ");
+    m.channel_list?.emit("channel", 2, { type: "duel" }, 0);
+    expect(m.deck1?.charaIndex).toEqual([21, 22, 23]);
+    expect(m.deck_name?.text).toBe("迪城用 ");
+    m.channel_list?.emit("channel", 1, { type: "ranked" }, 0);
+    expect(m.deck1?.charaIndex).toEqual([11, 12, 13]);
+
+    const rooms = h.reports.filter((r) => r.type === "room-changed").map((r) => r.room);
+    expect(rooms.slice(-3)).toEqual(["alexandria", "dietherm", "alexandria"]);
+  });
+
+  it("⚠ 看的是 type 不是編號 —— 跨平台的 duel 頻道也是迪城；沒帶 info 就查 channels", () => {
+    const h = makeGame();
+    install(h);
+    setRoomDecks(h, PRELOAD_MATCH);
+    const m = enterMatch(h);
+    m.channels_cross = { 4: { type: "duel" } };
+
+    m.channel_list?.emit("channel", 4, { type: "duel" }, 0);
+    expect(m.deck1?.charaIndex).toEqual([21, 22, 23]);
+
+    m.channel_list?.emit("channel", 1, undefined, 0);
+    expect(m.deck1?.charaIndex).toEqual([11, 12, 13]);
+  });
+
+  it("沒有推那一房的牌時不碰 deck1，但房型照樣回報（preloaded=false）", () => {
+    const h = makeGame();
+    install(h);
+    setRoomDecks(h, { alexandria: PRELOAD_MATCH.alexandria });
+    const m = enterMatch(h);
+    const before = h.reports.length;
+
+    m.channel_list?.emit("channel", 2, { type: "duel" }, 0);
+    expect(m.deck1?.charaIndex).toEqual([684, 674, 665]);
+    expect(m.redrawn).toBe(0);
+    expect(m.deck_name?.text).toBe("Deck1 ");
+    expect(h.reports.slice(before)).toEqual([
+      { type: "room-changed", room: "dietherm", preloaded: false },
+    ]);
+  });
+
+  it("⚠ 換牌那段自己出事也要把事件交給遊戲 —— 不能因為我們的東西讓玩家進不了頻道", () => {
+    const h = makeGame();
+    install(h);
+    setRoomDecks(h, PRELOAD_MATCH);
+    const m = enterMatch(h);
+    m.change_deck = () => {
+      throw new Error("boom");
+    };
+
+    expect(() => m.channel_list?.emit("channel", 2, { type: "duel" }, 0)).not.toThrow();
+    expect(m.channel).toBe(2);
+  });
+
+  it("COST 用牌組編輯那支算的官方價補進去 —— 不然進頻道那一幀是 cost:0", () => {
+    const h = makeGame();
+    install(h);
+    setRoomDecks(h, PRELOAD_MATCH);
+    const m = enterMatch(h);
+    (h.window as unknown as Record<string, unknown>)["__ulrDeckEdit"] = {
+      costFor: (_content: unknown, custom: boolean) => (custom ? 999 : 64),
+    };
+
+    m.channel_list?.emit("channel", 1, { type: "ranked" }, 0);
+    expect(m.deck1?.cost).toBe(64);
+    expect(m.costText).toBe("cost:64");
+  });
+
+  it("⚠ 哪一種價看房型，跟牌盒同一張表：迪城自訂、亞城官方（2026-09-12 兩則回報）", () => {
+    const h = makeGame();
+    install(h);
+    setRoomDecks(h, PRELOAD_MATCH);
+    const m = enterMatch(h);
+    const w = h.window as unknown as Record<string, unknown>;
+    w["__ulrDeckEdit"] = { costFor: (_c: unknown, custom: boolean) => (custom ? 92 : 91) };
+    // 罰則補丁的 costOf 不能搶在牌盒前面 —— 它在亞城會給自訂價
+    w["__ulrPenaltyPatch"] = { installed: true, costOf: () => 80 };
+
+    m.channel_list?.emit("channel", 2, { type: "duel" }, 0);
+    expect(m.costText).toBe("cost:92");
+    m.channel_list?.emit("channel", 1, { type: "ranked" }, 0);
+    expect(m.costText).toBe("cost:91");
+  });
+
+  it("牌盒還沒掛上時：迪城退回罰則補丁的 costOf，亞城寧可不動也不拿自訂價", () => {
+    const h = makeGame();
+    install(h);
+    setRoomDecks(h, PRELOAD_MATCH);
+    const m = enterMatch(h);
+    const w = h.window as unknown as Record<string, unknown>;
+    w["__ulrPenaltyPatch"] = { installed: true, costOf: () => 92 };
+
+    m.channel_list?.emit("channel", 2, { type: "duel" }, 0);
+    expect(m.deck1?.cost).toBe(92);
+    m.channel_list?.emit("channel", 1, { type: "ranked" }, 0);
+    expect(m.deck1?.cost).toBe(0); // Node 帶來的 0，沒有被自訂價蓋掉
+  });
+
+  it("每次進 Match 都是新的一顆 channel_list —— 新的要包上，舊的不留", () => {
+    const h = makeGame();
+    install(h);
+    setRoomDecks(h, PRELOAD_MATCH);
+    const m = enterMatch(h);
+    const old = m.channel_list;
+
+    // 離開再進來：遊戲 create() 又 new 了一顆
+    m.withChannelList();
+    const poll = h.timers[h.timers.length - 1];
+    poll?.();
+    expect(m.channel_list).not.toBe(old);
+    expect(Object.prototype.hasOwnProperty.call(m.channel_list, "emit")).toBe(true);
+    const st = h.window.__ulrRoomGate as { channelHooks: unknown[] };
+    expect(st.channelHooks).toHaveLength(1);
+
+    m.channel_list?.emit("channel", 2, { type: "duel" }, 0);
+    expect(m.deck1?.charaIndex).toEqual([21, 22, 23]);
+  });
+
+  it("重裝不會包兩層", () => {
+    const h = makeGame();
+    install(h);
+    const m = enterMatch(h);
+    install(h);
+    const poll = h.timers[h.timers.length - 1];
+    poll?.();
+    setRoomDecks(h, PRELOAD_MATCH);
+
+    let fired = 0;
+    m.channel_list?.on("channel", () => fired++);
+    m.channel_list?.emit("channel", 1, { type: "ranked" }, 0);
+    expect(fired).toBe(1);
+  });
+
+  it("拆掉之後 emit 還回去，選頻道不再換牌", () => {
+    const h = makeGame();
+    install(h);
+    setRoomDecks(h, PRELOAD_MATCH);
+    const m = enterMatch(h);
+    expect(run(h, ROOM_GATE_UNINSTALL_EXPRESSION)).toBe("ok");
+
+    expect(Object.prototype.hasOwnProperty.call(m.channel_list, "emit")).toBe(false);
+    m.channel_list?.emit("channel", 2, { type: "duel" }, 0);
+    expect(m.deck1?.charaIndex).toEqual([684, 674, 665]);
+    expect(m.channel).toBe(2);
   });
 });
 

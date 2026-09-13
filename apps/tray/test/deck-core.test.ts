@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
-import type { DeckContent, DeckLibrary } from "@ulr/deck-library";
-import { addDeck, emptyDeckContent, emptyLibrary, listDecks, ROOM_KINDS } from "@ulr/deck-library";
+import type { DeckContent, DeckLibrary, RaidBoss } from "@ulr/deck-library";
+import {
+  addDeck,
+  emptyDeckContent,
+  emptyLibrary,
+  listDecks,
+  ROOM_KINDS,
+  setSelected,
+} from "@ulr/deck-library";
 import type { DeckSession } from "../src/deck-core.js";
 import {
   applyLanded,
@@ -11,12 +18,14 @@ import {
   DEFAULT_ROOM,
   enterRoom,
   expireNotice,
+  followDeckOnEdit,
   highlightOf,
   isApplyDue,
   migrateServerDecks,
   newSession,
   NOTICE_TTL_MS,
   queueApply,
+  raidBossOfMons,
   resolveActive,
   resolveAll,
   roomDeckPreloadOf,
@@ -154,13 +163,24 @@ describe("畫面狀態", () => {
     expect(deckEditStateOf(newSession(lib)).decks[0]?.bosses).toEqual([]);
   });
 
-  it("四種房型都送過去，頁面不自己寫死", () => {
+  it("四種房型都送過去，頁面不自己寫死；順序是任務→渦→亞城→迪城", () => {
+    // 2026-09-12 玩家定的順序：先 PVE 再 PVP，最常用的迪城在最下面。
     expect(deckEditStateOf(sessionOf()).rooms.map((r) => r.key)).toEqual([
+      "quest",
       "raid",
       "alexandria",
-      "quest",
       "dietherm",
     ]);
+  });
+
+  it("每一房該畫哪一種 COST：PVE 不畫、亞城官方、迪城自訂", () => {
+    const lib = libraryOf(deckOf(1));
+    const modeOf = (room: (typeof ROOM_KINDS)[number]) =>
+      deckEditStateOf({ ...newSession(lib), room }).costDisplay;
+    expect(modeOf("quest")).toBe("none");
+    expect(modeOf("raid")).toBe("none");
+    expect(modeOf("alexandria")).toBe("official");
+    expect(modeOf("dietherm")).toBe("custom");
   });
 });
 
@@ -222,7 +242,7 @@ describe("玩家點了東西", () => {
     expect(out.session.notice).not.toBeNull();
   });
 
-  it("新增是複製現在這副，不是空牌組 —— 空的選不動（guardDeck1 會擋）", () => {
+  it("新增是複製現在這副，不是空牌組 —— 空的在房間選不動、在 Edit 等於 reset", () => {
     const current = deckOf(684);
     const out = applyReport(sessionOf(), { type: "deck-add" }, current);
     const decks = listDecks(out.session.library, DEFAULT_ROOM);
@@ -297,6 +317,52 @@ describe("玩家點了東西", () => {
     const session = sessionOf(deckOf(1));
     const out = applyReport(session, { type: "room-switch", room: "月球" }, deckOf(1));
     expect(out.session.room).toBe(DEFAULT_ROOM);
+  });
+
+  it("⚠⚠ 換房**牌組要跟著換**（2026-09-12）", () => {
+    // 原本只換「選單看哪一房」，手上的牌不動 —— 於是切到渦房之後選單列的是
+    // 渦的牌，畫面上擺的還是迪城那副，而玩家會以為自己已經換過去了。
+    const here = deckOf(1);
+    const there = deckOf(2);
+    let lib = emptyLibrary("3f2a1c04");
+    lib = addDeck(lib, DEFAULT_ROOM, { content: here }).library;
+    lib = addDeck(lib, "raid", { content: there }).library;
+    const session = newSession(lib);
+
+    const out = applyReport(session, { type: "room-switch", room: "raid" }, here);
+    expect(out.session.room).toBe("raid");
+    // 排進隊伍（不是直接寫伺服器），而且 write 交出去給前端即時換牌
+    expect(out.session.pending?.id).toBe(listDecks(lib, "raid")[0]?.id);
+    expect(out.session.pending?.room).toBe("raid");
+    expect(out.write).toEqual(there);
+  });
+
+  it("挑的那一副跟進房時一樣 —— 兩邊不一樣的話進房會再閃一次牌", () => {
+    const a = deckOf(1);
+    const b = deckOf(2);
+    let lib = emptyLibrary("3f2a1c04");
+    lib = addDeck(lib, DEFAULT_ROOM, { content: deckOf(9) }).library;
+    lib = addDeck(lib, "raid", { content: a }).library;
+    lib = addDeck(lib, "raid", { content: b }).library;
+    const second = listDecks(lib, "raid")[1]?.id ?? "";
+    lib = setSelected(lib, "raid", second);
+    const session = newSession(lib);
+
+    const switched = applyReport(session, { type: "room-switch", room: "raid" }, deckOf(9));
+    const entered = enterRoom(session, "raid", deckOf(9));
+    expect(switched.session.pending?.id).toBe(second);
+    expect(entered.pending?.id).toBe(second);
+  });
+
+  it("那一房還沒有牌組時什麼都不換", () => {
+    const here = deckOf(1);
+    let lib = emptyLibrary("3f2a1c04");
+    lib = addDeck(lib, DEFAULT_ROOM, { content: here }).library;
+    const session = newSession(lib);
+    const out = applyReport(session, { type: "room-switch", room: "quest" }, here);
+    expect(out.session.room).toBe("quest");
+    expect(out.session.pending).toBeNull();
+    expect(out.write).toBeNull();
   });
 });
 
@@ -396,8 +462,9 @@ describe("收編伺服器的 Deck2／Deck3", () => {
 
   it("伺服器那一格是空的就往前補，不留一副空牌佔位", () => {
     // ⚠ 「Deck3 要落在第 3 格」得先有第 2 格，而唯一的補法是塞一副空牌 ——
-    // 而空牌**選不動**（`guardDeck1` 擋著，第一格空的會讓玩家卡死在編輯畫面）。
-    // 佔位的代價是玩家清單裡多一副永遠點不動的東西，所以寧可往前補。
+    // 而空牌在房間裡**選不動**（`guardDeck1` 擋著，寫空到伺服器會讓玩家卡死在
+    // 編輯畫面）、在 Edit 裡選了等於按 reset。佔位的代價是玩家清單裡多一副
+    // 沒有牌的東西，所以寧可往前補。
     const d1 = deckOf(44);
     const out = migrateServerDecks(sessionOf(d1), null, deckOf(35));
     const list = listDecks(out.library, DEFAULT_ROOM);
@@ -636,5 +703,136 @@ describe("進了哪一房就套哪一套（WP-19）", () => {
     const away = enterRoom({ ...picked, here: "quest" }, "dietherm", dietherm, 2_000);
     const back = enterRoom(away, "quest", dietherm, 3_000);
     expect(back.pending?.id).toBe(second?.id);
+  });
+});
+
+describe("進了牌組編輯，選單跟著手上這副是哪一房的（2026-09-12）", () => {
+  /** 迪城兩副（1、2）、亞城兩副（3、4）。 */
+  function twoRoomsTwoDecks(): { session: DeckSession; d: DeckContent[]; a: DeckContent[] } {
+    const d = [deckOf(1), deckOf(2)];
+    const a = [deckOf(3), deckOf(4)];
+    let lib = emptyLibrary("3f2a1c04");
+    for (const c of d) lib = addDeck(lib, "dietherm", { content: c }).library;
+    for (const c of a) lib = addDeck(lib, "alexandria", { content: c }).library;
+    return { session: newSession(lib), d, a };
+  }
+  const idAt = (s: DeckSession, room: "dietherm" | "alexandria", i: number): string =>
+    listDecks(s.library, room)[i]?.id ?? "";
+
+  it("手上是亞城那副、選單停在迪城 → 換到亞城，黃字指著那一副", () => {
+    // 回報的情境：托盤重開過，選單停在預設的迪特赫姆，黃字指著迪城 Deck2，
+    // 但畫面上的牌其實是亞城的。
+    const { session, a } = twoRoomsTwoDecks();
+    const stale = {
+      ...session,
+      library: setSelected(session.library, "dietherm", idAt(session, "dietherm", 1)),
+    };
+    const out = followDeckOnEdit(stale, a[1]!);
+    expect(out.room).toBe("alexandria");
+    expect(highlightOf(out, "alexandria")).toBe(idAt(out, "alexandria", 1));
+    expect(out.active.alexandria).toBe(idAt(out, "alexandria", 1));
+    expect(out.library.selected?.alexandria).toBe(idAt(out, "alexandria", 1));
+  });
+
+  it("選單這一房就有這副 → 房不動，黃字對到它（selected 也跟著改）", () => {
+    const { session, d } = twoRoomsTwoDecks();
+    const stale = {
+      ...session,
+      library: setSelected(session.library, "dietherm", idAt(session, "dietherm", 0)),
+    };
+    const out = followDeckOnEdit(stale, d[1]!);
+    expect(out.room).toBe("dietherm");
+    expect(highlightOf(out, "dietherm")).toBe(idAt(out, "dietherm", 1));
+    expect(out.library.selected?.dietherm).toBe(idAt(out, "dietherm", 1));
+  });
+
+  it("四房都是同一副的複本 → 誰「記住」了它誰優先，不是照房間順序", () => {
+    // seedAllRooms 之後四房內容一樣，光看內容分不出他從哪一房出來。
+    const same = deckOf(7);
+    let lib = emptyLibrary("3f2a1c04");
+    lib = seedAllRooms(lib, same);
+    lib = addDeck(lib, "quest", { content: deckOf(8) }).library;
+    // 任務房記住的是第二副（8），渦房記住的是第一副（7 = 手上這副）
+    lib = setSelected(lib, "quest", listDecks(lib, "quest")[1]?.id ?? "");
+    lib = setSelected(lib, "raid", listDecks(lib, "raid")[0]?.id ?? "");
+    const session = { ...newSession(lib), room: "quest" as const };
+    const out = followDeckOnEdit(session, same);
+    expect(out.room).toBe("raid");
+  });
+
+  it("對不上任何一副 → 什麼都不動", () => {
+    const { session } = twoRoomsTwoDecks();
+    const out = followDeckOnEdit(session, deckOf(99));
+    expect(out).toBe(session);
+  });
+
+  it("有東西排著隊 → 不動，黃字跟隊伍", () => {
+    const { session, a, d } = twoRoomsTwoDecks();
+    const queued = queueApply(
+      session,
+      "dietherm",
+      idAt(session, "dietherm", 0),
+      d[0]!,
+      a[0]!,
+      1_000,
+    );
+    expect(followDeckOnEdit(queued, a[1]!)).toBe(queued);
+  });
+
+  it("已經對好了 → 回同一個物件，呼叫端不必重畫", () => {
+    const { session, a } = twoRoomsTwoDecks();
+    const first = followDeckOnEdit(session, a[0]!);
+    expect(first.room).toBe("alexandria");
+    expect(followDeckOnEdit(first, a[0]!)).toBe(first);
+  });
+});
+
+describe("渦房選了渦，照 BOSS 標籤換牌組（2026-09-13）", () => {
+  /** 渦房四副：龜海、龜甲、龜乙、魚蟲狗。選單停在迪城（預設）。 */
+  function raidDecks(): { session: DeckSession; c: DeckContent[]; id: (i: number) => string } {
+    const c = [deckOf(11), deckOf(12), deckOf(13), deckOf(14)];
+    const tags: RaidBoss[][] = [["sea", "turtle"], ["turtle"], ["turtle"], ["fish", "bug", "dog"]];
+    let lib = emptyLibrary("3f2a1c04");
+    c.forEach((content, i) => {
+      lib = addDeck(lib, "raid", { content, bosses: tags[i] ?? [] }).library;
+    });
+    const session = newSession(lib);
+    return { session, c, id: (i) => listDecks(session.library, "raid")[i]?.id ?? "" };
+  }
+
+  it("BOSS 代碼對得到標籤：前綴相同的渦I／II·III／IV 都算", () => {
+    expect(raidBossOfMons("mc1008_02")).toBe("turtle");
+    expect(raidBossOfMons("mc1008_03")).toBe("turtle");
+    expect(raidBossOfMons("mc1003_01")).toBe("dog");
+    expect(raidBossOfMons("mc1004")).toBeNull();
+    expect(raidBossOfMons("__proto__")).toBeNull();
+  });
+
+  it("選了龜 → 挑標籤最少、排最前面的那副，排隊並回傳要換上的內容", () => {
+    const { session, c, id } = raidDecks();
+    const out = applyReport(session, { type: "raid-pick", mons: "mc1008_02" }, c[3]!);
+    expect(out.session.room).toBe("raid");
+    expect(out.session.pending?.id).toBe(id(1));
+    expect(out.session.library.selected?.raid).toBe(id(1));
+    expect(out.write).toEqual(c[1]);
+  });
+
+  it("手上已經是那副 → 不排隊、不寫", () => {
+    const { session, c, id } = raidDecks();
+    const out = applyReport(session, { type: "raid-pick", mons: "mc1008_02" }, c[1]!);
+    expect(out.write).toBeNull();
+    expect(out.session.pending).toBeNull();
+    expect(out.session.active.raid).toBe(id(1));
+  });
+
+  it("⚠ 沒有任何一副掛那個標籤、或認不得的 BOSS → 什麼都不變", () => {
+    let lib = emptyLibrary("3f2a1c04");
+    lib = addDeck(lib, "raid", { content: deckOf(21), bosses: ["sea"] }).library;
+    const session = newSession(lib);
+    for (const mons of ["mc1008_02", "mc1004", "mc1005"]) {
+      const out = applyReport(session, { type: "raid-pick", mons }, deckOf(99));
+      expect(out.session).toBe(session);
+      expect(out.write).toBeNull();
+    }
   });
 });

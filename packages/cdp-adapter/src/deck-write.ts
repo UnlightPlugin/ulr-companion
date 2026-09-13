@@ -55,6 +55,7 @@
  */
 
 import { embedJson } from "./embed.js";
+import { ROOM_COST_SNIPPET } from "./room-cost.js";
 
 /** 送給 `db_editdeck` 的一副牌組。**這是送出去的形狀，不是讀回來的。** */
 export interface DeckPayload {
@@ -71,10 +72,47 @@ export interface DeckPayload {
 export type FlatDeck = Record<string, unknown>;
 
 /**
+ * 快取的連線多久沒連上就換一條新的（毫秒）。
+ *
+ * 新開的連線從 new 到伺服器回 `__connected` 實測不到一秒；WSClient 自己斷線
+ * 重連的間隔是 1 秒起跳。10 秒夠它們各自走完，又遠短於 `fetch` 的 30 秒逾時
+ * —— 所以玩家最多只會吃到一次失敗，下一次點就換新連線了。
+ */
+export const DECK_SOCKET_STALE_MS = 10_000;
+
+/**
  * 在頁面裡建立（或取回）我們自己的 game 服務連線。
  *
  * 存在 `window.__ulrDeckSock`，跨呼叫重用 —— 每次都開一條新的話，玩家連按
  * 幾下換牌組就會留下一串閒置連線。
+ *
+ * ## ⚠⚠ 重用之前要確認它真的連著（2026-09-13）
+ *
+ * 回報：「渦房開牌盒無法換牌組，左右也無法切換；牌組編輯內無法切換房間」。
+ * 托盤記錄只有一句「讀不到你的卡片庫存，先不換」，而牌組庫從斷線之後就再也
+ * 沒接上過。實機查到的是：
+ *
+ * ```
+ *   __ulrDeckSock   readyState=1（WebSocket 開著）  state=1（REGISTERING）
+ *   Raid.socket     readyState=1                    state=2（CONNECTED）
+ * ```
+ *
+ * 遊戲那次斷線（code 1006）之後，WSClient **自己重連**了：WebSocket 打開 →
+ * `#onOpen` 把狀態設成 REGISTERING → 帶舊 id 去握手 → 伺服器始終沒回
+ * `__connected`。REGISTERING 期間送出去的東西全部躺在 `#outBuffer` 裡不發，
+ * 所以每一次 `fetch` 都是等到逾時 —— **換牌組要先讀庫存，於是整個牌組庫的
+ * 每一個操作都失敗**，而 WebSocket 本身看起來完全正常。
+ *
+ * 遊戲自己不受影響，是因為它每進一個場景都 new 一條新的；只有我們這條是
+ * 永遠重用的。
+ *
+ * 所以現在用 WSClient **自己的事件**記「這條真的連上了」（`connect` 是收到
+ * `__connected` 才發的，`close` 是斷線）：連著就重用；沒連著而且超過
+ * {@link DECK_SOCKET_STALE_MS} 就拆掉換一條新的。不讀 `state` 的數字 ——
+ * 那是遊戲內部的列舉，哪天重排了這裡會安靜地判錯。
+ *
+ * ⚠ 舊版腳本留下的連線沒有這些記號，會被當成「很久沒連上」換掉一次。那是
+ * 對的：它正是這次卡死的那一條。
  */
 const DECK_SOCKET_SETUP = `
   var g = window.game;
@@ -85,11 +123,29 @@ const DECK_SOCKET_SETUP = `
     if (s.socket && s.id) { host = s; break; }
   }
   if (!host) throw new Error("找不到可借用 WSClient 與玩家 id 的場景");
+  var old = window.__ulrDeckSock;
+  if (old && window.__ulrDeckSockLive !== old &&
+      !(Date.now() - (window.__ulrDeckSockAt || 0) < ${DECK_SOCKET_STALE_MS})) {
+    try { old.disconnect(); } catch (e) { /* 已經斷了 */ }
+    window.__ulrDeckSock = null;
+  }
   if (!window.__ulrDeckSock) {
     var cfg = UL_CONFIG.domains.game;
     var url = cfg.urls[0] + ":" + cfg.ports[Math.floor(Math.random() * cfg.ports.length)];
-    window.__ulrDeckSock = new (host.socket.constructor)(url);
+    var fresh = new (host.socket.constructor)(url);
+    window.__ulrDeckSock = fresh;
     window.__ulrDeckSockUrl = url;
+    window.__ulrDeckSockAt = Date.now();
+    window.__ulrDeckSockLive = null;
+    fresh.on("connect", function () {
+      if (window.__ulrDeckSock === fresh) window.__ulrDeckSockLive = fresh;
+    });
+    // 斷線後從這一刻重新起算寬限時間：WSClient 自己重連得上就繼續用它。
+    fresh.on("close", function () {
+      if (window.__ulrDeckSock !== fresh) return;
+      window.__ulrDeckSockLive = null;
+      window.__ulrDeckSockAt = Date.now();
+    });
   }
   // ⚠ id 每次都從場景重讀，不快取 —— 玩家換帳號登入時快取的會是上一個人的
   var sock = window.__ulrDeckSock, pid = host.id;
@@ -231,6 +287,7 @@ export function buildDeckApplyExpression(decks: DeckPayload[], deckCheck: boolea
     var ack = await ackP;
 
     // 同步客戶端記憶體，見檔頭「寫完一定要同步客戶端記憶體」
+    ${ROOM_COST_SNIPPET}
     var synced = [];
     Object.keys(g.scene.keys).forEach(function (k) {
       var sc = g.scene.keys[k];
@@ -242,7 +299,11 @@ export function buildDeckApplyExpression(decks: DeckPayload[], deckCheck: boolea
         cur.charaIndex = src.charaIndex.slice();
         if (cur.eventIndex !== undefined) cur.eventIndex = src.eventIndex.slice();
         if (cur.weapon !== undefined) cur.weapon = src.weapon.slice();
-        cur.cost = src.cost;
+        // ⚠ cost 不能照抄 payload：呼叫端帶的是快照裡**上一副**的數字（2026-09-12
+        // 迪城「COST 變來變去」的其中一個來源）。照房型算成跟牌盒一樣的數字，見
+        // room-cost.ts；算不出來才用帶來的值。
+        var rc = ulrRoomCostOf(cur, ulrRoomOfScene(k, sc));
+        cur.cost = rc !== null ? rc : src.cost;
         if (synced.indexOf(k) < 0) synced.push(k);
       }
     });
@@ -410,6 +471,28 @@ export const EDIT_DECK_READ_EXPRESSION = `(function () {
  * 它裝的正是我們寫進去的內容。這也表示：遊戲被強制關掉（沒有正常離開畫面）時
  * 這次切換不會留在伺服器上 —— 跟玩家自己排牌沒存就關掉是同一種結果。
  *
+ * ## 空牌組在 Edit 畫面是合法的 —— 那就是 reset 鈕按下去的狀態（2026-09-12）
+ *
+ * 選單裡選了一副空的（玩家自己按過 reset 又存起來的那種），Edit 這一段照寫
+ * 不誤：寫進記憶體的東西跟遊戲 reset 產生的一模一樣，出口那道「第一格不能空」
+ * 的檢查是遊戲自己擋的、玩家看得到原因。原本一律拒絕的後果是「選了空牌組，
+ * 舊的那副還在畫面上」，玩家得自己再按一次 reset。
+ *
+ * `guardDeck1` 守的是**伺服器**那條路（`buildDeckApplyExpression`）——
+ * 寫空到伺服器才會讓玩家卡死。房間場景也不收，回 `empty-room`，見下面。
+ *
+ * ## ⚠ 房間場景要自己把 COST 算對（2026-09-12）
+ *
+ * 大廳／房間的 `cost:NN` 讀的是 `deck1.cost`，而遊戲**只在載入時信任這個欄位、
+ * 從不重算**。payload 的 cost 一律帶 0（伺服器自己會算，見 {@link DeckPayload}），
+ * 所以換牌之後房間會顯示「COST 0」，或停在上一副的舊數字 —— 2026-09-12 在亞城
+ * 回報的正是這個。這支換完會把真的數字補進 `deck1.cost` 再重畫。
+ *
+ * ⚠ 算法只有一種，在 `room-cost.ts`：**跟牌盒畫的同一張表**（迪城自訂價、其餘
+ * 官方價）。原本這裡固定算官方價，而慢路徑抄的是上一副的數字、遊戲自己載入的
+ * 又是自訂價 —— 同一副牌輪流出現三個數字，就是 2026-09-12 迪城回報的「COST
+ * 變來變去」。
+ *
  * 回 `not-active` 表示編輯畫面沒開著，呼叫端要退回走伺服器那條路。
  */
 export function buildEditDeckWriteExpression(deck: DeckPayload, label?: string): string {
@@ -417,6 +500,7 @@ export function buildEditDeckWriteExpression(deck: DeckPayload, label?: string):
   try {
     var g = window.game;
     if (!g) return "not-active";
+    ${ROOM_COST_SNIPPET}
     var d = JSON.parse(${embedJson(deck)});
     // ⚠ 一定要 JSON.parse。embedJson() 給的是「要餵給 JSON.parse 的字串字面
     // 值」，直接用的話 label 會變成字串 "null" 而不是 null —— 症狀是遊戲裡
@@ -454,7 +538,18 @@ export function buildEditDeckWriteExpression(deck: DeckPayload, label?: string):
       if (!sc || !sc.scene.isActive()) continue;
       // 這個場景有在畫牌組嗎？沒有 deck1 就不是（例如還在載入）。
       if (!sc.deck1) continue;
+      // ⚠ 空牌組**只有 Edit 收**（那裡等於幫玩家按 reset，見上面）。房間裡
+      // 沒有 reset 這回事：寫進去畫面會變成三格空的、開戰卻用伺服器那副舊的，
+      // 而且沒有人會把它送上去 —— 呼叫端拿到這個值就照 guardDeck1 的理由拒絕。
+      if (d.charaIndex[0] === null || d.charaIndex[0] === undefined) return "empty-room";
       load(sc);
+      // ⚠ COST 要自己算出來填進去（2026-09-12 回報）。房間場景的 cost:NN 讀的是
+      // deck1.cost，而遊戲**不重算** —— 它只在載入時信任那個欄位。上面 load()
+      // 帶進來的是 0（payload 的 cost 一律 0），所以不補的話畫面會顯示「COST 0」，
+      // 或停在上一副的舊數字。哪一種價看房型（跟牌盒同一張表），見 room-cost.ts；
+      // 算不出來就維持原樣。
+      var c = ulrRoomCostOf(sc.deck1, ulrRoomOfScene(names[i], sc));
+      if (c !== null) sc.deck1.cost = c;
       // 名字：⚠ 遊戲原本寫死 "Deck1 "，但牌組庫裡那一副有自己的名字，而
       // 「Deck1」對玩家已經沒有意義了（工作槽永遠是 1）。
       try {
@@ -527,6 +622,7 @@ export const DECK_SOCKET_CLOSE_EXPRESSION = `(function () {
     if (window.__ulrDeckSock) {
       try { window.__ulrDeckSock.disconnect(); } catch (e) { /* 已經斷了 */ }
       window.__ulrDeckSock = null;
+      window.__ulrDeckSockLive = null;
       return "closed";
     }
     return "none";
