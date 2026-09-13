@@ -88,6 +88,12 @@ export const DEFAULT_UPDATE_FEED = `${SERVICE_ORIGIN}/update`;
  */
 export const DEFAULT_RULE_FEED = `${SERVICE_ORIGIN}/rules`;
 
+/** 共享渦狀態的看板（見 `raid-share.ts`）。跟 `/rules` 同一台 Worker。 */
+export const DEFAULT_RAID_SHARE_URL = `${SERVICE_ORIGIN}/raids`;
+
+/** 打渦隊伍的看板（同一台 Worker、同一個看板實例）。 */
+export const DEFAULT_RAID_TEAMS_URL = `${SERVICE_ORIGIN}/raid-teams`;
+
 /**
  * 開發者用的關鍵字：不要雲端，改用同一台電腦上的 broker。
  *

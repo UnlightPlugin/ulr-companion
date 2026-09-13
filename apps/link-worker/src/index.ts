@@ -25,6 +25,12 @@
 
 import { LINK_PROTOCOL_VERSION } from "@ulr/arbiter-link/protocol";
 import {
+  MAX_RAID_SHARE_BODY_BYTES,
+  MAX_RAID_TEAMS_BODY_BYTES,
+  RAID_SHARE_PATH,
+  RAID_TEAMS_PATH,
+} from "@ulr/arbiter-link/raid-share";
+import {
   COUNT_PATH,
   COUNT_SUFFIX,
   COUNT_TAG_PARAM,
@@ -41,10 +47,12 @@ import { CURRENT_RULE_SET } from "./rules.js";
 
 export { LinkRoom } from "./room.js";
 export { MatchQueueRoom } from "./queue.js";
+export { RaidBoardRoom } from "./raid-board.js";
 
 interface Env {
   ROOMS: DurableObjectNamespace;
   QUEUES: DurableObjectNamespace;
+  RAIDS: DurableObjectNamespace;
 }
 
 export default {
@@ -130,6 +138,23 @@ export default {
         // ⚠ 不快取：人數的全部價值就是它是現在的。
         { headers: { "cache-control": "no-store" } },
       );
+    }
+
+    // 共享渦狀態（見 `@ulr/arbiter-link/raid-share`）。全世界一塊看板，一個實例。
+    // ⚠ 這條路由上**沒有渦碼**，只有渦碼的雜湊 —— 驗證與理由都在 raid-share.ts。
+    // `/raid-teams`（打渦隊伍）住在同一塊看板裡，只是 body 上限大一點。
+    if (url.pathname === RAID_SHARE_PATH || url.pathname === RAID_TEAMS_PATH) {
+      // 太大的 body 在入口就擋掉，不必轉進看板（看板那邊一律先把 body 讀完）。
+      const length = Number(request.headers.get("content-length") ?? "0");
+      const max =
+        url.pathname === RAID_TEAMS_PATH ? MAX_RAID_TEAMS_BODY_BYTES : MAX_RAID_SHARE_BODY_BYTES;
+      if (length > max) return new Response("too big", { status: 413 });
+      try {
+        return await env.RAIDS.getByName("board").fetch(request);
+      } catch {
+        // 看板掛了只是沒有共享圖示，插件那邊會當作查不到。
+        return new Response("board unavailable", { status: 503 });
+      }
     }
 
     // 約戰配對佇列（WP-16）。跟房間走同一套驗證與同一個模式，只是換一個

@@ -79,6 +79,8 @@ export type { LinkClientOptions, LinkStatus } from "./link-client.js";
 // 階段 3：中間人的位址從「一個埠號」變成「一個字串」，兩種傳輸共用同一份解析。
 export {
   DEFAULT_LINK_TARGET,
+  DEFAULT_RAID_SHARE_URL,
+  DEFAULT_RAID_TEAMS_URL,
   DEFAULT_RULE_FEED,
   DEFAULT_UPDATE_FEED,
   describeTarget,
@@ -140,3 +142,36 @@ export type {
   WatchSocketLike,
   WatchState,
 } from "./queue-watch.js";
+
+export {
+  isRaidShareKey,
+  MAX_RAID_SHARE_BODY_BYTES,
+  MAX_RAID_SHARE_KEYS,
+  MAX_RAID_STATES,
+  MAX_RAIDS_PER_POST,
+  normalizeRaidUpload,
+  parseRaidShareKeys,
+  RAID_BOARD_CAPACITY,
+  RAID_SHARE_KEY_LENGTH,
+  RAID_SHARE_MAX_AHEAD_MS,
+  RAID_SHARE_PATH,
+  RaidBoard,
+  raidShareKey,
+  MAX_RAID_TEAM_ENTRIES_PER_POST,
+  MAX_RAID_TEAMS_BODY_BYTES,
+  MAX_RAID_TEAMS_PER_PLAYER,
+  normalizeTeamsUpload,
+  RAID_TEAM_BOARD_CAPACITY,
+  RAID_TEAMS_PATH,
+  RaidTeamBoard,
+  raidPlayerKey,
+} from "./raid-share.js";
+export type {
+  SharedRaid,
+  SharedRaidState,
+  SharedRaidTeams,
+  SharedRaidUpload,
+  SharedTeam,
+  SharedTeamsPlayer,
+  SharedTeamsUpload,
+} from "./raid-share.js";

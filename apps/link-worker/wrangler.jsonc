@@ -25,6 +25,8 @@
     "bindings": [
       { "name": "ROOMS", "class_name": "LinkRoom" },
       { "name": "QUEUES", "class_name": "MatchQueueRoom" },
+      // 共享渦狀態的看板（raid-board.ts）。全世界一個實例、只放記憶體。
+      { "name": "RAIDS", "class_name": "RaidBoardRoom" },
     ],
   },
 
@@ -38,6 +40,7 @@
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["LinkRoom"] },
     { "tag": "v2", "new_sqlite_classes": ["MatchQueueRoom"] },
+    { "tag": "v3", "new_sqlite_classes": ["RaidBoardRoom"] },
   ],
 
   // console.log 會進 Cloudflare 的觀測後台。⚠ 因此 log 一律只印截短的房號，

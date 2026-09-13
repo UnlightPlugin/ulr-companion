@@ -16,6 +16,33 @@ export {
 export type { CostPhase, CostState, EngineOptions, EngineStatus } from "./engine.js";
 
 export {
+  DEFAULT_RAID_PUBLIC_TIMEOUT_MS,
+  fetchObservedRaids,
+  lookupSharedRaids,
+  mergePublicMaps,
+  parseObservedRaids,
+  uploadSharedRaids,
+  RAID_PUBLIC_REFRESH_MS,
+  ULGG_OBSERVED_RAIDS_URL,
+} from "./raid-public.js";
+export type { FetchLike } from "./raid-public.js";
+
+export {
+  aggregateTeams,
+  buildTeamUploads,
+  localTeamsMap,
+  lookupRaidTeams,
+  MAX_RAID_BATTLE_RECORDS,
+  mergeTeamsMaps,
+  parseBattleRecords,
+  pruneBattles,
+  toBattleRecord,
+  uploadRaidTeams,
+  upsertBattle,
+} from "./raid-teams.js";
+export type { RaidBattleRecord } from "./raid-teams.js";
+
+export {
   bandForTotal,
   buildRoomName,
   checkOwnDeck,
