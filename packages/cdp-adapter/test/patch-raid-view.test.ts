@@ -28,7 +28,7 @@
  * 9. 過期狀態不畫；重裝會卸掉舊的 canvas 貼圖（不然新版畫法不生效）
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import {
   buildRaidViewPatchScript,
   buildRaidViewSetAutoDeleteExpression,
@@ -1101,6 +1101,95 @@ describe("渦房的獎勵標記", () => {
       const again = reports.filter((r) => r.type === "raid-battle");
       expect(again).toHaveLength(2);
       expect(again[1]).toMatchObject({ at: battles[0]!.at, damage: 270, points: 5900, turns: 3 });
+    });
+
+    it("連打：回渦房清單還沒換就又開打 → 用開打那一刻的榜結算上一場，不被蓋掉", () => {
+      // 2026-09-13 實機：同一個渦連打 3 場，開打前分數 3600 → 7106 → 14231，只記到 1 場
+      // 開打時刻是 Date.now()：測試跑太快兩場會落在同一毫秒，所以時鐘手動推進
+      let clock = Date.now();
+      const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+      onTestFinished(() => now.mockRestore());
+      const { raid, window } = setup([battleRow(0, {}, 3600)]);
+      const { fire } = withSocket(raid);
+      const reports = withReports(window);
+      run(window, buildRaidViewPatchScript({ bindingName: BINDING }));
+      poll?.();
+      arm(raid);
+      const battles = () => reports.filter((r) => r.type === "raid-battle");
+      const leaveAndComeBack = (row: RaidRow) => {
+        clock += 1000;
+        raid.status = 7;
+        poll?.();
+        raid.status = 5;
+        raid.raid_data = [row];
+        poll?.(); // 回來第一眼（還不量）
+      };
+
+      fire("raid_ready"); // 第 1 場
+      leaveAndComeBack(battleRow(0, {}, 7106));
+      expect(battles()).toEqual([]);
+      fire("raid_ready"); // 一秒內第 2 場：第 1 場用這一刻的榜結算
+      expect(battles()).toHaveLength(1);
+      expect(battles()[0]).toMatchObject({ damage: 0, points: 3506 });
+
+      leaveAndComeBack(battleRow(16, {}, 14231));
+      fire("raid_ready"); // 第 3 場
+      expect(battles()).toHaveLength(2);
+      expect(battles()[1]).toMatchObject({ damage: 16, points: 7125 });
+      // 兩場是不同的開打時刻（不會被當成同一場的補報合併掉）
+      expect(battles()[1]!.at).not.toBe(battles()[0]!.at);
+
+      // 第 3 場照原本的路量：回來、清單換過一份
+      leaveAndComeBack(battleRow(16, {}, 14231));
+      raid.raid_data = [battleRow(50, {}, 21147)];
+      poll?.();
+      expect(battles()).toHaveLength(3);
+      expect(battles()[2]).toMatchObject({ damage: 34, points: 6916 });
+      // 第 1、2 場沒有補報：同一個渦之後進帳的都算最新那場
+      raid.raid_data = [battleRow(60, {}, 22000)];
+      poll?.();
+      expect(battles()).toHaveLength(4);
+      expect(battles()[3]).toMatchObject({ at: battles()[2]!.at, damage: 44, points: 7769 });
+    });
+
+    it("連打換渦：上一個渦結算後留補報，晚到的分數照樣補上", () => {
+      const other = (point: number) =>
+        Object.assign(
+          ROW({
+            profound_id: "2092-y",
+            pass: "otherCode123",
+            points: [{ name: "燈皇", point, damage: 0 }],
+          }),
+          {
+            ap_spend: 1,
+            limit: Date.now() + 3_600_000,
+          },
+        );
+      const { raid, window } = setup([battleRow(0, {}, 100), other(0)]);
+      const { fire } = withSocket(raid);
+      const reports = withReports(window);
+      run(window, buildRaidViewPatchScript({ bindingName: BINDING }));
+      poll?.();
+      arm(raid);
+      fire("raid_ready"); // 在 2091-x 開打
+      raid.status = 7;
+      poll?.();
+      raid.status = 5;
+      raid.raid_data = [battleRow(0, {}, 3600), other(0)];
+      poll?.();
+      (raid as unknown as Record<string, unknown>).raid_id = "2092-y";
+      fire("raid_ready"); // 換到 2092-y 開打
+      const battles = () => reports.filter((r) => r.type === "raid-battle");
+      expect(battles()).toHaveLength(1);
+      expect(battles()[0]).toMatchObject({ code: "tfqLuvEDegF3", points: 3500 });
+      // 2091-x 的傷害分晚到：補報給上一場
+      raid.status = 7;
+      poll?.();
+      raid.status = 5;
+      raid.raid_data = [battleRow(30, {}, 9000), other(0)];
+      poll?.();
+      const late = battles().filter((b) => b.code === "tfqLuvEDegF3");
+      expect(late.at(-1)).toMatchObject({ at: battles()[0]!.at, damage: 30, points: 8900 });
     });
 
     it("回合數以伺服器的 turn_limit 為準；牌組角色跟伺服器那份對不上就用伺服器的、事件卡留空", () => {

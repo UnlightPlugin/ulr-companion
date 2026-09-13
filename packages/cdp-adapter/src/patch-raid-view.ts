@@ -38,6 +38,8 @@
  *        deck{deck_now} 與榜上自己的 damage／point；人回到渦房、raid_data 換過一份之後
  *        再讀一次相減，回報 raid-battle。AP = ap_spend × 回合（官方回合面板同一條算式）。
  *        之後 15 分鐘內分數再漲（提早離場時晚到）用同一個 at 補報。
+ *        還沒量到就又開打（連打時回渦房一秒就按 START）：用開打那一刻的榜先把上一場結算掉
+ *        （v16，2026-09-13 實機連打 3 場只記到 1 場）。
  *        量不到（渦不見了）就不回報 —— 不記一筆傷害是猜的
  *      · 看：托盤把自己的紀錄＋插件互傳查到的別人的，整理成「渦碼 → 名字 → 隊伍」推下來
  *        （setTeams）。有隊伍的名字（排行榜、傷害統計）旁掛一顆牌盒 edit_icon、點得下去；
@@ -136,7 +138,7 @@ import {
 const FLAG = "__ulrRaidView";
 
 /** 腳本版本。**改動注入腳本裡任何一行就 +1**，修 bug 也算。 */
-export const RAID_VIEW_SCRIPT_VERSION = 15;
+export const RAID_VIEW_SCRIPT_VERSION = 16;
 
 /**
  * 開打那一場的暫存（⑨）掛在頁面上的地方。**重裝不清**：打到一半插件重裝，
@@ -2184,6 +2186,12 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
       var R = G && G.scene.keys.Raid;
       if (!R || !R.player || typeof R.player.name !== "string") return;
       var r = raidById(R, R.raid_id);
+      var prev = window[BATTLE];
+      if (prev && prev.away) settleEarly(prev, R, r ? r.profound_id : R.raid_id);
+      window[BATTLE] = null;
+      // 同一個渦之後才進帳的分數算新這一場的（它的「開打前」已經讀不到了），
+      // 別的渦的補報照留
+      window[TAIL] = tails().filter(function (t) { return t.b.id !== (r ? r.profound_id : R.raid_id); });
       var deck = deckCopy(R["deck" + R.deck_now]);
       var sv = config && config.room_playerAdeck;
       if (sv && sv.chara && sv.charaIndex) {
@@ -2198,8 +2206,38 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
         turns: turns, ap: spend * turns, deck: deck, before: scoreOf(r, R.player.name),
         at: Date.now(), away: false, seen: null
       };
-      window[TAIL] = null;
     } catch (e) { st.reason = "raid_ready: " + String((e && e.message) || e); }
+  }
+  /**
+   * 上一場還沒量完就又開打了：用這一刻的榜把它結算掉，不要被新的蓋掉。
+   *
+   * ⚠ 2026-09-13 實機（打渦.py 直連回渦房、一秒內再按 START）：同一個渦連打 3 場只記到
+   * 1 場。原本要等「回渦房後清單換過一份」才量，而連打時清單還沒換、下一場的 raid_ready
+   * 就先到，把上一場整格蓋掉。那一刻的榜其實是新的（三場的開打前分數 3600→7106→14231），
+   * 拿它結算就對得上。之後才進帳的分數：同一個渦算下一場的，別的渦留一條補報。
+   */
+  function settleEarly(prev, R, nextId) {
+    if (Date.now() - prev.at > CFG.battleMaxMs) return;
+    var r = raidById(R, prev.id);
+    if (!r) return;
+    var now = scoreOf(r, prev.player);
+    var points = Math.max(0, now.point - prev.before.point);
+    var damage = Math.max(0, now.damage - prev.before.damage);
+    report(battleReport(prev, damage, points));
+    if (prev.id !== nextId) addTail(prev, damage, points, R.raid_data);
+  }
+  /** 補報清單。上一版是單一物件，重裝接手時轉成清單。 */
+  function tails() {
+    var t = window[TAIL];
+    if (!t) t = [];
+    else if (!Array.isArray(t)) t = [t];
+    window[TAIL] = t;
+    return t;
+  }
+  function addTail(b, damage, points, data) {
+    var list = tails().filter(function (t) { return t.b.id !== b.id; });
+    list.push({ b: b, damage: damage, points: points, data: data, until: Date.now() + CFG.tailMs });
+    window[TAIL] = list;
   }
   /** Raid 場景 shutdown 會斷掉 socket，下次進房是新的一顆：換過就重掛。 */
   function hookReady(st, R) {
@@ -2240,23 +2278,25 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
     var damage = Math.max(0, now.damage - b.before.damage);
     report(battleReport(b, damage, points));
     // 提早離場的話分數會晚幾分鐘才進帳（打渦.py 實測）：之後漲的都算這一場，補一次更新
-    window[TAIL] = { b: b, damage: damage, points: points, data: R.raid_data, until: Date.now() + CFG.tailMs };
+    addTail(b, damage, points, R.raid_data);
   }
   function settleTail(R) {
-    var t = window[TAIL];
-    if (!t) return;
-    if (Date.now() > t.until) { window[TAIL] = null; return; }
-    if (R.raid_data === t.data) return;
-    t.data = R.raid_data;
-    var r = raidById(R, t.b.id);
-    if (!r) return;
-    var now = scoreOf(r, t.b.player);
-    var points = Math.max(0, now.point - t.b.before.point);
-    var damage = Math.max(0, now.damage - t.b.before.damage);
-    if (points <= t.points && damage <= t.damage) return;
-    t.points = points;
-    t.damage = damage;
-    report(battleReport(t.b, damage, points));
+    var list = tails().filter(function (t) { return Date.now() <= t.until; });
+    window[TAIL] = list;
+    for (var i = 0; i < list.length; i++) {
+      var t = list[i];
+      if (R.raid_data === t.data) continue;
+      t.data = R.raid_data;
+      var r = raidById(R, t.b.id);
+      if (!r) continue;
+      var now = scoreOf(r, t.b.player);
+      var points = Math.max(0, now.point - t.b.before.point);
+      var damage = Math.max(0, now.damage - t.b.before.damage);
+      if (points <= t.points && damage <= t.damage) continue;
+      t.points = points;
+      t.damage = damage;
+      report(battleReport(t.b, damage, points));
+    }
   }
 
   // ---- 主迴圈 ---------------------------------------------------------------
