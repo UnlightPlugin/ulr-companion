@@ -26,16 +26,112 @@ import type {
   CostOverrides,
   CostOverrideTables,
   CostPatchCoverage,
+  CostPatchEnabledResult,
   CostPatchReport,
 } from "./patch-cost.js";
 import {
   buildCostPatchCoverageExpression,
+  buildCostPatchEnabledExpression,
   buildCostPatchScript,
   costsStamp,
   costTargetAssetKeys,
   isCostPatchReport,
   parseCostPatchCoverage,
+  parseCostPatchEnabledResult,
 } from "./patch-cost.js";
+import type { CostToggleReport, CostToggleState, CostToggleStatus } from "./patch-cost-toggle.js";
+import {
+  buildCostTogglePatchScript,
+  buildCostToggleStateExpression,
+  COST_TOGGLE_STATUS_EXPRESSION,
+  COST_TOGGLE_UNINSTALL_EXPRESSION,
+  isCostToggleReport,
+  parseCostToggleStatus,
+} from "./patch-cost-toggle.js";
+import type {
+  DisplayFullscreenReport,
+  DisplaySettingsReport,
+  DisplayState,
+  DisplayStatus,
+} from "./patch-display.js";
+import {
+  buildDisplayPatchScript,
+  buildDisplayStateExpression,
+  DISPLAY_STATUS_EXPRESSION,
+  DISPLAY_UNINSTALL_EXPRESSION,
+  isDisplayFullscreenReport,
+  isDisplaySettingsReport,
+  parseDisplayStatus,
+} from "./patch-display.js";
+import type { WindowFillResult } from "./window-fill.js";
+import { fillGameWindow } from "./window-fill.js";
+import type { NavReport, NavStatus } from "./patch-nav.js";
+import {
+  buildNavPatchScript,
+  isNavReport,
+  NAV_STATUS_EXPRESSION,
+  NAV_UNINSTALL_EXPRESSION,
+  parseNavStatus,
+} from "./patch-nav.js";
+import type { AssetGuardStatus, AssetRepairReport } from "./patch-asset-guard.js";
+import {
+  ASSET_GUARD_STATUS_EXPRESSION,
+  ASSET_GUARD_UNINSTALL_EXPRESSION,
+  buildAssetGuardPatchScript,
+  isAssetRepairReport,
+  parseAssetGuardStatus,
+} from "./patch-asset-guard.js";
+import type { RaidSurrenderReport, RaidSurrenderStatus } from "./patch-raid-surrender.js";
+import {
+  buildRaidSurrenderPatchScript,
+  isRaidSurrenderReport,
+  parseRaidSurrenderStatus,
+  RAID_SURRENDER_STATUS_EXPRESSION,
+  RAID_SURRENDER_UNINSTALL_EXPRESSION,
+} from "./patch-raid-surrender.js";
+import type {
+  RaidAutoDeleteReport,
+  RaidAutoDeleteSetting,
+  RaidAutoDeleteSettingReport,
+  RaidBattleReport,
+  RaidCodesReport,
+  RaidPublicMap,
+  RaidRefreshReport,
+  RaidSnapshotRow,
+  RaidTeamsMap,
+  RaidViewStatus,
+} from "./patch-raid-view.js";
+import type {
+  RaidRewardMode,
+  RaidRewardModeReport,
+  RaidRewardReport,
+  RaidRewardStatus,
+} from "./patch-raid-reward.js";
+import {
+  buildRaidRewardPatchScript,
+  buildRaidRewardSetModeExpression,
+  isRaidRewardModeReport,
+  isRaidRewardReport,
+  parseRaidRewardStatus,
+  RAID_REWARD_STATUS_EXPRESSION,
+  RAID_REWARD_UNINSTALL_EXPRESSION,
+} from "./patch-raid-reward.js";
+import {
+  buildRaidViewPatchScript,
+  buildRaidViewSetAutoDeleteExpression,
+  buildRaidViewSetPublicExpression,
+  buildRaidViewSetTeamsExpression,
+  isRaidAutoDeleteReport,
+  isRaidAutoDeleteSettingReport,
+  isRaidBattleReport,
+  isRaidCodesReport,
+  isRaidRefreshReport,
+  parseRaidViewSnapshot,
+  parseRaidViewStatus,
+  RAID_VIEW_SNAPSHOT_EXPRESSION,
+  RAID_VIEW_STATUS_EXPRESSION,
+  RAID_VIEW_UNINSTALL_EXPRESSION,
+} from "./patch-raid-view.js";
 import type { PenaltyBand, PenaltyPatchReport } from "./patch-penalty.js";
 import {
   buildPenaltyPatchScript,
@@ -71,6 +167,13 @@ import {
   PRESENT_STATUS_EXPRESSION,
   PRESENT_UNINSTALL_EXPRESSION,
 } from "./patch-present.js";
+import type { ShopStatus } from "./patch-shop.js";
+import {
+  buildShopPatchScript,
+  parseShopStatus,
+  SHOP_STATUS_EXPRESSION,
+  SHOP_UNINSTALL_EXPRESSION,
+} from "./patch-shop.js";
 import type { HiddenStage, HiddenStageStatus } from "./patch-stage.js";
 import {
   buildHiddenStageScript,
@@ -222,6 +325,19 @@ export class CdpAdapter {
   #speedHandlers = new Set<(report: SpeedPatchReport) => void>();
   #lobbyHandlers = new Set<(report: LobbyReport) => void>();
   #deckEditHandlers = new Set<(report: DeckEditReport) => void>();
+  #costToggleHandlers = new Set<(report: CostToggleReport) => void>();
+  #displayHandlers = new Set<(report: DisplaySettingsReport) => void>();
+  #displayFullscreenHandlers = new Set<(report: DisplayFullscreenReport) => void>();
+  #navHandlers = new Set<(report: NavReport) => void>();
+  #raidSurrenderHandlers = new Set<(report: RaidSurrenderReport) => void>();
+  #assetRepairHandlers = new Set<(report: AssetRepairReport) => void>();
+  #raidRewardHandlers = new Set<(report: RaidRewardReport) => void>();
+  #raidCodesHandlers = new Set<(report: RaidCodesReport) => void>();
+  #raidBattleHandlers = new Set<(report: RaidBattleReport) => void>();
+  #raidRefreshHandlers = new Set<(report: RaidRefreshReport) => void>();
+  #raidAutoDeleteHandlers = new Set<(report: RaidAutoDeleteReport) => void>();
+  #raidAutoDeleteSettingHandlers = new Set<(report: RaidAutoDeleteSettingReport) => void>();
+  #raidRewardModeHandlers = new Set<(report: RaidRewardModeReport) => void>();
   #closeHandlers = new Set<(reason: string) => void>();
 
   constructor(options: CdpAdapterOptions = {}) {
@@ -594,12 +710,17 @@ export class CdpAdapter {
    */
   async installCostOverrides(
     costs: CostOverrides | CostOverrideTables,
+    options: { enabled?: boolean } = {},
   ): Promise<CostPatchInstallation> {
     const client = this.#client;
     const session = this.#session;
     if (client === null || session === null) throw new NotConnectedError();
 
-    const source = buildCostPatchScript({ costs, bindingName: REPORT_BINDING_NAME });
+    const source = buildCostPatchScript({
+      costs,
+      bindingName: REPORT_BINDING_NAME,
+      enabled: options.enabled ?? true,
+    });
     const res = await client.send<{ identifier?: unknown }>(
       "Page.addScriptToEvaluateOnNewDocument",
       { source },
@@ -623,9 +744,31 @@ export class CdpAdapter {
    *
    * 趕不趕得上要看 `costAssetsLoaded()`：已經在快取裡的資料這條路救不回來。
    */
-  async installCostOverridesLive(costs: CostOverrides | CostOverrideTables): Promise<void> {
-    const source = buildCostPatchScript({ costs, bindingName: REPORT_BINDING_NAME });
+  async installCostOverridesLive(
+    costs: CostOverrides | CostOverrideTables,
+    options: { enabled?: boolean } = {},
+  ): Promise<void> {
+    const source = buildCostPatchScript({
+      costs,
+      bindingName: REPORT_BINDING_NAME,
+      enabled: options.enabled ?? true,
+    });
     await this.evaluate<unknown>(source);
+  }
+
+  /**
+   * 不重載，把畫面上的價格切成自訂表（true）或原價（false）。
+   *
+   * 靠的是補丁改寫時記下的原價，所以只對「掛鉤真的攔到過」的表有效；
+   * `installed: false` 或 `swapped: 0` 都代表這個頁面上沒有東西可切 ——
+   * 畫面本來就是原價，要自訂價得先重載（走 `costPatchCoverage()` 那條路）。
+   *
+   * ⚠ **不動罰則。** 呼叫端要一起切 `installPenaltyOverrides` ／
+   * `uninstallPenaltyOverrides`，否則會變成「官方價格配自訂罰則」。
+   */
+  async setCostOverridesEnabled(enabled: boolean): Promise<CostPatchEnabledResult> {
+    const raw = await this.evaluate<string>(buildCostPatchEnabledExpression(enabled));
+    return parseCostPatchEnabledResult(raw);
   }
 
   /**
@@ -888,6 +1031,336 @@ export class CdpAdapter {
     return await this.evaluate<string>(PRESENT_UNINSTALL_EXPRESSION);
   }
 
+  // ── 牌組編輯畫面的「自訂 COST ↔ 官方」開關 ────────────────────────────────
+
+  /** 訂閱「玩家點了開關」。`enabled` 是他想要的那一邊；真的切不切是呼叫端的事。 */
+  onCostToggle(handler: (report: CostToggleReport) => void): () => void {
+    this.#costToggleHandlers.add(handler);
+    return () => this.#costToggleHandlers.delete(handler);
+  }
+
+  /**
+   * 把開關畫到牌組編輯畫面的標題列。
+   *
+   * 跟其他 `Runtime.evaluate` 裝的東西一樣：不必重載，但**遊戲一重載就沒了**。
+   * `mounted: false` 常常是正常的 —— 玩家不在 Edit 畫面、或 `available` 是 false。
+   */
+  async installCostToggle(state: CostToggleState): Promise<CostToggleStatus> {
+    const raw = await this.evaluate<string>(
+      buildCostTogglePatchScript({ bindingName: REPORT_BINDING_NAME, state }),
+    );
+    return parseCostToggleStatus(raw);
+  }
+
+  /** 推新狀態。回 `"not-installed"` 就要改叫 `installCostToggle`。 */
+  async setCostToggleState(state: CostToggleState): Promise<string> {
+    return await this.evaluate<string>(buildCostToggleStateExpression(state));
+  }
+
+  async costToggleStatus(): Promise<CostToggleStatus> {
+    const raw = await this.evaluate<string>(COST_TOGGLE_STATUS_EXPRESSION);
+    return parseCostToggleStatus(raw);
+  }
+
+  async uninstallCostToggle(): Promise<string> {
+    return await this.evaluate<string>(COST_TOGGLE_UNINSTALL_EXPRESSION);
+  }
+
+  // ── 畫面設定（解析度／畫面大小／全螢幕）＋ Option 的 plugin 分頁 ──────────
+
+  /** 玩家在 Option 的 plugin 分頁改了畫面設定（頁面已經自己套用了，這裡只是要存）。 */
+  onDisplaySettings(handler: (report: DisplaySettingsReport) => void): () => void {
+    this.#displayHandlers.add(handler);
+    return () => this.#displayHandlers.delete(handler);
+  }
+
+  /**
+   * 繪圖緩衝放大、畫面縮放／全螢幕，並在 Option 加 plugin 分頁。
+   * 不必重載，遊戲一重載就沒了。還沒進遊戲也裝得上（腳本等 game 建好）。
+   */
+  async installDisplayPatch(state: DisplayState): Promise<DisplayStatus> {
+    const raw = await this.evaluate<string>(
+      buildDisplayPatchScript({ bindingName: REPORT_BINDING_NAME, state }),
+    );
+    return parseDisplayStatus(raw);
+  }
+
+  /** 推新狀態。回 `"not-installed"` 就要改叫 `installDisplayPatch`。 */
+  async setDisplayState(state: DisplayState): Promise<string> {
+    return await this.evaluate<string>(buildDisplayStateExpression(state));
+  }
+
+  async displayStatus(): Promise<DisplayStatus> {
+    return parseDisplayStatus(await this.evaluate<string>(DISPLAY_STATUS_EXPRESSION));
+  }
+
+  async uninstallDisplayPatch(): Promise<string> {
+    return await this.evaluate<string>(DISPLAY_UNINSTALL_EXPRESSION);
+  }
+
+  /** 頁面進了／出了 HTML 全螢幕（桌面版進去之後要靠 {@link fillGameWindow} 推滿螢幕）。 */
+  onDisplayFullscreen(handler: (report: DisplayFullscreenReport) => void): () => void {
+    this.#displayFullscreenHandlers.add(handler);
+    return () => this.#displayFullscreenHandlers.delete(handler);
+  }
+
+  /** 客戶端主程序的 pid（`SystemInfo.getProcessInfo`，browser 層級）。 */
+  async browserProcessId(): Promise<number | null> {
+    const client = this.#client;
+    if (client === null) throw new NotConnectedError();
+    const raw = await client.send<{ processInfo?: { type?: unknown; id?: unknown }[] }>(
+      "SystemInfo.getProcessInfo",
+    );
+    const browser = raw.processInfo?.find((p) => p.type === "browser");
+    return typeof browser?.id === "number" ? browser.id : null;
+  }
+
+  /**
+   * 把桌面版的視窗推成整個螢幕。**頁面要先進 HTML 全螢幕**，理由見
+   * `window-fill.ts` 檔頭。
+   */
+  async fillGameWindow(): Promise<WindowFillResult> {
+    const pid = await this.browserProcessId();
+    if (pid === null) return { ok: false, rect: null, reason: "查不到客戶端的 pid" };
+    return await fillGameWindow(pid);
+  }
+
+  // ── 商店的購買數量檔位 ───────────────────────────────────────────────────
+
+  /**
+   * 把商店確認框的數量下拉（1..20）換成檔位表（1 2 3 5 7 … 500）。
+   *
+   * ⚠ 跟贈送次數那支一樣走 `Runtime.evaluate`、不回報、不需要 Node 推狀態：
+   * 上限是頁面自己算的（照抄官方公式），點選也是交給官方 handler。
+   * **遊戲一重載就會被沖掉**，重連時要再裝一次。
+   *
+   * ⚠ `active` 幾乎一定是 `false`（玩家沒開確認框時沒有東西可換），那
+   * **不是失敗**。腳本會自己盯著。
+   */
+  async installShopPatch(): Promise<ShopStatus> {
+    const raw = await this.evaluate<string>(buildShopPatchScript());
+    return parseShopStatus(raw);
+  }
+
+  async shopStatus(): Promise<ShopStatus> {
+    const raw = await this.evaluate<string>(SHOP_STATUS_EXPRESSION);
+    return parseShopStatus(raw);
+  }
+
+  async uninstallShopPatch(): Promise<string> {
+    return await this.evaluate<string>(SHOP_UNINSTALL_EXPRESSION);
+  }
+
+  // ── 返回鈕左邊的直連捷徑列（DUEL／RAID／QUEST／DECK） ─────────────────
+
+  /** 訂閱「玩家點了捷徑」。成功失敗都會來一則，`ok: false` 時看 `reason`。 */
+  onNav(handler: (report: NavReport) => void): () => void {
+    this.#navHandlers.add(handler);
+    return () => this.#navHandlers.delete(handler);
+  }
+
+  /**
+   * 把大廳那四顆鈕縮小放到每個房間的返回鈕左邊，點一下直接跳房間。
+   *
+   * 跟其他 `Runtime.evaluate` 裝的東西一樣：不必重載，但**遊戲一重載就沒了**。
+   * 貼圖是腳本自己非同步抓的，所以剛裝完 `ready` 幾乎一定是 `false`，
+   * `mounted` 也常是 `null`（玩家在大廳或戰鬥裡）—— 都不是失敗。
+   */
+  async installNavPatch(): Promise<NavStatus> {
+    const raw = await this.evaluate<string>(
+      buildNavPatchScript({ bindingName: REPORT_BINDING_NAME }),
+    );
+    return parseNavStatus(raw);
+  }
+
+  async navStatus(): Promise<NavStatus> {
+    const raw = await this.evaluate<string>(NAV_STATUS_EXPRESSION);
+    return parseNavStatus(raw);
+  }
+
+  async uninstallNavPatch(): Promise<string> {
+    return await this.evaluate<string>(NAV_UNINSTALL_EXPRESSION);
+  }
+
+  // ── 渦戰裡的投降鈕 ──────────────────────────────────────────────────────
+
+  /** 訂閱「玩家在渦戰按了投降」。成功失敗都會來一則，`ok: false` 時看 `reason`。 */
+  onRaidSurrender(handler: (report: RaidSurrenderReport) => void): () => void {
+    this.#raidSurrenderHandlers.add(handler);
+    return () => this.#raidSurrenderHandlers.delete(handler);
+  }
+
+  /**
+   * 把渦戰裡官方藏起來的白旗顯示出來，按下去不開確認面板、直接回渦房。
+   *
+   * 跟其他 `Runtime.evaluate` 裝的東西一樣：不必重載，但**遊戲一重載就沒了**。
+   * `mounted` 幾乎一定是 `false`（玩家不在渦戰裡），那不是失敗 —— 腳本自己
+   * 輪詢等玩家開打。
+   */
+  async installRaidSurrenderPatch(): Promise<RaidSurrenderStatus> {
+    const raw = await this.evaluate<string>(
+      buildRaidSurrenderPatchScript({ bindingName: REPORT_BINDING_NAME }),
+    );
+    return parseRaidSurrenderStatus(raw);
+  }
+
+  async raidSurrenderStatus(): Promise<RaidSurrenderStatus> {
+    const raw = await this.evaluate<string>(RAID_SURRENDER_STATUS_EXPRESSION);
+    return parseRaidSurrenderStatus(raw);
+  }
+
+  async uninstallRaidSurrenderPatch(): Promise<string> {
+    return await this.evaluate<string>(RAID_SURRENDER_UNINSTALL_EXPRESSION);
+  }
+
+  // ── 開機資料檔的防護 ────────────────────────────────────────────────────
+
+  /** 訂閱「補抓了一支開機資料檔」（或重試到放棄）。 */
+  onAssetRepair(handler: (report: AssetRepairReport) => void): () => void {
+    this.#assetRepairHandlers.add(handler);
+    return () => this.#assetRepairHandlers.delete(handler);
+  }
+
+  /**
+   * 盯著遊戲開機載的 JSON：CDN 回錯沒進快取的就自己補抓、重新餵給靜態表。
+   * 全部都在就自己停。遊戲一重載就沒了，每次接上都要裝。
+   */
+  async installAssetGuard(): Promise<AssetGuardStatus> {
+    const raw = await this.evaluate<string>(
+      buildAssetGuardPatchScript({ bindingName: REPORT_BINDING_NAME }),
+    );
+    return parseAssetGuardStatus(raw);
+  }
+
+  async assetGuardStatus(): Promise<AssetGuardStatus> {
+    const raw = await this.evaluate<string>(ASSET_GUARD_STATUS_EXPRESSION);
+    return parseAssetGuardStatus(raw);
+  }
+
+  async uninstallAssetGuard(): Promise<string> {
+    return await this.evaluate<string>(ASSET_GUARD_UNINSTALL_EXPRESSION);
+  }
+
+  // ── 渦房的獎勵標記 ──────────────────────────────────────────────────────
+
+  /**
+   * 渦房清單／地圖／詳細面板／SUPPORT 清單上的碎片色與獎勵標記。
+   *
+   * 跟其他 `Runtime.evaluate` 裝的東西一樣：不必重載，遊戲一重載就沒了。
+   * `inRaid: false` 不是失敗 —— 腳本自己輪詢等玩家進渦房。
+   */
+  async installRaidViewPatch(
+    publicMap?: RaidPublicMap,
+    autoDelete?: RaidAutoDeleteSetting,
+    teams?: RaidTeamsMap,
+  ): Promise<RaidViewStatus> {
+    const raw = await this.evaluate<string>(
+      buildRaidViewPatchScript({
+        bindingName: REPORT_BINDING_NAME,
+        ...(publicMap === undefined ? {} : { publicMap }),
+        ...(autoDelete === undefined ? {} : { autoDelete }),
+        ...(teams === undefined ? {} : { teams }),
+      }),
+    );
+    return parseRaidViewStatus(raw);
+  }
+
+  /** 推「渦碼 → 名字 → 隊伍」表下去。回 `"ok"` 或 `"not-installed"`。 */
+  async setRaidViewTeams(teams: RaidTeamsMap): Promise<string> {
+    return await this.evaluate<string>(buildRaidViewSetTeamsExpression(teams));
+  }
+
+  /** 玩家按了渦房的更新鈕（⑩）。 */
+  onRaidRefresh(handler: (report: RaidRefreshReport) => void): () => void {
+    this.#raidRefreshHandlers.add(handler);
+    return () => this.#raidRefreshHandlers.delete(handler);
+  }
+
+  /** 打完一場渦、量到了傷害（⑨）。 */
+  onRaidBattle(handler: (report: RaidBattleReport) => void): () => void {
+    this.#raidBattleHandlers.add(handler);
+    return () => this.#raidBattleHandlers.delete(handler);
+  }
+
+  async raidViewStatus(): Promise<RaidViewStatus> {
+    const raw = await this.evaluate<string>(RAID_VIEW_STATUS_EXPRESSION);
+    return parseRaidViewStatus(raw);
+  }
+
+  /** 把「渦碼 → TL／狀態」的公開渦表推下去。回 `"ok"` 或 `"not-installed"`。 */
+  async setRaidViewPublic(map: RaidPublicMap): Promise<string> {
+    return await this.evaluate<string>(buildRaidViewSetPublicExpression(map));
+  }
+
+  /** 自動刪了一個死渦。 */
+  onRaidAutoDelete(handler: (report: RaidAutoDeleteReport) => void): () => void {
+    this.#raidAutoDeleteHandlers.add(handler);
+    return () => this.#raidAutoDeleteHandlers.delete(handler);
+  }
+
+  /** 玩家在遊戲裡的死渦面板上切了自動刪除。 */
+  onRaidAutoDeleteSetting(handler: (report: RaidAutoDeleteSettingReport) => void): () => void {
+    this.#raidAutoDeleteSettingHandlers.add(handler);
+    return () => this.#raidAutoDeleteSettingHandlers.delete(handler);
+  }
+
+  async setRaidAutoDelete(setting: RaidAutoDeleteSetting): Promise<string> {
+    return await this.evaluate<string>(buildRaidViewSetAutoDeleteExpression(setting));
+  }
+
+  /** SUPPORT 清單畫出來了：那一批公開渦的渦碼。 */
+  onRaidCodes(handler: (report: RaidCodesReport) => void): () => void {
+    this.#raidCodesHandlers.add(handler);
+    return () => this.#raidCodesHandlers.delete(handler);
+  }
+
+  /** 自己渦清單上的渦（插件互傳要上傳的）。人不在渦房是空陣列。 */
+  async raidViewSnapshot(): Promise<RaidSnapshotRow[]> {
+    return parseRaidViewSnapshot(await this.evaluate<string>(RAID_VIEW_SNAPSHOT_EXPRESSION));
+  }
+
+  async uninstallRaidViewPatch(): Promise<string> {
+    return await this.evaluate<string>(RAID_VIEW_UNINSTALL_EXPRESSION);
+  }
+
+  // ── 渦擊破結算的 OK 面板 ────────────────────────────────────────────────
+
+  /** 伺服器推了渦的結算（不管哪個模式都會來）。 */
+  onRaidReward(handler: (report: RaidRewardReport) => void): () => void {
+    this.#raidRewardHandlers.add(handler);
+    return () => this.#raidRewardHandlers.delete(handler);
+  }
+
+  /** 玩家在摘要面板上切了模式。 */
+  onRaidRewardMode(handler: (report: RaidRewardModeReport) => void): () => void {
+    this.#raidRewardModeHandlers.add(handler);
+    return () => this.#raidRewardModeHandlers.delete(handler);
+  }
+
+  /**
+   * 把渦擊破結算的 OK 面板換成三段式（全部／只一次／不再）。
+   * 包的是 `Raid.prototype.raid_reward`，不必等場景建好。
+   */
+  async installRaidRewardPatch(mode: RaidRewardMode): Promise<RaidRewardStatus> {
+    const raw = await this.evaluate<string>(
+      buildRaidRewardPatchScript({ bindingName: REPORT_BINDING_NAME, mode }),
+    );
+    return parseRaidRewardStatus(raw);
+  }
+
+  async raidRewardStatus(): Promise<RaidRewardStatus> {
+    const raw = await this.evaluate<string>(RAID_REWARD_STATUS_EXPRESSION);
+    return parseRaidRewardStatus(raw);
+  }
+
+  async setRaidRewardMode(mode: RaidRewardMode): Promise<string> {
+    return await this.evaluate<string>(buildRaidRewardSetModeExpression(mode));
+  }
+
+  async uninstallRaidRewardPatch(): Promise<string> {
+    return await this.evaluate<string>(RAID_REWARD_UNINSTALL_EXPRESSION);
+  }
+
   /**
    * 開始監看 WebSocket 事件（WP-09）。
    *
@@ -1130,6 +1603,58 @@ export class CdpAdapter {
     }
     if (isDeckEditReport(parsed)) {
       dispatch(this.#deckEditHandlers, parsed);
+      return;
+    }
+    if (isCostToggleReport(parsed)) {
+      dispatch(this.#costToggleHandlers, parsed);
+      return;
+    }
+    if (isDisplaySettingsReport(parsed)) {
+      dispatch(this.#displayHandlers, parsed);
+      return;
+    }
+    if (isDisplayFullscreenReport(parsed)) {
+      dispatch(this.#displayFullscreenHandlers, parsed);
+      return;
+    }
+    if (isNavReport(parsed)) {
+      dispatch(this.#navHandlers, parsed);
+      return;
+    }
+    if (isRaidAutoDeleteReport(parsed)) {
+      dispatch(this.#raidAutoDeleteHandlers, parsed);
+      return;
+    }
+    if (isRaidAutoDeleteSettingReport(parsed)) {
+      dispatch(this.#raidAutoDeleteSettingHandlers, parsed);
+      return;
+    }
+    if (isRaidCodesReport(parsed)) {
+      dispatch(this.#raidCodesHandlers, parsed);
+      return;
+    }
+    if (isRaidBattleReport(parsed)) {
+      dispatch(this.#raidBattleHandlers, parsed);
+      return;
+    }
+    if (isRaidRefreshReport(parsed)) {
+      dispatch(this.#raidRefreshHandlers, parsed);
+      return;
+    }
+    if (isRaidRewardReport(parsed)) {
+      dispatch(this.#raidRewardHandlers, parsed);
+      return;
+    }
+    if (isRaidRewardModeReport(parsed)) {
+      dispatch(this.#raidRewardModeHandlers, parsed);
+      return;
+    }
+    if (isRaidSurrenderReport(parsed)) {
+      dispatch(this.#raidSurrenderHandlers, parsed);
+      return;
+    }
+    if (isAssetRepairReport(parsed)) {
+      dispatch(this.#assetRepairHandlers, parsed);
       return;
     }
     if (isRoomGateReport(parsed)) {

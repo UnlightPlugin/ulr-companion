@@ -128,6 +128,15 @@ contextBridge.exposeInMainWorld("ulr", {
     applyDelay: (seconds: number) => ipcRenderer.invoke("ulr:deck-apply-delay", seconds),
   },
 
+  /** 渦：獎勵標記的狀態與結算通知的模式。 */
+  raid: {
+    state: () => ipcRenderer.invoke("ulr:raid-state"),
+    rewardMode: (mode: string) => ipcRenderer.invoke("ulr:raid-reward-mode", mode),
+    share: (on: boolean) => ipcRenderer.invoke("ulr:raid-share", on),
+    teamShare: (on: boolean) => ipcRenderer.invoke("ulr:raid-team-share", on),
+    autoDelete: (on: boolean) => ipcRenderer.invoke("ulr:raid-auto-delete", on),
+  },
+
   stages: {
     state: () => ipcRenderer.invoke("ulr:stages-state"),
     set: (on: boolean) => ipcRenderer.invoke("ulr:stages-set", on),

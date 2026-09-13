@@ -22,9 +22,15 @@ import {
   browserDebugPort,
   browserProfileDir,
   DEFAULT_DEBUG_PORT,
+  DEFAULT_DISPLAY_STATE,
+  DEFAULT_RAID_REWARD_MODE,
   desktopUserDataDir,
+  isRaidRewardMode,
+  isRenderMode,
+  isSizeMode,
   normalizeTint,
 } from "@ulr/cdp-adapter";
+import type { DisplayState, RaidRewardMode } from "@ulr/cdp-adapter";
 
 /**
  * 客戶端種類。不影響接線方式（三種都是 CDP），影響的是**預設埠、
@@ -242,6 +248,43 @@ export interface Profile {
    * ⚠ 舊設定檔沒有這一欄 → 3 秒（`DEFAULT_APPLY_DELAY_SECONDS`）。
    */
   applyDelaySeconds: number;
+  /**
+   * 渦擊破結算的 OK 面板怎麼演：`all` 官方原樣一頁一頁按、`once` 一張摘要
+   * 一顆 OK、`none` 不演（記錄檔照記）。預設 `once`。
+   *
+   * ⚠ 玩家在遊戲裡的摘要面板上也切得到，切了會回寫到這裡 —— 兩邊看到的
+   * 永遠是同一個值。舊設定檔沒有這一欄 → `once`。
+   */
+  raidRewardMode: RaidRewardMode;
+  /**
+   * 插件互傳渦狀態（上傳自己清單上的渦、查別人傳的）。預設**開**。
+   *
+   * 玩家 2026-09-13：ulgg 當主力、網站掛點時靠插件玩家互傳。雲端上只有渦碼的
+   * 雜湊（見 `@ulr/arbiter-link/raid-share`），所以預設開不會把渦碼散出去。
+   */
+  raidShare: boolean;
+  /**
+   * 分享自己打渦用的隊伍（`raidShare` 也開著才真的傳）。預設**開**。
+   *
+   * 玩家 2026-09-13：「預設開啟分享使用的隊伍，因為在對戰房也是看得到其他房間使用的
+   * 牌組的。要關閉分享的話自己去插件面板關閉。」雲端上渦碼與名字都只有雜湊。
+   */
+  raidTeamShare: boolean;
+  /** 自動刪除 HP 歸零的渦。預設關。 */
+  raidAutoDelete: boolean;
+  /**
+   * 關著的時候，死渦面板上要不要出現「自動刪除死渦」那顆鈕。預設開。
+   * 在遊戲裡關掉自動刪除會一起關掉這個 —— 之後只能在插件視窗重新打開（玩家訂的）。
+   */
+  raidAutoDeletePrompt: boolean;
+  /**
+   * 畫面設定：`render` 繪製解析度（off／auto／x2／x3）、`size` 畫面大小
+   * （x1／x1.25／x1.5／x2／fullscreen）。預設關、×1 —— 跟官方一樣。
+   *
+   * 玩家在遊戲的 Option › plugin 分頁改的，改了會回寫到這裡。舊設定檔沒有這一欄
+   * → 預設值。
+   */
+  display: DisplayState;
 }
 
 /** 等候套用的預設秒數。 */
@@ -457,6 +500,26 @@ export function normalizeProfile(raw: unknown): Profile | null {
     editUnit: normalizeEditUnit(r["editUnit"]),
     // 舊設定檔沒有這一欄 → 3 秒。
     applyDelaySeconds: normalizeApplyDelaySeconds(r["applyDelaySeconds"]),
+    // 舊設定檔沒有這一欄 → once（一張摘要）。
+    raidRewardMode: isRaidRewardMode(r["raidRewardMode"])
+      ? r["raidRewardMode"]
+      : DEFAULT_RAID_REWARD_MODE,
+    // 舊設定檔沒有這三欄 → 互傳開、自動刪除關、遊戲內提示開。
+    raidShare: r["raidShare"] !== false,
+    // 舊設定檔沒有這一欄 → 開（玩家訂的預設）。
+    raidTeamShare: r["raidTeamShare"] !== false,
+    raidAutoDelete: r["raidAutoDelete"] === true,
+    raidAutoDeletePrompt: r["raidAutoDeletePrompt"] !== false,
+    // 舊設定檔沒有這一欄 → 關、×1（官方原樣）。
+    display: normalizeDisplay(r["display"]),
+  };
+}
+
+function normalizeDisplay(raw: unknown): DisplayState {
+  const o = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
+  return {
+    render: isRenderMode(o["render"]) ? o["render"] : DEFAULT_DISPLAY_STATE.render,
+    size: isSizeMode(o["size"]) ? o["size"] : DEFAULT_DISPLAY_STATE.size,
   };
 }
 
@@ -507,6 +570,12 @@ export function defaultProfile(kind: ClientKind = "desktop"): Profile {
     editUnit: 0,
     // 停三秒才寫伺服器。見 `applyDelaySeconds`。
     applyDelaySeconds: DEFAULT_APPLY_DELAY_SECONDS,
+    raidRewardMode: DEFAULT_RAID_REWARD_MODE,
+    raidShare: true,
+    raidTeamShare: true,
+    raidAutoDelete: false,
+    raidAutoDeletePrompt: true,
+    display: { ...DEFAULT_DISPLAY_STATE },
   };
 }
 

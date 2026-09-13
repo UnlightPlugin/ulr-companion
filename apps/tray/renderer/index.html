@@ -1075,9 +1075,8 @@
           id: "vortex",
           label: "渦",
           subs: [
-            { id: "vspeed", label: "速度加倍", todo: true },
-            { id: "vteam", label: "推薦隊伍", todo: true },
-            { id: "vrank", label: "排名與獎勵", todo: true },
+            { id: "vrank", label: "獎勵標記" },
+            { id: "vreward", label: "結算通知" },
           ],
         },
         { id: "bonus", label: "獎勵", subs: [{ id: "foresight", label: "未來視", todo: true }] },
@@ -1344,6 +1343,9 @@
         // 跟著快照走 —— 一個純設定頁沒有理由每三秒去戳一次遊戲。
         if (onStagePage()) startStagePolling();
         else stopStagePolling();
+        // 渦那兩頁同理：狀態要跟遊戲要，開著才輪詢。
+        if (onRaidPage()) startRaidPolling();
+        else stopRaidPolling();
       }
 
       /**
@@ -1690,6 +1692,7 @@
           penalty: "off",
           penaltyEverywhere: false,
           bands: null,
+          enabled: true,
           error: null,
         };
 
@@ -1757,6 +1760,13 @@
              </div>`;
 
         const state = `<div class="card">
+             ${
+               // 牌組畫面標題列那顆開關切到「官方」了。規則還載著，只是畫面上
+               // 暫時是原版的價格與罰則 —— 要講出來，否則下面兩行看起來像壞掉。
+               rule && cost.enabled === false
+                 ? `<div class="hint warn">⇄ 牌組畫面的開關切在<b>官方</b>：現在顯示的是原版價格與罰則。把 DeckEdit 標題列那顆開關往右撥就回到這份規則。</div>`
+                 : ""
+             }
              <div class="row"><span class="dim">卡片價格</span><span>${
                COST_PHASE_TEXT[cost.phase] ?? cost.phase
              }</span></div>
@@ -3379,6 +3389,151 @@
         return "生效中";
       }
 
+      // --- 渦 › 獎勵標記 / 結算通知 ----------------------------------------
+      //
+      // 狀態不在 snapshot 裡（兩支注入腳本各要一次 CDP 往返），開著才輪詢。
+      let rstate = null;
+      let raidTimer = null;
+      const onRaidPage = () => tab === "vortex" && (sub === "vrank" || sub === "vreward");
+
+      function startRaidPolling() {
+        if (raidTimer !== null) return;
+        const tick = () =>
+          window.ulr.raid.state().then((s) => {
+            rstate = s;
+            if (!onRaidPage()) return;
+            if (isEditing()) {
+              scheduleCatchUp();
+              return;
+            }
+            renderBody();
+          });
+        void tick();
+        raidTimer = setInterval(tick, 3000);
+      }
+      function stopRaidPolling() {
+        if (raidTimer !== null) clearInterval(raidTimer);
+        raidTimer = null;
+      }
+      function applyRaidRewardMode(mode) {
+        return window.ulr.raid.rewardMode(mode).then((s) => {
+          rstate = s;
+          renderBody();
+        });
+      }
+
+      function raidViewText(v) {
+        if (v === null) return "還沒接上遊戲 —— 開了遊戲就會自己裝上";
+        if (!v.installed) return "還沒裝上" + (v.reason ? "：" + v.reason : "");
+        if (!v.inRaid) return "已裝上，等你進渦房";
+        return "生效中：" + v.rows + " 列清單、" + v.vortices + " 顆地圖渦";
+      }
+
+      const RAID_MARK_TIP =
+        "碎片色照排名獎勵：黃＝記憶、綠＝時間、藍＝靈魂、紅＝生命、紫＝死亡；渦I 畫硬幣。" +
+        "書籤渦（記憶的書籤）用白、素材渦（魔之刀身／戒指／彈頭／手鐲）用黑，妖精另加星號，渦IV 白框加亮。" +
+        "自己開的渦紅框。獎勵表是 ulgg 的 TL 表（60 筆，全是渦II/III），查不到的 TL 退回公式推碎片色。";
+      const RAID_SHARE_TIP =
+        "開著的話，你渦清單上的渦（TL、BOSS 狀態、HP）會傳到插件的雲端，別人在 SUPPORT 看到同一個渦就查得到；" +
+        "你也查得到別人傳的。雲端上只存渦碼的雜湊，不存渦碼本身、不存分數榜與玩家名字 —— 不知道渦碼的人查不到。" +
+        "ulgg 是主要來源，這個是它掛掉或還沒掃到時的備援；同一個渦取比較新的那份。";
+      const RAID_TEAM_TIP =
+        "每打完一場渦，插件記下用的那副牌、選的回合、花的 AP，回到渦房後看排行榜上自己的傷害漲了多少。" +
+        "開著的話這些會傳到插件雲端，同一個渦裡開插件的人在排行榜或傷害統計點你的名字就看得到；你也看得到別人的。" +
+        "雲端上渦碼與名字都只存雜湊（名字是跟渦碼一起算的），不知道渦碼的人查不到，也串不起你打過哪些渦。" +
+        "關掉後下一輪會把雲端上你的隊伍撤掉；自己的隊伍在自己的畫面上照樣看得到。";
+      const RAID_PUBLIC_TIP =
+        "SUPPORT 那份公開渦清單伺服器不給 TL，圖示是靠 ulgg.online 的觀測站對渦碼查來的，" +
+        "只在你人在渦房時每 30 秒問一次；ulgg 掛了就只是沒圖示，其他功能照常。";
+
+      PAGES["vortex/vrank"] = () => {
+        const s = rstate;
+        const v = s?.view ?? null;
+        const state = `<div class="card">
+            <div class="row"><span class="dim">狀態</span><span>${esc(raidViewText(v))}</span></div>
+            <div class="row"><span class="dim">公開渦表${info(RAID_PUBLIC_TIP)}</span><span>${v?.publicCount ?? 0} 筆</span></div>
+            ${v?.reason && v.installed ? `<div class="hint warn">⚠ ${esc(v.reason)}</div>` : ""}
+          </div>`;
+        const what = `<div class="card">
+            <div class="hint" style="margin-top:0">
+              <b>渦房裡會多出來的東西</b>${info(RAID_MARK_TIP)}<br />
+              · 清單與 SUPPORT：BOSS 名字右邊接獎勵圖示（碎片／硬幣／書籤／素材／抽獎券）與 BOSS 身上的狀態＋剩餘時間<br />
+              · 地圖上的渦照碎片色上色，自己開的紅框、渦IV 白框<br />
+              · 點進渦之後多一顆「獎勵一覽」：發現／參加／排名／擊破一次看完<br />
+              · 每 10 秒自己重讀一次清單 —— 血量與狀態不用重進渦房也會動<br />
+              · Profound 計數下面的「Refresh」：等於重進渦房（渦清單、AP、死渦的結算一起重讀），順便馬上重查雲端<br />
+              · 排行榜名字旁標出推測是誰上的狀態；「傷害統計」列出每個人的分數、傷害、佔比<br />
+              · 名字旁有牌盒的人有分享隊伍：點下去看他用哪幾副牌、各打了幾場、幾回合、幾 AP、多少傷害
+            </div>
+          </div>`;
+        const share = `<div class="card">
+            <label class="toggle">
+              <input type="checkbox" id="raidShareOn" ${s?.share !== false ? "checked" : ""} />
+              <span><b>和其他插件玩家互傳渦狀態</b>${info(RAID_SHARE_TIP)}
+                <div class="hint">ulgg 掛了或還沒掃到的公開渦，靠其他開插件的玩家補上。</div>
+              </span>
+            </label>
+            <label class="toggle">
+              <input type="checkbox" id="raidTeamShareOn" ${s?.teamShare !== false ? "checked" : ""} ${s?.share === false ? "disabled" : ""} />
+              <span><b>分享打渦用的隊伍</b>${info(RAID_TEAM_TIP)}
+                <div class="hint">
+                  別人點你的名字看得到你用哪副牌、打了幾場、幾回合、幾 AP、多少傷害 —— 給不知道該帶什麼、該花多少 AP 的新手參考。
+                  ${s?.share === false ? "（要先打開上面的互傳）" : ""}
+                </div>
+              </span>
+            </label>
+          </div>`;
+        return (
+          head("獎勵標記", "渦的獎勵是什麼、BOSS 身上有什麼，直接畫在渦房裡。") +
+          state +
+          share +
+          what
+        );
+      };
+
+      function raidRewardText(r) {
+        if (r === null) return "還沒接上遊戲 —— 開了遊戲就會自己裝上";
+        if (!r.installed) return "還沒裝上" + (r.reason ? "：" + r.reason : "");
+        return r.open ? "摘要面板開著" : "生效中";
+      }
+      const AUTO_DELETE_TIP =
+        "刪渦走的是官方「放棄」同一個動作。死渦在結算發下來之前刪掉會不會吃掉獎勵沒人驗過，所以有你一份的會等結算收到才刪。" +
+        "死渦的詳細面板上也有開關；在遊戲裡關掉之後，要再開只能在這裡。";
+      const REWARD_TIP =
+        "你參加過的渦被打倒後，官方會一頁一頁演結算，每一件獎勵都要按一次 OK。" +
+        "獎勵在伺服器推過來那一刻就已經入帳，面板純粹是演出 —— 不演不會少拿。" +
+        "「只通知一次」會畫一張摘要列出這一批所有渦與獎勵、一顆 OK；面板上有開關可以要求之後照樣顯示官方畫面。" +
+        "不管哪個模式，記錄頁都會記一行拿了什麼。";
+
+      PAGES["vortex/vreward"] = () => {
+        const s = rstate;
+        const mode = s?.rewardMode ?? snap?.profile?.raidRewardMode ?? "once";
+        const opt = (value, label, hint) => `<label class="toggle">
+            <input type="radio" name="raidRewardMode" value="${value}" ${mode === value ? "checked" : ""} />
+            <span><b>${label}</b><div class="hint">${hint}</div></span>
+          </label>`;
+        const picker = `<div class="card">
+            ${opt("all", "全部通知", "官方原樣：每個渦、每件獎勵都要按一次 OK。")}
+            ${opt("once", "只通知一次", "一張摘要列出這一批所有渦與獎勵，一顆 OK。面板上可以勾「按 OK 後照樣顯示官方詳細畫面」。")}
+            ${opt("none", "不再通知", "什麼都不跳。拿了什麼看「設置 › 記錄」。")}
+          </div>`;
+        const state = `<div class="card">
+            <div class="row"><span class="dim">狀態${info(REWARD_TIP)}</span><span>${esc(raidRewardText(s?.reward ?? null))}</span></div>
+          </div>`;
+        const autoDel = `<div class="card">
+            <label class="toggle">
+              <input type="checkbox" id="raidAutoDeleteOn" ${s?.autoDelete ? "checked" : ""} />
+              <span><b>自動刪除 HP 歸零的渦</b>${info(AUTO_DELETE_TIP)}
+                <div class="hint">
+                  沒有你一份獎勵的死渦馬上刪；有你一份的，等那個渦的結算收到了才刪。
+                  ${s && !s.autoDelete && !s.autoDeletePrompt ? "（你在遊戲裡關掉過，遊戲內的開關鈕已收起；在這裡打開會一起恢復）" : ""}
+                </div>
+              </span>
+            </label>
+          </div>`;
+        return head("結算通知", "渦被打倒之後的 OK 面板要怎麼演。") + picker + state + autoDel;
+      };
+
       PAGES["deck/hidden"] = () => {
         const s = sstate;
         // ⚠ 第一次畫的時候還沒問到狀態。這時候**不要先畫出開關** —— 它會是沒勾的
@@ -3771,6 +3926,25 @@
         }
         if (t.id === "tintPick") {
           return void window.ulr.setReadyTint(parseInt(t.value.slice(1), 16)).then(apply);
+        }
+        if (t.name === "raidRewardMode" && t.checked) return void applyRaidRewardMode(t.value);
+        if (t.id === "raidShareOn") {
+          return void window.ulr.raid.share(t.checked).then((s) => {
+            rstate = s;
+            renderBody();
+          });
+        }
+        if (t.id === "raidTeamShareOn") {
+          return void window.ulr.raid.teamShare(t.checked).then((s) => {
+            rstate = s;
+            renderBody();
+          });
+        }
+        if (t.id === "raidAutoDeleteOn") {
+          return void window.ulr.raid.autoDelete(t.checked).then((s) => {
+            rstate = s;
+            renderBody();
+          });
         }
         if (t.id === "stagesOn") {
           return void window.ulr.stages.set(t.checked).then((s) => {

@@ -58,6 +58,7 @@ import {
   DEBUG_PORT_SWITCH_AUTO,
   duelApCost,
   HIDDEN_STAGES,
+  isRaidRewardMode,
   resolveDebugPort,
   ROOM_ERROR_AP_SHORT,
   SELECTABLE_STAGES,
@@ -71,6 +72,9 @@ import type {
   LobbyQuickPressed,
   LobbyTierCount,
   MatchContext,
+  RaidRewardMode,
+  RaidRewardStatus,
+  RaidViewStatus,
   RoomGateReport,
 } from "@ulr/cdp-adapter";
 import type { DeckContent, RoomKind } from "@ulr/deck-library";
@@ -119,6 +123,7 @@ import {
   autoSave,
   deckEditStateOf,
   enterRoom,
+  followDeckOnEdit,
   roomDeckPreloadOf,
   expireNotice,
   isApplyDue,
@@ -137,6 +142,7 @@ import { trayIconPng } from "./icon.js";
 import type { IconState } from "./icon.js";
 import { launchAtLoginEnabled, launchInstance, setLaunchAtLogin } from "./launch.js";
 import { openLogFile } from "./log-file.js";
+import { readRaidBattles, writeRaidBattles } from "./raid-battle-store.js";
 import type { ClientKind, CostRuleMode, MatchPrefs, Profile, ProfileStore } from "./profiles.js";
 import {
   addProfile,
@@ -554,6 +560,33 @@ interface StagePageState {
 
 async function stageStatus(): Promise<HiddenStageStatus | null> {
   return (await engine?.hiddenStageStatus().catch(() => null)) ?? null;
+}
+
+function describeRaidRewardMode(mode: RaidRewardMode): string {
+  return mode === "all" ? "全部通知" : mode === "none" ? "不再通知" : "只通知一次";
+}
+
+/** 渦那一頁要畫的東西：兩支注入腳本的狀態＋結算面板的模式。 */
+interface RaidPageState {
+  rewardMode: RaidRewardMode;
+  share: boolean;
+  teamShare: boolean;
+  autoDelete: boolean;
+  autoDeletePrompt: boolean;
+  view: RaidViewStatus | null;
+  reward: RaidRewardStatus | null;
+}
+
+async function raidPageState(): Promise<RaidPageState> {
+  return {
+    rewardMode: profile.raidRewardMode,
+    share: profile.raidShare,
+    teamShare: profile.raidTeamShare,
+    autoDelete: profile.raidAutoDelete,
+    autoDeletePrompt: profile.raidAutoDeletePrompt,
+    view: (await engine?.raidViewStatus().catch(() => null)) ?? null,
+    reward: (await engine?.raidRewardStatus().catch(() => null)) ?? null,
+  };
 }
 
 /**
@@ -1617,6 +1650,7 @@ async function adoptServerDecks(snap: DeckSnapshot): Promise<void> {
  *
  * ```
  *   1. guardDeck1  —— 第一格空的會讓玩家卡死在牌組編輯畫面（兩個出口都被擋）
+ *                     ⚠ 只擋伺服器與房間那條；人在 Edit 時寫空 = 幫他按 reset
  *   2. 庫存        —— 只送玩家真的有的卡。讀不到庫存就**不寫**
  *   3. ack         —— 沒有 ack 就是沒寫進去
  *   4. 讀回來對過  —— ⚠⚠ 有 ack **也不代表寫進去了**
@@ -1636,7 +1670,7 @@ async function adoptServerDecks(snap: DeckSnapshot): Promise<void> {
  *
  * ```
  *   front   只寫客戶端記憶體（玩家人在 Edit 畫面時）。**一次網路都不跑。**
- *           寫不到就回 null 當成功 —— 那不是失敗，只是他不在那個畫面。
+ *           寫不到就回 `none` 當成功 —— 那不是失敗，只是他不在那個畫面。
  *   commit  一路寫到伺服器。等候秒數到了、或開戰前才走這條。
  * ```
  *
@@ -1644,24 +1678,49 @@ async function adoptServerDecks(snap: DeckSnapshot): Promise<void> {
  */
 type WriteMode = "front" | "commit";
 
+/**
+ * 寫到了哪裡 —— 呼叫端靠它決定「這一副算不算已經落地」。
+ *
+ * ```
+ *   edit    寫進 Edit 畫面的記憶體。⚠ 對牌組庫而言**這就是落地**：遊戲會在玩家
+ *           離開畫面時自己送上伺服器，沒有第二步要做（見 frontApplyPending）。
+ *   room    只寫了房間場景的記憶體（front 模式）。伺服器還是舊的，還得提交。
+ *   none    front 模式、沒有畫面可寫。那一副還排在隊伍裡。
+ *   server  寫進伺服器並讀回對過。
+ * ```
+ */
+type WriteDone = "edit" | "room" | "none" | "server";
+type WriteResult = { done: WriteDone; failure?: undefined } | { done?: undefined; failure: string };
+
+const failed = (failure: string): WriteResult => ({ failure });
+const wrote = (done: WriteDone): WriteResult => ({ done });
+
 async function writeDeck1(
   content: DeckContent,
   snapshot: DeckSnapshot | null,
   mode: WriteMode = "commit",
   label?: string,
-): Promise<string | null> {
-  if (engine === null) return "還沒接上遊戲。";
+): Promise<WriteResult> {
+  if (engine === null) return failed("還沒接上遊戲。");
 
+  // ⚠ 空牌組**不在這裡擋死**（2026-09-12 改）。玩家人在 Edit 畫面時選一副空的，
+  // 等於幫他按 reset —— 寫進記憶體的狀態跟遊戲 reset 鈕產生的一模一樣，出口
+  // 那道「第一格不能空」是遊戲自己擋、玩家看得到原因。原本一律拒絕的症狀是
+  // 「選了空牌組，舊的那副還在畫面上」，得自己再按一次 reset。
+  //
+  // 擋的地方往下移：快路徑只有 Edit 收（房間場景回 `empty-room`），沒收到就照
+  // 原本的理由拒絕 —— **伺服器那條路永遠不會拿到空的**，那才是卡死的來源。
   const guard = guardDeck1(content);
-  if (guard !== null) return guard;
 
   // ⚠ 讀不到庫存時**拒絕**而不是放行。放行的代價是可能送出玩家沒有的卡，
-  // 而拒絕的代價只是玩家再點一次 —— 兩邊不對等。
-  const inventory = await deckInventory();
-  if (inventory === null) return "讀不到你的卡片庫存，先不換 —— 再點一次試試。";
-  const shortages = findShortages(content, inventory);
-  if (shortages.length > 0) {
-    return `這副牌有 ${shortages.length} 張卡你手上沒有，沒有換過去。`;
+  // 而拒絕的代價只是玩家再點一次 —— 兩邊不對等。（空牌組沒有卡可查，跳過。）
+  if (guard === null) {
+    const inventory = await deckInventory();
+    if (inventory === null) return failed("讀不到你的卡片庫存，先不換 —— 再點一次試試。");
+    const shortages = findShortages(content, inventory);
+    if (shortages.length > 0) {
+      return failed(`這副牌有 ${shortages.length} 張卡你手上沒有，沒有換過去。`);
+    }
   }
 
   // ── 快路徑：玩家人就在編輯畫面 → 只換記憶體並重畫，一次網路都不跑 ────────
@@ -1677,24 +1736,29 @@ async function writeDeck1(
     // 編輯畫面：寫完就結束。遊戲會在玩家離開時自己把它送上伺服器。
     if (fast === "ok") {
       deckLastSeen = content;
-      return null;
+      return wrote("edit");
     }
+    // 空的那一副只有 Edit 收得下（上面 "ok" 那條）。走到這裡表示玩家不在
+    // Edit —— 房間場景頁面端已經拒絕（`empty-room`）、不在畫面上更不能寫伺服器。
+    // ⚠ 這裡 return 的是 guardDeck1 的理由，而且 `front` 模式也一樣：空牌組
+    // 留在隊伍裡沒有意義，等候秒數到了只會在提交那一步再失敗一次。
+    if (guard !== null) return failed(guard);
     // ⚠⚠ 房間場景（任務／渦／對戰房）：畫面已經換好了，但**沒有人會把它送上
     // 伺服器** —— 遊戲只在離開 Edit 時送。所以只有 `front` 模式可以在這裡收工；
     // `commit` 模式一定要繼續走下去，否則開戰時伺服器上還是舊的那一副，
     // 而畫面看起來完全正常。
     if (fast === "ok-room") {
       deckLastSeen = content;
-      if (mode === "front") return null;
+      if (mode === "front") return wrote("room");
     } else if (fast !== "not-active") {
-      return `換不過去：${fast}`;
+      return failed(`換不過去：${fast}`);
     } else if (mode === "front") {
       // 玩家不在任何有牌組列的畫面，沒有記憶體可以換。**這不是失敗**：
       // 那一副還排在隊伍裡，等候秒數到了或他按開戰時才會真的寫出去。
-      return null;
+      return wrote("none");
     }
   } catch (err) {
-    return `換不過去：${err instanceof Error ? err.message : String(err)}`;
+    return failed(`換不過去：${err instanceof Error ? err.message : String(err)}`);
   }
 
   // ── 慢路徑：編輯畫面沒開著 → 只能寫伺服器 ────────────────────────────────
@@ -1709,7 +1773,7 @@ async function writeDeck1(
     ],
     deckCheck,
   );
-  if (!result.ack) return "伺服器沒有回應，牌組沒有換過去 —— 再點一次試試。";
+  if (!result.ack) return failed("伺服器沒有回應，牌組沒有換過去 —— 再點一次試試。");
 
   // 第 4 道：讀回來對過才算數（見上面那段 ⚠⚠）。
   let landed: DeckContent;
@@ -1717,16 +1781,16 @@ async function writeDeck1(
     const after = await engine.readDecks();
     landed = deckContentFromFlat(after.decks[0] ?? {});
   } catch {
-    return "換完之後讀不回來，不確定有沒有成功 —— 重開一次牌組畫面看看。";
+    return failed("換完之後讀不回來，不確定有沒有成功 —— 重開一次牌組畫面看看。");
   }
   if (deckContentHash(landed) !== deckContentHash(content)) {
     // ⚠ 這一行要寫得夠具體，否則玩家只會看到「沒反應」。最可能的原因是
     // Deck2/Deck3 還佔著同一張卡 —— 三副共扣同一個卡片池。
     log("✗ 換牌組：伺服器收下了但牌組沒有真的變（Deck2／Deck3 可能還佔著同一張卡）");
-    return "伺服器收下了卻沒換 —— 多半是 Deck2／Deck3 還佔著同一張卡，清空它們再試。";
+    return failed("伺服器收下了卻沒換 —— 多半是 Deck2／Deck3 還佔著同一張卡，清空它們再試。");
   }
   deckLastSeen = landed;
-  return null;
+  return wrote("server");
 }
 
 /**
@@ -1742,7 +1806,11 @@ async function writeDeck1(
  * 換帳號的偵測交給輪詢那一拍（它離開畫面時本來就會讀伺服器）。
  */
 async function onDeckReport(report: DeckEditReport): Promise<void> {
-  if (engine === null || deck === null || deckBusy) return;
+  if (engine === null || deck === null) return;
+  // 玩家連點時忙著就丟掉後面幾則 —— 但 raid-pick 同一個渦頁面只報一次，丟了
+  // 就不會再來（常見的撞法：剛進渦房、進房換牌還在寫就點了渦），所以等它讓出來。
+  if (deckBusy && !(report.type === "raid-pick" && (await waitForDeckIdle(2_000)))) return;
+  if (deckBusy || engine === null || deck === null) return;
   deckBusy = true;
   try {
     const now = await currentDeck1();
@@ -1851,6 +1919,18 @@ async function syncGatePending(): Promise<void> {
  *
  * ⚠ `fronted` 記的是「已經換到眼前了」，這支靠它避免重複寫。它**不表示**已經
  * 寫進伺服器 —— 那是 {@link commitPending} 的事。
+ *
+ * ## ⚠⚠ 在 Edit 畫面換到眼前 = 落地，隊伍當場清掉（2026-09-12）
+ *
+ * 人在牌組編輯畫面時，這一步之後**沒有第二步**：遊戲會在玩家離開畫面時自己把
+ * deck1 送上伺服器，等候秒數到了再「提交」一次是多餘的 —— 而且有害。提交走
+ * 的是同一條快路徑，會把**庫裡那份快照**再寫進記憶體一次，玩家在那三秒裡排
+ * 的牌當場被蓋回去（選了空牌組的話，是剛放進去的卡又被清掉）。2026-09-12
+ * 回報：「三秒套用牌組已經干擾了手牌編輯，把手牌清空，或是把手牌復原」。
+ *
+ * 所以 `edit` 這個結果直接 {@link applyLanded}：active 指到那一副（接下來的
+ * 編輯由自動存檔存進它），pending 清掉（等候秒數與開戰閘門都不會再碰它）。
+ * 房間場景（`room`）不在此列 —— 那裡沒有人會把記憶體送上去，非提交不可。
  */
 async function frontApplyPending(
   current: DeckContent,
@@ -1862,13 +1942,9 @@ async function frontApplyPending(
 
   // 名字要一起送過去：房裡那行小字原本寫死「Deck1」，而工作槽永遠是 1，
   // 那個字對玩家已經沒有意義了 —— 要顯示的是他自己那副牌的名字。
-  const failure = await writeDeck1(
-    pending.content,
-    snapshot,
-    "front",
-    deckLabel(deck, pending.room, pending.id),
-  );
-  if (failure !== null) {
+  const label = deckLabel(deck, pending.room, pending.id);
+  const result = await writeDeck1(pending.content, snapshot, "front", label);
+  if (result.failure !== undefined) {
     deck = withNotice(
       {
         ...deck,
@@ -1878,9 +1954,15 @@ async function frontApplyPending(
           [pending.room]: resolveActive(deck.library, pending.room, current),
         },
       },
-      failure,
+      result.failure,
     );
-    log(`✗ 換牌組：${failure}`);
+    log(`✗ 換牌組：${result.failure}`);
+    return;
+  }
+  if (result.done === "edit") {
+    // 編輯畫面：到此為止（見上面 ⚠⚠）。
+    deck = applyLanded(deck, pending);
+    log(`✓ 已換成「${label}」（${ROOM_LABELS[pending.room]}，離開編輯畫面時遊戲自己會存）`);
     return;
   }
   // 前端換好了，玩家眼睛已經看到新的牌。
@@ -1927,17 +2009,17 @@ async function commitPending(reason: "dwell" | "battle"): Promise<boolean> {
   // ⚠ 名字要帶。房裡那行小字原本寫死「Deck1」，而工作槽永遠是 1 —— 少了它，
   // 走這條路換過去的那一副會頂著上一副的名字。（選單掛著時 `redraw()` 也會
   // 把它改對，但玩家不在有牌組列的畫面時只有這裡管得到。）
-  const failure = await writeDeck1(
+  const result = await writeDeck1(
     pending.content,
     snap,
     "commit",
     deckLabel(deck, pending.room, pending.id),
   );
-  if (failure !== null) {
+  if (result.failure !== undefined) {
     // ⚠ 寫不進去就把隊伍清掉，**不要留著反覆重試**。留著的話玩家每按一次
     // 開戰都會被攔一下再失敗一次，而他看到的是「這遊戲卡卡的」。
-    deck = withNotice({ ...deck, pending: null }, failure);
-    log(`✗ ${reason === "battle" ? "開戰前換牌組" : "套用牌組"}：${failure}`);
+    deck = withNotice({ ...deck, pending: null }, result.failure);
+    log(`✗ ${reason === "battle" ? "開戰前換牌組" : "套用牌組"}：${result.failure}`);
     await syncGatePending();
     await pushDeckState();
     return false;
@@ -2073,6 +2155,22 @@ async function waitForDeckIdle(timeoutMs: number): Promise<boolean> {
  * 自己會在離開 Edit 時把 Deck1 存回伺服器 —— 那正是玩家最後一次改動。
  */
 async function deckTick(): Promise<void> {
+  // ⚠ 上一拍還沒跑完就不要疊第二拍（2026-09-13）。牌組連線卡住時每一次讀都要
+  // 等 30 秒逾時，而拍子是 4 秒 —— 疊起來的 initDeckLibrary 之後各自回來，
+  // 成功的那幾個會把 session 整份重建好幾次，失敗的那幾個則在「已接上」之後
+  // 又印一句「在等遊戲登入」。
+  if (deckTickRunning) return;
+  deckTickRunning = true;
+  try {
+    await deckTickOnce();
+  } finally {
+    deckTickRunning = false;
+  }
+}
+
+let deckTickRunning = false;
+
+async function deckTickOnce(): Promise<void> {
   if (engine === null || latest?.connected !== true) return;
   if (deckPending) {
     await initDeckLibrary();
@@ -2116,6 +2214,24 @@ async function deckTick(): Promise<void> {
           deck = saved.session;
           saveDeckLibrary();
           dirty = true;
+        }
+        // 剛進編輯畫面那一拍：選單跟著「手上這副是哪一房的」走，見
+        // `followDeckOnEdit`。⚠ 只在進來那一拍做 —— 之後玩家在裡面改牌，
+        // 內容跟每一副都對不上是常態，每拍都算的話選單會跳來跳去。
+        if (mounted && !wasMounted && now.where === "edit") {
+          const followed = followDeckOnEdit(deck, now.current);
+          if (followed !== deck) {
+            const label =
+              followed.active[followed.room] === null
+                ? "？"
+                : deckLabel(followed, followed.room, followed.active[followed.room] ?? "");
+            log(
+              `· 進了牌組編輯 —— 手上是「${label}」（${ROOM_LABELS[followed.room]}），選單跟過去`,
+            );
+            deck = followed;
+            saveDeckLibrary();
+            dirty = true;
+          }
         }
       }
     } catch {
@@ -3037,6 +3153,52 @@ app.whenReady().then(() => {
   // ⚠ 同樣要在 engine 建好之後。這裡只是把玩家上次的選擇交給引擎，真正裝到
   // 頁面上是接上遊戲之後的事（`#syncHiddenStages`）。
   engine.setHiddenStages(profile.hiddenStages);
+  // 渦擊破結算的 OK 面板模式同理；玩家在遊戲裡的面板上切了也要記回配置。
+  engine.setRaidRewardMode(profile.raidRewardMode);
+  engine.setRaidShare(profile.raidShare);
+  engine.setRaidTeamShare(profile.raidTeamShare);
+  // 自己打渦的紀錄：讀硬碟交給引擎，每多一場就回寫（見 raid-battle-store.ts）
+  engine.setRaidBattles(readRaidBattles());
+  engine.onRaidBattlesChanged((records) => {
+    if (ephemeral) return;
+    try {
+      writeRaidBattles(records);
+    } catch (err) {
+      log(`✗ 打渦紀錄存檔失敗：${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
+  engine.setRaidAutoDelete({
+    enabled: profile.raidAutoDelete,
+    prompt: profile.raidAutoDeletePrompt,
+  });
+  engine.onRaidAutoDeleteChanged((setting) => {
+    profile = { ...profile, raidAutoDelete: setting.enabled, raidAutoDeletePrompt: setting.prompt };
+    if (!ephemeral) {
+      store = updateProfile(profile.id, {
+        raidAutoDelete: setting.enabled,
+        raidAutoDeletePrompt: setting.prompt,
+      });
+    }
+    log(
+      setting.enabled
+        ? "· 自動刪除死渦已開啟（在遊戲裡開的）"
+        : "· 自動刪除死渦已停用（在遊戲裡關的；要再開請到 渦 › 結算通知）",
+    );
+    pushState();
+  });
+  engine.onRaidRewardModeChanged((mode) => {
+    profile = { ...profile, raidRewardMode: mode };
+    if (!ephemeral) store = updateProfile(profile.id, { raidRewardMode: mode });
+    log(`· 渦結算通知改為「${describeRaidRewardMode(mode)}」（在遊戲裡切的）`);
+    pushState();
+  });
+  // 畫面設定（解析度／畫面大小）：只在遊戲的 Option › plugin 分頁改，托盤只負責記住。
+  engine.setDisplay(profile.display);
+  engine.onDisplayChanged((display) => {
+    profile = { ...profile, display };
+    if (!ephemeral) store = updateProfile(profile.id, { display });
+    log(`· 畫面設定改為 解析度 ${display.render}、畫面大小 ${display.size}（在遊戲裡改的）`);
+  });
 
   tray = new Tray(nativeImage.createFromBuffer(trayIconPng("idle")));
   refreshTray();
@@ -3323,6 +3485,60 @@ app.whenReady().then(() => {
     log(on ? "· 隱藏地圖已啟用（開房選單會多四張）" : "· 隱藏地圖已停用，選單回官方那 11 項");
     pushState();
     return { enabled: on, stages: HIDDEN_STAGES, status: await stageStatus() };
+  });
+
+  // -------------------------------------------------------------------------
+  // 渦：獎勵標記與結算通知
+  // -------------------------------------------------------------------------
+
+  ipcMain.handle("ulr:raid-state", async (): Promise<RaidPageState> => raidPageState());
+
+  ipcMain.handle("ulr:raid-reward-mode", async (_event, raw: unknown): Promise<RaidPageState> => {
+    if (isRaidRewardMode(raw)) {
+      // 跟 `ulr:stages-set` 同一招：先改記憶體、非臨時配置才落地。
+      profile = { ...profile, raidRewardMode: raw };
+      if (!ephemeral) store = updateProfile(profile.id, { raidRewardMode: raw });
+      engine?.setRaidRewardMode(raw);
+      log(`· 渦結算通知改為「${describeRaidRewardMode(raw)}」`);
+      pushState();
+    }
+    return raidPageState();
+  });
+
+  ipcMain.handle("ulr:raid-share", async (_event, on: unknown): Promise<RaidPageState> => {
+    if (typeof on === "boolean") {
+      profile = { ...profile, raidShare: on };
+      if (!ephemeral) store = updateProfile(profile.id, { raidShare: on });
+      engine?.setRaidShare(on);
+      log(on ? "· 插件互傳渦狀態已開啟" : "· 插件互傳渦狀態已關閉（只用 ulgg）");
+      pushState();
+    }
+    return raidPageState();
+  });
+
+  ipcMain.handle("ulr:raid-team-share", async (_event, on: unknown): Promise<RaidPageState> => {
+    if (typeof on === "boolean") {
+      profile = { ...profile, raidTeamShare: on };
+      if (!ephemeral) store = updateProfile(profile.id, { raidTeamShare: on });
+      engine?.setRaidTeamShare(on);
+      log(on ? "· 分享打渦隊伍已開啟" : "· 分享打渦隊伍已關閉（下一輪會把雲端上自己的隊伍撤掉）");
+      pushState();
+    }
+    return raidPageState();
+  });
+
+  /** 插件視窗這邊打開自動刪除時，遊戲內的提示鈕也一起恢復。 */
+  ipcMain.handle("ulr:raid-auto-delete", async (_event, on: unknown): Promise<RaidPageState> => {
+    if (typeof on === "boolean") {
+      const prompt = on ? true : profile.raidAutoDeletePrompt;
+      profile = { ...profile, raidAutoDelete: on, raidAutoDeletePrompt: prompt };
+      if (!ephemeral)
+        store = updateProfile(profile.id, { raidAutoDelete: on, raidAutoDeletePrompt: prompt });
+      engine?.setRaidAutoDelete({ enabled: on, prompt });
+      log(on ? "· 自動刪除死渦已開啟" : "· 自動刪除死渦已停用");
+      pushState();
+    }
+    return raidPageState();
   });
 
   /** 重新推一次。給「等太久放棄了」那個收尾狀態用的按鈕。 */

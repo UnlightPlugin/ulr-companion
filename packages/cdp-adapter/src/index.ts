@@ -61,26 +61,78 @@ export type { FindGameContextOptions, GameExecutionContext } from "./game-contex
 
 export {
   buildCostPatchCoverageExpression,
+  buildCostPatchEnabledExpression,
   buildCostPatchScript,
   COST_TABLE_IDS,
   COST_TABLE_TARGETS,
   costsStamp,
   DEFAULT_MAX_WAIT_MS,
   DEFAULT_POLL_INTERVAL_MS,
+  EDIT_SCENE_CLONES,
   InvalidCostOverrideError,
   isCostPatchReport,
   normalizeCostTables,
+  parseCostPatchEnabledResult,
 } from "./patch-cost.js";
 export type {
   CostOverrides,
   CostOverrideTables,
   CostPatchApplied,
+  CostPatchEnabledResult,
   CostPatchError,
   CostPatchInstalled,
   CostPatchOptions,
   CostPatchReport,
   CostTableId,
 } from "./patch-cost.js";
+
+export {
+  buildCostTogglePatchScript,
+  buildCostToggleStateExpression,
+  COST_TOGGLE_SCRIPT_VERSION,
+  COST_TOGGLE_STATUS_EXPRESSION,
+  COST_TOGGLE_UNINSTALL_EXPRESSION,
+  DEFAULT_COST_TOGGLE_POLL_MS,
+  isCostToggleReport,
+  parseCostToggleStatus,
+} from "./patch-cost-toggle.js";
+export type {
+  CostTogglePatchOptions,
+  CostToggleReport,
+  CostToggleState,
+  CostToggleStatus,
+} from "./patch-cost-toggle.js";
+
+export {
+  buildDisplayPatchScript,
+  buildDisplayStateExpression,
+  DEFAULT_DISPLAY_POLL_MS,
+  DEFAULT_DISPLAY_STATE,
+  DISPLAY_SCRIPT_VERSION,
+  DISPLAY_STATUS_EXPRESSION,
+  DISPLAY_UNINSTALL_EXPRESSION,
+  isDisplayFullscreenReport,
+  isDisplaySettingsReport,
+  isRenderMode,
+  isSizeMode,
+  MAX_RENDER_SCALE,
+  parseDisplayStatus,
+  RENDER_MODES,
+  MAX_SIZE_ZOOM,
+  MIN_SIZE_ZOOM,
+  SIZE_PRESETS,
+} from "./patch-display.js";
+export { fillGameWindow, parseWindowFillOutput } from "./window-fill.js";
+export type { WindowFillResult } from "./window-fill.js";
+export type {
+  DisplayFullscreenReport,
+  DisplayPatchOptions,
+  DisplaySettingsReport,
+  DisplayState,
+  DisplayStatus,
+  RenderMode,
+  SizeMode,
+} from "./patch-display.js";
 
 export {
   buildPenaltyPatchScript,
@@ -142,6 +194,180 @@ export {
   PRESENT_UNINSTALL_EXPRESSION,
 } from "./patch-present.js";
 export type { PresentPatchOptions, PresentStatus } from "./patch-present.js";
+
+export {
+  buildShopPatchScript,
+  DEFAULT_SHOP_POLL_MS,
+  OFFICIAL_QUANTITY_CAP,
+  parseShopStatus,
+  QUANTITY_TIERS,
+  SHOP_SCRIPT_VERSION,
+  SHOP_STATUS_EXPRESSION,
+  SHOP_UNINSTALL_EXPRESSION,
+} from "./patch-shop.js";
+export type { ShopPatchOptions, ShopStatus } from "./patch-shop.js";
+
+export {
+  buildNavPatchScript,
+  DEFAULT_NAV_ARM_TIMEOUT_MS,
+  DEFAULT_NAV_POLL_MS,
+  DEFAULT_NAV_PORT_TIMEOUT_MS,
+  isNavReport,
+  NAV_BACK_EVENT,
+  NAV_HOST_SCENES,
+  NAV_PERSISTENT_SCENES,
+  NAV_SCRIPT_VERSION,
+  NAV_STATUS_EXPRESSION,
+  NAV_TARGET_SCENE,
+  NAV_TARGETS,
+  NAV_UNINSTALL_EXPRESSION,
+  parseNavStatus,
+} from "./patch-nav.js";
+export type { NavPatchOptions, NavReport, NavStatus, NavTarget } from "./patch-nav.js";
+
+export {
+  ASSET_GUARD_SCRIPT_VERSION,
+  ASSET_GUARD_STATUS_EXPRESSION,
+  ASSET_GUARD_UNINSTALL_EXPRESSION,
+  buildAssetGuardPatchScript,
+  DEFAULT_ASSET_GUARD_MAX_ATTEMPTS,
+  DEFAULT_ASSET_GUARD_POLL_MS,
+  GAME_DATA_FILES,
+  isAssetRepairReport,
+  parseAssetGuardStatus,
+} from "./patch-asset-guard.js";
+export type {
+  AssetGuardPatchOptions,
+  AssetGuardStatus,
+  AssetRepairReport,
+} from "./patch-asset-guard.js";
+
+export {
+  buildRaidSurrenderPatchScript,
+  DEFAULT_RAID_SURRENDER_POLL_MS,
+  DEFAULT_RAID_SURRENDER_PORT_TIMEOUT_MS,
+  isRaidSurrenderReport,
+  parseRaidSurrenderStatus,
+  RAID_SURRENDER_RULE,
+  RAID_SURRENDER_SCRIPT_VERSION,
+  RAID_SURRENDER_STATUS_EXPRESSION,
+  RAID_SURRENDER_UNINSTALL_EXPRESSION,
+} from "./patch-raid-surrender.js";
+export type {
+  RaidSurrenderPatchOptions,
+  RaidSurrenderReport,
+  RaidSurrenderStatus,
+} from "./patch-raid-surrender.js";
+
+export {
+  classifyRaid,
+  describeRaidClass,
+  FRAGMENT_BY_CODE,
+  FRAGMENT_BY_ITEM,
+  FRAGMENT_BY_KEY,
+  fragmentByFormula,
+  fragmentOfEntry,
+  isFairyMons,
+  lookupRaidTreasure,
+  RAID_BOOKMARK_ITEM,
+  RAID_FAIRY_MONS,
+  RAID_FRAGMENTS,
+  RAID_MATERIAL_ITEMS,
+  RAID_OWN_FRAME_TINT,
+  RAID_SPECIAL_TINT,
+  RAID_TICKET_PREFIX,
+  RAID_TREASURE_TABLE,
+  raidTierOf,
+  specialOfEntry,
+  ticketOfEntry,
+} from "./raid-treasure.js";
+export type {
+  RaidClass,
+  RaidClassifyInput,
+  RaidFragment,
+  RaidFragmentInfo,
+  RaidRewardItem,
+  RaidTier,
+  RaidTreasureEntry,
+} from "./raid-treasure.js";
+
+export {
+  parseRaidStatusCode,
+  RAID_STATUS_BY_CODE,
+  RAID_STATUS_COLORS,
+  RAID_STATUSES,
+} from "./raid-status.js";
+export type { RaidStatusInfo, RaidStatusKind, RaidStatusLabel } from "./raid-status.js";
+
+export {
+  buildRaidViewPatchScript,
+  buildRaidViewSetAutoDeleteExpression,
+  buildRaidViewSetPublicExpression,
+  buildRaidViewSetTeamsExpression,
+  isRaidBattleReport,
+  isRaidRefreshReport,
+  RAID_BATTLE_PENDING_MAX_MS,
+  RAID_BATTLE_TAIL_MS,
+  RAID_VIEW_MANUAL_REFRESH_COOLDOWN_MS,
+  DEFAULT_RAID_AUTO_DELETE,
+  DEFAULT_RAID_VIEW_POLL_MS,
+  DEFAULT_RAID_VIEW_REFRESH_MS,
+  isRaidAutoDeleteReport,
+  isRaidAutoDeleteSettingReport,
+  isRaidCodesReport,
+  parseRaidViewSnapshot,
+  parseRaidViewStatus,
+  RAID_VIEW_SNAPSHOT_EXPRESSION,
+  RAID_ICON_SOURCES,
+  RAID_MATERIAL_WEAPON_INDEX,
+  RAID_TIER4_FRAME_TINT,
+  RAID_VIEW_LABELS,
+  RAID_VIEW_SCRIPT_VERSION,
+  RAID_VIEW_STATUS_EXPRESSION,
+  RAID_VIEW_UNINSTALL_EXPRESSION,
+} from "./patch-raid-view.js";
+export type {
+  RaidAutoDeleteReport,
+  RaidAutoDeleteSetting,
+  RaidAutoDeleteSettingReport,
+  RaidBattleReport,
+  RaidCodesReport,
+  RaidDeckContent,
+  RaidPublicInfo,
+  RaidPublicMap,
+  RaidRefreshReport,
+  RaidSnapshotRow,
+  RaidStateRef,
+  RaidTeamsMap,
+  RaidTeamView,
+  RaidViewPatchOptions,
+  RaidViewStatus,
+} from "./patch-raid-view.js";
+
+export {
+  buildRaidRewardPatchScript,
+  buildRaidRewardSetModeExpression,
+  DEFAULT_RAID_REWARD_MODE,
+  isRaidRewardMode,
+  isRaidRewardModeReport,
+  isRaidRewardReport,
+  parseRaidRewardStatus,
+  RAID_REWARD_LABELS,
+  RAID_REWARD_MODES,
+  RAID_REWARD_SCRIPT_VERSION,
+  RAID_REWARD_STATUS_EXPRESSION,
+  RAID_REWARD_UNINSTALL_EXPRESSION,
+} from "./patch-raid-reward.js";
+export type {
+  RaidRewardEntry,
+  RaidRewardMode,
+  RaidRewardModeReport,
+  RaidRewardPatchOptions,
+  RaidRewardReport,
+  RaidRewardStatus,
+} from "./patch-raid-reward.js";
+
+export { JUMP_PERSISTENT_SCENES, SCENE_JUMP_SNIPPET } from "./scene-jump.js";
 
 export {
   ARCADIA_STAGES,
@@ -376,6 +602,7 @@ export {
   parseDeckEditStatus,
 } from "./patch-deck-edit.js";
 export type {
+  DeckEditContent,
   DeckEditItem,
   DeckEditPatchOptions,
   DeckEditReport,
