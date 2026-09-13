@@ -25,6 +25,7 @@
  */
 
 import { readFileSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { MenuItemConstructorOptions } from "electron";
 import {
@@ -166,6 +167,7 @@ import {
   userDataDirFor,
 } from "./profiles.js";
 import { startRuleFeed } from "./rule-feed.js";
+import { BUNDLE_REPORT_INTERVAL_MS, createBundleReporter, readPushToken } from "./bundle-report.js";
 import { consumeUpdatedFlag, startAutoUpdate } from "./updater.js";
 import { cleanupStaleFiles } from "./zip-update.js";
 
@@ -1379,6 +1381,8 @@ let deckTimer: ReturnType<typeof setInterval> | null = null;
  */
 const DECK_APPLY_TICK_MS = 500;
 let deckApplyTimer: ReturnType<typeof setInterval> | null = null;
+/** 回報遊戲檔名給書籤玩家用（`bundle-report.ts`）。 */
+let bundleReportTimer: ReturnType<typeof setInterval> | null = null;
 /** 牌組庫的全部狀態。`null` = 還沒讀到帳號指紋（遊戲還沒登入完成）。 */
 let deck: DeckSession | null = null;
 /** 這份 session 是哪個帳號的。**換帳號登入要整份重來。** */
@@ -2500,6 +2504,8 @@ async function quit(): Promise<void> {
   deckTimer = null;
   if (deckApplyTimer !== null) clearInterval(deckApplyTimer);
   deckApplyTimer = null;
+  if (bundleReportTimer !== null) clearInterval(bundleReportTimer);
+  bundleReportTimer = null;
   // 大廳人數的推播線。⚠ 不收的話 Electron 退不乾淨（那幾條 socket 還活著）。
   stopLobbyWatch();
   // ⚠ 排隊中就關掉插件的話，要先把自己從佇列上拿掉、順手收掉開了一半的房 ——
@@ -3769,6 +3775,19 @@ app.whenReady().then(() => {
   // 去量「停了 3 秒沒」，玩家實際等到的會是 4 到 8 秒。
   engine.onRoomGate((report) => void onRoomGate(report));
   deckApplyTimer = setInterval(() => void deckApplyTick(), DECK_APPLY_TICK_MS);
+
+  // 接著 Steam 開的遊戲時，把這一版的程式檔名回報到雲端，給用書籤開網頁版的
+  // 玩家用。⚠ 平常一次網路都不打：同一份清單處理過就記住，只有雲端還沒跟上
+  // 改版的那段時間才每小時問一次。書籤開的頁面（網址沒 token）直接跳過。
+  const bundleReporter = createBundleReporter({
+    fetch: (url, init) => fetch(url, init),
+    read: async () =>
+      engine !== null && latest?.connected === true ? await engine.readServedBundles() : null,
+    // 維護者自己的電腦才有這個檔（雲端清單.py 用的同一把）；有的話回報算兩份
+    token: readPushToken(join(homedir(), ".ulr-push-token"), (p) => readFileSync(p, "utf8")),
+    log: (l) => log(l),
+  });
+  bundleReportTimer = setInterval(() => void bundleReporter.tick(), BUNDLE_REPORT_INTERVAL_MS);
 
   void engine.start();
   // 靜默下載、安全的時機才套用。細節與那個「安全」的定義見 updater.ts。

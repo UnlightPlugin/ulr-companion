@@ -142,6 +142,31 @@ export const BUNDLE_DISCOVERY_EXPRESSION = `(function () {
 })()`;
 
 /**
+ * 同上，但**只在伺服器真的吐了頁面時**才回清單，否則回 `null`。
+ *
+ * 給「回報到雲端」用 —— 那裡要的是真相來源，不是任何一個載著遊戲的分頁：
+ *
+ * | 分頁                               | 網址有 token | 可以回報 |
+ * | ---------------------------------- | ------------ | -------- |
+ * | Steam 桌面版（iframe 裡）           | ✓            | ✓        |
+ * | Steam 網頁版啟動器開的瀏覽器        | ✓            | ✓        |
+ * | 書籤＋擴充／竄改猴／CDP 重建的外殼  | ✗            | ✗        |
+ *
+ * 最後一種的檔名**本來就是從清單來的**，回報回去等於把舊清單再送一次。
+ * 2026-09-13 實測：桌面版與書籤分頁的三十幾支 chunk 只差 runtime 與兩個
+ * 延遲 chunk —— 正是書籤那份清單過期的地方，所以兩者是同一個 build。
+ *
+ * 重建過的旗標（`__ulrBootShell`、擴充的 dataset）也一起看：token 以外多一道。
+ */
+export const SERVED_BUNDLES_EXPRESSION = `(function () {
+  var params = new URLSearchParams(location.search);
+  if (!params.get("token")) return "null";
+  if (window.__ulrBootShell && window.__ulrBootShell.rebuilt) return "null";
+  if (document.documentElement.dataset.${BUNDLES_DATASET_KEY}) return "null";
+  return ${BUNDLE_DISCOVERY_EXPRESSION};
+})()`;
+
+/**
  * 驗證從頁面讀回來的東西真的是一份 bundle 清單。
  *
  * 頁面是外部輸入 —— 玩家可能裝了別的擴充功能在同源塞 script，也可能遊戲改版

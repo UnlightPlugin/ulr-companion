@@ -13,7 +13,11 @@
  */
 
 import type { GameBundles } from "./boot-shell.js";
-import { BUNDLE_DISCOVERY_EXPRESSION, parseDiscoveredBundles } from "./boot-shell.js";
+import {
+  BUNDLE_DISCOVERY_EXPRESSION,
+  parseDiscoveredBundles,
+  SERVED_BUNDLES_EXPRESSION,
+} from "./boot-shell.js";
 import { CdpClient } from "./client.js";
 import { DEFAULT_DEBUG_PORT } from "./constants.js";
 import type { GameExecutionContext } from "./game-context.js";
@@ -472,6 +476,21 @@ export class CdpAdapter {
   async discoverBundles(): Promise<GameBundles> {
     const raw = await this.evaluate<string>(BUNDLE_DISCOVERY_EXPRESSION);
     return parseDiscoveredBundles(raw);
+  }
+
+  /**
+   * 伺服器真的吐了頁面（網址帶 token）才回清單，重建過的外殼、還沒載完的頁面
+   * 都回 `null`。理由見 `SERVED_BUNDLES_EXPRESSION`。**永遠不 throw 清單格式錯**
+   * —— 讀不到就是讀不到，呼叫端只是這次不回報。
+   */
+  async readServedBundles(): Promise<GameBundles | null> {
+    const raw = await this.evaluate<string>(SERVED_BUNDLES_EXPRESSION);
+    if (raw === "null") return null;
+    try {
+      return parseDiscoveredBundles(raw);
+    } catch {
+      return null;
+    }
   }
 
   // -------------------------------------------------------------------------

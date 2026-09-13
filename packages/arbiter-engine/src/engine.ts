@@ -1578,6 +1578,16 @@ export class ArbiterEngine {
     return await adapter.applyDecks(decks, deckCheck);
   }
 
+  /**
+   * 伺服器真的吐出來的遊戲程式檔名（網址帶 token 的頁面才有）。沒接上、不是
+   * 真頁面都回 `null`。托盤拿去回報給書籤玩家用（`bundle-report.ts`）。
+   */
+  async readServedBundles(): Promise<readonly string[] | null> {
+    const adapter = this.#adapter;
+    if (adapter === null) return null;
+    return await adapter.readServedBundles();
+  }
+
   /** 讀玩家的卡片庫存。「只用真的有的卡」那條線靠它。 */
   async readInventory(): Promise<InventorySnapshot> {
     const adapter = this.#adapter;

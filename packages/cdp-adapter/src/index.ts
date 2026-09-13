@@ -428,6 +428,7 @@ export type {
 
 export {
   BUNDLE_DISCOVERY_EXPRESSION,
+  SERVED_BUNDLES_EXPRESSION,
   buildBookmarklet,
   buildBookmarkUrl,
   buildBootShellScript,
