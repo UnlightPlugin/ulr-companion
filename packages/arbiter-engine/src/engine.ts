@@ -33,11 +33,34 @@
 import type { MatchDriver } from "./match-session.js";
 import {
   fetchObservedRaids,
-  lookupSharedRaids,
   mergePublicMaps,
+  pickUlggReports,
   RAID_PUBLIC_REFRESH_MS,
-  uploadSharedRaids,
+  reportStageToUlgg,
+  syncSharedRaids,
 } from "./raid-public.js";
+import { RaidFeedSync } from "./raid-feed-client.js";
+import {
+  addBattle,
+  applySnapshot,
+  emptyLedger,
+  formatLedger,
+  formatOutcomeDetail,
+  formatRaidTally,
+  formatRaidTrack,
+  formatVanished,
+  ledgerExpect,
+  ledgerLevels,
+  outcomeKey,
+  pruneOutcomes,
+  settleOutcomes,
+  tallyToday,
+  upsertOutcome,
+  type ItemLedger,
+  type RaidOutcomeRecord,
+  type RaidOutcomeState,
+  type RaidOutcomeTally,
+} from "./raid-track.js";
 import {
   buildTeamUploads,
   localTeamsMap,
@@ -67,13 +90,17 @@ import type {
   CostOverrideTables,
   CostPatchReport,
   CostTableId,
+  CharaPickerReport,
+  CharaPickerState,
+  LobbyStandReport,
+  LobbyStandState,
   CostToggleReport,
   CostToggleState,
   DeckApplyResult,
   DeckEditReport,
   DeckEditState,
   DeckEditStatus,
-  DeckPayload,
+  DeckSlotWrite,
   DeckSnapshot,
   DisplayFullscreenReport,
   DisplaySettingsReport,
@@ -81,9 +108,19 @@ import type {
   DisplayStatus,
   DisplayWindowReport,
   EditDeckRead,
-  GateRoom,
   HiddenStageStatus,
+  InputRescueReport,
+  BonusItemOrder,
+  BonusItemPlace,
+  DietPart,
+  ItemPanelPart,
+  ItemPanelPatchOptions,
+  ItemPanelStatus,
   InventorySnapshot,
+  QuestBonusReport,
+  QuestBonusSample,
+  QuestShortcutPart,
+  QuestTreasureStatus,
   LobbyQuickPressed,
   LobbyReport,
   LobbyState,
@@ -95,9 +132,16 @@ import type {
   PenaltyPatchReport,
   PresentStatus,
   RaidAutoDeleteReport,
+  RaidItemDeltaReport,
+  RaidTrackReport,
   RaidAutoDeleteSetting,
   RaidPublicMap,
+  RaidSnapshotRow,
   RaidTeamsMap,
+  RaidLearnedEntry,
+  RaidLearnedTable,
+  RaidLearnReport,
+  RaidLearnSample,
   RaidRewardMode,
   RaidRewardModeReport,
   RaidRewardReport,
@@ -105,16 +149,24 @@ import type {
   RaidSurrenderReport,
   RaidSurrenderStatus,
   RaidViewStatus,
-  RoomDeckPreload,
+  CardArtEntry,
+  CardArtReport,
+  CardArtStatus,
+  MatchRoomScriptOptions,
+  RoomGateDecks,
   RoomGateReport,
   RoomGateStatus,
   Seat,
+  ServerDeck,
   ShopStatus,
 } from "@ulr/cdp-adapter";
 import type { CardCatalog } from "@ulr/rule-schema";
-import { buildCatalog } from "@ulr/rule-schema";
+import { buildCatalog, LEGACY_EVENT_IDS, LEGACY_WEAPON_IDS } from "@ulr/rule-schema";
 import {
   ArbiterRunner,
+  CARD_ART_SCRIPT_VERSION,
+  CHARA_PICKER_SCRIPT_VERSION,
+  LOBBY_STAND_SCRIPT_VERSION,
   COST_TABLE_IDS,
   COST_TOGGLE_SCRIPT_VERSION,
   createCdpAdapter,
@@ -122,7 +174,15 @@ import {
   DEFAULT_DEBUG_PORT,
   DEFAULT_SPEED_LEASE_MS,
   explainDebugPort,
+  GameFrameAppearedError,
   HIDDEN_STAGES,
+  ITEM_PANEL_SCRIPT_VERSION,
+  QUEST_TREASURE_SCRIPT_VERSION,
+  appendQuestBonusSample,
+  summarizeQuestBonus,
+  appendLearnLog,
+  mergeLearned,
+  rebuildLearned,
   LOBBY_SCRIPT_VERSION,
   NAV_SCRIPT_VERSION,
   NAV_TARGET_SCENE,
@@ -131,16 +191,37 @@ import {
   DEFAULT_RAID_AUTO_DELETE,
   DEFAULT_DISPLAY_STATE,
   DEFAULT_RAID_REWARD_MODE,
+  DEFAULT_BONUS_ITEM_ORDER,
+  DEFAULT_BONUS_ITEM_PLACE,
   DISPLAY_SCRIPT_VERSION,
   RAID_REWARD_SCRIPT_VERSION,
   RAID_SURRENDER_SCRIPT_VERSION,
   RAID_VIEW_SCRIPT_VERSION,
+  reloadGamePage,
   resolveDebugPort,
   SHOP_SCRIPT_VERSION,
 } from "@ulr/cdp-adapter";
 
 /** 連不上就每隔這麼久再試一次。玩家不會為了插件而先開遊戲。 */
 export const CONNECT_RETRY_MS = 2_000;
+
+/** 「舊索引 → 新 id」的表倒過來。對照表是一對一的（rule-schema 的測試守著）。 */
+function invertLegacyIds(ids: readonly number[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  ids.forEach((id, index) => {
+    out[String(id)] = index;
+  });
+  return out;
+}
+
+/**
+ * 開房腳本在頁面上算「自己牌組的規則鍵」要用的對照（改版後 id → 規則鍵的舊索引）。
+ * `@ulr/cdp-adapter` 不依賴 rule-schema，所以由這裡算好傳進去。
+ */
+const MATCH_ROOM_TABLES: MatchRoomScriptOptions = {
+  weaponIndexById: invertLegacyIds(LEGACY_WEAPON_IDS),
+  eventIndexById: invertLegacyIds(LEGACY_EVENT_IDS),
+};
 
 /** 硬底線的預設值：剩這麼多秒就一定送出，不再等任何人。 */
 export const DEFAULT_DEADLINE_SECONDS = 3;
@@ -175,7 +256,7 @@ export interface EngineOptions {
    * 這個客戶端的 user-data-dir。給了才有「埠變了也找得回來」這件事。
    *
    * ⚠ **一定要跟這份配置的客戶端種類一致。** 桌面版是
-   * `%APPDATA%\UNLIGHT-Revive`、網頁版是瀏覽器 profile 目錄。給錯的症狀是
+   * `desktopUserDataDir()`（`%APPDATA%\UNLIGHT Revive`）、網頁版是瀏覽器 profile 目錄。給錯的症狀是
    * 「我開的是網頁版的插件，它卻接到桌面版的遊戲去」—— 不給比給錯好，
    * 不給只是少一層保險。
    */
@@ -203,6 +284,17 @@ export interface EngineOptions {
   readyTint?: number | null;
   onLog?: (line: string) => void;
   onStatus?: (status: EngineStatus) => void;
+  /**
+   * 遊戲頁面重載過（CDP 連線沒斷，但頁面是新的一份）。
+   *
+   * ⚠⚠ **換帳號就是走這條路**：同一個分頁導向另一個帳號的網址，連線一路活著，
+   * `onStatus` 看不到任何斷線。牌組庫是跟著帳號走的，只靠斷線去重認帳號的話，
+   * 托盤會一直拿上一個人的庫在新帳號身上 preload 與自動存檔（2026-09-14 實機）。
+   *
+   * 叫的時機在補裝房間偵測**之前** —— 呼叫端在這裡同步清掉的 room preload，
+   * 補裝時就不會又把上一個人的牌推回頁面。
+   */
+  onPageReload?: () => void;
 }
 
 /**
@@ -267,14 +359,6 @@ export interface CostState {
   enabled: boolean;
   /** 出錯時的原因。 */
   error: string | null;
-}
-
-/** 自動刪除時自己有份、沒等結算就刪掉的渦（驗證「刪了會不會吃獎勵」用）。 */
-interface EarlyDeletedRaid {
-  name: string;
-  founder: string;
-  /** 之後來了幾批結算都沒看到它 */
-  misses: number;
 }
 
 const COST_OFF: CostState = {
@@ -417,12 +501,26 @@ export class ArbiterEngine {
    * 又只剩 11 項」，而玩家不會把它跟重載連在一起。
    */
   #hiddenStages = false;
+  /**
+   * 牌組編輯畫面的人物篩選與最愛卡片。`null` = 托盤還沒給過（那就不裝）。
+   * 留著的理由同上：evaluate 裝的，重載就沒了。
+   */
+  #charaPicker: CharaPickerState | null = null;
+  #charaPickerHandlers = new Set<(report: CharaPickerReport) => void>();
+  /** 首頁立繪與 Library 愛心複選。`null` = 托盤還沒給過（那就不裝）。理由同上。 */
+  #lobbyStand: LobbyStandState | null = null;
+  #lobbyStandHandlers = new Set<(report: LobbyStandReport) => void>();
   /** 渦擊破結算的 OK 面板要怎麼演。托盤從配置讀進來、玩家在面板上切了也會回寫。 */
   #raidRewardMode: RaidRewardMode = DEFAULT_RAID_REWARD_MODE;
   #raidRewardModeHandlers = new Set<(mode: RaidRewardMode) => void>();
   /** 畫面設定（解析度／畫面大小）。托盤從配置讀進來；玩家在 Option 裡改了也會回寫。 */
   #display: DisplayState = { ...DEFAULT_DISPLAY_STATE };
   #displayHandlers = new Set<(state: DisplayState) => void>();
+  /**
+   * 卡面替換（MOD）：托盤從資料夾讀進來的 PNG。**留著**是因為補丁是
+   * evaluate 裝的，重載就沒了 —— 接上／重裝時要拿同一份再裝一次。
+   */
+  #cardArt: readonly CardArtEntry[] = [];
   /** 誰在等「玩家按了大廳那顆快速比賽」。 */
   #lobbyHandlers = new Set<(press: LobbyQuickPressed) => void>();
   /** 誰在等「玩家在牌組編輯畫面點了什麼」。 */
@@ -443,7 +541,7 @@ export class ArbiterEngine {
    */
   #roomGatePending = false;
   /** 每一房「進去就該用的那一副」。重裝之後靠它補推回去。 */
-  #roomDecks: Partial<Record<GateRoom, RoomDeckPreload>> = {};
+  #roomDecks: RoomGateDecks = { mode: "off", decks: {} };
   #stopping = false;
   #loop: Promise<void> | null = null;
   #resolveStop: (() => void) | null = null;
@@ -622,12 +720,12 @@ export class ArbiterEngine {
    *
    * ⚠ **每次取用都重裝一次 `__ulrMatch`。** 注入的東西在遊戲重載之後就沒了，
    * 而配對是玩家按下去才跑的 —— 不能假設上次裝的還在。重裝很便宜（只換函式，
-   * 不重掛 listener，也不動已經收到的房間清單）。
+   * 頻道清單那層包裝認得自己，不會包兩層，記下來的頻道也不會丟）。
    */
   async matchDriver(): Promise<MatchDriver | null> {
     const adapter = this.#adapter;
     if (adapter === null) return null;
-    await adapter.installMatchRoom();
+    await adapter.installMatchRoom(MATCH_ROOM_TABLES);
     return adapter;
   }
 
@@ -732,8 +830,8 @@ export class ArbiterEngine {
     }
   }
 
-  /** 跳出遊戲自己的錯誤對話框（「這個牌組不符合遊戲規則」）。 */
-  async showLobbyError(code: number | null, message?: string): Promise<void> {
+  /** 跳出遊戲自己的錯誤對話框（代碼是 `MatchUITexts.error` 的鍵，例如 `NOT_ENOUGH_AP`）。 */
+  async showLobbyError(code: string | null, message?: string): Promise<void> {
     const adapter = this.#adapter;
     if (adapter === null) return;
     try {
@@ -766,6 +864,8 @@ export class ArbiterEngine {
     try {
       const status = await adapter.lobbyStatus();
       if (status.installed && status.version === LOBBY_SCRIPT_VERSION) return status;
+      // 頁面重載過 → 開房腳本（與它記頻道清單的那層包裝）也跟著沒了，一起補。
+      await adapter.installMatchRoom(MATCH_ROOM_TABLES).catch(() => "");
       return await adapter.installLobbyPatch();
     } catch {
       return null;
@@ -780,6 +880,14 @@ export class ArbiterEngine {
   async #syncLobby(): Promise<void> {
     const adapter = this.#adapter;
     if (adapter === null) return;
+    // ⚠ 開房腳本跟著一起裝：它在遊戲的 socket 類別上順路記下頻道清單（迪城要借
+    // 亞城的 COST 檔位），而那份清單只在玩家經過頻道選單的那一刻出現 —— 等到按下
+    // 快速比賽才裝就錯過了。接上遊戲、#reinstall 都會走這裡。
+    try {
+      await adapter.installMatchRoom(MATCH_ROOM_TABLES);
+    } catch (err) {
+      this.#log(`✗ 開房腳本注入失敗：${describe(err)}`);
+    }
     try {
       const status = await adapter.installLobbyPatch();
       // ⚠ `buttonReady: false` 幾乎一定會發生（這時玩家還在標題畫面），
@@ -856,6 +964,21 @@ export class ArbiterEngine {
       if (!status.installed) this.#log(`· 商店數量檔位還沒裝上：${status.reason ?? "原因不明"}`);
     } catch (err) {
       this.#log(`✗ 商店數量檔位注入失敗：${describe(err)}`);
+    }
+  }
+
+  /**
+   * 暗房預覽（已有的調暗、事件卡標持有數）。**每次接上遊戲與遊戲重載後都會
+   * 自己叫一次。** `mounted: false` 只是玩家不在暗房，不是錯誤。
+   */
+  async #syncLot(): Promise<void> {
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    try {
+      const status = await adapter.installLotPatch();
+      if (!status.installed) this.#log(`· 暗房預覽還沒裝上：${status.reason ?? "原因不明"}`);
+    } catch (err) {
+      this.#log(`✗ 暗房預覽注入失敗：${describe(err)}`);
     }
   }
 
@@ -940,6 +1063,56 @@ export class ArbiterEngine {
     }
   }
 
+  // -------------------------------------------------------------------------
+  // 卡面替換（MOD）
+  // -------------------------------------------------------------------------
+
+  /**
+   * 換一份清單並立刻推到頁面（先拆再裝）。空清單 = 全部還原。
+   * 沒接上遊戲時只是記著，接上時 `#syncCardArt()` 會裝。
+   */
+  setCardArt(entries: readonly CardArtEntry[]): void {
+    this.#cardArt = entries.map((e) => ({ frame: e.frame, dataUrl: e.dataUrl }));
+    void this.#syncCardArt();
+  }
+
+  async cardArtStatus(): Promise<CardArtStatus | null> {
+    const adapter = this.#adapter;
+    if (adapter === null) return null;
+    try {
+      const status = await adapter.cardArtStatus();
+      if (status.installed && status.version === CARD_ART_SCRIPT_VERSION) return status;
+      if (this.#cardArt.length === 0) return status;
+      return await adapter.installCardArtPatch(this.#cardArt);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 把卡面替換裝上去。**每次接上遊戲、遊戲重載後、清單變了都會叫。**
+   * 清單是空的就只拆不裝（玩家把圖全刪了也要看到卡面變回官方）。
+   */
+  async #syncCardArt(): Promise<void> {
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    try {
+      if (this.#cardArt.length === 0) {
+        await adapter.uninstallCardArtPatch();
+        return;
+      }
+      const status = await adapter.installCardArtPatch(this.#cardArt);
+      if (!status.installed) this.#log(`· 卡面替換還沒裝上：${status.reason ?? "原因不明"}`);
+    } catch (err) {
+      this.#log(`✗ 卡面替換注入失敗：${describe(err)}`);
+    }
+  }
+
+  #onCardArt(report: CardArtReport): void {
+    if (report.applied > 0) this.#log(`✓ 卡面替換：換上 ${report.applied} 張`);
+    for (const f of report.failed) this.#log(`⚠ 卡面替換：${f.frame} 沒換上 —— ${f.reason}`);
+  }
+
   /**
    * 開機資料檔的防護。**每次接上遊戲與遊戲重載後都會自己叫一次。**
    * 資料都在的話腳本自己就停了，所以沒補到東西不寫 log。
@@ -972,6 +1145,252 @@ export class ArbiterEngine {
   }
 
   /**
+   * 官方請求逾時後把畫面鎖死的解鎖。**每次接上遊戲與遊戲重載後都會自己叫一次。**
+   */
+  async #syncInputRescue(): Promise<void> {
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    try {
+      const status = await adapter.installInputRescue();
+      if (!status.installed) this.#log(`· 畫面解鎖還沒裝上：${status.reason ?? "原因不明"}`);
+    } catch (err) {
+      this.#log(`✗ 畫面解鎖注入失敗：${describe(err)}`);
+    }
+  }
+
+  /** 官方某個請求等不到伺服器回覆、把畫面鎖住了，已經解開。那個操作本身沒成功。 */
+  #onInputRescue(report: InputRescueReport): void {
+    this.#log(
+      `⟳ 遊戲的 ${report.event} 請求伺服器沒回、畫面被鎖住，已經解開（${report.scenes.join("、")}）；那個操作沒有成功，要的話再做一次`,
+    );
+  }
+
+  /** 渦房的物品捷徑。托盤從配置推進來。 */
+  #itemShortcut = false;
+  /** 任務房的物品捷徑：水沙、通行證兩塊各自開關。同上。 */
+  #questStack = false;
+  #questPasses = false;
+  /** 迪城：水捷徑、GEM UP 兩塊各自開關。同上。 */
+  #dietStack = false;
+  #gemUp = false;
+  /** 獎勵遊戲的物品捷徑＋差距大時先用哪一種＋畫在哪。同上。 */
+  #bonusItem = false;
+  #bonusOrder: BonusItemOrder = DEFAULT_BONUS_ITEM_ORDER;
+  #bonusPlace: BonusItemPlace = DEFAULT_BONUS_ITEM_PLACE;
+
+  get itemShortcut(): boolean {
+    return this.#itemShortcut;
+  }
+
+  get questItemShortcut(): { stack: boolean; passes: boolean } {
+    return { stack: this.#questStack, passes: this.#questPasses };
+  }
+
+  get dietOverlay(): { stack: boolean; gemUp: boolean } {
+    return { stack: this.#dietStack, gemUp: this.#gemUp };
+  }
+
+  /** 開關渦房的物品捷徑。立刻推到頁面上（頁面沒裝就整支補裝）。 */
+  setItemShortcut(on: boolean): void {
+    this.#itemShortcut = on;
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    void adapter
+      .setItemShortcut(on)
+      .then((r) => (r === "not-installed" ? this.#syncItemPanel() : undefined))
+      .catch(() => undefined);
+  }
+
+  /** 開關任務房捷徑的其中一塊（`stack` 水沙、`passes` 通行證）。同上。 */
+  setQuestItemShortcut(part: QuestShortcutPart, on: boolean): void {
+    if (part === "stack") this.#questStack = on;
+    else this.#questPasses = on;
+    this.#pushItemPanelPart(part, on);
+  }
+
+  /** 開關迪城的其中一塊（`dietStack` 水捷徑、`gemUp` GEM UP）。同上。 */
+  setDietOverlay(part: DietPart, on: boolean): void {
+    if (part === "dietStack") this.#dietStack = on;
+    else this.#gemUp = on;
+    this.#pushItemPanelPart(part, on);
+  }
+
+  get bonusItemShortcut(): { on: boolean; order: BonusItemOrder; place: BonusItemPlace } {
+    return { on: this.#bonusItem, order: this.#bonusOrder, place: this.#bonusPlace };
+  }
+
+  /** 開關獎勵遊戲的物品捷徑。同上。 */
+  setBonusItemShortcut(on: boolean): void {
+    this.#bonusItem = on;
+    this.#pushItemPanelPart("bonusItem", on);
+  }
+
+  /** 換獎勵遊戲差距大時先用哪一種道具。同上。 */
+  setBonusItemOrder(order: BonusItemOrder): void {
+    this.#bonusOrder = order;
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    void adapter
+      .setBonusItemOrder(order)
+      .then((r) => (r === "not-installed" ? this.#syncItemPanel() : undefined))
+      .catch(() => undefined);
+  }
+
+  /** 換獎勵遊戲的捷徑畫在哪（上方／蓋在使用物品上）。同上。 */
+  setBonusItemPlace(place: BonusItemPlace): void {
+    this.#bonusPlace = place;
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    void adapter
+      .setBonusItemPlace(place)
+      .then((r) => (r === "not-installed" ? this.#syncItemPanel() : undefined))
+      .catch(() => undefined);
+  }
+
+  #pushItemPanelPart(part: ItemPanelPart, on: boolean): void {
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    void adapter
+      .setItemPanelPart(part, on)
+      .then((r) => (r === "not-installed" ? this.#syncItemPanel() : undefined))
+      .catch(() => undefined);
+  }
+
+  #itemPanelOptions(): ItemPanelPatchOptions {
+    return {
+      shortcut: this.#itemShortcut,
+      questStack: this.#questStack,
+      questPasses: this.#questPasses,
+      dietStack: this.#dietStack,
+      gemUp: this.#gemUp,
+      bonusItem: this.#bonusItem,
+      bonusOrder: this.#bonusOrder,
+      bonusPlace: this.#bonusPlace,
+    };
+  }
+
+  /**
+   * 物品欄那支現在在頁面上的狀態。沒接上遊戲時是 `null`。
+   * 頁面說「沒裝」或「不是這一版」就當場補裝（跟 `raidViewStatus()` 同一套）。
+   */
+  async itemPanelStatus(): Promise<ItemPanelStatus | null> {
+    const adapter = this.#adapter;
+    if (adapter === null) return null;
+    try {
+      const status = await adapter.itemPanelStatus();
+      if (status.installed && status.version === ITEM_PANEL_SCRIPT_VERSION) return status;
+      return await adapter.installItemPanelPatch(this.#itemPanelOptions());
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 物品欄（開窗不擋整個畫面、渦房／任務房排序、搜索框蓋在物品欄上）＋兩房的物品捷徑。
+   * **每次接上遊戲與遊戲重載後都會自己叫一次。**
+   */
+  async #syncItemPanel(): Promise<void> {
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    try {
+      const status = await adapter.installItemPanelPatch(this.#itemPanelOptions());
+      if (!status.installed) this.#log(`· 物品欄還沒裝上：${status.reason ?? "原因不明"}`);
+    } catch (err) {
+      this.#log(`✗ 物品欄注入失敗：${describe(err)}`);
+    }
+  }
+
+  /** 任務地圖的寶箱標註。托盤從配置推進來。 */
+  #questTreasure = false;
+
+  get questTreasure(): boolean {
+    return this.#questTreasure;
+  }
+
+  /** 開關寶箱標註。立刻推到頁面上（頁面沒裝就整支補裝）。 */
+  setQuestTreasure(on: boolean): void {
+    this.#questTreasure = on;
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    void adapter
+      .setQuestTreasure(on)
+      .then((r) => (r === "not-installed" ? this.#syncQuestTreasure() : undefined))
+      .catch(() => undefined);
+  }
+
+  /** 寶箱標註那支現在在頁面上的狀態。沒接上遊戲時是 `null`；沒裝或舊版就當場補裝。 */
+  async questTreasureStatus(): Promise<QuestTreasureStatus | null> {
+    const adapter = this.#adapter;
+    if (adapter === null) return null;
+    try {
+      const status = await adapter.questTreasureStatus();
+      if (status.installed && status.version === QUEST_TREASURE_SCRIPT_VERSION) return status;
+      return await adapter.installQuestTreasurePatch(
+        this.#questTreasure,
+        summarizeQuestBonus(this.#questBonus),
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  /** 寶箱標註（＋學 HighLow 開始星數）。**每次接上遊戲與遊戲重載後都會自己叫一次。** */
+  async #syncQuestTreasure(): Promise<void> {
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    try {
+      const status = await adapter.installQuestTreasurePatch(
+        this.#questTreasure,
+        summarizeQuestBonus(this.#questBonus),
+      );
+      if (!status.installed) this.#log(`· 寶箱標註還沒裝上：${status.reason ?? "原因不明"}`);
+    } catch (err) {
+      this.#log(`✗ 寶箱標註注入失敗：${describe(err)}`);
+    }
+  }
+
+  // ---- HighLow 格的開始星數：邊玩邊學（見 @ulr/cdp-adapter 的 quest-bonus.ts） ----
+
+  #questBonus: QuestBonusSample[] = [];
+  #questBonusHandlers = new Set<(samples: QuestBonusSample[]) => void>();
+
+  /** 托盤啟動時把硬碟上的樣本交進來。 */
+  setQuestBonusSamples(samples: readonly QuestBonusSample[]): void {
+    this.#questBonus = [...samples];
+  }
+
+  get questBonusSamples(): readonly QuestBonusSample[] {
+    return this.#questBonus;
+  }
+
+  /** 學到一筆時通知托盤存檔。 */
+  onQuestBonusChanged(handler: (samples: QuestBonusSample[]) => void): () => void {
+    this.#questBonusHandlers.add(handler);
+    return () => this.#questBonusHandlers.delete(handler);
+  }
+
+  #onQuestBonus(report: QuestBonusReport): void {
+    const s = report.sample;
+    this.#questBonus = appendQuestBonusSample(this.#questBonus, s);
+    const stat = summarizeQuestBonus(this.#questBonus)[s.level];
+    const range =
+      stat === undefined ? "" : stat.min === stat.max ? `${stat.min}` : `${stat.min}～${stat.max}`;
+    this.#log(
+      `· 學到 HighLow Lv${s.level} 開始星數 ${s.step}（這一級目前 ${range}，共 ${stat?.n ?? 1} 筆）`,
+    );
+    for (const h of this.#questBonusHandlers) {
+      try {
+        h([...this.#questBonus]);
+      } catch {
+        // 存檔是托盤的事，不能擋住引擎
+      }
+    }
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    void adapter.setQuestBonusStats(summarizeQuestBonus(this.#questBonus)).catch(() => undefined);
+  }
+
+  /**
    * 玩家在渦戰按了投降。成功講一句（這一場送出去的攻擊照樣進帳，只是不看
    * 演出），失敗把原因印出來 —— 頁面那邊失敗只會把白旗彈回亮的。
    */
@@ -998,6 +1417,7 @@ export class ArbiterEngine {
         this.#raidPublic,
         this.#raidAutoDelete,
         this.#teamsForPage(),
+        this.#raidLearned,
       );
     } catch {
       return null;
@@ -1017,6 +1437,7 @@ export class ArbiterEngine {
         this.#raidPublic,
         this.#raidAutoDelete,
         teams,
+        this.#raidLearned,
       );
       this.#raidTeamsPushed = JSON.stringify(teams);
       if (!status.installed) this.#log(`· 渦房獎勵標記還沒裝上：${status.reason ?? "原因不明"}`);
@@ -1063,6 +1484,7 @@ export class ArbiterEngine {
     try {
       const status = await adapter.installRaidRewardPatch(this.#raidRewardMode);
       if (!status.installed) this.#log(`· 渦結算面板還沒裝上：${status.reason ?? "原因不明"}`);
+      else if (status.reason !== null) this.#log(`⚠ 渦結算面板裝上了但掛不上：${status.reason}`);
     } catch (err) {
       this.#log(`✗ 渦結算面板注入失敗：${describe(err)}`);
     }
@@ -1080,38 +1502,7 @@ export class ArbiterEngine {
   }
 
   /** 伺服器推了結算：不管哪個模式都記一行，玩家關掉通知後還查得到拿了什麼。 */
-  /**
-   * HP 歸零就被自動刪掉、而自己有份的渦。刪在結算之前會不會吃掉獎勵沒驗過（玩家
-   * 2026-09-13 選了不等結算、也不為了驗證多問伺服器），所以**搭官方本來就會送的那一次**
-   * 驗：玩家進渦房／打完回來時官方自己要 db_raid_reward，那一批裡有它就是沒被吃掉。
-   */
-  #earlyDeleted: EarlyDeletedRaid[] = [];
-
-  /** 結算批次裡有沒有先刪掉的渦：有就記「沒被吃掉」；連兩批都沒有就提醒一次。 */
-  #checkEarlyDeleted(report: RaidRewardReport): void {
-    const left: EarlyDeletedRaid[] = [];
-    for (const d of this.#earlyDeleted) {
-      const hit = report.entries.some((e) => e.boss === d.name && e.founder === d.founder);
-      if (hit) {
-        this.#log(
-          `✓ 先刪掉的死渦 ${d.name}（發現者 ${d.founder}）結算照樣來了：刪在結算前不會吃掉獎勵`,
-        );
-        continue;
-      }
-      d.misses += 1;
-      if (d.misses === 2) {
-        this.#log(
-          `⚠ 先刪掉的死渦 ${d.name}（發現者 ${d.founder}）連兩批結算都沒出現：可能刪在結算前會吃掉獎勵，考慮關掉自動刪除`,
-        );
-        continue;
-      }
-      left.push(d);
-    }
-    this.#earlyDeleted = left;
-  }
-
   #onRaidReward(report: RaidRewardReport): void {
-    this.#checkEarlyDeleted(report);
     for (const e of report.entries) {
       const got = [
         ...e.rewards.founder,
@@ -1122,9 +1513,14 @@ export class ArbiterEngine {
       const rank = e.rank === null ? "" : `第 ${e.rank} 名`;
       const dmg = e.dmg === null ? "" : `${e.dmg.toLocaleString()} pts`;
       this.#log(
-        `· 渦擊破 ${e.prf} ${e.boss}：${[rank, dmg].filter((x) => x !== "").join("・")}${got === "" ? "" : `，獲得 ${got}`}`,
+        `· 渦擊破 ${e.prf} ${e.boss}：${[rank, dmg].filter((x) => x !== "").join("・")}${got === "" ? "" : `，獲得 ${got}`}` +
+          (e.received === false ? "（⚠ 官方回報「領了」失敗，下次進渦房會再列一次）" : ""),
       );
     }
+    if (report.failed !== undefined && report.failed > 0) {
+      this.#log(`⚠ 收到 ${report.failed} 個渦的結算，但插件整理內容失敗（獎勵照樣領了）`);
+    }
+    this.#settleRaidOutcomes(report);
   }
 
   // -------------------------------------------------------------------------
@@ -1168,6 +1564,7 @@ export class ArbiterEngine {
     } catch (err) {
       this.#log(`✗ 畫面設定注入失敗：${describe(err)}`);
     }
+    await this.#applyShellDisplay();
   }
 
   async #pushDisplay(): Promise<void> {
@@ -1175,9 +1572,29 @@ export class ArbiterEngine {
     if (adapter === null) return;
     try {
       const r = await adapter.setDisplayState(this.#display);
-      if (r === "not-installed") await this.#syncDisplay();
+      if (r === "not-installed") {
+        await this.#syncDisplay();
+        return;
+      }
     } catch {
       // 連線正在死；重連會整支重裝。
+      return;
+    }
+    await this.#applyShellDisplay();
+  }
+
+  /**
+   * 桌面版（遊戲在外殼的 iframe 裡）：畫面大小與全螢幕由這裡對外殼下，iframe
+   * 裡的腳本摸不到外殼。見 `shell-display.ts`。
+   */
+  async #applyShellDisplay(): Promise<void> {
+    const adapter = this.#adapter;
+    if (adapter === null || !adapter.hasShell) return;
+    try {
+      const r = await adapter.applyShellDisplay(this.#display);
+      if (r !== null && r.reason !== null) this.#log(`· 畫面大小沒套上：${r.reason}`);
+    } catch (err) {
+      this.#log(`✗ 畫面大小調不動：${describe(err)}`);
     }
   }
 
@@ -1227,6 +1644,9 @@ export class ArbiterEngine {
         // UI 那邊的事，不能擋住引擎
       }
     }
+    // 桌面版：頁面自己調不到外殼，由這裡轉過去。回報也可能是外殼發的（Esc 退出
+    // 全螢幕），那時要推回頁面讓 Option 分頁跟上 —— 兩邊都已經是這個值時是空轉。
+    if (this.#adapter?.hasShell === true) void this.#pushDisplay();
   }
 
   #onRaidRewardMode(report: RaidRewardModeReport): void {
@@ -1244,6 +1664,8 @@ export class ArbiterEngine {
   #raidPublic: RaidPublicMap = {};
   #raidPublicTimer: ReturnType<typeof setInterval> | null = null;
   #raidPublicBusy = false;
+  /** 公開渦通知（raid-feed）：讀公開渦表、順手傳 SUPPORT 與自己清單。見 docs/raid-feed.md。 */
+  #raidFeed = new RaidFeedSync();
   /** 自動刪除死渦的設定。托盤從配置推進來；玩家在遊戲裡切了也會回寫。 */
   #raidAutoDelete: RaidAutoDeleteSetting = { ...DEFAULT_RAID_AUTO_DELETE };
   #raidAutoDeleteHandlers = new Set<(setting: RaidAutoDeleteSetting) => void>();
@@ -1280,12 +1702,111 @@ export class ArbiterEngine {
     }
   }
 
-  #onRaidAutoDelete(report: RaidAutoDeleteReport): void {
-    const why = report.reason === "no-reward" ? "沒有自己的份" : "自己有份，HP 歸零就刪、沒等結算";
-    if (report.reason === "had-reward") {
-      this.#earlyDeleted.push({ name: report.name, founder: report.founder, misses: 0 });
-      if (this.#earlyDeleted.length > 50) this.#earlyDeleted.shift();
+  // ---- 今天有幾個渦沒拿到獎勵（見 raid-track.ts） ---------------------------
+
+  /** 打過／看過的渦與結果，加上道具對帳（托盤從硬碟讀進來、每變一次回寫）。 */
+  #raidOutcomes: RaidOutcomeRecord[] = [];
+  #itemLedger: ItemLedger = emptyLedger();
+  #raidOutcomesHandlers = new Set<(state: RaidOutcomeState) => void>();
+  /** 還在等結算、清單上卻不見了的渦：第一次發現不見的時刻（等一下結算再判定） */
+  #raidGoneSince = new Map<string, number>();
+
+  /** 托盤啟動時把硬碟上的紀錄交進來。太舊的當場丟掉。 */
+  setRaidOutcomeState(state: RaidOutcomeState): void {
+    this.#raidOutcomes = pruneOutcomes(state.outcomes, Date.now());
+    this.#itemLedger = state.ledger;
+  }
+
+  /** 紀錄變了時通知托盤存檔。 */
+  onRaidOutcomesChanged(handler: (state: RaidOutcomeState) => void): () => void {
+    this.#raidOutcomesHandlers.add(handler);
+    return () => this.#raidOutcomesHandlers.delete(handler);
+  }
+
+  /** 本機時區今天結束的渦：拿到／有分沒拿到／本來就沒份，加上還在等的。 */
+  get raidOutcomeToday(): RaidOutcomeTally {
+    return tallyToday(this.#raidOutcomes, Date.now());
+  }
+
+  #onRaidTrack(report: RaidTrackReport): void {
+    const now = Date.now();
+    const next = upsertOutcome(this.#raidOutcomes, report, now, this.#raidBattles);
+    const rec = next.find((x) => x.key === outcomeKey(report.found, report.name));
+    this.#log(formatRaidTrack(report) + (rec ? formatOutcomeDetail(rec) : ""));
+    this.#raidOutcomes = pruneOutcomes(next, now);
+    this.#log(formatRaidTally(tallyToday(this.#raidOutcomes, now)));
+    this.#saveRaidOutcomes();
+  }
+
+  /** 結算到了：對回渦（還在等的、判成沒拿到的都翻成拿到），列的東西記進對帳。 */
+  #settleRaidOutcomes(report: RaidRewardReport): void {
+    const now = Date.now();
+    const { records, changed } = settleOutcomes(this.#raidOutcomes, report.entries, now);
+    this.#itemLedger = ledgerExpect(this.#itemLedger, report.entries);
+    this.#raidOutcomes = records;
+    if (changed > 0) this.#log(formatRaidTally(tallyToday(this.#raidOutcomes, now)));
+    this.#saveRaidOutcomes();
+  }
+
+  /** 打了一場：記一筆等結算（離線、托盤重開都在） */
+  #outcomeBattle(record: RaidBattleRecord): void {
+    const now = Date.now();
+    this.#raidOutcomes = addBattle(this.#raidOutcomes, this.#raidBattles, record, now);
+    this.#saveRaidOutcomes();
+  }
+
+  /** 人在渦房時讀到的清單：補資料；打過的渦不見了又等不到結算就判定。 */
+  #outcomeSnapshot(rows: readonly RaidSnapshotRow[], listed: boolean): void {
+    const now = Date.now();
+    const { records, decided } = applySnapshot(
+      this.#raidOutcomes,
+      rows,
+      listed,
+      this.#raidGoneSince,
+      now,
+    );
+    // 30 秒一輪：沒變就不寫檔
+    const changed = JSON.stringify(records) !== JSON.stringify(this.#raidOutcomes);
+    this.#raidOutcomes = records;
+    for (const x of decided) this.#log(formatVanished(x) + formatOutcomeDetail(x));
+    if (decided.length > 0) this.#log(formatRaidTally(tallyToday(this.#raidOutcomes, now)));
+    if (changed) this.#saveRaidOutcomes();
+  }
+
+  /** 官方重讀了道具清單：變多的記一行；碎片、渦幣、抽獎券、異化礦材跟結算列的對帳。 */
+  #onRaidItemDelta(report: RaidItemDeltaReport): void {
+    if (report.changes.length > 0) {
+      const up = report.changes.map(
+        (c) => `${c.name} +${c.after - c.before}（${c.before}→${c.after}）`,
+      );
+      this.#log(`· 道具增加（${report.registry}）：${up.join("、")}`);
     }
+    if (report.levels === undefined) return;
+    const { ledger, lines } = ledgerLevels(
+      this.#itemLedger,
+      report.registry,
+      report.levels,
+      report.names ?? {},
+      Date.now(),
+    );
+    this.#itemLedger = ledger;
+    for (const line of formatLedger(report.registry, lines)) this.#log(line);
+    this.#saveRaidOutcomes();
+  }
+
+  #saveRaidOutcomes(): void {
+    const state: RaidOutcomeState = { outcomes: [...this.#raidOutcomes], ledger: this.#itemLedger };
+    for (const h of this.#raidOutcomesHandlers) {
+      try {
+        h(state);
+      } catch {
+        // 存檔是托盤的事，不能擋住引擎
+      }
+    }
+  }
+
+  #onRaidAutoDelete(report: RaidAutoDeleteReport): void {
+    const why = report.reason === "no-reward" ? "沒有自己的份" : "自己有份，結算收到了才刪";
     this.#log(`· 自動刪除死渦：${report.name}（發現者 ${report.founder}，${why}）`);
   }
 
@@ -1356,8 +1877,62 @@ export class ArbiterEngine {
         // 存檔是托盤的事，不能擋住引擎
       }
     }
+    this.#outcomeBattle(record);
     // 自己的那一場馬上看得到，不等下一輪雲端
     void this.#pushRaidTeams();
+  }
+
+  // ---- 渦獎勵表：邊打邊學（見 @ulr/cdp-adapter 的 raid-learned.ts） -------------
+
+  /** 學到的渦獎勵表（托盤從硬碟讀進來、每學到一次回寫）。 */
+  #raidLearned: RaidLearnedTable = {};
+  /** 每一次結算的原料（找規則用），跟表存在同一個檔 */
+  #raidLearnLog: RaidLearnSample[] = [];
+  #raidLearnedHandlers = new Set<(table: RaidLearnedTable, log: RaidLearnSample[]) => void>();
+
+  /** 托盤啟動時把硬碟上的表交進來。 */
+  setRaidLearned(table: RaidLearnedTable, log: readonly RaidLearnSample[] = []): void {
+    // 用 log 重算：規則改過的話（例如 category 不再算對不上），舊檔上的表當場跟著變對
+    this.#raidLearned = rebuildLearned(table, log);
+    this.#raidLearnLog = [...log];
+  }
+
+  /** 表變了（學到一次）時通知托盤存檔。 */
+  onRaidLearnedChanged(
+    handler: (table: RaidLearnedTable, log: RaidLearnSample[]) => void,
+  ): () => void {
+    this.#raidLearnedHandlers.add(handler);
+    return () => this.#raidLearnedHandlers.delete(handler);
+  }
+
+  #onRaidLearn(report: RaidLearnReport): void {
+    const { table, entry, conflict, isNew } = mergeLearned(this.#raidLearned, report.sample);
+    this.#raidLearned = table;
+    this.#raidLearnLog = appendLearnLog(this.#raidLearnLog, report.sample);
+    const what = describeLearned(entry);
+    if (conflict) this.#log(`⚠ 渦獎勵對不上之前學的（${entry.key}），改用這次的：${what}`);
+    else
+      this.#log(
+        `· ${isNew ? "學到" : "再次確認"}渦獎勵 Lv.${entry.level} ${entry.name}（★${entry.rarity}・區塊 ${entry.mapIndex}・ulgg stage ${report.sample.stage ?? "?"}）：${what}`,
+      );
+    for (const h of this.#raidLearnedHandlers) {
+      try {
+        h({ ...this.#raidLearned }, [...this.#raidLearnLog]);
+      } catch {
+        // 存檔是托盤的事，不能擋住引擎
+      }
+    }
+    void this.#pushRaidLearned();
+  }
+
+  async #pushRaidLearned(): Promise<void> {
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    try {
+      await adapter.setRaidViewLearned(this.#raidLearned);
+    } catch {
+      // 頁面正在重載；重裝時會整份帶下去
+    }
   }
 
   #teamsForPage(): RaidTeamsMap {
@@ -1404,6 +1979,8 @@ export class ArbiterEngine {
   }
 
   #stopRaidPublicPoll(): void {
+    if (this.#ulggRetry !== null) clearTimeout(this.#ulggRetry);
+    this.#ulggRetry = null;
     if (this.#raidPublicTimer === null) return;
     clearInterval(this.#raidPublicTimer);
     this.#raidPublicTimer = null;
@@ -1427,12 +2004,23 @@ export class ArbiterEngine {
       const status = await adapter.raidViewStatus();
       if (!status.installed || !status.inRaid) return;
       const share = this.#raidShare;
-      const [ulgg, shared] = await Promise.all([
+      // 頁面記憶體裡的清單（不送請求）：記結算用，互傳開著時也拿去傳（發現者＋到期時刻當鍵）
+      const snap = await adapter.raidViewSnapshotListed();
+      this.#outcomeSnapshot(snap.rows, snap.listed);
+      const mine = share ? snap.rows : [];
+      // SUPPORT 清單是玩家自己打開時客戶端拿到的（不送請求）；上傳跟著互傳開關，讀不受影響
+      const support = await adapter.raidSupportSnapshot();
+      const published = await adapter.raidPublishedSnapshot();
+      const [ulgg, synced, feed] = await Promise.all([
         fetchObservedRaids(),
-        share && this.#raidCodes.size > 0
-          ? lookupSharedRaids([...this.#raidCodes])
-          : Promise.resolve({}),
+        mine.length > 0 ? syncSharedRaids(mine) : Promise.resolve({ map: {}, uploaded: 0 }),
+        this.#raidFeed.sync(support, snap.rows, share, published),
       ]);
+      if (feed.support > 0 || feed.own > 0) {
+        this.#log(`· 公開渦通知：傳 SUPPORT ${feed.support} 個、補 ★／stage ${feed.own} 個`);
+      }
+      const shared = synced.map;
+      if (share) await this.#reportStagesToUlgg(mine, ulgg);
       this.#raidBattles = pruneBattles(this.#raidBattles, Date.now());
       if (this.#raidTeamsRetract && this.#raidBattles.length > 0) {
         // 關掉分享的那一刻：送一次空的把看板上自己的隊伍撤掉
@@ -1440,8 +2028,6 @@ export class ArbiterEngine {
       }
       this.#raidTeamsRetract = false;
       if (share) {
-        const mine = await adapter.raidViewSnapshot();
-        if (mine.length > 0) await uploadSharedRaids(mine);
         if (this.#raidTeamShare && this.#raidBattles.length > 0) {
           await uploadRaidTeams(await buildTeamUploads(this.#raidBattles));
         }
@@ -1451,7 +2037,7 @@ export class ArbiterEngine {
         this.#raidTeamsCloud = {};
       }
       await this.#pushRaidTeams();
-      const map = mergePublicMaps(ulgg, shared);
+      const map = mergePublicMaps(mergePublicMaps(ulgg, shared), feed.map);
       if (Object.keys(map).length === 0) return;
       this.#raidPublic = map;
       await adapter.setRaidViewPublic(map);
@@ -1459,6 +2045,99 @@ export class ArbiterEngine {
       // 連線正在死或頁面正在重載；下一輪再說。
     } finally {
       this.#raidPublicBusy = false;
+    }
+  }
+
+  #raidFeedNowBusy = false;
+
+  /**
+   * 玩家剛做了什麼（按 SUPPORT 拿到公開清單、開打記下 stage／BOSS 狀態）：馬上傳給公開渦通知
+   * （raid-feed），不等 30 秒那一輪 —— 那一輪只在人在渦房時跑、戰鬥中不跑，等打完回來，
+   * 開場看到的狀態多半已經過期。戰鬥中也照讀記憶體裡的清單（見 RAID_VIEW_SNAPSHOT_EXPRESSION）。
+   */
+  async #pushRaidFeedNow(): Promise<void> {
+    const adapter = this.#adapter;
+    if (adapter === null || !this.#raidShare || this.#raidFeedNowBusy) return;
+    this.#raidFeedNowBusy = true;
+    try {
+      const support = await adapter.raidSupportSnapshot();
+      const published = await adapter.raidPublishedSnapshot();
+      const r = await this.#raidFeed.sync(
+        support,
+        await adapter.raidViewSnapshot(),
+        true,
+        published,
+      );
+      if (r.support > 0 || r.own > 0) {
+        this.#log(
+          `· 公開渦通知（當下）：傳 SUPPORT ${r.support} 個、補 ★／stage／狀態 ${r.own} 個`,
+        );
+      }
+    } catch {
+      // 連線正在死或頁面正在重載；30 秒那一輪會再補。
+    } finally {
+      this.#raidFeedNowBusy = false;
+    }
+  }
+
+  /** 已經回報給 ulgg、拿到回應的渦碼（這次開機內）。 */
+  #ulggReported = new Set<string>();
+  #ulggNowBusy = false;
+  #ulggRetry: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * 頁面剛記下新的 stage（發現渦、開打）：馬上回報 ulgg，不等 30 秒那一輪 ——
+   * 那一輪只在人在渦房時跑，發現完馬上開打的話要等打完回來才輪得到（2026-09-25 實機：
+   * 14:46:38 發現、11 秒後就進戰鬥，回來時 ulgg 已經從別處拿到了）。
+   *
+   * ulgg 還沒列出這個渦碼（它還沒觀測到）就不能報（不把沒公開的渦碼送出去），
+   * 30 秒後再看，最多 `left` 次。
+   */
+  async #reportStagesNow(left = 6): Promise<void> {
+    const adapter = this.#adapter;
+    if (adapter === null || !this.#raidShare || this.#ulggNowBusy) return;
+    this.#ulggNowBusy = true;
+    if (this.#ulggRetry !== null) clearTimeout(this.#ulggRetry);
+    this.#ulggRetry = null;
+    try {
+      const mine = await adapter.raidViewSnapshot();
+      const waiting = (ulgg: RaidPublicMap) =>
+        mine.some(
+          (r) =>
+            typeof r.code === "string" &&
+            r.stage !== null &&
+            !this.#ulggReported.has(r.code) &&
+            ulgg[r.code] === undefined,
+        );
+      const ulgg = await fetchObservedRaids();
+      await this.#reportStagesToUlgg(mine, ulgg);
+      if (left > 1 && waiting(ulgg)) {
+        this.#ulggRetry = setTimeout(() => void this.#reportStagesNow(left - 1), 30_000);
+        this.#ulggRetry.unref?.();
+      }
+    } catch {
+      // 連線正在死或頁面正在重載；下一次記下 stage 或 30 秒那一輪會再來。
+    } finally {
+      this.#ulggNowBusy = false;
+    }
+  }
+
+  /**
+   * 自己看到的 stage 回報給 ulgg（自己開的、別人開的都報；規則見 raid-public.ts 的 pickUlggReports）。
+   * 網路失敗的下一輪再試；拿到回應（收不收都算）就不再報同一個渦。
+   * 記錄裡不寫渦碼 —— 渦碼等於門票。
+   */
+  async #reportStagesToUlgg(mine: readonly RaidSnapshotRow[], ulgg: RaidPublicMap): Promise<void> {
+    for (const r of pickUlggReports(mine, ulgg, this.#ulggReported)) {
+      const res = await reportStageToUlgg(r);
+      if (res === null) continue;
+      this.#ulggReported.add(r.raid_code);
+      const verdict =
+        res.ok === true && res.accepted === true
+          ? "收下"
+          : `沒收（${res.reason ?? (res.matched === false ? "對不上渦" : "原因不明")}）`;
+      const whose = mine.some((m) => m.code === r.raid_code) ? "自己開的渦" : "別人開的渦";
+      this.#log(`· 回報 ulgg：${whose} stage ${r.stage}（★${r.rarity}）→ ${verdict}`);
     }
   }
 
@@ -1506,6 +2185,24 @@ export class ArbiterEngine {
       }
     } catch {
       // 連線正在死。下一輪重連會重裝，這裡不必吵。
+    }
+  }
+
+  /**
+   * **把牌組庫介面拆掉，而且不再補裝。**（玩家把牌組替換模式切成「關閉」）
+   *
+   * 狀態清成 `null` 是關鍵：`deckEditStatus()`／重連時的 `#syncDeckEdit()` 都是
+   * 「有狀態才補裝」，所以之後不會有人把它裝回去 —— 直到托盤再推一次狀態。
+   * 拆的時候頁面會把 ◀▶ 的原版行為裝回去。
+   */
+  async clearDeckEdit(): Promise<void> {
+    this.#deckEditState = null;
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    try {
+      await adapter.uninstallDeckEdit();
+    } catch {
+      // 連線正在死；重連時狀態是 null，不會被裝回去。
     }
   }
 
@@ -1571,10 +2268,7 @@ export class ArbiterEngine {
   }
 
   /**
-   * 讀玩家目前的三副牌組與帳號指紋。
-   *
-   * ⚠ 走的是**自己開的 game 服務連線**，玩家人在哪個畫面都讀得到 —— 見
-   * `deck-write.ts` 檔頭的「服務分池」。
+   * 讀伺服器那份牌組與帳號指紋。頁面記過就一趟網路都不跑，見 `deck-write.ts`。
    */
   async readDecks(): Promise<DeckSnapshot> {
     const adapter = this.#adapter;
@@ -1583,15 +2277,14 @@ export class ArbiterEngine {
   }
 
   /**
-   * **覆寫玩家的三副牌組。**
+   * **把整份牌組寫進伺服器**（`deck_update`）。
    *
-   * ⚠ 這支會改變玩家的帳號狀態而且沒有復原。引擎自己永遠不會呼叫它 ——
-   * 只有玩家在牌組選單裡點了某一副才會走到這裡。
+   * ⚠ 這支會改變玩家的帳號狀態而且沒有復原。引擎自己永遠不會呼叫它。
    */
-  async applyDecks(decks: DeckPayload[], deckCheck: boolean): Promise<DeckApplyResult> {
+  async applyDecks(decks: ServerDeck[]): Promise<DeckApplyResult> {
     const adapter = this.#adapter;
     if (adapter === null) throw new Error("還沒接上遊戲");
-    return await adapter.applyDecks(decks, deckCheck);
+    return await adapter.applyDecks(decks);
   }
 
   /**
@@ -1612,16 +2305,15 @@ export class ArbiterEngine {
   }
 
   /**
-   * **換牌組的快路徑**：只換客戶端記憶體並重畫，一次網路都不跑。
+   * **換牌組的快路徑**：只換客戶端記憶體那幾格並重畫，一次網路都不跑。
    *
-   * 回 `ok` 表示換好了；`not-active` 表示編輯畫面沒開著，呼叫端要改走
-   * {@link applyDecks}。⚠ 這支**不寫伺服器** —— 玩家離開編輯畫面時遊戲會
-   * 自己把 `deck1` 送出去，而那時它裝的正是我們寫進去的。
+   * 回 `ok`（編輯畫面）／`ok-room`（房間場景，伺服器還是舊的）／`not-active`／
+   * `empty-room`。⚠ 這支**不寫伺服器**。
    */
-  async writeEditDeck(deck: DeckPayload, label?: string): Promise<string> {
+  async writeEditDeck(slots: DeckSlotWrite[], pin: number | null): Promise<string> {
     const adapter = this.#adapter;
     if (adapter === null) throw new Error("還沒接上遊戲");
-    return await adapter.writeEditDeck(deck, label);
+    return await adapter.writeEditDeck(slots, pin);
   }
 
   /**
@@ -1684,26 +2376,30 @@ export class ArbiterEngine {
    * 見 `patch-room-gate.ts` 的 `RoomDeckPreload`。**沒接上遊戲時只記著**，
    * 接上（或遊戲重載後重裝）時 `#syncRoomGate()` 會補推。
    */
-  async setRoomDecks(decks: Partial<Record<GateRoom, RoomDeckPreload>>): Promise<void> {
-    this.#roomDecks = decks;
+  async setRoomDecks(payload: RoomGateDecks): Promise<void> {
+    this.#roomDecks = payload;
     const adapter = this.#adapter;
     if (adapter === null) return;
     try {
       // 頁面說「沒裝」就整支補裝（連 pending 一起補推）—— 跟 `setRoomGatePending`
       // 同一個理由。托盤每次牌組狀態變動都會走到這裡，所以這是重載之後最常
       // 被踩到的補裝點。
-      if ((await adapter.setRoomDecks(decks)) === "not-installed") await this.#syncRoomGate();
+      if ((await adapter.setRoomDecks(payload)) === "not-installed") await this.#syncRoomGate();
     } catch {
       // 連線正在死。重連時會重裝並補推。
     }
   }
 
-  /** 放行被攔下來的那一下開戰。 */
-  async releaseRoomGate(): Promise<string> {
+  /**
+   * 放行被攔下來的那一下開戰。
+   *
+   * `ok=false` → 頁面不把這一房記成「伺服器驗過了」，下一場再攔一次。
+   */
+  async releaseRoomGate(ok: boolean = true): Promise<string> {
     const adapter = this.#adapter;
     if (adapter === null) return "not-connected";
     try {
-      return await adapter.releaseRoomGate();
+      return await adapter.releaseRoomGate(ok);
     } catch {
       // 放不了行也不必吵：頁面自己的看門狗會在幾秒內原樣放行。
       return "failed";
@@ -1795,6 +2491,30 @@ export class ArbiterEngine {
   }
 
   /**
+   * 玩家自己按的「重新整理」。跟 {@link reloadGame} 不同，**不需要已經接上遊戲**：
+   * 白畫面、斷線、重載空檔時 `#adapter` 是 `null`，而那正是玩家最需要它的時候。
+   * 另開一條連線對頂層頁面下 `Page.reload`（見 `reload-page.ts`）。
+   */
+  async reloadGamePage(): Promise<void> {
+    const preferred = this.#options.port ?? DEFAULT_DEBUG_PORT;
+    const port =
+      this.#status.port ??
+      (await resolveDebugPort({ port: preferred, userDataDir: this.#options.userDataDir }))?.port ??
+      preferred;
+    await reloadGamePage({ port });
+  }
+
+  /**
+   * 桌面版客戶端的主程序 pid（標題列按鈕靠它找視窗）。網頁版、沒接上都回 `null`
+   * —— 網頁版的視窗是玩家的瀏覽器，不去動它。
+   */
+  async desktopProcessId(): Promise<number | null> {
+    const adapter = this.#adapter;
+    if (adapter === null || !adapter.hasShell) return null;
+    return await adapter.browserProcessId();
+  }
+
+  /**
    * 從跑著的客戶端讀一份**卡片名冊**（四張表的原價 + 中文名）。
    *
    * 編輯 COST 的介面靠它把 `cc001_01` 顯示成「艾伯李斯特 L1」。呼叫端負責
@@ -1810,6 +2530,18 @@ export class ArbiterEngine {
    * 剛換一份規則、托盤自己重開過 —— 這三種情況插件都會說「沒在套」，而頁面
    * 上的數字仍然是改過的。2026-08-16 就是這樣讓三格假原價進了名冊。
    */
+  /**
+   * 只讀角色的中文名（`cc034` → `史塔夏`）。卡面替換用檔名對卡要靠它。
+   *
+   * 跟 `readCardCatalog` 不同，**套著自訂 COST 也讀得**：名字不是被改寫的
+   * 那份資料。遊戲還在標題畫面（profile 還沒載）會拋錯，呼叫端晚點再試。
+   */
+  async readCardNames(): Promise<Record<string, string>> {
+    const adapter = this.#adapter;
+    if (adapter === null) throw new Error("還沒接上遊戲");
+    return (await adapter.readProfiles()).characters;
+  }
+
   async readCardCatalog(gameVersion: string): Promise<CardCatalog> {
     const adapter = this.#adapter;
     if (adapter === null) throw new Error("還沒接上遊戲");
@@ -1954,6 +2686,115 @@ export class ArbiterEngine {
   /** 玩家按了牌組畫面上那顆開關。 */
   #onCostToggle(report: CostToggleReport): void {
     void this.setCostRuleEnabled(report.enabled);
+  }
+
+  // -------------------------------------------------------------------------
+  // 牌組編輯畫面的人物篩選與最愛卡片（patch-chara-picker）
+  //
+  // ⚠ 跟牌組庫同一個分工：引擎只搬運。最愛存在托盤的牌組庫（要跟牌組一起上雲），
+  // 代表卡挑哪一級是托盤的設定。
+  // -------------------------------------------------------------------------
+
+  /** 玩家按了「最愛卡片」鈕。 */
+  onCharaPicker(handler: (report: CharaPickerReport) => void): () => void {
+    this.#charaPickerHandlers.add(handler);
+    return () => this.#charaPickerHandlers.delete(handler);
+  }
+
+  /** 換掉畫面上的設定、最愛與隱藏裝備清單。**沒接上遊戲時只記著，接上時自己會補。** */
+  setCharaPicker(state: CharaPickerState): void {
+    this.#charaPicker = {
+      ...state,
+      favorites: [...state.favorites],
+      hiddenWeapons: [...state.hiddenWeapons],
+      favoriteEvents: [...state.favoriteEvents],
+    };
+    void this.#syncCharaPicker();
+  }
+
+  /** 裝上／更新。接上與重載後都要叫（見 `#reinstall`）。 */
+  async #syncCharaPicker(): Promise<void> {
+    const adapter = this.#adapter;
+    const state = this.#charaPicker;
+    if (adapter === null || state === null) return;
+    try {
+      const status = await adapter.charaPickerStatus();
+      if (status.installed && status.version === CHARA_PICKER_SCRIPT_VERSION) {
+        if ((await adapter.setCharaPickerState(state)) === "ok") return;
+      }
+      await adapter.installCharaPicker(state);
+    } catch (err) {
+      this.#log(`✗ 人物篩選注入失敗：${describe(err)}`);
+    }
+  }
+
+  #onCharaPickerReport(report: CharaPickerReport): void {
+    if (report.type === "chara-picker-error") {
+      this.#log(`✗ 人物篩選出錯：${report.message}`);
+      return;
+    }
+    for (const handler of [...this.#charaPickerHandlers]) {
+      try {
+        handler(report);
+      } catch {
+        // §9.1：訂閱者出錯不得讓插件或遊戲崩潰。
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 首頁立繪與 Library 愛心複選（patch-lobby-stand）
+  //
+  // 同一個分工：清單與擺法存在托盤的牌組庫（要上雲），引擎只搬運。
+  // -------------------------------------------------------------------------
+
+  /** 玩家改了最愛角色、或在首頁編輯模式按了 OK。 */
+  onLobbyStand(handler: (report: LobbyStandReport) => void): () => void {
+    this.#lobbyStandHandlers.add(handler);
+    return () => this.#lobbyStandHandlers.delete(handler);
+  }
+
+  /** 換掉畫面上的清單與擺法。**沒接上遊戲時只記著，接上時自己會補。** */
+  setLobbyStand(state: LobbyStandState): void {
+    this.#lobbyStand = {
+      ready: state.ready,
+      sets: state.sets.map((s) => ({
+        charas: [...s.charas],
+        layout: Object.fromEntries(Object.entries(s.layout).map(([k, v]) => [k, { ...v }])),
+      })),
+      ui: Object.fromEntries(Object.entries(state.ui).map(([k, v]) => [k, { ...v }])),
+    };
+    void this.#syncLobbyStand();
+  }
+
+  /** 裝上／更新。接上與重載後都要叫（見 `#reinstall`）。 */
+  async #syncLobbyStand(): Promise<void> {
+    const adapter = this.#adapter;
+    const state = this.#lobbyStand;
+    if (adapter === null || state === null) return;
+    try {
+      const status = await adapter.lobbyStandStatus();
+      if (status.installed && status.version === LOBBY_STAND_SCRIPT_VERSION) {
+        if ((await adapter.setLobbyStandState(state)) === "ok") return;
+      }
+      await adapter.installLobbyStand(state);
+    } catch (err) {
+      this.#log(`✗ 首頁立繪注入失敗：${describe(err)}`);
+    }
+  }
+
+  #onLobbyStandReport(report: LobbyStandReport): void {
+    if (report.type === "lobby-stand-error") {
+      this.#log(`✗ 首頁立繪出錯：${report.message}`);
+      return;
+    }
+    for (const handler of [...this.#lobbyStandHandlers]) {
+      try {
+        handler(report);
+      } catch {
+        // §9.1：訂閱者出錯不得讓插件或遊戲崩潰。
+      }
+    }
   }
 
   /**
@@ -2261,6 +3102,12 @@ export class ArbiterEngine {
         // 牌組畫面上的「自訂 ↔ 官方」開關同理（腳本自己輪詢等玩家進 Edit）。
         adapter.onCostToggle((r) => this.#onCostToggle(r));
         await this.#syncCostToggle();
+        // 人物篩選與最愛卡片同理（腳本自己輪詢等玩家進 Edit）。
+        adapter.onCharaPicker((r) => this.#onCharaPickerReport(r));
+        await this.#syncCharaPicker();
+        // 首頁立繪同理（腳本自己輪詢等玩家進 Lobby／Library）。
+        adapter.onLobbyStand((r) => this.#onLobbyStandReport(r));
+        await this.#syncLobbyStand();
         // 隱藏地圖同理。⚠ 這時候遊戲多半還在標題畫面，Match 類別還沒載進來，
         // 所以裝不上很正常 —— 玩家進大廳後由配對頁那邊補裝（見 main.ts）。
         await this.#syncHiddenStages();
@@ -2273,27 +3120,47 @@ export class ArbiterEngine {
         await this.#syncPresent();
         // 商店的數量檔位同理（輪詢等玩家開確認框）。
         await this.#syncShop();
+        // 暗房預覽同理（輪詢等玩家進暗房）。
+        await this.#syncLot();
         // 返回鈕左邊的直連捷徑同理（輪詢等玩家進任一房間）。
         adapter.onNav((r) => this.#onNav(r));
         await this.#syncNav();
         // 渦戰裡的投降鈕同理（輪詢等玩家開打渦戰）。
         adapter.onRaidSurrender((r) => this.#onRaidSurrender(r));
         await this.#syncRaidSurrender();
+        // 卡面替換同理（輪詢等卡面圖集載進來）。清單是空的就什麼都不裝。
+        adapter.onCardArt((r) => this.#onCardArt(r));
+        await this.#syncCardArt();
         // 開機資料檔的防護（輪詢等 Initialize 跑完；CDN 回錯沒載成的自己補抓）。
         adapter.onAssetRepair((r) => this.#onAssetRepair(r));
         await this.#syncAssetGuard();
+        // 官方請求逾時把畫面鎖死時自己解開（聽 unhandledrejection，不輪詢）。
+        adapter.onInputRescue((r) => this.#onInputRescue(r));
+        await this.#syncInputRescue();
+        // 物品欄＋渦房／任務房的物品捷徑（輪詢等面板類別載進來、等玩家進房）。
+        await this.#syncItemPanel();
+        // 任務地圖的寶箱標註（輪詢等玩家開任務地圖）＋學 HighLow 的開始星數。
+        adapter.onQuestBonus((r) => this.#onQuestBonus(r));
+        await this.#syncQuestTreasure();
         // 渦房的獎勵標記同理（輪詢等玩家進渦房）。公開渦的 TL 另外每 30 秒
         // 從 ulgg 拉一次，只在玩家人在渦房時拉。
         adapter.onRaidCodes((r) => this.#onRaidCodes(r.codes));
         adapter.onRaidAutoDelete((r) => this.#onRaidAutoDelete(r));
         adapter.onRaidAutoDeleteSetting((r) => this.#onRaidAutoDeleteSetting(r));
         adapter.onRaidBattle((r) => this.#onRaidBattle(toBattleRecord(r)));
+        adapter.onRaidLearn((r) => this.#onRaidLearn(r));
         // 玩家按了渦房的更新鈕：頁面已經照官方重進渦房送了三則讀取，這邊跟著馬上重查雲端
         adapter.onRaidRefresh(() => void this.#refreshRaidPublic());
+        adapter.onRaidStage(() => {
+          void this.#reportStagesNow();
+          void this.#pushRaidFeedNow();
+        });
+        adapter.onRaidTrack((r) => this.#onRaidTrack(r));
         await this.#syncRaidView();
         this.#startRaidPublicPoll();
         // 渦擊破結算的 OK 面板：包的是原型，連上就能裝。
         adapter.onRaidReward((r) => this.#onRaidReward(r));
+        adapter.onRaidItemDelta((r) => this.#onRaidItemDelta(r));
         adapter.onRaidRewardMode((r) => this.#onRaidRewardMode(r));
         await this.#syncRaidReward();
         // 畫面設定（解析度／畫面大小）＋ Option 的 plugin 分頁：腳本自己等 game 建好。
@@ -2411,14 +3278,33 @@ export class ArbiterEngine {
           // 更新），價格卻不會換 —— 那正是「看起來像壞掉」的那一種。
           // 價格本身不動：插件關掉時畫面停在哪一邊就是哪一邊，重載一次就乾淨。
           await adapter.uninstallCostToggle();
+          // ⚠ 人物篩選同理：留著的話最愛鈕點了會動，卻沒人存。拆的時候把原版
+          // 那 18 張放回來、refresh 還原。
+          await adapter.uninstallCharaPicker();
+          // ⚠ 首頁立繪同理：留著的話愛心點了會動、擺法按 OK 卻沒人存。拆的時候
+          // 多出來的立繪拿掉、官方那張放回原位、Library 那一頁叫官方重畫。
+          await adapter.uninstallLobbyStand();
           // ⚠ 直連捷徑同理：留著的話按鈕還在、點了卻沒人記錄，而且貼圖白占
           // 10 MB。拆的時候連貼圖一起卸。
           await adapter.uninstallNavPatch();
           // ⚠ 渦戰投降鈕同理：留著的話白旗還在、按了卻沒人記錄；拆的時候把
           // 官方 handler 掛回去、白旗藏回去。
           await adapter.uninstallRaidSurrenderPatch();
+          // ⚠ 卡面替換同理：插件關掉就該看到官方卡面。拆的時候原本的格子放回去、
+          // 多加的貼圖銷毀。
+          await adapter.uninstallCardArtPatch();
           // 開機資料防護：只停輪詢，補進快取的資料留著（那本來就是遊戲該有的）。
           await adapter.uninstallAssetGuard();
+          // 畫面解鎖：收監聽。
+          await adapter.uninstallInputRescue();
+          // ⚠ 物品欄同理：留著的話捷徑還在、官方的好友與物品鈕藏著，開關卻沒人管了。
+          // 拆的時候把兩顆官方鈕放回來、面板類別還原。
+          await adapter.uninstallItemPanelPatch();
+          // ⚠ 寶箱標註同理：留著的話卡面還畫在任務地圖上、開關卻沒人管了。
+          await adapter.uninstallQuestTreasurePatch();
+          // ⚠ 暗房預覽同理：插件關掉就該看到官方的預覽。拆的時候 create_preview
+          // 與 socket.fetch 還給官方、勾選與持有數拆掉、調暗的卡恢復。
+          await adapter.uninstallLotPatch();
           // ⚠ 渦房的獎勵標記同理：留著的話圖示還在、地圖渦還是我們的顏色，
           // 但托盤已經不會再推公開渦表。拆的時候把地圖渦換回官方貼圖。
           this.#stopRaidPublicPoll();
@@ -2428,6 +3314,7 @@ export class ArbiterEngine {
           // ⚠ 畫面設定同理：留著的話 plugin 分頁還在、改了卻沒人存。拆的時候
           // 緩衝、視窗大小、全螢幕全部還原成官方。
           await adapter.uninstallDisplayPatch();
+          await adapter.resetShellDisplay();
         } catch (err) {
           this.#log(`✗ 拆不掉攔截：${describe(err)}（遊戲重載一次就會乾淨）`);
         }
@@ -2461,11 +3348,21 @@ export class ArbiterEngine {
       });
       this.#log(`⟳ 遊戲重載過，攔截已重新裝上（${status}）`);
       this.#emit({ error: null });
+      // ⚠ 要在下面那串補裝（尤其是 #syncRoomGate）之前叫，見 `onPageReload`。
+      try {
+        this.#options.onPageReload?.();
+      } catch {
+        // §9.1：訂閱者出錯不得讓插件或遊戲崩潰。
+      }
       // ⚠ 重載把罰則補丁也沖掉了（它是 evaluate 裝的）。不補的話症狀是
       // 「牌組畫面的罰 C 突然變回原版」，而玩家不會把它跟重載連在一起。
       await this.#syncPenalty();
       // ⚠ 開關也是。症狀是「標題列那顆開關不見了」。
       await this.#syncCostToggle();
+      // ⚠ 人物篩選也是。症狀是「[Chara] 鈕與最愛卡片鈕不見了」。
+      await this.#syncCharaPicker();
+      // ⚠ 首頁立繪也是。症狀是「首頁只剩一張、擺法變回官方的」。
+      await this.#syncLobbyStand();
       // ⚠ 重載把加速也沖掉了。不補的話症狀是「打到一半突然變回原速」，
       // 而玩家完全不會把它跟「剛剛重載過」連在一起。
       await this.#syncSpeed();
@@ -2480,13 +3377,24 @@ export class ArbiterEngine {
       await this.#syncPresent();
       // ⚠ 商店的數量檔位也是。症狀是「下拉又只剩 1..20」。
       await this.#syncShop();
+      // ⚠ 暗房預覽也是。症狀是「已有的娃娃又不暗了、勾選不見了」。
+      await this.#syncLot();
       // ⚠ 直連捷徑也是。症狀是「返回鈕左邊那四顆不見了」。
       await this.#syncNav();
       // ⚠ 渦戰投降鈕也是。症狀是「這一場渦戰白旗不見了」。
       await this.#syncRaidSurrender();
+      // ⚠ 卡面替換也是。症狀是「重載後卡面又變回官方的」—— 而套用自訂 COST
+      // 時我們自己就會重載一次。
+      await this.#syncCardArt();
       // ⚠ 開機資料防護也是，而且重載正是它要盯的那一刻（CDN 回錯就發生在開機）。
       // 症狀是「牌組編輯事件卡擠在左上角、直連圖示不見」。
       await this.#syncAssetGuard();
+      // ⚠ 畫面解鎖也是。症狀是「又開始點不動、只能重載」。
+      await this.#syncInputRescue();
+      // ⚠ 物品欄也是。症狀是「渦房的物品捷徑不見了、好友與物品鈕又回來了」。
+      await this.#syncItemPanel();
+      // ⚠ 寶箱標註也是。症狀是「任務地圖上的卡面不見了」。
+      await this.#syncQuestTreasure();
       // ⚠ 渦房的獎勵標記也是。症狀是「清單上的碎片圖示不見了、地圖渦又變回
       // 紅藍兩色」。
       await this.#syncRaidView();
@@ -2533,7 +3441,7 @@ export class ArbiterEngine {
       };
       const what = label[report.by] ?? report.by;
       this.#emit({ lastSend: what });
-      this.#log(`→ 送出 I_am_ok（${what}，壓了 ${(report.heldMs / 1000).toFixed(1)}s）`);
+      this.#log(`→ 送出 OK（${what}，壓了 ${(report.heldMs / 1000).toFixed(1)}s）`);
     }
   }
 
@@ -2561,6 +3469,8 @@ export class ArbiterEngine {
 
       try {
         const session = await adapter.connect();
+        // 桌面版重載的空檔只接得到外殼：畫面大小先套，不等遊戲（見 adapter 那支的說明）
+        await adapter.applyDisplayToAttachedShell(this.#display).catch(() => null);
         await adapter.waitForGame();
         if (port !== preferred) {
           // 這件事一定要講。玩家設定裡看到的是 preferred，而之後所有指令
@@ -2573,6 +3483,9 @@ export class ArbiterEngine {
       } catch (err) {
         // 連不上就把這一輪的 adapter 收乾淨，不要留著等 GC。
         await adapter.disconnect().catch(() => {});
+        // 桌面版重載的空檔先接到了外殼，遊戲 iframe 剛冒出來 —— 馬上重挑就接得到。
+        // 不睡、也不診斷埠（埠好好的，診斷只會印出一句錯的話）。
+        if (err instanceof GameFrameAppearedError) continue;
         // ⚠ 不能安靜地等。埠打錯的症狀會是「跑起來之後什麼都沒發生」，
         // 而真正的原因只在第一行閃過去。
         if (attempt === 1) this.#emit({ connected: false, error: `等遊戲…（${describe(err)}）` });
@@ -2603,6 +3516,19 @@ export class ArbiterEngine {
 
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * 學到的渦獎勵 → 記錄檔一行。這邊沒有道具名（名字表在遊戲快取裡），印獎勵碼
+ * `類別:id×數量`，對得回 探渦.py 與結算面板。
+ */
+function describeLearned(e: RaidLearnedEntry): string {
+  const codes = (list: readonly { type: number; id: number; value: number }[]): string =>
+    list.map((i) => `${i.type}:${i.id}×${i.value}`).join("+") || "-";
+  const tiers = e.ranking
+    .map((t) => `${t.from}${t.to === null ? "+" : `–${t.to}`} ${codes(t.items)}`)
+    .join("、");
+  return `排名 ${tiers || "-"}（看過 ${e.rankSeen} 人）`;
 }
 
 /**

@@ -8,13 +8,14 @@
  * ```
  *   頁面 raid-battle（一場）──▶ 引擎 #raidBattles（托盤存硬碟）
  *                                   │ aggregateTeams：同一副牌合成一支
- *                                   ├──▶ POST /raid-teams（渦碼、名字都只傳雜湊）
+ *                                   ├──▶ POST /raid-teams（渦、名字都只傳雜湊）
  *   自己渦清單上的名字 ──▶ GET /raid-teams ─┤
  *                                   ▼
- *                     渦碼 → 名字 → 隊伍 ──▶ setTeams 推回頁面
+ *                     渦 → 名字 → 隊伍 ──▶ setTeams 推回頁面
  * ```
  *
- * 看板與雜湊的理由在 `@ulr/arbiter-link/raid-share`。
+ * 「渦」是發現者＋發現時刻（`raidTeamRef`，頁面拼的是同一個字串）—— 改版後別人開的渦
+ * 沒有渦碼。看板與雜湊的理由在 `@ulr/arbiter-link/raid-share`。
  *
  * ## 為什麼自己的紀錄要存硬碟
  *
@@ -33,7 +34,8 @@ import {
   MAX_RAID_TEAM_ENTRIES_PER_POST,
   MAX_RAID_TEAMS_PER_PLAYER,
   raidPlayerKey,
-  raidShareKey,
+  raidTeamKey,
+  raidTeamRef,
 } from "@ulr/arbiter-link";
 import type {
   RaidBattleReport,
@@ -55,7 +57,10 @@ export function toBattleRecord(report: RaidBattleReport): RaidBattleRecord {
   return rest;
 }
 
-/** 檔案讀回來的東西 → 乾淨的紀錄。形狀不對的丟掉。 */
+/**
+ * 檔案讀回來的東西 → 乾淨的紀錄。形狀不對的丟掉（改版前用渦碼 `code` 的舊紀錄也在這裡丟掉，
+ * 那些渦早就過期了）。
+ */
 export function parseBattleRecords(raw: unknown): RaidBattleRecord[] {
   const list = (raw as { battles?: unknown } | null)?.battles;
   if (!Array.isArray(list)) return [];
@@ -66,7 +71,7 @@ export function parseBattleRecords(raw: unknown): RaidBattleRecord[] {
     if (
       o === null ||
       typeof o !== "object" ||
-      typeof o.code !== "string" ||
+      typeof o.raid !== "string" ||
       typeof o.player !== "string" ||
       typeof o.limit !== "number" ||
       typeof o.turns !== "number" ||
@@ -84,7 +89,7 @@ export function parseBattleRecords(raw: unknown): RaidBattleRecord[] {
       continue;
     }
     out.push({
-      code: o.code,
+      raid: o.raid,
       player: o.player,
       limit: o.limit,
       turns: o.turns,
@@ -112,7 +117,7 @@ export function upsertBattle(
   record: RaidBattleRecord,
 ): { records: RaidBattleRecord[]; updated: boolean } {
   const same = (r: RaidBattleRecord) =>
-    r.code === record.code && r.player === record.player && r.at === record.at;
+    r.raid === record.raid && r.player === record.player && r.at === record.at;
   const updated = records.some(same);
   return {
     records: updated ? records.map((r) => (same(r) ? record : r)) : [...records, record],
@@ -169,20 +174,20 @@ export function aggregateTeams(records: readonly RaidBattleRecord[]): RaidTeamVi
     .slice(0, MAX_RAID_TEAMS_PER_PLAYER);
 }
 
-/** 本機紀錄 → 渦碼 → 名字 → 隊伍。 */
+/** 本機紀錄 → 渦 → 名字 → 隊伍。 */
 export function localTeamsMap(records: readonly RaidBattleRecord[]): RaidTeamsMap {
   const groups = new Map<string, Map<string, RaidBattleRecord[]>>();
   for (const r of records) {
-    let byName = groups.get(r.code);
-    if (byName === undefined) groups.set(r.code, (byName = new Map()));
+    let byName = groups.get(r.raid);
+    if (byName === undefined) groups.set(r.raid, (byName = new Map()));
     const list = byName.get(r.player);
     if (list === undefined) byName.set(r.player, [r]);
     else list.push(r);
   }
   const out: RaidTeamsMap = {};
-  for (const [code, byName] of groups) {
-    out[code] = {};
-    for (const [name, list] of byName) out[code][name] = aggregateTeams(list);
+  for (const [raid, byName] of groups) {
+    out[raid] = {};
+    for (const [name, list] of byName) out[raid][name] = aggregateTeams(list);
   }
   return out;
 }
@@ -190,8 +195,8 @@ export function localTeamsMap(records: readonly RaidBattleRecord[]): RaidTeamsMa
 /** 雲端查到的 ＋ 本機的：本機有的名字用本機的。 */
 export function mergeTeamsMaps(cloud: RaidTeamsMap, local: RaidTeamsMap): RaidTeamsMap {
   const out: RaidTeamsMap = {};
-  for (const [code, byName] of Object.entries(cloud)) out[code] = { ...byName };
-  for (const [code, byName] of Object.entries(local)) out[code] = { ...out[code], ...byName };
+  for (const [raid, byName] of Object.entries(cloud)) out[raid] = { ...byName };
+  for (const [raid, byName] of Object.entries(local)) out[raid] = { ...out[raid], ...byName };
   return out;
 }
 
@@ -205,15 +210,15 @@ export async function buildTeamUploads(
 ): Promise<SharedTeamsUpload[]> {
   const out: SharedTeamsUpload[] = [];
   const local = localTeamsMap(records);
-  for (const [code, byName] of Object.entries(local)) {
-    const key = await raidShareKey(code);
+  for (const [raid, byName] of Object.entries(local)) {
+    const key = await raidTeamKey(raid);
     for (const [name, teams] of Object.entries(byName)) {
       const limit = Math.max(
-        ...records.filter((r) => r.code === code && r.player === name).map((r) => r.limit),
+        ...records.filter((r) => r.raid === raid && r.player === name).map((r) => r.limit),
       );
       out.push({
         key,
-        player: await raidPlayerKey(code, name),
+        player: await raidPlayerKey(raid, name),
         limit,
         teams: retract ? [] : (teams as SharedTeam[]),
       });
@@ -250,22 +255,25 @@ function numberOr0(v: unknown): number {
 }
 
 /**
- * 拿自己渦清單上的渦去查：渦碼算渦 key、榜上每個名字算玩家 key，對得上的才收。
- * **任何失敗都回空表**。
+ * 拿自己渦清單上的渦去查：發現者＋發現時刻算渦 key、榜上每個名字算玩家 key，對得上的才收。
+ * 查回來的表以 `raidTeamRef` 當鍵（頁面拼同一個字串去找）。**任何失敗都回空表**。
  */
 export async function lookupRaidTeams(
-  rows: readonly Pick<RaidSnapshotRow, "code" | "players">[],
+  rows: readonly Pick<RaidSnapshotRow, "founder" | "foundAt" | "players">[],
   fetchImpl: FetchLike = fetch as unknown as FetchLike,
   url: string = DEFAULT_RAID_TEAMS_URL,
   timeoutMs: number = DEFAULT_RAID_PUBLIC_TIMEOUT_MS,
 ): Promise<RaidTeamsMap> {
   const out: RaidTeamsMap = {};
-  const byKey = new Map<string, { code: string; names: Map<string, string> }>();
+  const byKey = new Map<string, { raid: string; names: Map<string, string> }>();
   for (const r of rows) {
-    if (typeof r.code !== "string" || r.code === "" || r.players.length === 0) continue;
+    if (typeof r.founder !== "string" || typeof r.foundAt !== "number" || r.players.length === 0) {
+      continue;
+    }
+    const raid = raidTeamRef(r.founder, r.foundAt);
     const names = new Map<string, string>();
-    for (const n of r.players) names.set(await raidPlayerKey(r.code, n), n);
-    byKey.set(await raidShareKey(r.code), { code: r.code, names });
+    for (const n of r.players) names.set(await raidPlayerKey(raid, n), n);
+    byKey.set(await raidTeamKey(raid), { raid, names });
   }
   const keys = [...byKey.keys()];
   for (let i = 0; i < keys.length; i += MAX_RAID_SHARE_KEYS) {
@@ -306,7 +314,7 @@ export async function lookupRaidTeams(
           });
         }
         if (teams.length === 0) continue;
-        (out[hit.code] ??= {})[name] = teams;
+        (out[hit.raid] ??= {})[name] = teams;
       }
     }
   }

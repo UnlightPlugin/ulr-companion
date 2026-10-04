@@ -18,14 +18,58 @@ export type { CostPhase, CostState, EngineOptions, EngineStatus } from "./engine
 export {
   DEFAULT_RAID_PUBLIC_TIMEOUT_MS,
   fetchObservedRaids,
-  lookupSharedRaids,
   mergePublicMaps,
   parseObservedRaids,
-  uploadSharedRaids,
+  pickUlggReports,
+  reportStageToUlgg,
+  sharedRaidMapKey,
+  syncSharedRaids,
   RAID_PUBLIC_REFRESH_MS,
+  ULGG_FRAGMENT_REPORT_URL,
   ULGG_OBSERVED_RAIDS_URL,
 } from "./raid-public.js";
-export type { FetchLike } from "./raid-public.js";
+export type {
+  FetchLike,
+  SharedRaidSync,
+  UlggStageReport,
+  UlggStageReportResult,
+} from "./raid-public.js";
+export {
+  addBattle,
+  applySnapshot,
+  clockOf,
+  emptyLedger,
+  expectLabel,
+  foundOfBattle,
+  formatLedger,
+  formatOutcomeDetail,
+  formatRaidTally,
+  formatRaidTrack,
+  formatVanished,
+  ledgerExpect,
+  ledgerLevels,
+  outcomeKey,
+  parseLedger,
+  parseOutcomeRecords,
+  parseOutcomeState,
+  pruneOutcomes,
+  RAID_VANISH_GRACE_MS,
+  raidLabel,
+  raidOutcome,
+  settleOutcomes,
+  tallyToday,
+  upsertOutcome,
+} from "./raid-track.js";
+export type {
+  ItemLedger,
+  LedgerLine,
+  OwnBattle,
+  RaidOutcome,
+  RaidOutcomeRecord,
+  RaidOutcomeSource,
+  RaidOutcomeState,
+  RaidOutcomeTally,
+} from "./raid-track.js";
 
 export {
   aggregateTeams,

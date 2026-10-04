@@ -64,7 +64,9 @@ import {
   parseEventCardKey,
   RULE_PACKAGE_EXTENSION,
   shortHash,
-  toIndexTable,
+  toCardIdTable,
+  legacyWeaponId,
+  legacyEventId,
 } from "@ulr/rule-schema";
 import {
   CACHE_PATH,
@@ -110,14 +112,16 @@ function usage(): void {
   console.log("                              預設濾掉心跳，--all 看全部");
   console.log("  arbiter [--port N] [--policy either|opponent|never] [--deadline 秒]");
   console.log("       [--phase-seconds N] [--hazard-shorten N] [--no-ready]");
-  console.log("       [--link <位址>] [--no-link]   （預設是雲端中間人，不用設）");
+  console.log("       [--link <位址>] [--no-link]   （預設是 Cloudflare Workers，不用設）");
   console.log(
     `                              --link local（本機 :${DEFAULT_LINK_PORT}，開發用）｜wss://…`,
   );
   console.log("                              移動階段仲裁（⚠ 會改變遊戲行為）");
   console.log("                              --phase-seconds 是「我希望這個階段多長」，");
   console.log("                              雙方取比較長的那個當共同值；沒配到對手就不縮短");
-  console.log("                              先開的那個插件自動當中間人，雙開不必多開一個視窗");
+  console.log(
+    "                              --link local 時先開的那個插件自動開本機轉送，雙開不必多開一個視窗",
+  );
   console.log("  speed [--port N] [--factor N]");
   console.log("                              演出加速，只快動畫不動時鐘（預設 ×3）");
   console.log("                              實測約省 1 分鐘／場，伺服器排程那段動不了");
@@ -249,19 +253,19 @@ async function cmdProbe(args: string[]): Promise<number> {
 /**
  * 一份規則 → 注入腳本要的四張表。
  *
- * ⚠ 裝備與事件卡的鍵在這裡就換成**陣列索引字串**（`wp001` → `"1"`）。
+ * ⚠ 裝備與事件卡的鍵在這裡就換成**卡片 id 字串**（`wp001` → `"6"`，2026-09-23 改版後）。
  * 注入的腳本刻意不認得 `wp` / `ev` 這套命名，見 `patch-cost.ts`。
  * 認不得的鍵會被列出來 —— 默默丟掉等於那張卡的價格安靜地沒有生效。
  */
 function tablesOf(rule: CostRule): { costs: CostOverrideTables; unmapped: string[] } {
-  const equipment = toIndexTable(rule.equipment, parseEquipmentKey);
-  const eventCards = toIndexTable(rule.eventCards, parseEventCardKey);
+  const equipment = toCardIdTable(rule.equipment, parseEquipmentKey, legacyWeaponId);
+  const eventCards = toCardIdTable(rule.eventCards, parseEventCardKey, legacyEventId);
   return {
     costs: {
       characters: rule.characters,
       monsters: rule.monsters,
-      equipment: equipment.byIndex,
-      eventCards: eventCards.byIndex,
+      equipment: equipment.byId,
+      eventCards: eventCards.byId,
     },
     unmapped: [...equipment.unmapped, ...eventCards.unmapped],
   };

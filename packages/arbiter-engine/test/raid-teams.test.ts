@@ -3,7 +3,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { normalizeTeamsUpload, raidPlayerKey, RaidTeamBoard } from "@ulr/arbiter-link";
+import { normalizeTeamsUpload, raidPlayerKey, RaidTeamBoard, raidTeamRef } from "@ulr/arbiter-link";
 import {
   aggregateTeams,
   buildTeamUploads,
@@ -18,16 +18,20 @@ import {
 } from "@ulr/arbiter-engine";
 
 const NOW = Date.now();
+/** 改版後的新 id（2026-09-25 實機的戰鬥設定 playerA_deck） */
 const DECK_A = {
-  chara: ["cc043", "cc011", "cc033"],
-  charaIndex: [426, 109, 329],
-  weapon: [170, 136, 135],
-  eventIndex: [80, 80, 67, 67, 67, 67, 20, 41, 70, 70, 67, 67, 67, 80, 80, 80, 67, 67],
+  chara: ["cc035", "cc033", "cc011"],
+  charaIndex: [350, 330, 110],
+  weapon: [21, 123, 56],
+  eventIndex: [31, 31, 31, 34, 34, 28, 28, 34, 34, 34, 28, 28, 71, 80, 31, 31, 28, 28],
 };
-const DECK_B = { ...DECK_A, weapon: [170, 136, null] };
+const DECK_B = { ...DECK_A, weapon: [21, 123, null] };
+/** 別人開的渦：發現者＋發現時刻 */
+const FOUND_AT = NOW - 60_000;
+const RAID = raidTeamRef("路德", FOUND_AT);
 
 const battle = (over: Partial<RaidBattleRecord> = {}): RaidBattleRecord => ({
-  code: "tfqLuvEDegF3",
+  raid: RAID,
   player: "燈皇",
   limit: NOW + 3_600_000,
   turns: 1,
@@ -50,7 +54,7 @@ describe("紀錄 → 隊伍", () => {
       [100, 1, 1, 1, 100, 5490],
       [70, 2, 4, 4, 50, 10980],
     ]);
-    expect(teams[1]!.weapon).toEqual([170, 136, 135]);
+    expect(teams[1]!.weapon).toEqual([21, 123, 56]);
   });
 
   it("同一場補報（分數晚到）取代舊的那筆，不多算一場", () => {
@@ -64,18 +68,22 @@ describe("紀錄 → 隊伍", () => {
     ]);
   });
 
-  it("渦碼 → 名字 → 隊伍；本機有的名字蓋掉雲端那份", () => {
-    const local = localTeamsMap([battle(), battle({ code: "other" })]);
-    expect(Object.keys(local)).toEqual(["tfqLuvEDegF3", "other"]);
+  it("渦 → 名字 → 隊伍；本機有的名字蓋掉雲端那份", () => {
+    const local = localTeamsMap([battle(), battle({ raid: "other@1" })]);
+    expect(Object.keys(local)).toEqual([RAID, "other@1"]);
     const cloudTeam = { ...aggregateTeams([battle({ damage: 1 })])[0]! };
-    const merged = mergeTeamsMaps({ tfqLuvEDegF3: { 燈皇: [cloudTeam], A: [cloudTeam] } }, local);
-    expect(merged["tfqLuvEDegF3"]!["燈皇"]![0]!.damage).toBe(20);
-    expect(merged["tfqLuvEDegF3"]!["A"]).toEqual([cloudTeam]);
+    const merged = mergeTeamsMaps({ [RAID]: { 燈皇: [cloudTeam], A: [cloudTeam] } }, local);
+    expect(merged[RAID]!["燈皇"]![0]!.damage).toBe(20);
+    expect(merged[RAID]!["A"]).toEqual([cloudTeam]);
   });
 
   it("過期的渦丟掉；檔案讀回來形狀不對的丟掉", () => {
     expect(pruneBattles([battle(), battle({ limit: NOW - 1 })], NOW)).toHaveLength(1);
-    expect(parseBattleRecords({ battles: [battle(), { code: 1 }, null] })).toEqual([battle()]);
+    // 改版前的舊紀錄（用渦碼 code）丟掉
+    const legacy = { ...battle(), raid: undefined, code: "tfqLuvEDegF3" };
+    expect(parseBattleRecords({ battles: [battle(), legacy, { raid: 1 }, null] })).toEqual([
+      battle(),
+    ]);
     expect(parseBattleRecords("garbage")).toEqual([]);
   });
 });
@@ -98,7 +106,7 @@ describe("看板來回", () => {
   }
   const URL_ = "https://x.invalid/raid-teams";
 
-  it("傳上去只有雜湊；查的人拿渦碼＋榜上名字查得回來，榜上沒有的名字對不上", async () => {
+  it("傳上去只有雜湊；查的人拿發現者＋發現時刻＋榜上名字查得回來，榜上沒有的名字對不上", async () => {
     const cloud = fakeCloud();
     const n = await uploadRaidTeams(
       await buildTeamUploads([battle(), battle({ damage: 30 })]),
@@ -107,25 +115,39 @@ describe("看板來回", () => {
     );
     expect(n).toBe(1);
     const all = cloud.calls.join("\n");
-    expect(all).not.toContain("tfqLuvEDegF3");
+    expect(all).not.toContain("路德");
     expect(all).not.toContain("燈皇");
+    expect(all).not.toContain(String(FOUND_AT));
 
     const found = await lookupRaidTeams(
-      [{ code: "tfqLuvEDegF3", players: ["A", "燈皇"] }],
+      [
+        { founder: "路德", foundAt: FOUND_AT, players: ["A", "燈皇"] },
+        { founder: null, foundAt: FOUND_AT, players: ["燈皇"] }, // 沒有發現者：查不了，略過
+      ],
       cloud.fetchImpl,
       URL_,
     );
-    expect(found["tfqLuvEDegF3"]!["燈皇"]![0]).toMatchObject({
+    expect(Object.keys(found)).toEqual([RAID]);
+    expect(found[RAID]!["燈皇"]![0]).toMatchObject({
       battles: 2,
       damage: 50,
       best: 30,
       points: 10980,
     });
-    expect(found["tfqLuvEDegF3"]!["A"]).toBeUndefined();
-    expect(cloud.calls.at(-1)).not.toContain(await raidPlayerKey("tfqLuvEDegF3", "燈皇"));
+    expect(found[RAID]!["A"]).toBeUndefined();
+    expect(cloud.calls.at(-1)).not.toContain(await raidPlayerKey(RAID, "燈皇"));
+
+    // 發現時刻差 1 ms 就是別的渦
+    expect(
+      await lookupRaidTeams(
+        [{ founder: "路德", foundAt: FOUND_AT + 1, players: ["燈皇"] }],
+        cloud.fetchImpl,
+        URL_,
+      ),
+    ).toEqual({});
 
     const stranger = await lookupRaidTeams(
-      [{ code: "tfqLuvEDegF3", players: ["A"] }],
+      [{ founder: "路德", foundAt: FOUND_AT, players: ["A"] }],
       cloud.fetchImpl,
       URL_,
     );
@@ -137,7 +159,11 @@ describe("看板來回", () => {
     await uploadRaidTeams(await buildTeamUploads([battle()]), cloud.fetchImpl, URL_);
     await uploadRaidTeams(await buildTeamUploads([battle()], true), cloud.fetchImpl, URL_);
     expect(
-      await lookupRaidTeams([{ code: "tfqLuvEDegF3", players: ["燈皇"] }], cloud.fetchImpl, URL_),
+      await lookupRaidTeams(
+        [{ founder: "路德", foundAt: FOUND_AT, players: ["燈皇"] }],
+        cloud.fetchImpl,
+        URL_,
+      ),
     ).toEqual({});
   });
 
@@ -146,6 +172,8 @@ describe("看板來回", () => {
       throw new Error("offline");
     };
     expect(await uploadRaidTeams(await buildTeamUploads([battle()]), down, URL_)).toBe(0);
-    expect(await lookupRaidTeams([{ code: "x", players: ["y"] }], down, URL_)).toEqual({});
+    expect(
+      await lookupRaidTeams([{ founder: "x", foundAt: 1, players: ["y"] }], down, URL_),
+    ).toEqual({});
   });
 });

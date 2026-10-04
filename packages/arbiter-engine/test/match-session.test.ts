@@ -5,7 +5,6 @@ import { guestJoinRoom, hostOpenRoom, preflight, type MatchDriver } from "../src
 const ROOM: Parameters<MatchDriver["createRoom"]>[0] = {
   name: "ULR3",
   stage: "000",
-  multi: true,
   friend: false,
   pass: "AB12CD34",
   cost: null,
@@ -17,6 +16,7 @@ function ctx(over: Partial<MatchContext> = {}): MatchContext {
     channel: 4,
     channels: null,
     crossplay: true,
+    requiredAp: null,
     deckNow: 1,
     deckCost: 49,
     deckKeys: {
@@ -107,7 +107,7 @@ describe("preflight", () => {
     if (!r.ok) expect(r.block.code).toBe("already-matching");
   });
 
-  it("⚠ 玩家已經有自己的房就不能開 —— delete_room 會連那間一起收掉", async () => {
+  it("⚠ 玩家已經有自己的房就不能開 —— 遊戲一次只讓你開著一間", async () => {
     const d = driver({ snapshots: [{ seq: 3, rooms: [room({ name: "請多關照" })] }] });
     const r = await preflight(d, { expectChannel: 4 });
     expect(r.ok).toBe(false);
@@ -126,7 +126,19 @@ describe("preflight", () => {
 });
 
 describe("hostOpenRoom", () => {
-  it("開房之後從新的推播裡找出 room_id", async () => {
+  it("改版後 create_room 直接回 room_id —— 用它，不必翻清單", async () => {
+    const snap = vi.fn(async () => ({ seq: 0, live: true, rooms: [] as RoomEntry[] }));
+    const d = driver({
+      roomSnapshot: snap,
+      createRoom: async () => ({ ok: true, roomId: "bN8kekEQrEwqdxlJdUTbCqORtz1vdYGW0E9U" }),
+    });
+    const r = await hostOpenRoom(d, { room: ROOM, playerName: "燈皇", sleep: nosleep });
+    expect(r).toEqual({ ok: true, roomId: "bN8kekEQrEwqdxlJdUTbCqORtz1vdYGW0E9U" });
+    // 只有開房前那一次（排掉舊房用的），開房之後沒再看清單。
+    expect(snap).toHaveBeenCalledTimes(1);
+  });
+
+  it("回應沒帶 room_id 時，退回從新的推播裡找", async () => {
     const d = driver({
       snapshots: [
         { seq: 10, rooms: [] }, // 開房前
@@ -140,7 +152,7 @@ describe("hostOpenRoom", () => {
   it("⚠ 開房前就在清單上的房不算數 —— 那會交出上一場的 room_id", async () => {
     // 清單裡有一間看起來很像的房（同房主、同房名、也沒有對手），但它在開房
     // **之前**就在了。採信的話會把上一場的 room_id 交給對手，而伺服器會正確地
-    // 回 fail:9（那間房早就配對過了）—— 錯誤訊息看起來完全像別的問題。
+    // 拒絕（那間房早就配對過了）—— 錯誤訊息看起來完全像別的問題。
     const stale = { seq: 10, rooms: [room({ roomId: "上一場的" })] };
     const d = driver({ snapshots: [stale] });
     const r = await hostOpenRoom(d, {
@@ -155,10 +167,10 @@ describe("hostOpenRoom", () => {
 
   it("伺服器拒絕開房就不用收房", async () => {
     const d = driver({
-      createRoom: async () => ({ ok: false, reason: "伺服器拒絕開房", fail: 20 }),
+      createRoom: async () => ({ ok: false, reason: "伺服器拒絕開房", fail: "NOT_ENOUGH_AP" }),
     });
     const r = await hostOpenRoom(d, { room: ROOM, playerName: "燈皇", sleep: nosleep });
-    expect(r).toMatchObject({ ok: false, fail: 20, needsCancel: false });
+    expect(r).toMatchObject({ ok: false, fail: "NOT_ENOUGH_AP", needsCancel: false });
   });
 
   it("開出來的房沒鎖就不拿去配對", async () => {
@@ -220,10 +232,10 @@ describe("guestJoinRoom", () => {
   it("進房被拒就把 fail 代碼帶回來", async () => {
     const d = driver({
       snapshots: [{ seq: 1, rooms: [room({ roomId: "對方的房" })] }],
-      joinRoom: async () => ({ ok: false, reason: "進房被拒", fail: 9 }),
+      joinRoom: async () => ({ ok: false, reason: "進房被拒", fail: "ALREADY_IN_ROOM" }),
     });
     const r = await guestJoinRoom(d, { roomId: "對方的房", pass: "AB12CD34", sleep: nosleep });
-    expect(r).toMatchObject({ ok: false, fail: 9 });
+    expect(r).toMatchObject({ ok: false, fail: "ALREADY_IN_ROOM" });
   });
 });
 

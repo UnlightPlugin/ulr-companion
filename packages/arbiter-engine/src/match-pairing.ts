@@ -76,7 +76,12 @@ import type {
   QueueRole,
   QueueStatus,
 } from "@ulr/arbiter-link";
-import { ARCADIA_STAGES, isStageCode, ROOM_NAME_MAX_LENGTH } from "@ulr/cdp-adapter";
+import {
+  ARCADIA_STAGES,
+  isStageCode,
+  RANDOM_STAGE_CODE,
+  ROOM_NAME_MAX_LENGTH,
+} from "@ulr/cdp-adapter";
 import type { MatchContext, StageCode } from "@ulr/cdp-adapter";
 import type { MatchDriver, PreflightResult, Sleep } from "./match-session.js";
 import { guestJoinRoom, hostOpenRoom, preflight } from "./match-session.js";
@@ -140,21 +145,22 @@ export const LOBBY_WATCH_MS = 5_000;
 /**
  * 官方的「隨機」地點。選它等於把地點交給伺服器。
  *
- * ⚠ 這個值是**遊戲自己的**（`STAGES` 的最後一項），不是我們定的代號。
+ * ⚠ 這個值是**遊戲自己的**（選單的最後一項，改版後是 999；改版前是 014，而 014
+ * 現在是一張真的地圖）。
  */
-export const RANDOM_STAGE = "014";
+export const RANDOM_STAGE = RANDOM_STAGE_CODE;
 
 /**
  * 玩家能選的地點。**兩種抽法，加上十四張指定的地圖。**
  *
- * | 值                | 誰決定           | 決定成什麼                         |
- * | ----------------- | ---------------- | ---------------------------------- |
- * | `arcadia`         | **插件**         | {@link ARCADIA_STAGES}（000~010）  |
- * | `official`        | **遊戲伺服器**   | 它自己那份（我們看不到，也管不著） |
- * | `000`~`013`       | **玩家**         | 就那一張                           |
+ * | 值                      | 誰決定           | 決定成什麼                              |
+ * | ----------------------- | ---------------- | --------------------------------------- |
+ * | `arcadia`               | **插件**         | {@link ARCADIA_STAGES}（000~009 ＋ 011）|
+ * | `official`              | **遊戲伺服器**   | 它自己那份（我們看不到，也管不著）      |
+ * | `000`~`009`、`011`~`014`| **玩家**         | 就那一張                                |
  *
  * 兩種隨機的差別**不是**「哪個比較隨機」，是抽的池子不同 —— `arcadia` 一定會抽
- * 到那十一張裡的一張（含官方選單沒有的 010），`official` 抽的是官方那份。
+ * 到那十一張裡的一張（含官方選單沒有的 011），`official` 抽的是官方那份。
  *
  * ⚠ **指定一張不等於就開在那張。** 開房的只有 host，所以任何一方指定的地圖對
  * 另一邊都是單方面的 —— 兩邊指了不同張時走擲骰子（見 {@link negotiateStage}）。
@@ -190,7 +196,7 @@ export function stagePickLabel(pick: StagePick): string {
 export function pickArcadiaStage(roll: () => number = Math.random): string {
   const i = Math.floor(roll() * ARCADIA_STAGES.length);
   // ⚠ 要夾。`roll()` 回 1（或 1.0000001）時 `i` 會落在陣列外，而那個 undefined
-  // 會被當成開房參數送出去 —— 伺服器回 fail:20，而錯誤訊息完全看不出原因。
+  // 會被當成開房參數送出去 —— 伺服器拒絕開房，而錯誤訊息完全看不出原因。
   const clamped = Math.min(Math.max(i, 0), ARCADIA_STAGES.length - 1);
   return ARCADIA_STAGES[clamped] ?? RANDOM_STAGE;
 }
@@ -202,10 +208,10 @@ export function pickArcadiaStage(roll: () => number = Math.random): string {
  *
  * | 我       | 對手               | 結果                        |
  * | -------- | ------------------ | --------------------------- |
- * | arcadia  | 任何（含沒說）     | 從 000~010 抽一張           |
- * | 任何     | arcadia            | 從 000~010 抽一張           |
- * | official | 官方隨機／地圖／沒說 | **`014`**（官方隨機）     |
- * | 地圖     | official           | **`014`**                   |
+ * | arcadia  | 任何（含沒說）     | 從亞城池抽一張              |
+ * | 任何     | arcadia            | 從亞城池抽一張              |
+ * | official | 官方隨機／地圖／沒說 | **`999`**（官方隨機）     |
+ * | 地圖     | official           | **`999`**                   |
  * | `007`    | `007`              | `007`                       |
  * | `003`    | `007`              | **擲骰子二選一**            |
  * | `007`    | **沒說**（舊版）   | `007`                       |
@@ -213,8 +219,8 @@ export function pickArcadiaStage(roll: () => number = Math.random): string {
  * ⚠ **一個人選亞城隨機就整場走亞城隨機。** 這條優先權是玩家指定的：亞城池是
  * 這個玩法的預設樣子，而「有人想要那個池子」比「另一邊想要別的」更值得成立。
  *
- * ⚠ 代價要講清楚：亞城池裡有一張官方選單沒有的 `010`（見 {@link ARCADIA_STAGES}），
- * 所以選了官方隨機或指定地圖的人**也可能**被抽到 010。不想碰它就得兩邊都不選
+ * ⚠ 代價要講清楚：亞城池裡有一張官方選單沒有的 `011`（見 {@link ARCADIA_STAGES}），
+ * 所以選了官方隨機或指定地圖的人**也可能**被抽到 011。不想碰它就得兩邊都不選
  * 亞城隨機。
  *
  * ⚠ 兩邊各指定了不同的一張時**擲骰子**，不是「開房那一方說了算」——
@@ -243,17 +249,14 @@ export function negotiateStage(
  *
  * ```
  *   arcadia      → {"s":"arcadia"}
- *   official     → {"s":"014"}      ← 舊版看得懂的寫法
+ *   official     → {"s":"999"}      ← 遊戲自己的「隨機」代號
  *   007（地圖）  → {"s":"007"}
  * ```
  *
- * ⚠ `official` 送的是 `"014"` 而不是 `"official"`。舊版插件的 `parsePrefBody`
- * 只收 `"arcadia"` 與三位數字，收到 `"official"` 會當成「他沒說」—— 而 `"014"`
- * 它讀得懂，於是舊版當 host 時也會開隨機房。
- *
- * ⚠ **指定的地圖送過去，舊版會讀成「官方隨機」**（它把所有三位數字都折成
- * `official`）。那是可以接受的退化：只有 host 那一邊的算法算數，而舊版 host
- * 拿到「官方隨機」時開的是 `014` —— 一張雙方都沒指定的中立地圖。
+ * ⚠ 2026-09-23 改版前 `official` 送的是 `"014"`（那時的隨機）。改版後 014 是一張
+ * 真的地圖，所以改送 999。改版前的插件在新客戶端上本來就開不了房（開房協定整個
+ * 換了），跟它們的相容不必再顧：舊版送來的 `"014"` 會被讀成「指定聖域的凱旋門」，
+ * 舊版讀到 `"999"` 會當成「他沒說」。
  */
 export function encodePrefBody(pref: { stage: StagePick }): string {
   return JSON.stringify({ s: pref.stage === "official" ? RANDOM_STAGE : pref.stage });
@@ -263,10 +266,7 @@ export function encodePrefBody(pref: { stage: StagePick }): string {
  * 解析對手的 `q-pref`。壞掉一律 `null` —— 那等同「他沒說」，用我自己的選擇。
  *
  * ⚠ 要驗格式。這個值會決定開房參數，而開房參數是送進遊戲封包的東西 ——
- * 認得的代號只有 {@link STAGE_CODES} 那十四個加上 `014`。
- *
- * ⚠ `"014"` 一律當成 `official`。舊版只送得出 `"arcadia"` 與 `"014"`，所以
- * 收到別的三位數字就代表對面是新版，照著他指定的那張參與協商是對的。
+ * 認得的代號只有 {@link STAGE_CODES} 那十四個加上隨機 `999`。
  */
 export function parsePrefBody(body: string): { stage: StagePick } | null {
   try {
@@ -333,7 +333,7 @@ export function formatCostTag(costLimit: number | null, openFloor: number | null
  *
  * 而房名**本來就不是識別碼** —— 決定誰配得到誰的是配對鍵（裡面放的正是規則族），
  * 那個玩家改不了也看不到，房名寫什麼都不會讓錯的人配進來。既然它只是給大廳
- * 看的招牌，就該用玩家在「牌組 › Cost 表」看到的那個名字，兩邊對照得起來。
+ * 看的招牌，就該用玩家在「自訂COST › Cost 表」看到的那個名字，兩邊對照得起來。
  *
  * ⚠ 代價講清楚：同一族的不同版本可以改名字，所以大廳上可能出現兩個標籤不同、
  * 卻排在同一條佇列的房。那隻影響觀感，不影響配對。
@@ -990,7 +990,7 @@ export class MatchPairing {
     this.#patch({
       phase: "queued",
       linked: false,
-      message: "正在連中間人…",
+      message: "正在連 Cloudflare Workers…",
     });
     this.#watchLobby();
   }
@@ -1082,9 +1082,8 @@ export class MatchPairing {
    * ⚠ 排隊途中不叫 —— 玩家開房不是停止配對的理由（他可能想兩邊碰運氣），
    * 而在他還沒配到人的時候把房拆了，等於插件擅自取消了他的另一條路。
    *
-   * ⚠ `delete_room` 是**頻道層級**的：收的是他在這個頻道的**所有**房。所以
-   * 一定要先確認真的有房才叫，而且一定要寫進記錄檔 —— 玩家要知道那間房是被
-   * 誰收的（見 match-session.ts 的檔頭）。
+   * ⚠ 一定要先確認真的有房才叫，而且一定要寫進記錄檔 —— 玩家要知道那間房是被
+   * 誰收的。
    */
   async #clearOwnRoom(): Promise<void> {
     const context = await this.#options.driver.matchContext().catch(() => null);
@@ -1097,7 +1096,7 @@ export class MatchPairing {
     }
     if (!has) return;
 
-    this.#log("· 配到人了 —— 先幫你收掉自己開的那間房（那個指令是整個頻道一起收的）");
+    this.#log("· 配到人了 —— 先幫你收掉自己開的那間房");
     await this.#options.driver.cancelRoom().catch(() => "");
     // 收房之後清單要一點時間才更新。等一拍，否則接下來的 preflight 會讀到
     // 剛剛那間還在，然後判定「你已經有一間自己開的房」。
@@ -1116,9 +1115,7 @@ export class MatchPairing {
    * 房會在 `#openRoom` 叫它的時候被收掉。guest 那半段沒有 preflight，所以要
    * 自己叫一次 `#clearOwnRoom`。
    *
-   * ⚠ `delete_room` 是**頻道層級**的：它會把玩家在這個頻道的房**全部**收掉，
-   * 包含他自己手動開的那間。所以這件事一定要寫進記錄檔 —— 玩家要知道剛剛
-   * 那間房是被誰收的（見 match-session.ts 的檔頭）。
+   * ⚠ 這件事一定要寫進記錄檔 —— 玩家要知道剛剛那間房是被誰收的。
    */
   async #preflight(): Promise<PreflightResult> {
     const first = await preflight(this.#options.driver, { expectChannel: this.#options.channel });
@@ -1127,7 +1124,7 @@ export class MatchPairing {
       return first;
     }
 
-    this.#log("· 你在這個頻道已經有一間開著的房，先幫你收掉（收的是整個頻道的房）");
+    this.#log("· 你在這個頻道已經有一間開著的房，先幫你收掉");
     await this.#options.driver.cancelRoom().catch(() => "");
     // 收房之後清單要一點時間才更新。等一拍再問，否則會讀到剛剛那間還在。
     await (this.#options.sleep ?? defaultSleep)(1_000);
@@ -1184,7 +1181,7 @@ export class MatchPairing {
 
   #onQueueStatus(status: QueueStatus, waiting: number): void {
     if (status === "incompatible") {
-      void this.stop("中間人的協定版本跟這個插件不合，請更新。");
+      void this.stop("Cloudflare Workers 的協定版本跟這個插件不合，請更新。");
       return;
     }
     if (status === "unreachable") {
@@ -1195,8 +1192,8 @@ export class MatchPairing {
       // ⚠ 走 `#block` 是安全的 —— 會走到這裡就代表連線**一次都沒成立過**，
       // 所以不可能已經開了房（開房要先配到人）。
       this.#block(
-        "連不上中間人的配對佇列，已經停止排隊。這不是沒人跟你排 —— 是那條線根本沒接上。" +
-          "檢查網路，或到「設置 › 連線」看中間人的位址；「設置 › 記錄」有每一次失敗的原因。",
+        "連不上 Cloudflare Workers 的配對佇列，已經停止排隊。這不是沒人跟你排 —— 是那條線根本沒接上。" +
+          "檢查網路；「設置 › 記錄」有每一次失敗的原因。",
       );
       return;
     }
@@ -1214,8 +1211,8 @@ export class MatchPairing {
               ? "排隊中，等一個用同一份規則的人。"
               : // ⚠ 這句要指得出下一步。「連線中」對玩家沒有用 —— 他要知道的是
                 // 「這不是在等對手，是根本還沒連上」。
-                "連不上中間人的配對佇列，還在重試 —— 這不是在等對手。" +
-                "檢查網路，或到「設置 › 連線」看中間人的位址。",
+                "連不上 Cloudflare Workers 的配對佇列，還在重試 —— 這不是在等對手。" +
+                "檢查網路；「設置 › 記錄」有每一次失敗的原因。",
           }
         : {}),
     });
@@ -1437,7 +1434,7 @@ export class MatchPairing {
         // 跟那邊一定要是同一個字串 —— 傳同一個表達式就不會漂。
         name: buildRoomName(this.#options.rule.name, this.#options.costLimit, this.#openFloor),
         stage,
-        multi: ROOM_MULTI,
+        // ⚠ 3vs3 不在開房參數裡（改版後伺服器看牌組張數），`ROOM_MULTI` 只進配對鍵。
         friend: this.#options.room.friend,
         // ⚠ 房間密碼就是配對 token。**房名絕對不能帶它**，房名是公開的。
         pass: token,
@@ -1530,9 +1527,15 @@ export class MatchPairing {
       let gone = false;
       try {
         const snapshot = await this.#options.driver.roomSnapshot();
-        const mine = snapshot.rooms.find((r) => r.roomId === roomId);
-        if (mine === undefined) gone = snapshot.live || snapshot.seq > 0;
-        else joined = mine.playerBName !== null;
+        // ⚠ 對手進來的那一刻伺服器推 match_start，遊戲直接切去對戰、大廳進 sleep，
+        // 清單從此不再更新 —— 等不到「我那間多了 playerB」。要看 started。
+        if (snapshot.started === true) {
+          joined = true;
+        } else {
+          const mine = snapshot.rooms.find((r) => r.roomId === roomId);
+          if (mine === undefined) gone = snapshot.live || snapshot.seq > 0;
+          else joined = mine.playerBName !== null;
+        }
       } catch {
         // 讀不到就當這一輪沒看到，下一輪再問。連線斷了的話 stop() 會收掉這個迴圈。
       }

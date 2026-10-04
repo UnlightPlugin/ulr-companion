@@ -494,6 +494,7 @@ function ctx(over: Partial<MatchContext> = {}): MatchContext {
     channel: 2,
     channels: null,
     crossplay: false,
+    requiredAp: null,
     deckNow: 1,
     deckCost: 57,
     deckKeys: { characters: ["leon", "abel", "evarist"], equipment: [], eventCards: [] },
@@ -791,6 +792,39 @@ describe("狀態機：對戰開始就結束任務", () => {
     expect(p.status.phase).toBe("idle");
   });
 
+  /**
+   * ⚠ 改版後對手一進房，伺服器推 match_start，遊戲直接切去對戰、大廳進 sleep：
+   * 清單讀不到了（live false），房也不會「多一個 playerB」。只剩 started 可以看。
+   * 沒看它的話會一路等到逾時，然後在對戰中**收房**。
+   */
+  it("⚠ host：對手進來、大廳進 sleep 讀不到清單 —— 看 started 判定開打，不收房", async () => {
+    let started = false;
+    let opened = false;
+    const cancel = vi.fn(async () => "ok");
+    const { p, link } = pairing(
+      { handoffPollMs: 5, handoffTimeoutMs: 200 },
+      {
+        cancelRoom: cancel,
+        createRoom: async () => {
+          opened = true;
+          return { ok: true as const, roomId: "r-mine" };
+        },
+        roomSnapshot: async () => {
+          if (started) return { seq: 0, live: false, started: true, rooms: [] };
+          return { seq: 1, live: true, rooms: opened ? [{ ...empty, roomId: "r-mine" }] : [] };
+        },
+      },
+    );
+    await p.start();
+    await link.matched("host", link.tag);
+    expect(p.status.phase).toBe("ready");
+
+    started = true;
+    await new Promise((r) => setTimeout(r, 60));
+    expect(p.status.phase).toBe("idle");
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
   it("⚠ 對手離開佇列（q-cancel）不代表他跑了 —— 房號交出去之後要看房間，不看佇列", async () => {
     const { cancel, driver } = hostDriver();
     const { p, link } = pairing({ handoffPollMs: 5 }, driver);
@@ -916,10 +950,10 @@ describe("對戰地點：negotiateStage", () => {
     }
   });
 
-  it("亞城池就是官方那 10 張加上 010，共 11 張", () => {
+  it("亞城池就是官方那 10 張加上 011（改版前的 010），共 11 張", () => {
     expect(ARCADIA_STAGES).toHaveLength(11);
     expect(ARCADIA_STAGES[0]).toBe("000");
-    expect(ARCADIA_STAGES[10]).toBe("010");
+    expect(ARCADIA_STAGES[10]).toBe("011");
   });
 
   it("body 壞掉一律當成「他沒說」", () => {
@@ -937,22 +971,18 @@ describe("對戰地點：negotiateStage", () => {
     expect(parsePrefBody(encodePrefBody({ stage: "013" }))).toEqual({ stage: "013" });
   });
 
-  /**
-   * ⚠ 舊版插件的 `parsePrefBody` 只收 `"arcadia"` 與三位數字。`official` 送
-   * `"014"` 而不是 `"official"`，舊版才讀得懂 —— 它當 host 時也會開隨機房。
-   */
-  it("⚠ 官方隨機送的是舊版讀得懂的 014", () => {
-    expect(JSON.parse(encodePrefBody({ stage: "official" }))).toEqual({ s: RANDOM_STAGE });
+  /** ⚠ 改版後遊戲的「隨機」是 999（改版前是 014，而 014 現在是一張地圖）。 */
+  it("⚠ 官方隨機送的是遊戲自己的隨機代號 999", () => {
+    expect(RANDOM_STAGE).toBe("999");
+    expect(JSON.parse(encodePrefBody({ stage: "official" }))).toEqual({ s: "999" });
   });
 
-  /**
-   * ⚠ `014` 是「隨機」不是地圖，所以它一律折成 `official`。舊版只送得出
-   * `"arcadia"` 與 `"014"`，於是收到別的三位數字就代表對面是新版 —— 照著他
-   * 指定的那張參與協商是對的。
-   */
-  it("014 是官方隨機，其餘認得的代號就是那張地圖", () => {
-    expect(parsePrefBody(JSON.stringify({ s: "014" }))).toEqual({ stage: "official" });
+  it("999 是官方隨機；014 現在是聖域的凱旋門，不是隨機", () => {
+    expect(parsePrefBody(JSON.stringify({ s: "999" }))).toEqual({ stage: "official" });
+    expect(parsePrefBody(JSON.stringify({ s: "014" }))).toEqual({ stage: "014" });
     expect(parsePrefBody(JSON.stringify({ s: "007" }))).toEqual({ stage: "007" });
+    // 010 只是雷德貝魯格城的別名，不在可指定的地圖裡。
+    expect(parsePrefBody(JSON.stringify({ s: "010" }))).toBeNull();
   });
 });
 

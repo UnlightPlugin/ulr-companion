@@ -15,10 +15,9 @@
  *
  * ## 為什麼 preflight 不能省
  *
- * `delete_room` 是**頻道層級**的 —— 它只吃 channel、不吃 room_id。玩家如果
- * 自己手動開了一間房，插件再開一間，之後「取消配對」會把**兩間一起收掉**。
- * 所以開房前一定要先確認玩家沒有自己的房，有的話直接不開。
- * 2026-08-15 實測：按一次取消，兩間一起消失。
+ * 遊戲一次只讓你開著一間在等人的房（`room_wait`）。玩家自己手動開了一間的話，
+ * 插件那一間開不出來 —— 開房前要先知道，自動配對那條路會先幫他收掉
+ * （`MatchPairing.#preflight`）。改版後收房吃 room_id，只收那一間。
  */
 
 import { findOwnRoom } from "@ulr/cdp-adapter";
@@ -27,15 +26,19 @@ import type { CreateRoomOptions, MatchContext, RoomEntry } from "@ulr/cdp-adapte
 /** 這支需要遊戲做到的事。真的實作是 `CdpAdapter`，測試餵假的。 */
 export interface MatchDriver {
   matchContext(): Promise<MatchContext>;
-  /** `live` = 這份是遊戲當下手上的清單（不是等推播來的舊快取）。 */
-  roomSnapshot(): Promise<{ seq: number; live: boolean; rooms: RoomEntry[] }>;
+  /**
+   * `live` = 這份是遊戲當下手上的清單（人在頻道裡、大廳是 active 的）。
+   * `started` = 對戰已經開始（有人進了我的房、或我進了別人的房）—— 那時大廳
+   * 在 sleep，清單不再更新，只能看這個。
+   */
+  roomSnapshot(): Promise<{ seq: number; live: boolean; started?: boolean; rooms: RoomEntry[] }>;
   createRoom(
     options: CreateRoomOptions,
-  ): Promise<{ ok: true; roomId: string | null } | { ok: false; reason: string; fail?: number }>;
+  ): Promise<{ ok: true; roomId: string | null } | { ok: false; reason: string; fail?: string }>;
   joinRoom(
     roomId: string,
     pass: string,
-  ): Promise<{ ok: true } | { ok: false; reason: string; fail?: number }>;
+  ): Promise<{ ok: true } | { ok: false; reason: string; fail?: string }>;
   cancelRoom(): Promise<string>;
 }
 
@@ -90,12 +93,8 @@ export async function preflight(
   }
 
   const snapshot = await driver.roomSnapshot();
-  // ⚠ 空清單有兩種意思：「這個頻道沒有房」跟「我還不知道」。分不出來就會在
-  // 後者上判定「玩家沒有自己的房」，直接踩到 delete_room 是頻道層級的坑。
-  //
-  // `live` = 讀的是遊戲當下手上那份（channel_panel.match_room_data），那就是
-  // 大廳正在畫的東西，空的就是真的空。讀不到 live 才退回推播快取，而推播是
-  // **有變動才來**的 —— 一次都沒收到時（seq 0）只能說「還不知道」。
+  // ⚠ 空清單有兩種意思：「這個頻道沒有房」跟「我還不知道」。`live` = 讀的是遊戲
+  // 當下手上那份（channel_room），那就是大廳正在畫的東西，空的就是真的空。
   if (!snapshot.live && snapshot.seq === 0) {
     return {
       ok: false,
@@ -109,9 +108,7 @@ export async function preflight(
         ok: false,
         block: {
           code: "has-own-room",
-          message:
-            "你已經有一間自己開的房了。請先在遊戲裡收掉 —— " +
-            "插件的「取消配對」會連你手動開的那間一起收掉（那個指令是整個頻道一起收的）。",
+          message: "你已經有一間自己開的房了。請先在遊戲裡收掉再配對。",
         },
       };
     }
@@ -172,14 +169,16 @@ export interface HostOptions {
 }
 
 export type HostResult =
-  { ok: true; roomId: string } | { ok: false; reason: string; fail?: number; needsCancel: boolean };
+  { ok: true; roomId: string } | { ok: false; reason: string; fail?: string; needsCancel: boolean };
 
 /**
- * 開房，然後等自己那間房出現在清單裡，把 room_id 交出來。
+ * 開房，把 room_id 交出來。
  *
- * ⚠ **一定要等序號變大才採信清單。** 用開房前的快取會找到玩家上一場的房，
- * 於是把**上一場的 room_id** 交給對手 —— 伺服器會正確地回 `fail:9`
- * （那間房早就配對過了），而錯誤訊息看起來完全像是別的問題。2026-08-15 踩過。
+ * 改版後 `create_room` 的回應**就是** room_id，直接用。回應沒帶 id 時（理論上不會）
+ * 才退回舊做法：等自己那間房出現在清單裡。
+ *
+ * ⚠ 退回清單那條路**一定要排掉開房前就在的房**。用開房前的快取會找到玩家上一場
+ * 的房，於是把**上一場的 room_id** 交給對手。2026-08-15 踩過。
  *
  * `needsCancel` = 房已經開起來了但沒拿到 room_id，呼叫端**必須**收房，
  * 否則清單上會留一間永遠不會有人進來的空房。
@@ -199,6 +198,7 @@ export async function hostOpenRoom(driver: MatchDriver, options: HostOptions): P
       ? { ok: false, reason: created.reason, needsCancel: false }
       : { ok: false, reason: created.reason, fail: created.fail, needsCancel: false };
   }
+  if (created.roomId !== null) return { ok: true, roomId: created.roomId };
 
   // ⚠ 開房**之前**清單上有哪些房。要靠它認出「這間是新的」——
   // 原本是比對推播序號，但房間清單是「有變動才推」而不是定時推
@@ -237,7 +237,7 @@ export interface GuestOptions {
   sleep?: Sleep;
 }
 
-export type GuestResult = { ok: true } | { ok: false; reason: string; fail?: number };
+export type GuestResult = { ok: true } | { ok: false; reason: string; fail?: string };
 
 /**
  * 等 host 那間房出現在自己的清單裡，然後進去。
