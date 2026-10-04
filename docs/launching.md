@@ -253,7 +253,7 @@ netsh interface ipv4 show dynamicport tcp                  ← 保留是從這�
 ⚠ **回退範圍必須限定在同一種客戶端。** 每一種各有各的 user-data-dir：
 
 ```
-桌面版  %APPDATA%\UNLIGHT-Revive
+桌面版  %APPDATA%\UNLIGHT Revive（2026-09-23 前是 UNLIGHT-Revive，舊資料夾留著舊檔）
 Chrome  %USERPROFILE%\ulr-cdp-profile
 Edge    %USERPROFILE%\ulr-cdp-profile-edge
 ```
