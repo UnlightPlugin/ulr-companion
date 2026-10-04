@@ -89,6 +89,10 @@ if (hits.length > 0) {
 // 畫面是靜態檔案，直接複製過去 —— 沒有需要編譯的東西。
 cpSync(join(app, "renderer"), join(out, "renderer"), { recursive: true });
 
+// 內建的空卡框（卡面替換的底稿）。main.ts 開機時複製到玩家的 mods\cards\空框\。
+// 怎麼產生的見 scripts/extract-card-frames.ts 的檔頭。
+cpSync(join(app, "assets"), join(out, "assets"), { recursive: true });
+
 /**
  * 預設 COST 表。**烤進安裝包，離線也一定有一份。**
  *
