@@ -22,13 +22,17 @@ import { addTo, emptyStore, normalizeStore, removeFrom, updateIn } from "./profi
 export type {
   ClientKind,
   CostRuleMode,
+  DeckMode,
   MatchPrefs,
   Profile,
   ProfileStore,
 } from "./profiles-core.js";
 export {
   clientLabel,
+  DECK_MODES,
   DEFAULT_APPLY_DELAY_SECONDS,
+  DEFAULT_DECK_MODE,
+  isDeckMode,
   DEFAULT_COST_RULE_MODE,
   DEFAULT_EDIT_STEP,
   DEFAULT_MATCH_PREFS,

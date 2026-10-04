@@ -48,19 +48,19 @@
  * 而且改的東西下次換牌組就沒了」。
  */
 
-import type { DeckEditItem, DeckEditReport, DeckEditState } from "@ulr/cdp-adapter";
 import type {
-  DeckContent,
-  DeckLibrary,
-  DeckPayloadShape,
-  RaidBoss,
-  RoomKind,
-} from "@ulr/deck-library";
+  DeckEditItem,
+  DeckEditReport,
+  DeckEditSlot,
+  DeckEditState,
+  RoomDeckPreload,
+} from "@ulr/cdp-adapter";
+import type { DeckContent, DeckEntry, DeckLibrary, RaidBoss, RoomKind } from "@ulr/deck-library";
 import {
   addDeck,
   deckContentHash,
-  deckContentToPayload,
   displayName,
+  emptyDeckContent,
   findDeck,
   isRaidBoss,
   listDecks,
@@ -76,8 +76,18 @@ import {
   ROOM_LABELS,
   setDeckBosses,
   setSelected,
+  swapDecks,
   updateDeckContent,
 } from "@ulr/deck-library";
+
+/**
+ * 會碰牌組的兩種模式（`off` 的時候托盤根本不跑牌組庫）。見 `profiles-core.ts`
+ * 的 `Profile.deckMode`。
+ */
+export type ActiveDeckMode = "plugin" | "official";
+
+/** 伺服器的格數（`deck_max`）。官方三牌組模式一房就是這麼多副。 */
+export const OFFICIAL_SLOTS = 3;
 
 /**
  * 一行訊息在畫面上留多久。
@@ -175,6 +185,11 @@ export interface DeckSession {
    * —— 那時候看的是迪城，人還在渦房，而**自動套用要認人在哪裡，不是認選單**。
    */
   here: RoomKind | null;
+  /**
+   * 玩家眼前是第幾格（場景的 `deck_now`，1..3）。**只有官方三牌組模式用得到**：
+   * 選單的黃字、左下那行字、「挑一副換進眼前那一格」都認它。插件模式恆為 1。
+   */
+  slotNow: number;
 }
 
 /** 開一份新的（載入存檔之後就呼叫這支）。 */
@@ -187,6 +202,7 @@ export function newSession(library: DeckLibrary, room: RoomKind = DEFAULT_ROOM):
     noticeAt: 0,
     pending: null,
     here: null,
+    slotNow: 1,
   };
 }
 
@@ -242,6 +258,21 @@ export function resolveAll(
  * ⚠ 只有 hash 真的不同才動 `updatedAt`。不比就存的話，每一次輪詢都會讓
  * 這副牌變成「剛改過」，而同步那邊會據此判定「本地比較新」→ 每台電腦都在
  * 互相推自己那份，永遠停不下來。
+ *
+ * ## ⚠⚠ 有東西排著隊就什麼都不存（2026-09-20）
+ *
+ * `pending !== null` 的意思正好是「**我們自己知道**手上這兩份不一致」：那一副
+ * 已經塞進客戶端記憶體、伺服器還沒被寫到（{@link PendingApply}）。這段期間任何
+ * 「內容跟上次不一樣」都是我們自己造成的，不是玩家的編輯。
+ *
+ * 實機那一條（從渦房走到對戰房打小號）：點下迪城頻道的那一刻頁面就把記憶體
+ * 換成迪城那副、`active.dietherm` 跟著指過去，而伺服器上還躺著渦那副；三秒內
+ * 只要讀到伺服器，舊制就會把**渦的那副存進迪城的牌組1**。完整推導見
+ * `deck-seen.ts` 的檔頭。
+ *
+ * ⚠ 這裡不會漏掉玩家的編輯：人在牌組編輯畫面時，排著的那一副在換到眼前的那
+ * 一刻就落地、`pending` 當場清掉（`main.ts` 的 `frontApplyPending`），而房間
+ * 場景裡本來就沒有卡片可以編輯。
  */
 export function autoSave(
   session: DeckSession,
@@ -249,6 +280,7 @@ export function autoSave(
   lastSeen: DeckContent | null,
   now: Date = new Date(),
 ): { session: DeckSession; saved: boolean } {
+  if (session.pending !== null) return { session, saved: false };
   const id = session.active[session.room];
   if (id === null) return { session, saved: false };
   if (lastSeen === null) return { session, saved: false };
@@ -535,22 +567,245 @@ export function followDeckOnEdit(session: DeckSession, current: DeckContent): De
  * ⚠ 挑的規則跟 {@link enterRoom} **必須一樣**（都是 `resolveSelected`）。
  * 兩邊挑不一樣的話，頁面塞一副、托盤隨後寫另一副，玩家會看到牌閃兩次。
  *
- * ⚠ cost 帶 0：伺服器自己會算，而這裡沒有可靠的原值可以帶。
+ * 官方三牌組模式：那一房的前三副就是 Deck1..3，三格一起換、`deck_now` 不動。
+ * 那一房一副都沒有時不預載（不要把玩家的三副清空）。
  */
 export function roomDeckPreloadOf(
   session: DeckSession,
-): Partial<Record<RoomKind, { deck: DeckPayloadShape; name: string }>> {
-  const out: Partial<Record<RoomKind, { deck: DeckPayloadShape; name: string }>> = {};
+  mode: ActiveDeckMode = "plugin",
+): Partial<Record<RoomKind, RoomDeckPreload>> {
+  const out: Partial<Record<RoomKind, RoomDeckPreload>> = {};
   for (const room of ROOM_KINDS) {
+    if (mode === "official") {
+      const set = officialSetOf(session.library, room);
+      if (set.every((s) => s.entry === null)) continue;
+      out[room] = {
+        slots: set.map((s) => slotWrite(s.deckId, s.content)),
+        pin: null,
+        names: Object.fromEntries(set.map((s) => [String(s.deckId), s.name])),
+      };
+      continue;
+    }
     const entry = resolveSelected(session.library, room);
     if (entry === null) continue;
     const index = listDecks(session.library, room).findIndex((d) => d.id === entry.id);
     out[room] = {
-      deck: deckContentToPayload(entry.content, 0),
-      name: displayName(entry, index < 0 ? 0 : index),
+      slots: [slotWrite(1, entry.content)],
+      pin: 1,
+      names: { "1": displayName(entry, index < 0 ? 0 : index) },
     };
   }
   return out;
+}
+
+/** 一格要寫進客戶端記憶體的樣子（`deck-write.ts` 的 `DeckSlotWrite`）。 */
+export function slotWrite(
+  deckId: number,
+  content: DeckContent,
+): {
+  deckId: number;
+  chara_card_id: (number | null)[];
+  weapon_card_id: (number | null)[];
+  event_card_id: (number | null)[];
+} {
+  return {
+    deckId,
+    chara_card_id: [...content.charaId],
+    weapon_card_id: [...content.weaponId],
+    event_card_id: [...content.eventId],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 官方三牌組模式
+// ---------------------------------------------------------------------------
+
+/** 官方三牌組模式裡，一房的某一格。 */
+export interface OfficialSlot {
+  /** `deck_id`（1..3）。 */
+  deckId: number;
+  /** 庫裡排在那個位置的那一副；那一房不到那麼多副是 `null`（那一格是空的）。 */
+  entry: DeckEntry | null;
+  content: DeckContent;
+  /** 左下那行字：牌組名；空格是原版的 `Deck{n}`。 */
+  name: string;
+}
+
+/**
+ * **一房的官方三牌組：那一房牌組庫的前三副。**
+ *
+ * 玩家 2026-09-24 的規格：「進入每個房間時，換上對應的官方三牌組，每個房間最多
+ * 只能用官方三牌組」。用庫裡同一份清單的前三副，而不是另存一份 —— 兩種模式切來
+ * 切去時牌組不會分成兩套，排序照樣在選單裡拖。
+ */
+export function officialSetOf(library: DeckLibrary, room: RoomKind): OfficialSlot[] {
+  const list = listDecks(library, room);
+  const out: OfficialSlot[] = [];
+  for (let i = 0; i < OFFICIAL_SLOTS; i++) {
+    const entry = list[i] ?? null;
+    out.push({
+      deckId: i + 1,
+      entry,
+      content: entry === null ? emptyDeckContent() : entry.content,
+      name: entry === null ? `Deck${i + 1}` : displayName(entry, i),
+    });
+  }
+  return out;
+}
+
+/** 兩組三副的內容一不一樣（照 `deck_id` 對）。 */
+export function sameSet(a: readonly DeckContent[], b: readonly DeckContent[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((c, i) => {
+    const other = b[i];
+    return other !== undefined && deckContentHash(c) === deckContentHash(other);
+  });
+}
+
+/**
+ * **客戶端記憶體現在的三副，是哪一房的官方三牌組。** 找不到回 `null`。
+ *
+ * 先看 `prefer`（通常是選單現在那一房），再看其他房。四房一開始可能都是同一副的
+ * 複本，所以 `prefer` 排前面 —— 那才是玩家剛剛待的地方。
+ */
+export function officialRoomOf(
+  library: DeckLibrary,
+  current: readonly DeckContent[],
+  prefer: RoomKind,
+): RoomKind | null {
+  const order: RoomKind[] = [prefer, ...ROOM_KINDS.filter((r) => r !== prefer)];
+  for (const room of order) {
+    const set = officialSetOf(library, room);
+    if (set.every((s) => s.entry === null)) continue;
+    if (
+      sameSet(
+        set.map((s) => s.content),
+        current,
+      )
+    )
+      return room;
+  }
+  return null;
+}
+
+/**
+ * **官方三牌組模式的自動存檔**：玩家在牌組編輯畫面改了第 n 格，存回那一房的
+ * 第 n 副。
+ *
+ * 跟插件模式的 {@link autoSave} 同一條規矩：只存「我們兩次觀察之間真的變了」的
+ * 那幾格（`lastSeen` 是 `null` 一律不存），而且只存 Edit 裡看到的（呼叫端擋）。
+ *
+ * ⚠ 那一房不到 n 副、而那一格有牌 → **新增**一副補上去（玩家在空的 Deck3 排了
+ * 一副新的）。空的格子不新增 —— 那只是一格沒用到。
+ */
+export function officialAutoSave(
+  session: DeckSession,
+  current: readonly DeckContent[],
+  lastSeen: readonly DeckContent[] | null,
+  now: Date = new Date(),
+): { session: DeckSession; saved: number } {
+  if (lastSeen === null) return { session, saved: 0 };
+  const room = session.room;
+  let library = session.library;
+  let saved = 0;
+  for (let i = 0; i < Math.min(OFFICIAL_SLOTS, current.length); i++) {
+    const cur = current[i];
+    const seen = lastSeen[i];
+    if (cur === undefined || seen === undefined) continue;
+    if (deckContentHash(cur) === deckContentHash(seen)) continue;
+    const list = listDecks(library, room);
+    const entry = list[i];
+    if (entry !== undefined) {
+      if (deckContentHash(entry.content) === deckContentHash(cur)) continue;
+      library = updateDeckContent(library, room, entry.id, cur, now);
+      saved++;
+      continue;
+    }
+    if (cur.charaId.every((x) => x === null)) continue;
+    // 補到第 i 格：前面不夠的話 addDeck 會接在最後，而那正好是第 i 格（前面都滿了）。
+    if (list.length === i) {
+      library = addDeck(library, room, { content: cur, now }).library;
+      saved++;
+    }
+  }
+  return saved === 0 ? { session, saved } : { session: { ...session, library }, saved };
+}
+
+/**
+ * **官方三牌組模式的選單回報。** 回傳 `load` = 要不要把 `session.room` 的三副
+ * 重新換進客戶端記憶體（呼叫端做）。
+ *
+ * ```
+ *   deck-select   把那一副**換進眼前那一格**（跟原本在那一格的交換位置）
+ *   room-switch   選單切到另一房 → 換上那一房的三副
+ *   其他          改名、排序、標籤：跟插件模式一樣改庫；排序動到前三副也要重換
+ * ```
+ *
+ * ⚠ 沒有 deck-cycle：官方模式的 ◀▶ 是原版行為，頁面不回報。＋－也不畫。
+ */
+export function applyOfficialReport(
+  session: DeckSession,
+  report: DeckEditReport,
+  now: Date = new Date(),
+): { session: DeckSession; load: boolean } {
+  const room = session.room;
+  const at = now.getTime();
+  const firstThree = (lib: DeckLibrary): string =>
+    officialSetOf(lib, room)
+      .map((s) => s.entry?.id ?? "-")
+      .join(",");
+
+  switch (report.type) {
+    case "deck-select": {
+      const picked = findDeck(session.library, room, report.id);
+      if (picked === null) return { session, load: false };
+      const slot = Math.max(1, Math.min(OFFICIAL_SLOTS, session.slotNow));
+      const list = listDecks(session.library, room);
+      const there = list[slot - 1];
+      let library = session.library;
+      if (there === undefined) {
+        // 那一格原本是空的：把挑的那副搬到那個位置（前面不夠就接在最後）。
+        library = moveDeck(library, room, picked.id, slot - 1, now);
+      } else if (there.id !== picked.id) {
+        library = swapDecks(library, room, there.id, picked.id, now);
+      } else {
+        return { session, load: false };
+      }
+      return { session: withNotice({ ...session, library }, null, at), load: true };
+    }
+    case "room-switch": {
+      const next = ROOM_KINDS.find((k) => k === report.room);
+      if (next === undefined || next === room) return { session, load: false };
+      return { session: withNotice({ ...session, room: next }, null, at), load: true };
+    }
+    case "deck-rename":
+      return {
+        session: {
+          ...session,
+          library: renameDeck(session.library, room, report.id, report.name.trim(), now),
+        },
+        load: false,
+      };
+    case "deck-move": {
+      const before = firstThree(session.library);
+      const library = moveDeck(session.library, room, report.id, report.toIndex, now);
+      return { session: { ...session, library }, load: firstThree(library) !== before };
+    }
+    case "deck-bosses": {
+      const bosses = report.bosses.filter((b): b is RaidBoss => isRaidBoss(b));
+      return {
+        session: {
+          ...session,
+          library: setDeckBosses(session.library, room, report.id, bosses, now),
+        },
+        load: false,
+      };
+    }
+    case "deck-ui-error":
+      return { session: withNotice(session, `介面出錯：${report.message}`, at), load: false };
+    default:
+      return { session, load: false };
+  }
 }
 
 /**
@@ -568,7 +823,10 @@ export function highlightOf(session: DeckSession, room: RoomKind): string | null
 }
 
 /** 現在畫面上該長什麼樣。**選單上的每一個字都由這支決定。** */
-export function deckEditStateOf(session: DeckSession): DeckEditState {
+export function deckEditStateOf(
+  session: DeckSession,
+  mode: ActiveDeckMode = "plugin",
+): DeckEditState {
   const room = session.room;
   const decks: DeckEditItem[] = listDecks(session.library, room).map((d, i) => ({
     id: d.id,
@@ -576,21 +834,37 @@ export function deckEditStateOf(session: DeckSession): DeckEditState {
     // ⚠ 標籤只有渦房有意義（`DeckEntry.bosses` 在其他房恆為空，這裡再擋一次
     // 是為了讓手改過的存檔也畫得乾淨）。送的是**鍵**，頁面自己查 bossOptions。
     bosses: room === "raid" ? [...d.bosses] : [],
-    // 內容下放到頁面，但**只為了畫**：選單裡每一副要有三張卡面縮圖與兩種總
-    // COST，而那些只能從內容算。⚠ 頁面永遠不會把它送回來 —— 回報裡沒有任何
-    // 帶內容的種類（見 `DeckEditReport`）。
+    // 內容下放到頁面，但**只為了畫**：選單裡每一副要有三張卡面縮圖與總 COST，
+    // 而那些只能從內容算。⚠ 頁面永遠不會把它送回來。
     content: {
-      chara: [...d.content.chara],
-      charaIndex: [...d.content.charaIndex],
-      weapon: [...d.content.weapon],
-      eventIndex: [...d.content.eventIndex],
+      charaId: [...d.content.charaId],
+      weaponId: [...d.content.weaponId],
+      eventId: [...d.content.eventId],
     },
   }));
+
+  // 左下那行字與改名對象：插件模式只有工作槽（黃字那一副）；官方模式三格各自。
+  let slots: Record<string, DeckEditSlot>;
+  let activeId: string | null;
+  if (mode === "official") {
+    const set = officialSetOf(session.library, room);
+    slots = Object.fromEntries(
+      set.map((s) => [String(s.deckId), { id: s.entry?.id ?? null, name: s.name }]),
+    );
+    activeId = set[Math.max(0, Math.min(OFFICIAL_SLOTS, session.slotNow) - 1)]?.entry?.id ?? null;
+  } else {
+    activeId = highlightOf(session, room);
+    const index = decks.findIndex((d) => d.id === activeId);
+    slots = { "1": { id: activeId, name: index < 0 ? "Deck1" : (decks[index]?.name ?? "Deck1") } };
+  }
+
   return {
+    mode,
+    slots,
     room,
     rooms: ROOM_KINDS.map((k) => ({ key: k, label: ROOM_LABELS[k] })),
     decks,
-    activeId: highlightOf(session, room),
+    activeId,
     bossOptions: RAID_BOSSES.map((b) => ({ key: b, label: RAID_BOSS_LABELS[b] })),
     // 這一房該畫哪一種總 COST（PVE 不畫、亞城官方、迪城自訂）—— 房型的意思
     // 只有這邊知道，頁面照著畫就好。

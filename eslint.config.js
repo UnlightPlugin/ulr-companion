@@ -14,7 +14,7 @@ export default tseslint.config(
     // 專案沒裝 `globals`，所以這裡手動列出用到的那幾個就好。
     // tools/ 底下的維護腳本同一回事。⚠ 只列進版控的那一支：本機的
     // release-local.mjs 自己用 `/* global */` 宣告，兩邊都給會變 no-redeclare。
-    files: ["scripts/**/*.mjs", "tools/scrape-raid-treasure.mjs"],
+    files: ["scripts/**/*.mjs", "tools/scrape-raid-treasure.mjs", "tools/build-quest-treasure.mjs"],
     languageOptions: {
       globals: {
         console: "readonly",
@@ -22,6 +22,28 @@ export default tseslint.config(
         Buffer: "readonly",
         fetch: "readonly",
         setTimeout: "readonly",
+      },
+    },
+  },
+  {
+    // 網頁版開機用的 Chrome 擴充：原樣複製進使用者資料夾給瀏覽器載，
+    // 跑在頁面（content script）跟 service worker 裡，不經過 tsc。
+    files: ["apps/tray/assets/ulr-boot-extension/**/*.js"],
+    languageOptions: {
+      globals: {
+        chrome: "readonly",
+        window: "readonly",
+        document: "readonly",
+        location: "readonly",
+        fetch: "readonly",
+        URL: "readonly",
+        URLSearchParams: "readonly",
+        AbortController: "readonly",
+        Event: "readonly",
+        HTMLMediaElement: "readonly",
+        setTimeout: "readonly",
+        clearTimeout: "readonly",
+        setInterval: "readonly",
       },
     },
   },

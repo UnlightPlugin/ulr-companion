@@ -107,16 +107,17 @@ export async function syncDeckLibrary(
   opts: DeckSyncOptions,
 ): Promise<DeckSyncResult> {
   const got = await call(opts, { method: "GET" });
-  if ("error" in got) return { ok: false, reason: `讀雲端失敗：${got.error}` };
+  if ("error" in got) return { ok: false, reason: `讀 Cloudflare Workers 失敗：${got.error}` };
 
   let remote: { version: number; doc: SyncDocument | null };
   if (got.status === 404) remote = { version: 0, doc: null };
   else if (got.status === 200) {
     const rec = readRecord(got.body);
-    if (rec === null) return { ok: false, reason: "雲端那份讀不懂（可能是新版格式），這一輪不動" };
+    if (rec === null)
+      return { ok: false, reason: "Cloudflare Workers 上那份讀不懂（可能是新版格式），這一輪不動" };
     remote = rec;
   } else {
-    return { ok: false, reason: `讀雲端失敗：HTTP ${got.status}` };
+    return { ok: false, reason: `讀 Cloudflare Workers 失敗：HTTP ${got.status}` };
   }
 
   let base = local;
@@ -150,7 +151,7 @@ export async function syncDeckLibrary(
       headers: { "content-type": "application/json", "if-match": `"${remote.version}"` },
       body: JSON.stringify({ doc: merged.document }),
     });
-    if ("error" in put) return { ok: false, reason: `推上雲端失敗：${put.error}` };
+    if ("error" in put) return { ok: false, reason: `推上 Cloudflare Workers 失敗：${put.error}` };
     if (put.status === 200) {
       const v = (put.body as { version?: unknown } | null)?.version;
       const version = typeof v === "number" ? v : remote.version + 1;
@@ -159,11 +160,12 @@ export async function syncDeckLibrary(
     if (put.status === 409) {
       // 別台電腦剛好先寫了：拿它那份重來。本地已經合進去的東西（base）留著。
       const rec = readRecord(put.body);
-      if (rec === null) return { ok: false, reason: "雲端衝突回應讀不懂，這一輪不動" };
+      if (rec === null)
+        return { ok: false, reason: "Cloudflare Workers 的衝突回應讀不懂，這一輪不動" };
       remote = rec;
       continue;
     }
-    return { ok: false, reason: `推上雲端失敗：HTTP ${put.status}` };
+    return { ok: false, reason: `推上 Cloudflare Workers 失敗：HTTP ${put.status}` };
   }
   return { ok: false, reason: `連續 ${attempts} 次撞到別台電腦同時在寫，下一輪再試` };
 }

@@ -61,7 +61,7 @@
         margin: 0;
         background: var(--bg-lo);
         color: var(--text);
-        font: 13px/1.6 var(--sans);
+        font: 15px/1.6 var(--sans);
         user-select: none;
         display: flex;
         flex-direction: column;
@@ -81,7 +81,7 @@
       }
       header .brand {
         font-family: var(--serif);
-        font-size: 13px;
+        font-size: 15px;
         letter-spacing: 0.22em;
         text-transform: uppercase;
         color: #b9c6cc;
@@ -92,13 +92,13 @@
         padding: 1px 7px;
         border: 1px solid #3a4a52;
         border-radius: 2px;
-        font-size: 10.5px;
+        font-size: 12.5px;
         letter-spacing: 0.06em;
         color: #8fa0a8;
       }
       header .who {
         margin-left: auto;
-        font-size: 11.5px;
+        font-size: 13.5px;
         color: #8fa0a8;
         letter-spacing: 0.04em;
       }
@@ -112,15 +112,19 @@
         background: var(--bg-lo);
         border-bottom: 1px solid var(--line);
       }
+      /* ⚠ 大分頁有 9 個（2026-09-26 加了迪特赫姆與自訂COST），固定 min-width 92 在
+         860 寬的視窗會擠出去。改成照字長分、一起伸縮，最窄的 760 也放得下。 */
       nav.tabs button {
         appearance: none;
-        min-width: 92px;
-        padding: 6px 16px 5px;
+        flex: 1 1 auto;
+        min-width: 0;
+        white-space: nowrap;
+        padding: 6px 8px 5px;
         border: 1px solid var(--line);
         border-bottom: none;
         border-radius: 2px 2px 0 0;
         font-family: var(--serif);
-        font-size: 13.5px;
+        font-size: 15.5px;
         letter-spacing: 0.14em;
         cursor: pointer;
         color: var(--ink-off);
@@ -169,7 +173,7 @@
         background: none;
         color: var(--dim);
         font-family: var(--serif);
-        font-size: 13px;
+        font-size: 15px;
         letter-spacing: 0.1em;
         text-align: left;
         cursor: pointer;
@@ -199,7 +203,7 @@
       h2 {
         margin: 0 0 3px;
         font-family: var(--serif);
-        font-size: 16px;
+        font-size: 18px;
         font-weight: 600;
         letter-spacing: 0.08em;
       }
@@ -222,7 +226,7 @@
       }
       .lede {
         color: var(--dim);
-        font-size: 12px;
+        font-size: 14px;
         margin: 0;
       }
 
@@ -248,13 +252,13 @@
       }
       .big {
         font-family: var(--serif);
-        font-size: 24px;
+        font-size: 26px;
         font-weight: 600;
         font-variant-numeric: tabular-nums;
       }
       .hint {
         color: var(--dim);
-        font-size: 11.5px;
+        font-size: 13.5px;
         margin-top: 6px;
         line-height: 1.65;
       }
@@ -269,7 +273,7 @@
         padding: 0 3px;
         color: var(--dim);
         cursor: help;
-        font-size: 12px;
+        font-size: 14px;
         user-select: none;
       }
       .info:hover,
@@ -297,7 +301,7 @@
         border-radius: 3px;
         box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
         color: var(--fg);
-        font-size: 12px;
+        font-size: 14px;
         line-height: 1.7;
         /* ⚠ 滑鼠事件一律穿過去。氣泡就開在 ⓘ 正下方，收得到事件的話它會蓋住
            ⓘ 本身 → mouseleave → 收起來 → 又露出 ⓘ → 再展開，無限閃爍。 */
@@ -343,7 +347,7 @@
         display: flex;
         justify-content: space-between;
         color: var(--dim);
-        font-size: 11px;
+        font-size: 13px;
       }
 
       input[type="text"],
@@ -353,7 +357,7 @@
         border: 1px solid var(--line);
         border-radius: 2px;
         color: var(--text);
-        font: 12.5px var(--sans);
+        font: 14.5px var(--sans);
         padding: 4px 7px;
       }
       input:focus,
@@ -364,28 +368,38 @@
         background: #12151f;
       }
 
-      /* 遊戲的通用按鈕（btn_gene）：淺灰漸層、按下去描紅邊 */
-      button.gene {
+      /* 所有按鈕的預設：跟分頁、「OK 鈕的顏色」那排同一套暗紅（tab_chara）。
+         ⚠ **不要再用淺灰的 btn_gene 漸層。** 那是遊戲裡的通用鈕沒錯，但放在這個
+         深色視窗裡跟紅分頁是兩種東西，玩家看到的是「這顆跟其他按鈕不一樣」
+         （2026-10-04 被退過一次）。更早之前沒掛 class 的按鈕甚至是 Windows 原生白鈕。
+         用 `:where()` 把特異度壓到 0 —— 分頁、檔位、側欄那些有自己樣式的按鈕，
+         隨便一條規則都蓋得過它。 */
+      :where(button) {
         appearance: none;
         padding: 4px 12px;
-        border: 1px solid #2a2c31;
+        border: 1px solid var(--line);
         border-radius: 2px;
-        background: linear-gradient(180deg, #cfd4da 0%, #9aa1ab 48%, #cdd2d8 52%, #eef1f4 100%);
-        color: #23262c;
-        font: 12px var(--sans);
+        background: linear-gradient(180deg, var(--tab-off), var(--tab-off-lo));
+        color: #e8d5d6;
+        font: 14px var(--serif);
+        letter-spacing: 0.06em;
+        text-shadow: 0 1px 1px rgba(0, 0, 0, 0.6);
         cursor: pointer;
       }
-      button.gene:hover {
-        border-color: var(--red);
+      :where(button:hover) {
+        background: linear-gradient(180deg, var(--tab-hover), #6e282d);
+        color: #fff;
       }
-      button.gene:disabled {
+      /* Cost 表的規則來源：選中的那顆是 aria-pressed＋disabled（按了也沒事做），
+         它要亮著當「現在是這個」，不能跟著變淡。 */
+      :where(button:disabled:not([aria-pressed="true"])) {
         opacity: 0.4;
         cursor: default;
-        border-color: #2a2c31;
+        background: linear-gradient(180deg, var(--tab-off), var(--tab-off-lo));
+        color: #e8d5d6;
       }
-      button.gene.danger:hover {
-        border-color: var(--red);
-        color: #7a1f26;
+      :where(button.danger:hover) {
+        border-color: var(--amber);
       }
 
       /* =================================================================
@@ -411,7 +425,7 @@
         background: linear-gradient(180deg, var(--tab-off), var(--tab-off-lo));
         color: var(--ink-off);
         font-family: var(--serif);
-        font-size: 12.5px;
+        font-size: 14.5px;
         letter-spacing: 0.08em;
         cursor: pointer;
       }
@@ -425,7 +439,7 @@
       }
       .etabs .n {
         margin-left: 5px;
-        font-size: 10.5px;
+        font-size: 12.5px;
         opacity: 0.7;
       }
 
@@ -443,7 +457,7 @@
         flex: none;
         width: 6.6em;
         font-family: var(--serif);
-        font-size: 12px;
+        font-size: 14px;
         letter-spacing: 0.03em;
         color: var(--text);
         overflow: hidden;
@@ -466,7 +480,7 @@
       }
       .ehead .ename {
         color: var(--dim);
-        font-size: 11px;
+        font-size: 13px;
       }
       .egrid {
         flex: 1;
@@ -487,7 +501,7 @@
         grid-template-columns: repeat(3, minmax(0, 1fr));
       }
       .egrid .slot {
-        font-size: 10px;
+        font-size: 12.5px;
         color: var(--dim);
         text-align: center;
         letter-spacing: 0.04em;
@@ -510,7 +524,7 @@
       }
       .ecell .cn {
         display: block;
-        font-size: 10px;
+        font-size: 12.5px;
         line-height: 1.25;
         height: 2.5em;
         color: var(--dim);
@@ -545,7 +559,7 @@
         -webkit-box-orient: vertical;
         -webkit-line-clamp: 2;
         line-clamp: 2;
-        font-size: 9.5px;
+        font-size: 12px;
         line-height: 1.2;
         color: var(--grey);
         overflow: hidden;
@@ -559,7 +573,7 @@
         align-items: center;
         gap: 4px 10px;
         margin-bottom: 2px;
-        font-size: 11px;
+        font-size: 13px;
         color: var(--dim);
       }
       .evlegend b {
@@ -574,7 +588,7 @@
       .ecell input {
         width: 100%;
         padding: 2px 3px;
-        font-size: 11.5px;
+        font-size: 13.5px;
         text-align: center;
         font-variant-numeric: tabular-nums;
         background: #12151f;
@@ -723,7 +737,7 @@
       }
       .mblock .mname {
         font-family: var(--serif);
-        font-size: 11.5px;
+        font-size: 13.5px;
         color: var(--text);
         overflow: hidden;
         text-overflow: ellipsis;
@@ -735,7 +749,7 @@
       .egroup {
         margin: 12px 0 5px;
         font-family: var(--serif);
-        font-size: 12px;
+        font-size: 14px;
         letter-spacing: 0.06em;
         color: var(--amber);
         border-bottom: 1px solid rgba(255, 194, 71, 0.22);
@@ -743,27 +757,19 @@
       }
       .egroup .sub {
         color: var(--dim);
-        font-size: 11px;
+        font-size: 13px;
         letter-spacing: 0;
         margin-left: 6px;
       }
 
       /* 官方 COST 檔位的快速鍵。刻意做小 —— 它們是捷徑，不是主要的輸入方式，
          真正的值在旁邊那個數字欄位裡（自訂 COST 想填幾就填幾）。 */
+      /* ⚠ 顏色跟所有按鈕一樣是遊戲的暗紅鈕（見 `:where(button)`），這裡只縮小。
+         以前是深底灰字的自創扁平鈕，被玩家指出「所有按鈕都要用遊戲風格」。 */
       button.tier {
-        appearance: none;
         margin-left: 4px;
         padding: 3px 8px;
-        border: 1px solid var(--line);
-        border-radius: 2px;
-        background: #12151f;
-        color: var(--dim);
-        font: 11.5px var(--sans);
-        cursor: pointer;
-      }
-      button.tier:hover {
-        border-color: var(--red);
-        color: var(--text);
+        font-size: 13.5px;
       }
       /*
        * 選中的那一顆。配對那邊的檔位快速鍵**沒有**這個狀態（按了是把數字填進
@@ -771,9 +777,9 @@
        * 現在的設定值，看不出「現在是哪一個」的話玩家只能靠隔壁那格數字猜。
        */
       button.tier[aria-selected="true"] {
-        border-color: var(--amber);
-        color: var(--amber);
-        background: rgba(255, 194, 71, 0.1);
+        background: linear-gradient(180deg, var(--tab-on), var(--tab-on-lo));
+        color: var(--ink-on);
+        text-shadow: 0 1px 0 rgba(255, 255, 255, 0.6);
       }
 
       /* --- 編輯規則：一段壓 C 區間一排 --- */
@@ -787,12 +793,12 @@
       .bandrow input {
         width: 100%;
         padding: 3px 4px;
-        font-size: 12px;
+        font-size: 14px;
         text-align: center;
         font-variant-numeric: tabular-nums;
       }
       .bandrow .lbl {
-        font-size: 11px;
+        font-size: 13px;
         color: var(--dim);
         text-align: center;
       }
@@ -815,7 +821,7 @@
         background: linear-gradient(180deg, var(--tab-off), var(--tab-off-lo));
         color: #e8d5d6;
         font-family: var(--serif);
-        font-size: 13px;
+        font-size: 15px;
         letter-spacing: 0.06em;
         cursor: pointer;
       }
@@ -831,13 +837,13 @@
       table.profiles {
         width: 100%;
         border-collapse: collapse;
-        font-size: 12.5px;
+        font-size: 14.5px;
       }
       table.profiles th {
         text-align: left;
         font-weight: 500;
         color: var(--dim);
-        font-size: 11.5px;
+        font-size: 13.5px;
         padding: 0 6px 5px;
         border-bottom: 1px solid var(--rule);
       }
@@ -855,15 +861,26 @@
       table.profiles input[type="number"] {
         width: 72px;
       }
-      /* 中間人那一欄是一整個網址（36 字元），不再是四位數的埠。
-         窄於這個寬度會被切成 `wss://ulr-link.lldavuull.work`，而看不到尾巴的
-         網址沒有辦法用眼睛核對 —— 那正是這一格唯一的用途。 */
-      table.profiles td:nth-child(5) {
-        min-width: 250px;
+      /* 名稱給固定寬：`width: 100%` 的輸入框在自動排版的表格裡會拿原生的 20 字元
+         當理想寬度，把狀態欄擠到斷行；改成不換行的話，窄視窗又換它被擠成 0。 */
+      table.profiles input[data-field="name"] {
+        width: 6em;
+      }
+      /* 最窄的視窗狀態欄還是得斷行；只准斷在括號前，不要斷成「這個視／窗（已」。 */
+      table.profiles td.state {
+        word-break: keep-all;
+      }
+      table.profiles td.acts {
+        width: 1%;
+        white-space: nowrap;
+        text-align: right;
+      }
+      table.profiles td.acts button {
+        padding: 3px 7px;
       }
       .self-mark {
         color: var(--amber);
-        font-size: 11px;
+        font-size: 13px;
       }
 
       /* 步驟教學：玩家要照著做的東西，行距要鬆、序號要看得見 */
@@ -871,11 +888,19 @@
         margin: 8px 0 0;
         padding-left: 20px;
         color: var(--text);
-        font-size: 12px;
+        font-size: 14px;
         line-height: 1.9;
       }
       ol.steps li {
         margin-bottom: 2px;
+      }
+      /* 整行要給玩家照抄的長字串（捷徑目標）：自成一塊、在任何地方都能斷 */
+      code.line {
+        display: block;
+        margin: 4px 0;
+        white-space: pre-wrap;
+        word-break: break-all;
+        user-select: text;
       }
       code {
         display: inline-block;
@@ -886,7 +911,7 @@
         background: #12151f;
         color: var(--amber);
         font:
-          11.5px ui-monospace,
+          13.5px ui-monospace,
           Consolas,
           monospace;
         /* 玩家要把這一行複製到 Steam 去 —— 選得起來是這個元素的全部用途 */
@@ -903,7 +928,7 @@
       .todo-box h3 {
         margin: 0 0 6px;
         font-family: var(--serif);
-        font-size: 13.5px;
+        font-size: 15.5px;
         font-weight: 600;
         color: var(--text);
         letter-spacing: 0.06em;
@@ -912,7 +937,7 @@
         margin: 6px 0 0;
         padding-left: 18px;
         color: var(--dim);
-        font-size: 12px;
+        font-size: 14px;
         line-height: 1.75;
       }
       .badge {
@@ -920,7 +945,7 @@
         padding: 1px 7px;
         border: 1px solid var(--rule);
         border-radius: 2px;
-        font-size: 10.5px;
+        font-size: 12.5px;
         letter-spacing: 0.08em;
         color: var(--grey);
         vertical-align: 2px;
@@ -933,7 +958,7 @@
         overflow: auto;
         color: var(--dim);
         font:
-          11px/1.6 ui-monospace,
+          13px/1.6 ui-monospace,
           Consolas,
           monospace;
         white-space: pre-wrap;
@@ -950,7 +975,7 @@
         height: 28px;
         border-top: 1px solid var(--line);
         background: linear-gradient(180deg, #0d0d0d, #050505);
-        font-size: 11.5px;
+        font-size: 13.5px;
       }
       footer .cell {
         display: flex;
@@ -1011,9 +1036,8 @@
 
     <footer>
       <span class="cell"><span class="dot" id="dot"></span><span id="fProfile">—</span></span>
-      <span class="cell" id="fGame">等遊戲…</span>
       <span class="cell" id="fLink">—</span>
-      <span class="cell grow" id="fLast">—</span>
+      <span class="cell grow" id="fLast" style="cursor: pointer">—</span>
     </footer>
 
     <script>
@@ -1033,19 +1057,8 @@
           subs: [
             { id: "ready", label: "準備" },
             { id: "seconds", label: "秒數上限" },
-            // ⚠ 加速的引擎與協商都做好了，**刻意不開放**。理由見 battle/speed
-            // 那一頁：它動的是節奏，而節奏牽涉公平性，還沒驗夠。
-            {
-              id: "speed",
-              label: "加速",
-              todo: true,
-              why: "引擎與協商都做好了，刻意還沒開放。",
-              items: [
-                "它動的是<b>對戰節奏</b>，而節奏牽涉公平性 —— 還沒驗夠。",
-                "⚠ 而且效果有限：<b>戰鬥長度是伺服器排程的</b>，加速客戶端動畫改不動伺服器那一端的節拍。",
-                "開放的前提是兩邊協商一致，單邊加速沒有意義。",
-              ],
-            },
+            // 加速的引擎與協商都做好了，但連預告頁都拿掉了（玩家 2026-10-04）：
+            // 戰鬥長度是伺服器排程的，加速客戶端動畫幾乎沒效果。
             { id: "count", label: "記牌", todo: true },
             { id: "replay", label: "牌譜", todo: true },
           ],
@@ -1053,6 +1066,49 @@
         {
           id: "deck",
           label: "牌組",
+          subs: [
+            // 牌組替換排在等候套用前面：後者只在插件模式有意義。
+            { id: "deckmode", label: "牌組替換" },
+            { id: "apply", label: "等候套用" },
+            { id: "chara", label: "人物篩選" },
+          ],
+        },
+        {
+          id: "vortex",
+          label: "渦",
+          subs: [
+            { id: "vrank", label: "獎勵標記" },
+            { id: "vreward", label: "結算通知" },
+            { id: "vitem", label: "物品捷徑" },
+            { id: "vfeed", label: "渦通報" },
+          ],
+        },
+        // 迪特赫姆：只在迪城才有作用的東西（玩家 2026-09-26：在迪城和小號互刷賺 GEM）。
+        // 隱藏地圖是從牌組搬過來的 —— 它改的是迪城「創建對戰房間」的下拉。
+        {
+          id: "diet",
+          label: "迪特赫姆",
+          subs: [
+            { id: "hidden", label: "隱藏地圖" },
+            { id: "ditem", label: "物品捷徑" },
+            { id: "gemup", label: "GEM UP" },
+          ],
+        },
+        { id: "bonus", label: "獎勵", subs: [{ id: "bitem", label: "物品捷徑" }] },
+        {
+          id: "quest",
+          label: "任務",
+          subs: [
+            { id: "qitem", label: "物品捷徑" },
+            { id: "chest", label: "寶箱標註" },
+          ],
+        },
+        // 模組：改的是玩家自己畫面上的美術，不動規則、不動對手看到的東西。
+        { id: "mods", label: "模組", subs: [{ id: "cards", label: "卡面替換" }] },
+        // 自訂COST：原本在牌組底下的五格，獨立出來（玩家 2026-09-26）。
+        {
+          id: "rule",
+          label: "自訂COST",
           subs: [
             // ⚠ **對戰地點排第一。** 自動配對本身搬回遊戲裡了（迪城大廳那顆
             // 「快速比賽」），托盤這一格只剩「這一場開在哪」—— 而那是玩家會
@@ -1067,28 +1123,19 @@
             { id: "costedit", label: "編輯 COST" },
             { id: "ruleedit", label: "編輯規則" },
             { id: "ruledesc", label: "編輯描述" },
-            { id: "hidden", label: "隱藏地圖" },
-            { id: "apply", label: "等候套用" },
           ],
         },
-        {
-          id: "vortex",
-          label: "渦",
-          subs: [
-            { id: "vrank", label: "獎勵標記" },
-            { id: "vreward", label: "結算通知" },
-          ],
-        },
-        { id: "bonus", label: "獎勵", subs: [{ id: "foresight", label: "未來視", todo: true }] },
-        { id: "quest", label: "任務", subs: [{ id: "chest", label: "寶箱標註", todo: true }] },
         {
           id: "settings",
           label: "設置",
           subs: [
             { id: "link", label: "連線" },
+            // 用瀏覽器玩的整套：帶除錯埠的瀏覽器（按鈕／桌面捷徑／手動教學）＋
+            // ULR Boot＋書籤。放在連線底下：它跟「怎麼開遊戲」是同一件事。
+            { id: "web", label: "網頁版" },
             { id: "startup", label: "啟動" },
-            { id: "update", label: "更新" },
             { id: "log", label: "記錄" },
+            // 更新併進關於（玩家 2026-10-04）：那一頁只有版本號與一段說明。
             { id: "about", label: "關於" },
             // ⚠ **「配置」是整個介面裡優先級最低的一格，而且預設看不見。**
             //
@@ -1208,6 +1255,7 @@
         const id = e.target.closest("button")?.dataset.sub;
         if (!id || id === sub) return;
         sub = id;
+        webMsg = null;
         renderChrome();
         renderBody();
       });
@@ -1219,7 +1267,7 @@
         // ⚠ idle 不是錯誤，是「還不需要連」。跟 offline 分開講是刻意的 ——
         // 混成同一句的話，玩家在大廳看到「沒連上中間人」會以為壞了。
         idle: "還沒進對戰",
-        offline: "沒連上中間人",
+        offline: "沒連上 Cloudflare Workers",
         solo: "還沒配到對手",
         paired: "已配到對手",
         incompatible: "⚠ 版本不合，已退回單邊",
@@ -1269,25 +1317,22 @@
         $("fProfile").textContent = p && multi ? p.name : "";
         $("dot").className =
           "dot " + (!st || !st.connected ? "" : st.link === "paired" ? "paired" : "solo");
-        $("fGame").textContent = !st
-          ? "啟動中…"
-          : !st.connected
-            ? "等遊戲…"
-            : st.armed
-              ? // ⚠ 打任務／渦時也是 armed，但那不是「對戰中」。講成對戰中的話，
-                // 玩家會合理地期待準備與秒數在管 —— 而它們刻意沒有。
-                NPC_RULE_TEXT[st.rule]
-                ? `${NPC_RULE_TEXT[st.rule]}中（對手是 NPC）`
-                : `對戰中${st.seat ? `（座位 ${st.seat}）` : ""}`
-              : // ⚠ 不要寫「還沒進對戰」。**打完之後也會走到這裡**（結算畫面、
-                // 回大廳），而那時「還沒」是錯的 —— 玩家剛打完一場。
-                "已接上，不在對戰中";
-        $("fLink").textContent = st
-          ? st.connected && !st.pvp && NPC_RULE_TEXT[st.rule]
-            ? "不生效（NPC）"
-            : (LINK_TEXT[st.link] ?? st.link)
-          : "—";
-        $("fLast").textContent = st?.error ? "⚠ " + st.error : (st?.lastSend ?? "—");
+        /**
+         * ⚠ **狀態列不只講對戰。**（玩家 2026-10-04：插件功能很多）
+         *
+         *   第一格  燈號就是連線狀態（「等遊戲／已接上」那一格拿掉了，玩家 2026-10-04）
+         *   第二格  握手 —— **只在跟真人對戰時出現**。其他時候它只會寫「還沒進對戰」，
+         *           在大廳、渦房、任務裡看到這句只會讓人以為少做了什麼
+         *   最後一格 插件最近做的一件事（任何功能的記錄），點一下看完整記錄
+         */
+        const pvpNow = st?.connected === true && st.armed && st.pvp === true;
+        $("fLink").style.display = pvpNow ? "" : "none";
+        $("fLink").textContent = pvpNow ? (LINK_TEXT[st.link] ?? st.link) : "";
+        // 記錄有時一則好幾行（例外的堆疊），狀態列只放第一行；完整的在 title 與記錄頁。
+        const lastLog = (snap?.log ?? []).at(-1) ?? "";
+        const last = st?.error ? "⚠ " + st.error : lastLog.split("\n")[0] || "—";
+        $("fLast").textContent = last;
+        $("fLast").title = st?.error ? "⚠ " + st.error : lastLog || "";
       }
 
       // =====================================================================
@@ -1346,6 +1391,18 @@
         // 渦那兩頁同理：狀態要跟遊戲要，開著才輪詢。
         if (onRaidPage()) startRaidPolling();
         else stopRaidPolling();
+        // 任務那兩頁同理。
+        if (onQuestPage()) startQuestPolling();
+        else stopQuestPolling();
+        // 迪特赫姆的物品捷徑／GEM UP 同理。
+        if (onDietPage()) startDietPolling();
+        else stopDietPolling();
+        // 獎勵的物品捷徑同理。
+        if (onBonusPage()) startBonusPolling();
+        else stopBonusPolling();
+        // 卡面替換同理（資料夾內容＋遊戲那端換了幾張）。
+        if (onModsPage()) startModsPolling();
+        else stopModsPolling();
       }
 
       /**
@@ -1609,7 +1666,7 @@
         );
       };
 
-      // --- 牌組 › Cost 表 ---------------------------------------------------
+      // --- 自訂COST › Cost 表 ---------------------------------------------------
       /**
        * 自訂 COST。
        *
@@ -1681,7 +1738,7 @@
         return desc + log;
       }
 
-      PAGES["deck/cost"] = () => {
+      PAGES["rule/cost"] = () => {
         const st = snap?.status;
         const rule = snap?.costRule ?? null;
         const failure = snap?.costRuleError ?? null;
@@ -1900,13 +1957,16 @@
        * `explainDebugPort()` 在真的出事時講一句，而且是講**那一次**的原因 ——
        * 比預先把四種可能都攤在玩家面前準。
        *
-       * ⚠ **瀏覽器（Chrome／Edge）沒有這一段。** 那條路要自己改 `app.asar`，
-       * 玩家做不到 —— 對他講等於叫他去撞牆。（我自己也不需要：我知道那支 cmd
-       * 在哪。）判斷寫成「不是桌面版」而不是列舉瀏覽器，這樣以後多一種瀏覽器
-       * 也不會漏掉，安靜地對他顯示一段做不到的指示。
+       * ⚠ **瀏覽器（Chrome／Edge）走另一條。** 網頁版玩家是用書籤＋竄改猴（或
+       * ULR Boot）開遊戲的，那條路本身不需要除錯埠 —— 插件需要。所以給的是
+       * 「用專用設定檔帶除錯埠開瀏覽器」，不是 Steam 啟動選項（Steam 的網頁版
+       * 啟動器會把參數吃掉，見 docs）。判斷寫成「不是桌面版」而不是列舉瀏覽器，
+       * 這樣以後多一種瀏覽器也不會落到 Steam 那段去。
+       *
+       * ⚠ 說明只講**做什麼**，不猜玩家是誰、為什麼用網頁版。
        */
       function howToConnect(p) {
-        if (p && p.kind !== "desktop") return "";
+        if (p && p.kind !== "desktop") return browserConnect(p);
         return `<div class="card">
            <div class="row"><span><b>接不上遊戲？</b></span></div>
            <div class="hint">在 Steam 的啟動選項填這一行，然後重開遊戲：</div>
@@ -1917,7 +1977,35 @@
          </div>`;
       }
 
-      // --- 牌組 › 編輯 COST -------------------------------------------------
+      /**
+       * 開瀏覽器／存 .cmd／放擴充 的結果。按鈕旁邊講一句，不跳對話框。
+       * `at` = 講在哪一張卡底下（網頁版那頁有好幾張卡都有按鈕，只講在按的那張）。
+       */
+      let webMsg = null;
+      const webMsgLine = (at = null) =>
+        webMsg && (webMsg.at ?? null) === at
+          ? `<div class="hint${webMsg.bad ? " warn" : ""}">${esc(webMsg.text)}</div>`
+          : "";
+
+      function browserConnect(p) {
+        const name = kindText(p.kind);
+        const guide = snap?.bootExt?.guideUrl ?? "";
+        return `<div class="card">
+             <div class="row"><span><b>開 ${esc(name)}</b></span>
+               <span><button id="browserOpen">開啟</button> <button id="browserCmd">存成 .cmd</button></span></div>
+             <div class="hint">用插件專用的設定檔開，帶 <code>--remote-debugging-port=0</code>。
+               遊戲在這個視窗裡開，插件就接得上。</div>
+             ${webMsgLine()}
+           </div>
+           <div class="card">
+             <div class="row"><span><b>在瀏覽器裡開遊戲</b></span></div>
+             <div class="hint">這個設定檔是獨立的，書籤和腳本要在裡面裝一次，二選一：</div>
+             <div class="row"><span>竄改猴腳本</span><span><button data-link="${esc(guide)}">安裝說明</button></span></div>
+             <div class="row"><span>ULR Boot 擴充</span><span><button data-goto="web">設置 › 網頁版</button></span></div>
+           </div>`;
+      }
+
+      // --- 自訂COST › 編輯 COST ----------------------------------------------
       //
       // 這一頁存在的理由只有一句：**規則檔裡是 `cc001_01`，玩家看得懂的是
       // 「艾伯李斯特 L1」。** 中間那份對照叫名冊（catalog），從玩家自己跑著的
@@ -1966,7 +2054,7 @@
        */
       let edHideLocked = true;
 
-      const onEditPage = () => tab === "deck" && sub === "costedit";
+      const onEditPage = () => tab === "rule" && sub === "costedit";
 
       const ED_TABS = [
         { id: "characters", label: "角色卡" },
@@ -2579,7 +2667,7 @@
            </div>`;
       }
 
-      PAGES["deck/costedit"] = () => {
+      PAGES["rule/costedit"] = () => {
         const title = head(
           "編輯 COST",
           "改自己的規則檔。<b>看到的是卡片名稱，不是編號</b> —— 中間那份對照從你自己的遊戲讀。",
@@ -2594,7 +2682,7 @@
             `<div class="card">
                <div class="row"><span class="dim">規則</span><span class="bad"><b>還沒選</b></span></div>
                <div class="hint">編輯 COST 是<b>改一份既有的規則檔</b>，所以要先有檔案。
-                 到「牌組 › Cost 表」選一份 —— 沒有自己的規則就先選
+                 到「自訂COST › Cost 表」選一份 —— 沒有自己的規則就先選
                  <code>unlight-official</code>，那是原版數字的完整四張表，改它就是你的版本了。</div>
              </div>`
           );
@@ -2653,7 +2741,7 @@
                  ? "打名字、效果或顏色找卡（例：聖水、回復、紅）"
                  : "打名字找卡（例：艾伯、聖水、短劍）"
              }" value="${esc(edFilter)}" style="flex:1" />
-             <span class="dim" style="font-size:11px">名冊 ${esc(cat.gameVersion)} · ${esc(
+             <span class="dim" style="font-size:13px">名冊 ${esc(cat.gameVersion)} · ${esc(
                cat.readAt.slice(0, 10),
              )} 讀的</span>
              <button id="edCatalog" ${ed.connected ? "" : "disabled"}>重讀名冊</button>
@@ -2798,7 +2886,7 @@
         );
       };
 
-      // --- 牌組 › 編輯規則 --------------------------------------------------
+      // --- 自訂COST › 編輯規則 -----------------------------------------------
       //
       // 「編輯 COST」改的是**價格**（1186 個數字格），這一頁改的是**規則本身**。
       // 目前規則裡除了價格以外唯一有行為意義的欄位就是壓 C（`compressionRule`），
@@ -2814,7 +2902,7 @@
       let rlMsg = null;
       let rlLoading = false;
 
-      const onRulePage = () => tab === "deck" && sub === "ruleedit";
+      const onRulePage = () => tab === "rule" && sub === "ruleedit";
 
       /** 官方的兩段。「改回原版壓 C」那顆按的就是它。 */
       const RL_OFFICIAL = [
@@ -2975,7 +3063,7 @@
         }
       }
 
-      PAGES["deck/ruleedit"] = () => {
+      PAGES["rule/ruleedit"] = () => {
         const title = head(
           "編輯規則",
           "改規則檔裡<b>不是價格</b>的那一半。目前是壓 C —— 差距多少罰多少，一段一排。",
@@ -2990,7 +3078,7 @@
             `<div class="card">
                <div class="row"><span class="dim">規則</span><span class="bad"><b>還沒選</b></span></div>
                <div class="hint">編輯規則是<b>改一份既有的規則檔</b>，所以要先有檔案。
-                 到「牌組 › Cost 表」選一份 —— 沒有自己的規則就先選
+                 到「自訂COST › Cost 表」選一份 —— 沒有自己的規則就先選
                  <code>unlight-official</code>，那份的壓 C 就是原版的兩段。</div>
              </div>`
           );
@@ -3072,7 +3160,7 @@
         return title + header + table + preview;
       };
 
-      // --- 牌組 › 編輯描述 --------------------------------------------------
+      // --- 自訂COST › 編輯描述 -----------------------------------------------
       //
       // 規則檔的第三半：不是價格、也不是壓 C 的那些欄位 —— 名字、作者、版本、
       // 適用範圍、更新說明。
@@ -3088,7 +3176,7 @@
       let rd = null;
       let rdMsg = null;
       let rdLoading = false;
-      const onDescPage = () => tab === "deck" && sub === "ruledesc";
+      const onDescPage = () => tab === "rule" && sub === "ruledesc";
 
       const RD_FIELDS = [
         {
@@ -3149,7 +3237,7 @@
         return rd?.meta !== null && JSON.stringify(rd?.meta) !== rd?.saved;
       }
 
-      PAGES["deck/ruledesc"] = () => {
+      PAGES["rule/ruledesc"] = () => {
         const title = head(
           "編輯描述",
           "規則檔裡<b>不是數字</b>的那些欄位 —— 名字、作者、版本、說明。",
@@ -3163,7 +3251,7 @@
             title +
             `<div class="card">
                <div class="row"><span class="dim">規則</span><span class="bad"><b>還沒選</b></span></div>
-               <div class="hint">要先有檔案才改得動。到「牌組 › Cost 表」選一份 ——
+               <div class="hint">要先有檔案才改得動。到「自訂COST › Cost 表」選一份 ——
                  沒有自己的規則就先選 <code>unlight-official</code>，改完它就是你的版本了。</div>
              </div>`
           );
@@ -3235,7 +3323,7 @@
         );
       };
 
-      // --- 牌組 › 對戰地點 --------------------------------------------------
+      // --- 自訂COST › 對戰地點 -----------------------------------------------
       //
       // ⚠⚠ **這一頁曾經是「自動配對」，整整六張卡。** 排隊狀態、頻道資訊、兩份
       // COST 對照、開房設定、規則卡、房間清單 —— 要滑三個畫面才看得完，而玩家
@@ -3273,14 +3361,13 @@
         "· 沒人選亞城隨機、有人選官方隨機 → 官方隨機\n" +
         "· 兩邊各指定一張且不一樣 → 擲骰子二選一\n" +
         "\n" +
-        "亞城池是官方選單的 000～009 再加上 010（魔女山谷）。010 在官方開房選單裡選不到，" +
-        "插件只驗過它的背景圖載得起來，沒有在上面打完一整場。\n" +
+        "亞城池是官方選單的 000～009 再加上 011（魔女山谷）。011 在官方開房選單裡選不到，" +
+        "插件只驗過客戶端有它的背景圖，沒有在上面打完一整場。\n" +
         "⚠ 選官方隨機或指定地圖也躲不掉它 —— 對手選亞城隨機時整場就走亞城池。";
 
       const PICK_TIP =
         "開房的只有一方，所以「我指定 007」對另一邊永遠是被決定的。\n" +
-        "兩邊指同一張就開那一張；指不同張時擲骰子二選一 —— 那是唯一不偏袒任何一方的解法。\n" +
-        "對手是舊版插件時，他會把你指定的那張讀成「官方隨機」。";
+        "兩邊指同一張就開那一張；指不同張時擲骰子二選一 —— 那是唯一不偏袒任何一方的解法。";
 
       const AUTO_TIP =
         "檔位照你的牌組算，你填不到，也不必填：\n" +
@@ -3295,7 +3382,7 @@
         "⚠ 配到人會直接消耗 AP 並開打。再按一次那顆按鈕就是取消。\n" +
         "⚠ 排隊時每 5 秒確認你還在那個頻道：跑去打別場、退出頻道、換頻道都會自動停止排隊。";
 
-      PAGES["deck/match"] = () => {
+      PAGES["rule/match"] = () => {
         const stage = mform?.stage ?? snap?.profile?.match?.stage ?? "arcadia";
 
         // ⚠ **選單的順序就是協商的優先權**（見 `@ulr/arbiter-engine` 的
@@ -3338,13 +3425,13 @@
         );
       };
 
-      // --- 牌組 › 隱藏地圖 --------------------------------------------------
+      // --- 迪特赫姆 › 隱藏地圖 -----------------------------------------------
       //
       // ⚠ 這一頁跟配對頁一樣，狀態**不在 snapshot 裡** —— 它要跟遊戲要一次
       // （一次 CDP 往返）。開著才輪詢，離開就停。
       let sstate = null;
       let stageTimer = null;
-      const onStagePage = () => tab === "deck" && sub === "hidden";
+      const onStagePage = () => tab === "diet" && sub === "hidden";
 
       function startStagePolling() {
         if (stageTimer !== null) return;
@@ -3394,7 +3481,9 @@
       // 狀態不在 snapshot 裡（兩支注入腳本各要一次 CDP 往返），開著才輪詢。
       let rstate = null;
       let raidTimer = null;
-      const onRaidPage = () => tab === "vortex" && (sub === "vrank" || sub === "vreward");
+      const onRaidPage = () =>
+        tab === "vortex" &&
+        (sub === "vrank" || sub === "vreward" || sub === "vitem" || sub === "vfeed");
 
       function startRaidPolling() {
         if (raidTimer !== null) return;
@@ -3430,18 +3519,20 @@
       }
 
       const RAID_MARK_TIP =
-        "碎片色照排名獎勵：黃＝記憶、綠＝時間、藍＝靈魂、紅＝生命、紫＝死亡；渦I 畫硬幣。" +
-        "書籤渦（記憶的書籤）用白、素材渦（魔之刀身／戒指／彈頭／手鐲）用黑，妖精另加星號，渦IV 白框加亮。" +
-        "自己開的渦紅框。獎勵表是 ulgg 的 TL 表（60 筆，全是渦II/III），查不到的 TL 退回公式推碎片色。";
+        "2026-09-23 改版後渦清單不再給 TL。碎片色（黃＝記憶、綠＝時間、藍＝靈魂、紅＝生命、紫＝死亡；圓的是渦幣）" +
+        "看渦的 stage 套公式：你打過的渦用那場戰鬥的 stage、自己發現的渦用發現時的 stage，其次是 ulgg 觀測站給的；" +
+        "都沒有就看插件自己學到的：" +
+        "每收到一次渦的結算，把那個渦實際發的東西依「怪物＋渦階＋★＋地圖區塊」記下來（本機 raid-learned.json），" +
+        "同一種渦之後直接畫；兩次對不上就不拿來畫。都沒有的渦不畫任何標記 —— 不猜。";
       const RAID_SHARE_TIP =
-        "開著的話，你渦清單上的渦（TL、BOSS 狀態、HP）會傳到插件的雲端，別人在 SUPPORT 看到同一個渦就查得到；" +
-        "你也查得到別人傳的。雲端上只存渦碼的雜湊，不存渦碼本身、不存分數榜與玩家名字 —— 不知道渦碼的人查不到。" +
+        "開著的話，你渦清單上的渦（TL、BOSS 狀態、HP）會傳到 Cloudflare Workers（插件作者架的），別人在 SUPPORT 看到同一個渦就查得到；" +
+        "你也查得到別人傳的。上面只存渦碼的雜湊，不存渦碼本身、不存分數榜與玩家名字 —— 不知道渦碼的人查不到。" +
         "ulgg 是主要來源，這個是它掛掉或還沒掃到時的備援；同一個渦取比較新的那份。";
       const RAID_TEAM_TIP =
-        "每打完一場渦，插件記下用的那副牌、選的回合、花的 AP，回到渦房後看排行榜上自己的傷害漲了多少。" +
-        "開著的話這些會傳到插件雲端，同一個渦裡開插件的人在排行榜或傷害統計點你的名字就看得到；你也看得到別人的。" +
-        "雲端上渦碼與名字都只存雜湊（名字是跟渦碼一起算的），不知道渦碼的人查不到，也串不起你打過哪些渦。" +
-        "關掉後下一輪會把雲端上你的隊伍撤掉；自己的隊伍在自己的畫面上照樣看得到。";
+        "每打完一場渦，插件記下用的那副牌、選的回合、花的 AP、戰鬥中打掉的傷害，回到渦房後看排行榜上自己的分數漲了多少。" +
+        "開著的話這些會傳到 Cloudflare Workers（插件作者架的），同一個渦裡開插件的人在渦的詳細畫面點排行榜上你的名字就看得到；你也看得到別人的。" +
+        "上面的渦（發現者＋發現時刻）與名字都只存雜湊（名字是跟渦一起算的），不在那個渦裡的人查不到，也串不起你打過哪些渦。" +
+        "關掉後下一輪會把 Cloudflare Workers 上你的隊伍撤掉；自己的隊伍在自己的畫面上照樣看得到。";
       const RAID_PUBLIC_TIP =
         "SUPPORT 那份公開渦清單伺服器不給 TL，圖示是靠 ulgg.online 的觀測站對渦碼查來的，" +
         "只在你人在渦房時每 30 秒問一次；ulgg 掛了就只是沒圖示，其他功能照常。";
@@ -3457,20 +3548,24 @@
         const what = `<div class="card">
             <div class="hint" style="margin-top:0">
               <b>渦房裡會多出來的東西</b>${info(RAID_MARK_TIP)}<br />
-              · 清單與 SUPPORT：BOSS 名字右邊接獎勵圖示（碎片／硬幣／書籤／素材／抽獎券）與 BOSS 身上的狀態＋剩餘時間<br />
-              · 地圖上的渦照碎片色上色，自己開的紅框、渦IV 白框<br />
-              · 點進渦之後多一顆「獎勵一覽」：發現／參加／排名／擊破一次看完<br />
-              · 每 10 秒自己重讀一次清單 —— 血量與狀態不用重進渦房也會動<br />
-              · Profound 計數下面的「Refresh」：等於重進渦房（渦清單、AP、死渦的結算一起重讀），順便馬上重查雲端<br />
-              · 排行榜名字旁標出推測是誰上的狀態；「傷害統計」列出每個人的分數、傷害、佔比<br />
-              · 名字旁有牌盒的人有分享隊伍：點下去看他用哪幾副牌、各打了幾場、幾回合、幾 AP、多少傷害
+              · 清單：名字右邊接碎片色，排名獎勵有魔之素材／書籤的再接那張圖<br />
+              · 地圖：渦照碎片色上色，還不知道的是灰色；素材渦上方掛圖，自己開的渦紅框<br />
+              · 點進渦之後多一顆「獎勵一覽」：發現／參加／每一檔排名／擊破，自己現在那一檔亮一點<br />
+              · Profound 計數下面的「Refresh」：等於重進渦房（渦清單、AP、死渦的結算一起重讀），順便馬上重查 Cloudflare Workers<br />
+              · 詳細畫面的排行榜：有隊伍紀錄的名字後面多一顆牌組圖示，點名字看那個人打這個渦用的隊伍<br />
+              · SUPPORT 清單：已經通報過、碎片知道了的渦，名字右邊接碎片色（見「渦通報」）
+            </div>
+            <div class="hint">
+              改版後客戶端不再給每個人的傷害，傷害統計先停用（打渦隊伍的傷害改成插件在戰鬥中自己算）。
             </div>
           </div>`;
         const share = `<div class="card">
             <label class="toggle">
               <input type="checkbox" id="raidShareOn" ${s?.share !== false ? "checked" : ""} />
               <span><b>和其他插件玩家互傳渦狀態</b>${info(RAID_SHARE_TIP)}
-                <div class="hint">ulgg 掛了或還沒掃到的公開渦，靠其他開插件的玩家補上。</div>
+                <div class="hint">
+                  ulgg 掛了或還沒掃到的公開渦，靠其他開插件的玩家補上。Discord 的公開渦通報也靠這個（見「渦通報」）。
+                </div>
               </span>
             </label>
             <label class="toggle">
@@ -3483,17 +3578,14 @@
               </span>
             </label>
           </div>`;
-        return (
-          head("獎勵標記", "渦的獎勵是什麼、BOSS 身上有什麼，直接畫在渦房裡。") +
-          state +
-          share +
-          what
-        );
+        return head("獎勵標記", "渦打倒後發什麼，直接畫在渦房裡。") + state + share + what;
       };
 
       function raidRewardText(r) {
         if (r === null) return "還沒接上遊戲 —— 開了遊戲就會自己裝上";
         if (!r.installed) return "還沒裝上" + (r.reason ? "：" + r.reason : "");
+        // 腳本跑了但掛不上（客戶端改版把方法改名）——不能說生效中
+        if (r.reason) return "沒作用：" + r.reason;
         return r.open ? "摘要面板開著" : "生效中";
       }
       const AUTO_DELETE_TIP =
@@ -3534,7 +3626,365 @@
         return head("結算通知", "渦被打倒之後的 OK 面板要怎麼演。") + picker + state + autoDel;
       };
 
-      PAGES["deck/hidden"] = () => {
+      function itemPanelText(v) {
+        if (v === null) return "還沒接上遊戲 —— 開了遊戲就會自己裝上";
+        if (!v.installed) return "還沒裝上" + (v.reason ? "：" + v.reason : "");
+        if (!v.found) return "已裝上，等遊戲載入物品欄";
+        if (v.reason) return "沒作用：" + v.reason;
+        if (!v.shortcut) return "生效中（捷徑關著）";
+        return v.inRaid ? "生效中：渦房上 " + v.buttons + " 顆捷徑" : "生效中，等你進渦房";
+      }
+      const ITEM_SHORTCUT_TIP =
+        "按下去走的是官方物品欄「使用」同一條路（同一個請求、用完官方自己重讀渦清單），插件不多送任何東西。" +
+        "官方對水和渦探知機本來就不跳確認框，所以點一下就用掉；增益類才會問。" +
+        "水的數量是 0 時半透明、點不下去；探知機沒有就不顯示。";
+
+      PAGES["vortex/vitem"] = () => {
+        const s = rstate;
+        const state = `<div class="card">
+            <div class="row"><span class="dim">狀態</span><span>${esc(itemPanelText(s?.items ?? null))}</span></div>
+          </div>`;
+        const toggle = `<div class="card">
+            <label class="toggle">
+              <input type="checkbox" id="raidItemShortcutOn" ${s?.itemShortcut ? "checked" : ""} />
+              <span><b>渦房的物品捷徑</b>${info(ITEM_SHORTCUT_TIP)}
+                <div class="hint">
+                  藏起右下角的 FRIENDLIST 與 ITEM，改放捷徑，點一下就用：<br />
+                  · 右下：古代（原 FRIENDLIST）、精靈（原 ITEM）；SUPPORT 不動<br />
+                  · 「輸入Raid代碼」上方：渦探知機（渦一、渦二在前），有才顯示
+                </div>
+              </span>
+            </label>
+          </div>`;
+        const always = `<div class="card">
+            <div class="hint" style="margin-top:0">
+              <b>一直都有的</b><br />
+              · 物品欄開著時，面板外面照樣點得到；再按一次物品鈕就關<br />
+              · 渦房的物品欄：回 AP 的水排最前，接著渦二、渦一；增益類（髮冠、耳環、權杖、妖精、戒指、日記本）不列 —— 要用請到大廳的物品欄
+            </div>
+          </div>`;
+        return head("物品捷徑", "渦房常用的水與渦探知機，一點就用。") + state + toggle + always;
+      };
+
+      // --- 渦 › 渦通報 -------------------------------------------------------
+      //
+      // 公開渦的 Discord 通知（docs/raid-feed.md）。沒有自己的開關：上傳跟著「獎勵標記」的
+      // 互傳開關走（engine 的 #raidShare），這裡放同一顆 checkbox、同一個 id。
+      const RAID_FEED_TIP =
+        "插件只在你本來就會做的操作裡順手抓：打開 SUPPORT 時那份公開清單、進渦房／Refresh 時自己的渦清單、開打那一刻看到的 stage 與 BOSS 狀態。" +
+        "收到的渦由 Cloudflare Workers（插件作者架的）彙整，新渦湊 30 秒發一則到 Discord，之後有變化就編輯同一則。" +
+        "渦碼在遊戲頁面裡就丟掉，從不上傳；發現者名字會上傳，因為 Discord 訊息本來就公開它。";
+
+      PAGES["vortex/vfeed"] = () => {
+        const s = rstate;
+        const on = s?.share !== false;
+        const state = `<div class="card">
+            <div class="row"><span class="dim">狀態</span><span>${
+              on ? "開著，在渦房時順手回報" : "關著，不回報"
+            }</span></div>
+          </div>`;
+        const toggle = `<div class="card">
+            <label class="toggle">
+              <input type="checkbox" id="raidShareOn" ${on ? "checked" : ""} />
+              <span><b>回報公開渦給 Discord 機器人</b>${info(RAID_FEED_TIP)}
+                <div class="hint">
+                  你看到的公開渦，由機器人發到 Discord 的渦碼分享區。<br />
+                  跟「獎勵標記」的「和其他插件玩家互傳渦狀態」是同一個開關。
+                </div>
+              </span>
+            </label>
+          </div>`;
+        const what = `<div class="card">
+            <div class="hint" style="margin-top:0">
+              <b>會發哪些渦</b><br />
+              · SUPPORT 公開清單上的渦（有人打開 SUPPORT 時抓到）<br />
+              · 自己開的渦，參加資格選「無限制」按送出的那一刻<br />
+              · 渦 I～IV 都發<br />
+              · 不發：僅限好友、只靠渦碼加入的渦；已經打倒的
+            </div>
+            <div class="hint">
+              <b>回到遊戲裡</b><br />
+              · 通報過、碎片知道了的渦，SUPPORT 清單上名字右邊接碎片色 —— 還沒加入就知道掉什麼<br />
+              · 剛冒出來、還沒有開插件的人加入或開打的渦，碎片還不知道，不畫
+            </div>
+            <div class="hint">
+              <b>一則訊息</b><br />
+              · 一行一個渦：發現者、碎片色＋BOSS、HP；渦 IV 會 @渦4<br />
+              · 之後自己改：碎片從 ❓ 換成顏色、HP 跟上、打倒變 ☠️、到期沒打倒標 ⌛
+            </div>
+          </div>`;
+        const why = `<div class="card">
+            <div class="hint" style="margin-top:0">
+              <b>機器人不再 24 小時運作</b><br />
+              以前是開小號整天待在渦房裡監視公開渦，小號會被封、要一直開新的。
+              現在改成開著插件的玩家在渦房時順手回報 —— 開插件的人越多，通報越完整；
+              沒人開著插件的時段就沒有通報。
+            </div>
+          </div>`;
+        return (
+          head("渦通報", "公開渦自動發到 Discord 的渦碼分享區。") + state + toggle + what + why
+        );
+      };
+
+      // --- 任務 › 物品捷徑 / 寶箱標註 --------------------------------------
+      //
+      // 狀態不在 snapshot 裡（兩支注入腳本各要一次 CDP 往返），開著才輪詢。
+      let qstate = null;
+      let questTimer = null;
+      const onQuestPage = () => tab === "quest" && (sub === "qitem" || sub === "chest");
+
+      function startQuestPolling() {
+        if (questTimer !== null) return;
+        const tick = () =>
+          window.ulr.quest.state().then((s) => {
+            qstate = s;
+            if (!onQuestPage()) return;
+            if (isEditing()) {
+              scheduleCatchUp();
+              return;
+            }
+            renderBody();
+          });
+        void tick();
+        questTimer = setInterval(tick, 3000);
+      }
+      function stopQuestPolling() {
+        if (questTimer !== null) clearInterval(questTimer);
+        questTimer = null;
+      }
+
+      function questItemText(v) {
+        if (v === null) return "還沒接上遊戲 —— 開了遊戲就會自己裝上";
+        if (!v.installed) return "還沒裝上" + (v.reason ? "：" + v.reason : "");
+        if (!v.found) return "已裝上，等遊戲載入物品欄";
+        if (v.reason) return "沒作用：" + v.reason;
+        if (!v.questStack && !v.questPasses) return "生效中（捷徑都關著）";
+        return v.inQuest
+          ? "生效中：任務房上 " + v.questButtons + " 顆捷徑"
+          : "生效中，等你進任務房";
+      }
+      const QUEST_SHORTCUT_TIP =
+        "按下去走的是官方物品欄「使用」同一條路（同一個請求、用完官方自己重讀任務清單），插件不多送任何東西。" +
+        "官方會不會先跳確認框照原樣。" +
+        "水與沙漏固定五格，數量是 0 時半透明、點不下去；通行證有才顯示。";
+
+      PAGES["quest/qitem"] = () => {
+        const s = qstate;
+        const state = `<div class="card">
+            <div class="row"><span class="dim">狀態</span><span>${esc(questItemText(s?.items ?? null))}</span></div>
+          </div>`;
+        const toggle = `<div class="card">
+            <label class="toggle">
+              <input type="checkbox" id="questStackShortcutOn" ${s?.stackShortcut ? "checked" : ""} />
+              <span><b>水沙捷徑</b>${info(QUEST_SHORTCUT_TIP)}
+                <div class="hint">
+                  FRIENDLIST 正上方：精靈、古代、魔女、時間沙漏、超時空沙漏，點一下就用（官方的 FRIENDLIST 與 ITEM 不動）
+                </div>
+              </span>
+            </label>
+          </div>
+          <div class="card">
+            <label class="toggle">
+              <input type="checkbox" id="questPassShortcutOn" ${s?.passShortcut ? "checked" : ""} />
+              <span><b>通行證捷徑</b>
+                <div class="hint">
+                  牌組與人物中間：有的通行證，鈕上標名字（影1、月2、風1、天1、活1）
+                </div>
+              </span>
+            </label>
+          </div>`;
+        const always = `<div class="card">
+            <div class="hint" style="margin-top:0">
+              <b>一直都有的</b><br />
+              · 物品欄開著時，面板外面照樣點得到；再按一次物品鈕就關<br />
+              · 物品欄開著時點地圖，「開始搜索」會疊在物品欄上面，右上的 X 按得到<br />
+              · 任務房的物品欄：增益類（髮冠、耳環、權杖、妖精、戒指、日記本）不列 —— 要用請到大廳的物品欄
+            </div>
+          </div>`;
+        return (
+          head("物品捷徑", "任務房常用的水、沙漏與通行證，一點就用。") + state + toggle + always
+        );
+      };
+
+      function questTreasureText(v) {
+        if (v === null) return "還沒接上遊戲 —— 開了遊戲就會自己裝上";
+        if (!v.installed) return "還沒裝上" + (v.reason ? "：" + v.reason : "");
+        if (!v.enabled) return "關著";
+        if (!v.found) return "已裝上，等遊戲載入卡面";
+        if (v.reason) return "有狀況：" + v.reason;
+        return v.onMap ? "生效中：這張地圖標了 " + v.marks + " 格" : "生效中，等你打開任務地圖";
+      }
+      const QUEST_TREASURE_TIP =
+        "官方只畫寶箱的種類，內容要踩到才知道。" +
+        "內容表來自原版 Unlight 公開的伺服器資料（TreasureDatas），跟目前客戶端用到的寶箱對過，只缺一種。" +
+        "只讀遊戲本來就有的資料，不送任何請求。";
+      const QUEST_BONUS_TIP =
+        "High Low 格有等級（Lv1～Lv8），開始的星數跟等級有關，但客戶端沒有這張表。" +
+        "進獎勵遊戲時官方本來就會跟伺服器拿開始的星數，插件順手記下「幾級、幾星起」，不多送請求。" +
+        "不管標註開不開都會記。";
+
+      PAGES["quest/chest"] = () => {
+        const s = qstate;
+        const state = `<div class="card">
+            <div class="row"><span class="dim">狀態</span><span>${esc(questTreasureText(s?.treasure ?? null))}</span></div>
+          </div>`;
+        const toggle = `<div class="card">
+            <label class="toggle">
+              <input type="checkbox" id="questTreasureOn" ${s?.treasureMarks ? "checked" : ""} />
+              <span><b>任務地圖的寶箱標註</b>${info(QUEST_TREASURE_TIP)}
+                <div class="hint">
+                  每一格右邊畫出寶箱實際是什麼（官方的卡面：角色卡、武器／事件卡、道具、Gem）：<br />
+                  · 看牌組 COST 決定內容的格子：照你目前牌組的 COST 畫那一種，卡片下面標 COST 區間（例如 C76+）<br />
+                  · Exp 格：畫會拿到的卡 —— 牌頭同角色、等級 -1 的 L 卡（R 當 L 算，L1／R1 給 L1）<br />
+                  · High Low 格：標等級（Lv4），學到開始星數的話下一行標 ★<br />
+                  · 走過的格子不畫
+                </div>
+              </span>
+            </label>
+          </div>`;
+        const bonus = s?.bonus ?? {};
+        const levels = Object.keys(bonus)
+          .map(Number)
+          .sort((a, b) => a - b);
+        const rows = levels.length
+          ? levels
+              .map((lv) => {
+                const b = bonus[lv];
+                const range = b.min === b.max ? `${b.min}` : `${b.min}～${b.max}`;
+                return `<div class="row"><span class="dim">Lv${lv}</span><span>★${esc(range)}（${b.n} 筆）</span></div>`;
+              })
+              .join("")
+          : `<div class="hint" style="margin-top:0">還沒學到。打一次任務的 High Low 格就會記下開始星數。</div>`;
+        const learned = `<div class="card">
+            <div class="row"><span><b>High Low 開始星數</b>${info(QUEST_BONUS_TIP)}</span></div>
+            ${rows}
+          </div>`;
+        return (
+          head("寶箱標註", "任務地圖上每一格的寶箱是什麼，進去之前就知道。") +
+          state +
+          toggle +
+          learned
+        );
+      };
+
+      // --- 模組 › 卡面替換 --------------------------------------------------
+      //
+      // 狀態不在 snapshot 裡（資料夾要掃、遊戲那端要問一次 CDP），開著才輪詢。
+      let mstate = null;
+      let modsTimer = null;
+      const onModsPage = () => tab === "mods" && sub === "cards";
+
+      function startModsPolling() {
+        if (modsTimer !== null) return;
+        const tick = () =>
+          window.ulr.mods.cardsState().then((s) => {
+            mstate = s;
+            if (!onModsPage()) return;
+            renderBody();
+          });
+        void tick();
+        modsTimer = setInterval(tick, 3000);
+      }
+      function stopModsPolling() {
+        if (modsTimer !== null) clearInterval(modsTimer);
+        modsTimer = null;
+      }
+
+      function cardArtText(s, sent) {
+        if (s === null) return "還沒接上遊戲 —— 開了遊戲就會自己換上";
+        if (!s.installed) {
+          if (sent === 0) return "資料夾裡還沒有可用的圖";
+          return "還沒裝上" + (s.reason ? "：" + s.reason : "");
+        }
+        if (!s.atlasReady) return "已裝上，等遊戲載入卡面圖集（進大廳就有）";
+        if (s.pending > 0) return `換上 ${s.applied} 張，${s.pending} 張還在解碼`;
+        return (
+          `生效中：換上 ${s.applied} 張` + (s.failed.length ? `，${s.failed.length} 張沒換上` : "")
+        );
+      }
+
+      const CARD_ART_TIP =
+        "遊戲把每張角色卡的卡面（含金框與底部 HP/ATK/DEF 標籤）烤成一張 168×240 的圖，" +
+        "插件把你的 PNG 指到那一格。只改你自己畫面上的圖，對手、伺服器都不知道；" +
+        "插件關掉或重開遊戲就回官方卡面（插件開著時會自己再換上）。";
+      const BLANK_TIP =
+        "遊戲裡沒有無圖的空框，這是從 631 張官方卡面統計出來的：R 卡一張「框」（透明 PNG，疊在你的圖上面）；" +
+        "L 卡兩張 ——「底」是壁紙加框（不透明，放最下面），「框」疊在人物上面。十個等級的直條顏色不同，各出一份。" +
+        "336×480 是用 AI 放大的版本。要改就複製出來改 —— 插件更新時會換成新版空框。";
+
+      PAGES["mods/cards"] = () => {
+        const s = mstate;
+        const st = s?.status ?? null;
+        const failedBy = new Map((st?.failed ?? []).map((f) => [f.frame, f.reason]));
+        const state = `<div class="card">
+            <div class="row"><span class="dim">狀態${info(CARD_ART_TIP)}</span><span>${esc(cardArtText(st, s?.sent ?? 0))}</span></div>
+            <div class="row"><span class="dim">資料夾</span><span><code>${esc(s?.dir ?? "…")}</code></span></div>
+            <div style="margin-top:8px">
+              <button class="gene" id="modsOpen">開資料夾</button>
+              <button class="gene" id="modsReload">重新載入</button>
+            </div>
+            <div class="hint">把 PNG 放進資料夾就會自己換上（一秒內）；改了圖、刪了圖也一樣。</div>
+          </div>`;
+        const rows = (s?.files ?? [])
+          .map((f) => {
+            const why = f.problem ?? (f.frame !== null ? failedBy.get(f.frame) : null) ?? null;
+            const size = f.width !== null ? `${f.width}×${f.height}` : "—";
+            const ok = why === null && st?.installed && st.atlasReady;
+            return `<tr>
+                <td><code>${esc(f.file)}</code></td>
+                <td>${f.label !== null ? esc(f.label) : '<span class="dim">—</span>'}</td>
+                <td>${esc(size)}</td>
+                <td>${why !== null ? `<span class="warn">⚠ ${esc(why)}</span>` : ok ? "已換上" : '<span class="dim">等遊戲</span>'}</td>
+              </tr>`;
+          })
+          .join("");
+        const files = `<div class="card">
+            ${
+              rows === ""
+                ? `<div class="hint" style="margin-top:0">資料夾是空的。照下面的步驟做一張，放進去就會出現在這裡。</div>`
+                : `<table class="profiles"><thead><tr><th>檔名</th><th>哪張卡</th><th>尺寸</th><th>狀態</th></tr></thead><tbody>${rows}</tbody></table>`
+            }
+            ${s && !s.names ? `<div class="hint warn">還沒讀到角色名字表（接上遊戲、進到大廳後會自己讀）。在那之前檔名只認 <code>cc034_r01</code> 這種代號。</div>` : ""}
+          </div>`;
+        const blanks = s?.blanks ?? {};
+        const small = blanks["168x240"] ?? 0;
+        const large = blanks["336x480"] ?? 0;
+        const blankCard = `<div class="card">
+            <div class="row"><span class="dim">空框${info(BLANK_TIP)}</span>
+              <span>${small + large > 0 ? `168×240 ${small} 張 · 336×480 ${large} 張` : '<span class="warn">不見了（按下面補回來）</span>'}</span></div>
+            <div style="margin-top:8px">
+              <button class="gene" id="modsOpenBlanks">開空框資料夾</button>
+            </div>
+            <div class="hint">
+              插件內建，在 <code>空框\\168x240</code> 與 <code>空框\\336x480</code>：
+              <code>R1_框.png</code>…<code>R5_框.png</code>、<code>L1_底.png</code>＋<code>L1_框.png</code>…<code>L5</code>。
+            </div>
+          </div>`;
+        const howto = `<div class="card">
+            <div class="hint" style="margin-top:0"><b>怎麼做一張卡面</b></div>
+            <ol class="steps">
+              <li>按上面的「開空框資料夾」。</li>
+              <li>用繪圖軟體（Photoshop、Krita、GIMP、Photopea 都行）開 <b>168×240</b> 的新圖，或用 <code>336x480</code> 那份空框畫 <b>336×480</b> 的大圖（插件會自己縮）。</li>
+              <li><b>R 卡</b>：把你的圖放最下層，再把 <code>R1_框.png</code>（照卡的等級選）疊在最上面。<br />
+                  <b>L 卡</b>：最下層 <code>L1_底.png</code>（壁紙），中間放去背的人物，最上面 <code>L1_框.png</code>。</li>
+              <li>存成 PNG，檔名寫成 <code>史塔夏_R1.png</code>（角色名照遊戲裡的寫法）或代號 <code>cc034_r01.png</code>，放進上面那個資料夾。</li>
+              <li>一秒內就換上。沒換上的話看上面的清單，那一列會寫原因。</li>
+            </ol>
+            <div class="hint">
+              等級：L1～L5 是一般卡，R1～R5 是覺醒卡；框的直條顏色每個等級不同，記得選對。<br />
+              只換你自己看到的畫面 —— 對手看到的、伺服器存的都是官方卡面。
+            </div>
+          </div>`;
+        return (
+          head("卡面替換", "把自己畫的卡面換進遊戲 —— 只在你自己的畫面上。") +
+          state +
+          files +
+          blankCard +
+          howto
+        );
+      };
+
+      PAGES["diet/hidden"] = () => {
         const s = sstate;
         // ⚠ 第一次畫的時候還沒問到狀態。這時候**不要先畫出開關** —— 它會是沒勾的
         // 樣子，而那對已經啟用的玩家是假的（下一輪輪詢就會跳成勾的）。
@@ -3609,12 +4059,11 @@
         const caveat = `<div class="card">
             <div class="hint" style="margin-top:0">
               <b>要知道的三件事</b><br />
-              · 背景圖載得起來是<b>實測過的</b>，但還<b>沒有在這四張上打完一整場</b> ——
+              · 客戶端有這四張的背景與房間縮圖，但還<b>沒有在這四張上打完一整場</b> ——
                 真的出事只影響你自己那一場。<br />
-              · 伺服器本來就收這四個代號（實測開房不會被拒）。插件<b>沒有</b>改變
-                任何伺服器判定，只是讓選項在選單上出得來。<br />
-              · <b>遊戲重載會把它沖掉</b>，插件會自己補回去 ——
-                但補回去的那一刻選單又要等你開一次對話框。
+              · 插件<b>沒有</b>改變任何伺服器判定，只是讓選項在選單上出得來；
+                伺服器收不收這個代號由它自己決定。<br />
+              · <b>遊戲重載會把它沖掉</b>，插件會自己補回去。
             </div>
           </div>`;
 
@@ -3624,6 +4073,252 @@
           state +
           list +
           caveat
+        );
+      };
+
+      // --- 迪特赫姆 › 物品捷徑 / GEM UP ---------------------------------------
+      //
+      // 兩塊都住在物品欄那支注入腳本裡，狀態不在 snapshot 裡，開著才輪詢。
+      let dstate = null;
+      let dietTimer = null;
+      const onDietPage = () => tab === "diet" && (sub === "ditem" || sub === "gemup");
+
+      function startDietPolling() {
+        if (dietTimer !== null) return;
+        const tick = () =>
+          window.ulr.diet.state().then((s) => {
+            dstate = s;
+            if (!onDietPage()) return;
+            if (isEditing()) {
+              scheduleCatchUp();
+              return;
+            }
+            renderBody();
+          });
+        void tick();
+        dietTimer = setInterval(tick, 3000);
+      }
+      function stopDietPolling() {
+        if (dietTimer !== null) clearInterval(dietTimer);
+        dietTimer = null;
+      }
+
+      function dietItemText(v) {
+        if (v === null) return "還沒接上遊戲 —— 開了遊戲就會自己裝上";
+        if (!v.installed) return "還沒裝上" + (v.reason ? "：" + v.reason : "");
+        if (v.reason) return "沒作用：" + v.reason;
+        if (!v.dietStack) return "關著";
+        return v.inDiet ? "生效中：迪城上 " + v.dietButtons + " 顆捷徑" : "生效中，等你進迪城";
+      }
+      const DIET_SHORTCUT_TIP =
+        "按下去走的是官方物品欄「使用」同一條路（同一個請求、用完官方自己重讀物品），插件不多送任何東西。" +
+        "官方對水本來就不跳確認框，所以點一下就用掉。數量是 0 時半透明、點不下去。";
+
+      PAGES["diet/ditem"] = () => {
+        const s = dstate;
+        const state = `<div class="card">
+            <div class="row"><span class="dim">狀態</span><span>${esc(dietItemText(s?.items ?? null))}</span></div>
+          </div>`;
+        const toggle = `<div class="card">
+            <label class="toggle">
+              <input type="checkbox" id="dietStackOn" ${s?.itemShortcut ? "checked" : ""} />
+              <span><b>迪城的水捷徑</b>${info(DIET_SHORTCUT_TIP)}
+                <div class="hint">
+                  FRIENDLIST 正上方：精靈、古代、魔女，點一下就用（官方的 FRIENDLIST 與 ITEM 不動）
+                </div>
+              </span>
+            </label>
+          </div>`;
+        return head("物品捷徑", "在迪城喝水不用開物品欄。") + state + toggle;
+      };
+
+      function gemUpText(v) {
+        if (v === null) return "還沒接上遊戲 —— 開了遊戲就會自己裝上";
+        if (!v.installed) return "還沒裝上" + (v.reason ? "：" + v.reason : "");
+        if (v.reason) return "有狀況：" + v.reason;
+        if (!v.gemUp) return "關著";
+        if (v.gemPct === null) return "生效中，但現在沒有 GEM 加成（沒有就不畫）";
+        if (v.gemShown) return "生效中：迪城上顯示 +" + v.gemPct + "%";
+        return "生效中，等你進迪城";
+      }
+      const GEM_UP_TIP =
+        "跟大廳右側那張 GEM UP 同一張圖、同一種倒數（日:時:分:秒），圖上方多一行加成百分比（例如幸運的權杖Ⅰ是 +50%）。" +
+        "資料是遊戲本來就有的加成清單，不送任何請求。";
+
+      PAGES["diet/gemup"] = () => {
+        const s = dstate;
+        const pct = s?.items?.gemPct ?? null;
+        const state = `<div class="card">
+            <div class="row"><span class="dim">狀態</span><span>${esc(gemUpText(s?.items ?? null))}</span></div>
+            <div class="row"><span class="dim">目前的 GEM 加成</span><span>${pct === null ? "沒有" : "+" + pct + "%"}</span></div>
+          </div>`;
+        const toggle = `<div class="card">
+            <label class="toggle">
+              <input type="checkbox" id="dietGemUpOn" ${s?.gemUp ? "checked" : ""} />
+              <span><b>在迪城顯示 GEM UP</b>${info(GEM_UP_TIP)}
+                <div class="hint">右側、跟大廳同一個位置：GEM UP 圖＋剩餘時間，上方標加成百分比。沒有 GEM 加成時不畫。</div>
+              </span>
+            </label>
+          </div>`;
+        return head("GEM UP", "在迪城刷 GEM 時看得到加成還剩多久。") + state + toggle;
+      };
+
+      // --- 獎勵 › 物品捷徑 ---------------------------------------------------
+      //
+      // 住在物品欄那支注入腳本裡，狀態不在 snapshot 裡，開著才輪詢。
+      let bstate = null;
+      let bonusTimer = null;
+      const onBonusPage = () => tab === "bonus" && sub === "bitem";
+
+      function startBonusPolling() {
+        if (bonusTimer !== null) return;
+        const tick = () =>
+          window.ulr.bonus.state().then((s) => {
+            bstate = s;
+            if (!onBonusPage()) return;
+            if (isEditing()) {
+              scheduleCatchUp();
+              return;
+            }
+            renderBody();
+          });
+        void tick();
+        bonusTimer = setInterval(tick, 3000);
+      }
+      function stopBonusPolling() {
+        if (bonusTimer !== null) clearInterval(bonusTimer);
+        bonusTimer = null;
+      }
+
+      const BONUS_ITEM_NAMES = {
+        4: "幸運四葉草",
+        5: "白色石楠1",
+        6: "白色石楠3",
+        7: "白色石楠5",
+        8: "跳越星",
+      };
+      function bonusItemText(v) {
+        if (v === null) return "還沒接上遊戲 —— 開了遊戲就會自己裝上";
+        if (!v.installed) return "還沒裝上" + (v.reason ? "：" + v.reason : "");
+        if (v.reason) return "沒作用：" + v.reason;
+        if (!v.bonusItem) return "關著";
+        if (v.inBonus)
+          return "生效中：建議用 " + (BONUS_ITEM_NAMES[v.bonusPick] ?? "道具 " + v.bonusPick);
+        return "生效中，等獎勵遊戲猜錯時出現";
+      }
+      const BONUS_ITEM_TIP =
+        "能不能用照官方物品欄的判斷：兩顆骰子的差距不超過道具的數字（石楠1／3／5），四葉草（重投）與跳越星永遠能用。" +
+        "差距小時先用剛好夠的那朵：差 1 用石楠1、差 2～3 用石楠3，沒有就往下找。" +
+        "按下去走的是官方物品欄選了道具之後同一條路（同一個請求），插件不多送任何東西；官方這裡本來就沒有確認框，所以點一下就用掉。";
+
+      PAGES["bonus/bitem"] = () => {
+        const s = bstate;
+        const order = s?.order ?? snap?.profile?.bonusItemOrder ?? "heather5";
+        const state = `<div class="card">
+            <div class="row"><span class="dim">狀態</span><span>${esc(bonusItemText(s?.items ?? null))}</span></div>
+          </div>`;
+        const mode = !s?.itemShortcut ? "off" : (s?.place ?? "above");
+        const opt = (group, current, value, label, hint) => `<label class="toggle">
+            <input type="radio" name="${group}" value="${value}" ${current === value ? "checked" : ""} />
+            <span><b>${label}</b><div class="hint">${hint}</div></span>
+          </label>`;
+        const modeOpt = (value, label, hint) => opt("bonusItemMode", mode, value, label, hint);
+        const toggle = `<div class="card">
+            <div class="row"><span class="dim">猜錯時建議一顆道具，點一下就用${info(BONUS_ITEM_TIP)}</span><span></span></div>
+            ${modeOpt("off", "無捷徑", "照官方，按「使用物品」開物品欄自己挑。")}
+            ${modeOpt("above", "使用物品左上", "多一顆圓鈕，跟四顆大鈕圍成一圈。「使用物品」照常能開物品欄。")}
+            ${modeOpt("cover", "蓋住使用物品", "道具直接畫進「使用物品」裡，按同一個地方就用。沒有能用的道具時照官方；要自己挑別的請選左上。")}
+            <div class="hint">例：5 猜大出 2 → 石楠3；7 猜小出 8 → 石楠1。</div>
+          </div>`;
+        const orderOpt = (value, label, hint) => opt("bonusItemOrder", order, value, label, hint);
+        const picker = `<div class="card">
+            <div class="row"><span class="dim">差距大於 3 時先用</span><span></span></div>
+            ${orderOpt("heather5", "白色石楠5", "石楠5 → 四葉草 → 跳越星。差距超過 5 時石楠5 用不了，直接往下。")}
+            ${orderOpt("clover", "幸運四葉草", "四葉草 → 石楠5 → 跳越星。四葉草是重投，重投後還是可能猜錯。")}
+            ${orderOpt("star", "跳越星", "跳越星 → 石楠5 → 四葉草。")}
+          </div>`;
+        return head("物品捷徑", "獎勵遊戲猜錯時，不用開物品欄就能接關。") + state + toggle + picker;
+      };
+
+      // --- 牌組 › 牌組替換 --------------------------------------------------
+      //
+      // 三選一（玩家 2026-09-24 要的）。切換時牌組庫會整份重新接上 —— 插件模式
+      // 第一次接上會把 Deck2／Deck3 收進庫裡清空，那件事一定要寫在選項旁邊。
+      const DECK_MODE_TIP =
+        "牌組庫的牌組存在這台電腦（有開跨電腦同步的話也存在 Cloudflare Workers），四種房間（任務、渦、亞歷山卓城、迪特赫姆）各一組。" +
+        "兩種模式用的是同一份牌組庫，切來切去不會弄丟牌組。";
+
+      PAGES["deck/deckmode"] = () => {
+        const mode = snap?.profile.deckMode ?? "plugin";
+        const opt = (value, label, hint) => `<label class="toggle">
+            <input type="radio" name="deckMode" value="${value}" ${mode === value ? "checked" : ""} />
+            <span><b>${label}</b><div class="hint">${hint}</div></span>
+          </label>`;
+        return (
+          head("牌組替換") +
+          `<div class="card">
+             <div class="dim" style="margin-bottom:6px">每個房間用哪些牌組${info(DECK_MODE_TIP)}</div>
+             ${opt(
+               "plugin",
+               "插件模式",
+               "每個房間存任意多副，全部經過牌組一切換（◀▶ 切的是這一房的牌組）。" +
+                 "牌組二、三會收進牌組庫並清空，所以每一張卡都能放進任何一副。",
+             )}
+             ${opt(
+               "official",
+               "官方三牌組",
+               "進入每個房間時，換上那個房間的三副（牌組庫裡那一房的前三副）。" +
+                 "◀▶ 照官方切牌組一～三；三副共用卡池，跟官方一樣。",
+             )}
+             ${opt("off", "關閉", "插件不碰牌組，牌組編輯畫面與房間都是官方原樣。")}
+           </div>`
+        );
+      };
+
+      // --- 牌組 › 人物篩選 --------------------------------------------------
+      //
+      // 玩家 2026-09-26：原版「抽出」一次只看得到五個角色。遊戲裡「抽出」左邊多一顆
+      // [Chara]，按下去卡片格線換成全部角色（一張縮一半，12×6 一頁放完）。這一頁只
+      // 決定每個角色拿哪一張卡代表。
+      const CHARA_PICKER_TIP =
+        "在遊戲的牌組編輯畫面「抽出」左邊按 Chara，卡片區會換成持有角色一覽，點一張勾選／取消那個角色（可以勾好幾個，跟「抽出」一樣）；再按一次 Chara 收起來。" +
+        "原版「抽出」下拉照常能用，兩邊看的是同一個篩選。" +
+        "手上沒有指定的那一張時，用等級最接近的（例如選 L5 但只有 L4，就顯示 L4）；一張都沒有的角色不顯示。";
+      const FAVORITE_TIP =
+        "預覽區右下的「最愛卡片」鈕：把正在看的那一張卡加入／移出最愛（只算那一張，例如 R1 史特靈）。" +
+        "「1 Page」右邊的 Favorite 鈕：按下去只顯示最愛卡片，再按一次回到全部。" +
+        "Event 分頁也一樣：預覽事件卡時右下的「最愛卡片」收進最愛，格線右下的 Favorite 鈕只顯示最愛的事件卡（跟角色卡的最愛分開記）。" +
+        "最愛存在牌組庫裡，有開跨電腦同步的話跟牌組一起同步到其他電腦（牌組替換選「關閉」時用不到）。";
+      const CHARA_WEAPON_TIP =
+        "Equipment 分頁一律把通用武排在最前面、素材（異化礦材、魔之系列）排最後。" +
+        "「抽出」位置的 Chara Weapon 鈕：按下去只顯示通用武與目前牌組角色的專武，素材與手動隱藏的不顯示；再按一次回到全部。" +
+        "預覽武器時右下的「隱藏裝備」鈕：把很少用的（叮噹星、可可果之類）藏起來，只在 Chara Weapon 開著時生效。" +
+        "隱藏清單跟最愛一樣存在牌組庫、跟著跨電腦同步。";
+
+      PAGES["deck/chara"] = () => {
+        const mode = snap?.profile.charaPicker ?? "L5";
+        const opt = (value, label) => `<label class="toggle">
+            <input type="radio" name="charaPicker" value="${value}" ${mode === value ? "checked" : ""} />
+            <span><b>${label}</b></span>
+          </label>`;
+        return (
+          head("人物篩選") +
+          `<div class="card">
+             <div class="dim" style="margin-bottom:6px">角色一覽用哪一張卡代表${info(CHARA_PICKER_TIP)}</div>
+             ${opt("L1", "L1")}
+             ${opt("L2", "L2")}
+             ${opt("L3", "L3")}
+             ${opt("L4", "L4")}
+             ${opt("L5", "L5")}
+             ${opt("R", "最高等 R 卡")}
+             ${opt("off", "關閉")}
+           </div>
+           <div class="card">
+             <div class="dim">最愛卡片${info(FAVORITE_TIP)}</div>
+           </div>
+           <div class="card">
+             <div class="dim">Chara Weapon 與隱藏裝備${info(CHARA_WEAPON_TIP)}</div>
+           </div>`
         );
       };
 
@@ -3659,9 +4354,9 @@
       };
 
       const DECK_SYNC_TIP =
-        "牌組庫存到插件的雲端，同一個角色在另一台電腦登入時自動同步（新增、改牌、改名、刪除、排序都會過去）。" +
-        "雲端上的鍵是角色 id 的雜湊，文件裡沒有玩家名字；每一台電腦「這一房上次選哪一副」各自記。" +
-        "兩台同時改同一副時，後改的那一邊贏。雲端連不上就只用這台電腦的，不會把牌組清掉。";
+        "牌組庫存到 Cloudflare Workers（插件作者架的），同一個角色在另一台電腦登入時自動同步（新增、改牌、改名、刪除、排序都會過去）。" +
+        "上面的鍵是角色 id 的雜湊，文件裡沒有玩家名字；每一台電腦「這一房上次選哪一副」各自記。" +
+        "兩台同時改同一副時，後改的那一邊贏。連不上就只用這台電腦的，不會把牌組清掉。";
 
       function deckSyncCard() {
         const on = snap?.profile.deckCloudSync !== false;
@@ -3675,7 +4370,7 @@
         return `<div class="card">
             <label class="toggle">
               <input type="checkbox" id="deckCloudSyncOn" ${on ? "checked" : ""} />
-              <span><b>牌組雲端同步</b>${info(DECK_SYNC_TIP)}
+              <span><b>牌組跨電腦同步</b>${info(DECK_SYNC_TIP)}
                 <div class="hint">${line}</div>
               </span>
             </label>
@@ -3706,7 +4401,10 @@
               : alive === false
                 ? "沒有回應"
                 : "—";
-          return `<tr data-id="${esc(p.id)}"${self ? ' class="self"' : ""}>
+          // ⚠ 中間人那一列拿掉了（玩家 2026-10-04）：一律是雲端，畫面上不給改。
+          // 輸入與按鈕的事件都是 closest("tr[data-id]") 找配置。
+          const cls = self ? " self" : "";
+          return `<tr data-id="${esc(p.id)}" class="${cls.trim()}">
               <td><input type="text" data-field="name" value="${esc(p.name)}" /></td>
               <td><select data-field="kind">
                     ${Object.entries(KIND_TEXT)
@@ -3717,9 +4415,8 @@
                       .join("")}
                   </select></td>
               <td><input type="number" data-field="port" value="${p.port}" /></td>
-              <td><input type="text" data-field="link" value="${esc(p.link)}" placeholder="留空＝雲端" /></td>
-              <td>${esc(state)}</td>
-              <td>
+              <td class="state">${esc(state)}</td>
+              <td class="acts">
                 ${self ? "" : `<button data-act="launch">開新實例</button>`}
                 <button data-act="dup">複製</button>
                 ${list.length > 1 && !self ? `<button data-act="del">刪除</button>` : ""}
@@ -3729,7 +4426,7 @@
 
         const table = list.length
           ? `<table class="profiles">
-               <thead><tr><th>名稱</th><th>客戶端</th><th>遊戲埠</th><th>中間人</th><th>狀態</th><th></th></tr></thead>
+               <thead><tr><th>名稱</th><th>客戶端</th><th>遊戲埠</th><th>狀態</th><th></th></tr></thead>
                <tbody>${list.map(row).join("")}</tbody>
              </table>`
           : `<div class="hint">清單是空的。按下面的「新增配置」建一份 ——
@@ -3762,55 +4459,145 @@
         );
       };
 
+      /**
+       * 這份配置接哪一種客戶端。換了插件會自己重開（引擎綁在啟動時的客戶端上）。
+       *
+       * ⚠ 命令列開的臨時配置不給換：它不在清單裡，重開會落到別份配置上。
+       */
+      function clientKindRow(p) {
+        if (!p) return "";
+        const opts = Object.entries(KIND_TEXT)
+          .map(
+            ([k, label]) =>
+              `<option value="${k}"${p.kind === k ? " selected" : ""}>${label}</option>`,
+          )
+          .join("");
+        return `<div class="row"><span class="dim">客戶端</span>${
+          snap?.ephemeral
+            ? `<span>${esc(kindText(p.kind))}</span>`
+            : `<select id="clientKind" title="換了之後插件會重開一次">${opts}</select>`
+        }</div>`;
+      }
+
+      /**
+       * ⚠ **這一頁只回答一個問題：插件跟遊戲接上了沒。**（玩家 2026-10-04 指定精簡）
+       *
+       * 拿掉的東西都有別的地方看得到，或只是排錯用的：
+       *   分頁標題、攔截已掛上、側通道 → 狀態列與 戰鬥 › 準備 已經講了
+       *   CDP 埠、中間人、我是中間人   → 設置 › 配置 的表格裡有，狀態列最後一句也會報錯
+       *
+       * 「怎麼接上」的教學**只在還沒接上時出現** —— 接上了還掛著兩張說明卡，
+       * 玩家會以為自己哪裡沒做完。
+       */
       PAGES["settings/link"] = () => {
         const st = snap?.status;
         const p = snap?.profile;
-        /**
-         * ⚠ **埠與中間人只在「進階」打開時才出現。**
-         *
-         * 沒開進階的玩家只有一個客戶端、用的是雲端中間人的預設值，那兩個數字
-         * 他一個都不需要、也一個都不能拿去做什麼 —— 露出來只會變成「我是不是
-         * 漏設了什麼」。這一頁對他該只回答一個問題：**插件跟遊戲接上了沒。**
-         */
-        const multi = snap?.store?.multiProfile === true;
+        const connected = st?.connected === true;
         return (
           head("連線", "插件跟遊戲接上了沒。") +
           `<div class="card">
-             <div class="row"><span class="dim">遊戲</span><span>${
-               !st ? "啟動中…" : st.connected ? "已接上" : "等遊戲…"
-             }</span></div>
-             <div class="row"><span class="dim">分頁</span><span>${esc(st?.title ?? "—")}</span></div>
-             <div class="row"><span class="dim">攔截已掛上</span><span>${
-               // ⚠ 「不在對戰中」不等於「還在大廳」：戰鬥打完、還停在結算畫面
-               // 的那段時間也是否 —— 而那正是玩家最容易來看這一頁的時候。
-               st?.armed ? "是" : "否（不在對戰中）"
-             }</span></div>
-             <div class="row"><span class="dim">側通道</span><span>${
-               st ? (LINK_TEXT[st.link] ?? st.link) : "—"
-             }</span></div>
+             <div class="row"><span class="dim">遊戲</span><span class="${
+               connected ? "good" : "warn"
+             }">${!st ? "啟動中…" : connected ? "已接上" : "等遊戲…"}</span></div>
+             ${clientKindRow(p)}
              ${st?.error ? `<div class="hint warn">⚠ ${esc(st.error)}</div>` : ""}
            </div>
-           ${
-             multi
-               ? `<div class="card">
-                    <div class="row"><span class="dim">客戶端</span><span>${esc(
-                      kindText(p?.kind),
-                    )}</span></div>
-                    <div class="row"><span class="dim">CDP 埠</span><span>${
-                      // ⚠ 顯示**實際**接到的埠，不是設定值。用 =0 啟動時客戶端
-                      // 自己挑埠，我們從 DevToolsActivePort 讀回來 —— 顯示設定值
-                      // 的話，這個數字會是一個沒有人在聽的號碼，而它唯一的用途
-                      // 就是拿去給 CLI 用。
-                      st?.port != null ? `:${st.port}` : `—　<span class="dim">（未接上）</span>`
-                    }</span></div>
-                    <div class="row"><span class="dim">中間人</span><span>${esc(p?.link ?? "—")}</span></div>
-                    <div class="row"><span class="dim">我是中間人</span><span>${
-                      st?.hosting ? "是" : "否（連到別人開的）"
-                    }</span></div>
-                  </div>`
-               : ""
-           }
-           ${howToConnect(p)}`
+           ${connected ? "" : howToConnect(p)}`
+        );
+      };
+
+      // --- 設置 › 網頁版 ----------------------------------------------------
+      /**
+       * 用瀏覽器玩的整套，照玩家要做的順序排：① 帶除錯埠的瀏覽器 ② ULR Boot ③ 書籤。
+       *
+       * ① 的捷徑目標是主程序照**這台機器**組出來的（`snap.browsers`：找到的執行檔＋
+       * 這個人的家目錄），跟「開啟」按鈕、「建桌面捷徑」寫進 .lnk 的是同一行 ——
+       * 玩家照抄的、按鈕開的、捷徑開的永遠是同一個瀏覽器同一個設定檔。
+       *
+       * ULR Boot 原始檔跟著安裝包走，按一下放到固定的資料夾（`snap.bootExt.dir`）——
+       * 之後插件更新時再按一次就是原地更新。
+       *
+       * ⚠ 遊戲改版不用更新擴充：它每次開頁會去雲端拿這一版的檔名清單。
+       * 只有官方外殼本身改了（像 9/23 那次）才需要新版擴充，那時插件會一起更新。
+       */
+      PAGES["settings/web"] = () => {
+        const b = snap?.bootExt;
+        const br = snap?.browsers ?? {};
+        const stale = b?.installed && b?.bundled && b.installed !== b.bundled;
+        const action = !b?.installed ? "放好" : stale ? `更新到 ${b.bundled}` : "重新放一次";
+        const fams = [
+          ["chrome", "Chrome"],
+          ["edge", "Edge"],
+        ];
+        const openRows = fams
+          .map(([f, name]) =>
+            br[f]?.exe
+              ? `<div class="row"><span>${name}</span><span>
+                   <button data-browser="${f}">開啟</button>
+                   <button data-shortcut="${f}">建桌面捷徑</button></span></div>`
+              : `<div class="row"><span>${name}</span><span class="dim">沒找到</span></div>`,
+          )
+          .join("");
+        const targets = fams
+          .filter(([f]) => br[f]?.target)
+          .map(
+            ([f, name]) =>
+              `<div class="row"><span>${name}</span><span><button data-copytarget="${f}">複製</button></span></div>
+               <code class="line">${esc(br[f].target)}</code>`,
+          )
+          .join("");
+        return (
+          head("網頁版", "用瀏覽器玩，插件一樣接得上。") +
+          `<div class="card">
+             <div class="row"><span><b>① 帶除錯埠的瀏覽器</b></span></div>
+             <div class="hint">插件靠除錯埠接遊戲。這裡開的是專用設定檔，跟你平常的瀏覽器分開 ——
+               書籤、登入、擴充各一份，平常那個不用關也不受影響。</div>
+             ${openRows}
+             ${webMsgLine("browser")}
+             <div class="hint">建好的捷徑叫「ULR Chrome」「ULR Edge」，之後雙擊它就好，不用先開插件。
+               Edge 開的時候會順便掛上 ULR Boot（②放好的話）。</div>
+           </div>
+           <div class="card">
+             <div class="row"><span><b>自己做捷徑</b></span></div>
+             <ol class="steps">
+               <li>桌面按右鍵 › 新增 › 捷徑</li>
+               <li>「項目位置」貼上下面那一行（已經照你這台電腦填好）</li>
+               <li>名字隨便取，按完成</li>
+             </ol>
+             ${targets || `<div class="hint warn">沒找到 Chrome 或 Edge。</div>`}
+             ${webMsgLine("copy")}
+             <div class="hint">⚠ 只在平常那個瀏覽器的捷徑後面加 <code>--remote-debugging-port=0</code> 沒用：
+               Chrome 136 起預設設定檔不開除錯埠，而且瀏覽器開著時再點只會多開視窗、參數整串被丟掉。
+               一定要連 <code>--user-data-dir</code> 一起。</div>
+           </div>
+           <div class="card">
+             <div class="row"><span><b>② ULR Boot 擴充</b></span></div>
+             <div class="hint">讓瀏覽器不經 Steam、點書籤就進遊戲。插件內建，不用另外下載。</div>
+             <div class="row"><span class="dim">資料夾</span><span><code>${esc(b?.dir ?? "—")}</code></span></div>
+             <div class="row"><span class="dim">版本</span><span>${
+               b?.installed ? esc(b.installed) : "還沒放"
+             }</span></div>
+             <div class="row"><span></span><span><button id="bootExtInstall">${esc(action)}</button></span></div>
+             ${webMsgLine("boot")}
+             <ol class="steps">
+               <li>按上面的「${esc(action)}」，資料夾會打開</li>
+               <li>開擴充功能頁：
+                 <button data-extpage="chrome">Chrome</button> <button data-extpage="edge">Edge</button>
+                 ，右上角打開「開發人員模式」</li>
+               <li>「載入未封裝項目」→ 選那個資料夾</li>
+             </ol>
+             <div class="hint">Edge 用 ① 的按鈕或捷徑開會自動掛上，可以跳過 2、3 步。<br />
+               <b>更新</b>：插件更新後這裡會出現「更新到 …」，按它，再到擴充功能頁按 ⟳。
+               遊戲每週改版不用更新 —— 擴充自己去 Cloudflare Workers 拿新的檔名清單。</div>
+           </div>
+           <div class="card">
+             <div class="row"><span><b>③ 書籤</b></span></div>
+             <div class="hint">在 ① 開的瀏覽器裡，把這個網址存成書籤，<code>你的SteamID</code> 換成自己的：</div>
+             <code class="line">https://www.playunlight.online/?steamid=你的SteamID</code>
+             <div class="hint">SteamID 是 17 位數字（7656 開頭），Steam 個人檔案網址裡那串；改過自訂網址的話
+               到 Steam › 帳戶明細 看。<br />
+               不想裝擴充的話，用竄改猴腳本也行：<button data-link="${esc(b?.guideUrl ?? "")}">安裝說明</button></div>
+           </div>`
         );
       };
 
@@ -3843,33 +4630,12 @@
            </div>
            <div class="card">
              <div class="hint" style="margin-top:0">
-               <b>怎麼讓遊戲一開插件就接上</b><br />
-               在 Steam 的啟動選項裡設一次 debug port —— 步驟在
-               <b>設置 › 連線</b>那一頁。設好之後每次從 Steam 開遊戲，插件都會自己接上。<br />
-               ⚠ 沒設的話 debug 埠不會開，插件<b>永遠</b>接不上，而畫面上只會寫「等遊戲…」。
+               遊戲要帶除錯埠開，插件才接得上 —— 做法在 <b>設置 › 連線</b>。<br />
+               ⚠ 沒帶的話插件<b>永遠</b>接不上，畫面上只會寫「等遊戲…」。
              </div>
            </div>`
         );
       };
-
-      // --- 設置 › 更新 ------------------------------------------------------
-      PAGES["settings/update"] = () =>
-        head("更新", "") +
-        `<div class="card">
-           <div class="row"><span class="dim">目前版本</span><span>${esc(snap?.version ?? "—")}</span></div>
-           <div class="row"><span class="dim">執行方式</span><span>${
-             snap?.packaged ? "已安裝" : "開發模式（未打包）"
-           }</span></div>
-         </div>
-         <div class="card">
-           <div class="hint" style="margin-top:0">
-             更新流程本身是完整的（檢查 → 下載 → 驗 SHA-256 → 暫存 → 安全時機套用），
-             但<b>還沒有預設的發布來源</b>，要設環境變數 <b>ULR_UPDATE_FEED</b> 才會啟動。<br />
-             ⚠ <b>套用一定不在對戰中發生。</b>「靜默」指的是不打擾，不是未經同意就重啟 ——
-             協定版本一變，中間人會回 incompatible，雙方當場退回單邊模式。
-             那件事發生在移動階段中間的話，玩家會看到約定秒數突然消失而不知道為什麼。
-           </div>
-         </div>`;
 
       // --- 設置 › 記錄 ------------------------------------------------------
       PAGES["settings/log"] = () =>
@@ -3887,36 +4653,112 @@
          </div>`;
 
       // --- 設置 › 關於 ------------------------------------------------------
+      /**
+       * 「會連到哪裡、送什麼」—— **一條連線一列，照實寫，包含預設開著的分享。**
+       *
+       * ⚠ 這一段以前寫「只有兩個對外連線」「牌組內容不會送出去」，那是 v1 的事實；
+       * 之後加了牌組雲端、渦互傳、打渦隊伍、ulgg、配對佇列，這頁沒跟上，變成一份
+       * 錯的隱私說明（2026-10-04 玩家要求更新時對著程式碼重查）。**加新的對外連線時
+       * 這裡要跟著加一列** —— 連線清單在 `@ulr/arbiter-link/target.ts` 的 SERVICE_ORIGIN
+       * 那幾個常數、`raid-public.ts`（ulgg）與 `bundle-report.ts`。
+       *
+       * ⚠ **照實際的目的地分組，寫出主機名。**（玩家 2026-10-04）不要寫「中間人」
+       * 「雲端」「插件自己的伺服器」—— 玩家看不出那是哪裡，「自己的」還會被讀成
+       * 他自己的電腦。
+       */
+      const NET_GROUPS = [
+        {
+          host: "ulr-link.lldavuull.workers.dev",
+          note: "Cloudflare Workers，插件作者架的",
+          rows: [
+            ["對戰握手", "跟真人對戰時", "雜湊過的場次編號、準備／秒數等對戰偏好", ""],
+            ["配對與大廳人數", "在大廳、按下配對後", "配對規則的雜湊鍵", ""],
+            ["檢查更新", "每小時", "只問最新版號（插件、預設 COST 表）", ""],
+            [
+              "牌組跨電腦同步",
+              "牌組庫有變動時",
+              "牌組庫內容；鍵是角色 id 的雜湊，沒有名字",
+              "牌組 › 等候套用",
+            ],
+            [
+              "渦狀態互傳",
+              "在渦房時",
+              "渦的 stage／HP／狀態；SUPPORT 公開渦的發現者與到期時刻（會發到 Discord 通知）",
+              "渦 › 獎勵標記",
+            ],
+            [
+              "打渦隊伍",
+              "打完渦",
+              "你用的牌組、場數、回合、AP、傷害；名字只傳雜湊",
+              "渦 › 獎勵標記",
+            ],
+          ],
+        },
+        {
+          host: "ulr-hash.lldavuull.workers.dev",
+          note: "Cloudflare Workers，插件作者架的",
+          rows: [["遊戲檔名", "官方改版後", "這一版遊戲程式的檔名（給書籤玩家用）", ""]],
+        },
+        {
+          host: "ulgg.online",
+          note: "第三方的渦查詢網站",
+          // ⚠ 讀清單不受互傳開關管（關掉互傳就是「只剩 ulgg」），只有回報 stage 受管。
+          rows: [
+            [
+              "公開渦清單",
+              "在渦房時",
+              "讀公開渦清單；開著「渦狀態互傳」時，也回報你看到的渦是哪個 stage",
+              "",
+            ],
+          ],
+        },
+      ];
+
       PAGES["settings/about"] = () =>
         head("關於", "") +
         `<div class="card">
            <div class="row"><span class="dim">ULR Companion</span><span>${esc(snap?.version ?? "—")}</span></div>
-           <div class="hint">UNLIGHT:Revive 自訂 COST 規則與對戰追蹤的執行端。MIT 授權。</div>
-         </div>
-         <div class="card">
-           <div class="hint" style="margin-top:0">
-             <b>公平性立場</b><br />
-             這個插件只改<b>自己客戶端的顯示</b>，伺服器收到的東西一個字都沒變。<br />
-             · 不修改伺服器端技能判定，不繞過官方戰鬥規則<br />
-             · 自訂 COST 是<b>自我約束</b>：雙方同意才有意義<br />
-             · 不顯示也不上傳對手未揭露的手牌、牌組或任何隱藏資訊<br />
-             · 會改變節奏的功能（秒數、加速）一律<b>雙方同意才生效</b>
+           <div class="row"><span class="dim">執行方式</span><span>${
+             snap?.packaged ? "已安裝" : "開發模式（未打包）"
+           }</span></div>
+           <div class="hint">UNLIGHT:Revive 的輔助插件：自訂 COST、牌組庫、渦、對戰準備與秒數。MIT 授權。</div>
+           <div class="hint">
+             <b>自動更新</b>：每小時檢查一次，下載、驗簽章都在背景完成。
+             ⚠ <b>換版一定在對戰之外</b>，換過會留一行記錄。${
+               snap?.packaged ? "" : "<br />開發模式不會自動更新。"
+             }
            </div>
          </div>
          <div class="card">
            <div class="hint" style="margin-top:0">
-             <b>這個插件會連到哪裡、送什麼</b><br />
-             只有兩個對外連線，兩個都連到同一台伺服器（Cloudflare Workers）：<br />
-             · <b>中間人</b>（對戰中）—— 送<b>雜湊過的場次編號</b>與你的四個偏好設定<br />
-             · <b>檢查更新</b>（每小時一次）—— 只問「最新版是哪一版」<br />
-             <br />
-             <b>不會送出去的東西：</b>你的名字、Steam 帳號或 token、對手是誰、
-             任何一張手牌或牌組內容、對戰結果。<br />
-             伺服器只回答一個問題：<b>「這兩條連線在不在同一場對戰」</b> ——
-             場次編號是 SHA-256 截斷過的，它<b>認不出那是哪一場，也認不出你是誰</b>。<br />
-             <br />
-             ⚠ 沒進對戰時<b>完全不連線</b>。中間人連不上時自動退回單邊模式，
-             功能會少，但不會壞。
+             <b>公平性立場</b><br />
+             · 不改伺服器的判定，不繞過官方戰鬥規則<br />
+             · 替你送出的請求（換牌組、開房、用道具）都是官方畫面本來就能做的<br />
+             · 自訂 COST 是<b>自我約束</b>：雙方同意才有意義<br />
+             · 不顯示也不上傳對手未揭露的手牌、牌組或任何隱藏資訊<br />
+             · 會改變節奏的功能（秒數）一律<b>雙方同意才生效</b>
+           </div>
+         </div>
+         <div class="card">
+           <div class="row"><span><b>會連到哪裡、送什麼</b></span></div>
+           ${NET_GROUPS.map(
+             (g) =>
+               `<div class="row" style="margin-top:10px"><span><code>${esc(g.host)}</code></span><span class="dim">${esc(
+                 g.note,
+               )}</span></div>` +
+               g.rows
+                 .map(
+                   ([name, when, what, off]) =>
+                     `<div class="row"><span>${esc(name)}</span><span class="dim">${esc(when)}${
+                       off ? `　·　關：${esc(off)}` : ""
+                     }</span></div>
+                      <div class="hint" style="margin-top:0">${esc(what)}</div>`,
+                 )
+                 .join(""),
+           ).join("")}
+           <div class="hint">
+             <b>不會送出去：</b>Steam 帳號、token、密碼；對手的手牌；對戰的勝負。<br />
+             連不上時各功能退回只用這台電腦，不會壞。
            </div>
          </div>
          <div class="card">
@@ -3930,7 +4772,7 @@
                <div class="hint">
                  平常不需要。<b>一個視窗管一個遊戲</b>，裝好就是這樣，不必設定任何東西。<br />
                  打開之後左邊會多一格「配置」（在這一頁下面），托盤選單會多一個「開新實例」，
-                 狀態列會開始顯示埠號 —— 那些是給要同時開兩個帳號的人用的。
+                 狀態列左邊會寫這個視窗是哪一份 —— 那些是給要同時開兩個帳號的人用的。
                </div>
              </span>
            </label>
@@ -3953,6 +4795,18 @@
           return void window.ulr.setReadyTint(parseInt(t.value.slice(1), 16)).then(apply);
         }
         if (t.name === "raidRewardMode" && t.checked) return void applyRaidRewardMode(t.value);
+        if (t.name === "deckMode" && t.checked) {
+          return void window.ulr.deck.mode(t.value).then((saved) => {
+            if (snap !== null) snap.profile.deckMode = saved;
+            renderBody();
+          });
+        }
+        if (t.name === "charaPicker" && t.checked) {
+          return void window.ulr.deck.charaPicker(t.value).then((saved) => {
+            if (snap !== null) snap.profile.charaPicker = saved;
+            renderBody();
+          });
+        }
         if (t.id === "deckCloudSyncOn") {
           return void window.ulr.deck.cloudSync(t.checked).then((saved) => {
             if (snap !== null) snap.profile.deckCloudSync = saved;
@@ -3977,6 +4831,44 @@
             renderBody();
           });
         }
+        if (t.id === "raidItemShortcutOn") {
+          return void window.ulr.raid.itemShortcut(t.checked).then((s) => {
+            rstate = s;
+            renderBody();
+          });
+        }
+        if (t.id === "questStackShortcutOn" || t.id === "questPassShortcutOn") {
+          const part = t.id === "questStackShortcutOn" ? "stack" : "passes";
+          return void window.ulr.quest.itemShortcut(part, t.checked).then((s) => {
+            qstate = s;
+            renderBody();
+          });
+        }
+        if (t.id === "questTreasureOn") {
+          return void window.ulr.quest.treasure(t.checked).then((s) => {
+            qstate = s;
+            renderBody();
+          });
+        }
+        if (t.name === "bonusItemMode" && t.checked) {
+          return void window.ulr.bonus.mode(t.value).then((s) => {
+            bstate = s;
+            renderBody();
+          });
+        }
+        if (t.name === "bonusItemOrder" && t.checked) {
+          return void window.ulr.bonus.order(t.value).then((s) => {
+            bstate = s;
+            renderBody();
+          });
+        }
+        if (t.id === "dietStackOn" || t.id === "dietGemUpOn") {
+          const part = t.id === "dietStackOn" ? "dietStack" : "gemUp";
+          return void window.ulr.diet.toggle(part, t.checked).then((s) => {
+            dstate = s;
+            renderBody();
+          });
+        }
         if (t.id === "stagesOn") {
           return void window.ulr.stages.set(t.checked).then((s) => {
             sstate = s;
@@ -3996,6 +4888,10 @@
         if (t.id === "atLogin") return void options({ launchAtLogin: t.checked });
         if (t.id === "startMin") return void options({ startMinimized: t.checked });
         if (t.id === "multi") return void options({ multiProfile: t.checked });
+        if (t.id === "clientKind") {
+          t.disabled = true;
+          return void window.ulr.setClientKind(t.value);
+        }
 
         const row = t.closest("tr[data-id]");
         if (row && t.dataset.field) {
@@ -4111,6 +5007,22 @@
       $("content").addEventListener("click", (e) => {
         const btn = e.target.closest("button");
         if (!btn) return;
+
+        // --- 模組 › 卡面替換 ---
+        if (btn.id === "modsOpen") return void window.ulr.mods.cardsOpen();
+        if (btn.id === "modsReload") {
+          btn.disabled = true;
+          return void window.ulr.mods.cardsReload().then((s) => {
+            mstate = s;
+            renderBody();
+          });
+        }
+        if (btn.id === "modsOpenBlanks") {
+          return void window.ulr.mods.cardsOpenBlanks().then((s) => {
+            mstate = s;
+            renderBody();
+          });
+        }
 
         // --- 編輯 COST ---
         if (btn.dataset.edtab !== undefined) {
@@ -4303,6 +5215,38 @@
         if (btn.dataset.link) {
           return void window.ulr.openExternal(btn.dataset.link);
         }
+        // 設置底下的另一格（同一個大分頁，只換側欄）。
+        if (btn.dataset.goto) {
+          sub = btn.dataset.goto;
+          renderChrome();
+          return void renderBody();
+        }
+        // 網頁版那幾顆：結果講在按鈕旁邊（webMsg），不跳對話框。
+        const web = (p, at = null) =>
+          void p.then((r) => {
+            if (r?.text) webMsg = { text: r.text, bad: !r.ok, at };
+            renderBody();
+          });
+        if (btn.id === "browserOpen") {
+          btn.disabled = true;
+          btn.textContent = "開啟中…";
+          return web(window.ulr.browser.open());
+        }
+        if (btn.dataset.browser) {
+          btn.disabled = true;
+          btn.textContent = "開啟中…";
+          return web(window.ulr.browser.launch(btn.dataset.browser), "browser");
+        }
+        if (btn.dataset.shortcut)
+          return web(window.ulr.browser.shortcut(btn.dataset.shortcut), "browser");
+        if (btn.dataset.copytarget)
+          return web(window.ulr.browser.copyTarget(btn.dataset.copytarget), "copy");
+        if (btn.dataset.extpage) {
+          btn.disabled = true;
+          return web(window.ulr.browser.launch(btn.dataset.extpage, "extensions"), "boot");
+        }
+        if (btn.id === "browserCmd") return web(window.ulr.browser.saveCmd());
+        if (btn.id === "bootExtInstall") return web(window.ulr.bootExt.install(), "boot");
 
         const row = btn.closest("tr[data-id]");
         if (!row) return;
@@ -4403,6 +5347,14 @@
         renderChrome();
         renderBody();
       }
+
+      // 狀態列最後一格是最近一則記錄 —— 點它看完整的。
+      $("fLast").addEventListener("click", () => {
+        tab = "settings";
+        sub = "log";
+        renderChrome();
+        renderBody();
+      });
 
       renderChrome();
       window.ulr.onState(apply);

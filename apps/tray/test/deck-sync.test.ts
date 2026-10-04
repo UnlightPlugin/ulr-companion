@@ -58,8 +58,7 @@ function cloud(): {
 
 function deckWith(i: number) {
   const c = emptyDeckContent();
-  c.chara[0] = "cc069";
-  c.charaIndex[0] = i;
+  c.charaId[0] = i;
   return c;
 }
 
@@ -127,7 +126,7 @@ describe("syncDeckLibrary", () => {
 
     for (const lib of [rb.library, ra2.library]) {
       expect(lib.collections.dietherm.map((d) => d.name)).toEqual(["甲"]);
-      expect(lib.collections.dietherm[0]!.content.charaIndex[0]).toBe(9);
+      expect(lib.collections.dietherm[0]!.content.charaId[0]).toBe(9);
     }
     expect(ra2.pushed).toBe(false);
   });
@@ -173,7 +172,8 @@ describe("syncDeckLibrary", () => {
     let puts = 0;
     const fetch: FetchLike = async (_u, init) => {
       if (init?.method === "PUT") puts++;
-      return { status: 200, json: async () => ({ version: 5, doc: { version: 2, future: true } }) };
+      // 文件版本 2 是 2026-09-23 改版後的現行格式，「讀不懂」要用還不存在的 3。
+      return { status: 200, json: async () => ({ version: 5, doc: { version: 3, future: true } }) };
     };
     const r = await syncDeckLibrary(pc(), { baseUrl: BASE, key: KEY, fetch });
     expect(r.ok).toBe(false);

@@ -36,9 +36,8 @@ import {
 /** 一副長得出來的牌 —— 第一格有人，所以 `guardDeck1` 放行。 */
 function deckOf(first: number, event = 3): DeckContent {
   const c = emptyDeckContent();
-  c.chara[0] = "cc069";
-  c.charaIndex[0] = first;
-  c.eventIndex[0] = event;
+  c.charaId[0] = first;
+  c.eventId[0] = event;
   return c;
 }
 
@@ -531,8 +530,12 @@ describe("第一次使用時四房都要有牌組（WP-19）", () => {
     const lib = seedAllRooms(emptyLibrary("3f2a1c04"), deckOf(684));
     const preload = roomDeckPreloadOf(newSession(lib));
     for (const room of ROOM_KINDS) {
-      expect(preload[room]?.deck.charaIndex).toEqual(deckOf(684).charaIndex);
-      expect(typeof preload[room]?.name).toBe("string");
+      // 插件模式：只換第 1 格、deck_now 釘 1
+      expect(preload[room]?.slots).toHaveLength(1);
+      expect(preload[room]?.slots[0]?.deckId).toBe(1);
+      expect(preload[room]?.slots[0]?.chara_card_id).toEqual(deckOf(684).charaId);
+      expect(preload[room]?.pin).toBe(1);
+      expect(typeof preload[room]?.names["1"]).toBe("string");
     }
   });
 
@@ -542,7 +545,7 @@ describe("第一次使用時四房都要有牌組（WP-19）", () => {
     const preload = roomDeckPreloadOf(session);
     for (const room of ROOM_KINDS) {
       const out = enterRoom({ ...session, here: null }, room, deckOf(999), 1_000);
-      expect(preload[room]?.deck.charaIndex).toEqual(out.pending?.content.charaIndex);
+      expect(preload[room]?.slots[0]?.chara_card_id).toEqual(out.pending?.content.charaId);
     }
   });
 
@@ -834,5 +837,91 @@ describe("渦房選了渦，照 BOSS 標籤換牌組（2026-09-13）", () => {
       expect(out.session).toBe(session);
       expect(out.write).toBeNull();
     }
+  });
+});
+
+/**
+ * 2026-09-20 實機：**從渦房走到對戰房打小號，庫裡迪城的牌組1 變成渦那副。**
+ *
+ * 這一整個 describe 就是那次事故本身。三副拼圖：
+ *
+ * ```
+ *   頁面   點下迪城頻道就把客戶端記憶體換成迪城那副（patch-room-gate）
+ *   托盤   enterRoom 用那一份算出 active.dietherm = 迪城Deck1，並排隊
+ *   伺服器 還躺著渦那副，要等三秒後 commitPending() 才被寫到
+ * ```
+ *
+ * 這三秒內只要讀到伺服器，舊制就判成「玩家改了牌」→ 存進 active[room]。
+ * 基準那一半的測試在 `deck-seen.test.ts`；這裡測的是 `autoSave` 自己那兩道閘。
+ */
+describe("⚠⚠ 換房那幾秒不能把上一房的牌存進這一房（2026-09-20）", () => {
+  /** 渦房一副（選著的）、迪城一副（選著的）。 */
+  function raidToDietherm(): {
+    session: DeckSession;
+    raidDeck: DeckContent;
+    diethermDeck: DeckContent;
+    diethermId: string;
+  } {
+    const raidDeck = deckOf(684);
+    const diethermDeck = deckOf(115);
+    let lib = emptyLibrary("3f2a1c04");
+    const added = addDeck(lib, "dietherm", { content: diethermDeck });
+    lib = setSelected(added.library, "dietherm", added.entry.id);
+    lib = addDeck(lib, "raid", { content: raidDeck }).library;
+    return { session: newSession(lib), raidDeck, diethermDeck, diethermId: added.entry.id };
+  }
+
+  it("排著隊的時候一律不存 —— 那時候兩邊不一致是我們自己造成的", () => {
+    const { session, raidDeck, diethermDeck, diethermId } = raidToDietherm();
+    // 點下迪城頻道：頁面已經把客戶端換成迪城那副（preloaded）。
+    const entered = enterRoom(session, "dietherm", diethermDeck, 1_000, { preloaded: true });
+    expect(entered.pending?.id).toBe(diethermId);
+    expect(entered.active.dietherm).toBe(diethermId);
+
+    // 這三秒內讀到伺服器 —— 上面還躺著渦那副。舊制會把它存進迪城的牌組1。
+    const saved = autoSave(entered, raidDeck, diethermDeck);
+    expect(saved.saved).toBe(false);
+    expect(listDecks(saved.session.library, "dietherm")[0]?.content).toEqual(diethermDeck);
+  });
+
+  it("⚠ 提交失敗之後 active 照伺服器重算 → 指不到任何一副，存不進去", () => {
+    const { session, raidDeck, diethermDeck } = raidToDietherm();
+    const entered = enterRoom(session, "dietherm", diethermDeck, 1_000, { preloaded: true });
+
+    // commitPending() 寫失敗：隊伍清掉，active 照伺服器現況（渦那副）重算。
+    const failed: DeckSession = {
+      ...entered,
+      pending: null,
+      active: {
+        ...entered.active,
+        dietherm: resolveActive(entered.library, "dietherm", raidDeck),
+      },
+    };
+    expect(failed.active.dietherm).toBeNull();
+
+    const saved = autoSave(failed, raidDeck, diethermDeck);
+    expect(saved.saved).toBe(false);
+    expect(listDecks(saved.session.library, "dietherm")[0]?.content).toEqual(diethermDeck);
+  });
+
+  it("玩家真的在編輯畫面改牌還是照存 —— 這兩道閘沒有擋到正事", () => {
+    const { session, diethermDeck, diethermId } = raidToDietherm();
+    // 人在 Edit：排著的那一副換到眼前就落地、pending 當場清掉（frontApplyPending）。
+    const landed = applyLanded(
+      { ...session, room: "dietherm" },
+      {
+        id: diethermId,
+        content: diethermDeck,
+        room: "dietherm",
+        since: 1_000,
+        fronted: true,
+      },
+    );
+    expect(landed.pending).toBeNull();
+
+    const edited = deckOf(115, 9); // 換了一張事件卡
+    const saved = autoSave(landed, edited, diethermDeck);
+    expect(saved.saved).toBe(true);
+    expect(listDecks(saved.session.library, "dietherm")[0]?.content).toEqual(edited);
   });
 });

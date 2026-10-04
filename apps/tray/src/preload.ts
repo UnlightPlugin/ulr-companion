@@ -128,6 +128,10 @@ contextBridge.exposeInMainWorld("ulr", {
     applyDelay: (seconds: number) => ipcRenderer.invoke("ulr:deck-apply-delay", seconds),
     /** 牌組庫的雲端同步開關（同一個角色在不同電腦上同步）。 */
     cloudSync: (on: boolean) => ipcRenderer.invoke("ulr:deck-cloud-sync", on),
+    /** 牌組替換模式：`plugin`／`official`／`off`。回傳實際生效的那一個。 */
+    mode: (mode: string) => ipcRenderer.invoke("ulr:deck-mode", mode),
+    /** 人物篩選的代表卡：`L1`..`L5`／`R`／`off`。回傳實際生效的那一個。 */
+    charaPicker: (mode: string) => ipcRenderer.invoke("ulr:chara-picker", mode),
   },
 
   /** 渦：獎勵標記的狀態與結算通知的模式。 */
@@ -137,6 +141,46 @@ contextBridge.exposeInMainWorld("ulr", {
     share: (on: boolean) => ipcRenderer.invoke("ulr:raid-share", on),
     teamShare: (on: boolean) => ipcRenderer.invoke("ulr:raid-team-share", on),
     autoDelete: (on: boolean) => ipcRenderer.invoke("ulr:raid-auto-delete", on),
+    itemShortcut: (on: boolean) => ipcRenderer.invoke("ulr:raid-item-shortcut", on),
+  },
+
+  /** 任務：物品捷徑與寶箱標註的開關與狀態。 */
+  quest: {
+    state: () => ipcRenderer.invoke("ulr:quest-state"),
+    /** `part`：`stack` 水沙捷徑、`passes` 通行證捷徑。 */
+    itemShortcut: (part: "stack" | "passes", on: boolean) =>
+      ipcRenderer.invoke("ulr:quest-item-shortcut", part, on),
+    treasure: (on: boolean) => ipcRenderer.invoke("ulr:quest-treasure", on),
+  },
+
+  /** 迪特赫姆：物品捷徑與 GEM UP 的開關與狀態（隱藏地圖走 `stages`）。 */
+  diet: {
+    state: () => ipcRenderer.invoke("ulr:diet-state"),
+    /** `part`：`dietStack` 水捷徑、`gemUp` GEM UP。 */
+    toggle: (part: "dietStack" | "gemUp", on: boolean) =>
+      ipcRenderer.invoke("ulr:diet-toggle", part, on),
+  },
+
+  /** 獎勵遊戲：物品捷徑的三選一、差距大時先用哪一種、狀態。 */
+  bonus: {
+    state: () => ipcRenderer.invoke("ulr:bonus-state"),
+    /** `off` 無捷徑、`above` 按鈕左上、`cover` 蓋在使用物品上。 */
+    mode: (mode: "off" | "above" | "cover") => ipcRenderer.invoke("ulr:bonus-mode", mode),
+    /** `order`：`heather5` 石楠5、`clover` 四葉草、`star` 跳越星。 */
+    order: (order: "heather5" | "clover" | "star") => ipcRenderer.invoke("ulr:bonus-order", order),
+  },
+
+  /**
+   * 模組：卡面替換。
+   *
+   * ⚠ 沒有任何一支收路徑或檔案內容 —— 資料夾在哪由主程序定，圖是玩家自己
+   * 用檔案總管放進去的。畫面只能說「開那個資料夾」「開空框資料夾」「重讀」。
+   */
+  mods: {
+    cardsState: () => ipcRenderer.invoke("ulr:mods-cards-state"),
+    cardsOpen: () => ipcRenderer.invoke("ulr:mods-cards-open"),
+    cardsOpenBlanks: () => ipcRenderer.invoke("ulr:mods-cards-open-blanks"),
+    cardsReload: () => ipcRenderer.invoke("ulr:mods-cards-reload"),
   },
 
   stages: {
@@ -159,4 +203,23 @@ contextBridge.exposeInMainWorld("ulr", {
    * 見檔頭：介面越小，畫面被塞了一段別人的腳本時的後果越小。
    */
   copyDebugFlag: () => ipcRenderer.invoke("ulr:copy-debug-flag"),
+
+  /** 這份配置接哪一種客戶端。換了插件會自己重開。 */
+  setClientKind: (kind: string) => ipcRenderer.invoke("ulr:client-kind", kind),
+  browser: {
+    /** `"extensions"` = 開擴充功能頁；不給 = 新分頁。只收這兩種。 */
+    open: (page?: "extensions") => ipcRenderer.invoke("ulr:browser-open", page),
+    /** 指定 `"chrome"`／`"edge"` 開它的專用設定檔，不管這份配置接哪一種。 */
+    launch: (family: "chrome" | "edge", page?: "extensions") =>
+      ipcRenderer.invoke("ulr:browser-launch", family, page),
+    /** 在桌面放「ULR Chrome／ULR Edge」捷徑。 */
+    shortcut: (family: "chrome" | "edge") => ipcRenderer.invoke("ulr:browser-shortcut", family),
+    /** 捷徑「目標」整行放進剪貼簿。 */
+    copyTarget: (family: "chrome" | "edge") =>
+      ipcRenderer.invoke("ulr:browser-copy-target", family),
+    saveCmd: () => ipcRenderer.invoke("ulr:browser-save-cmd"),
+  },
+  bootExt: {
+    install: () => ipcRenderer.invoke("ulr:boot-ext-install"),
+  },
 });

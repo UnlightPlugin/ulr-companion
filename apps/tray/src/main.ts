@@ -24,7 +24,9 @@
  * 所有仲裁規則都在 `@ulr/arbiter-engine` 裡，跟命令列跑的是同一份。
  */
 
-import { readFileSync, statSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { mkdirSync, readFileSync, statSync, watch, writeFileSync } from "node:fs";
+import type { FSWatcher } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { MenuItemConstructorOptions } from "electron";
@@ -55,22 +57,43 @@ import {
   ruleTag,
 } from "@ulr/arbiter-link";
 import {
+  BrowserNotFoundError,
+  browserDebugPort,
+  buildBrowserLaunchCmd,
+  buildBrowserShortcutArgs,
   canAffordDuel,
   costTiersFor,
   DEBUG_PORT_SWITCH_AUTO,
+  detectGameInstall,
   duelApCost,
+  ENV_KEYS_TO_STRIP,
+  ensureBrowser,
+  findBrowser,
   HIDDEN_STAGES,
+  loadExtensionArgs,
+  isBonusItemOrder,
+  isBonusItemPlace,
+  isCharaPickerMode,
   isRaidRewardMode,
   resolveDebugPort,
   ROOM_ERROR_AP_SHORT,
   SELECTABLE_STAGES,
+  summarizeQuestBonus,
 } from "@ulr/cdp-adapter";
 import type {
+  BonusItemOrder,
+  BonusItemPlace,
+  QuestBonusStats,
+  CardArtStatus,
+  CharaPickerMode,
+  CharaPickerReport,
+  LobbyStandReport,
   DeckEditReport,
   DeckSnapshot,
   DuelAffordability,
   HiddenStageStatus,
-  InventorySnapshot,
+  ItemPanelStatus,
+  QuestTreasureStatus,
   LobbyQuickPressed,
   LobbyTierCount,
   MatchContext,
@@ -79,21 +102,36 @@ import type {
   RaidViewStatus,
   RoomGateReport,
 } from "@ulr/cdp-adapter";
-import type { DeckContent, RoomKind } from "@ulr/deck-library";
+import type { CharaFiles, DeckContent, Inventory, RoomKind } from "@ulr/deck-library";
 import {
-  deckContentFromFlat,
+  addDeck,
+  deckContentFromServer,
   deckContentHash,
-  deckContentToPayload,
   displayName,
   emptyDeckContent,
+  favoriteCards,
+  favoriteEvents,
   findDeck,
+  findSetShortages,
   findShortages,
   guardDeck1,
+  hiddenWeapons,
   isEmptyDeck,
   listDecks,
-  parseDeckContent,
+  lobbyStand,
+  // ⚠ 「這一房選的是哪一副」是庫裡的**意圖**（開戰前要寫進伺服器的正是它），
+  // 跟算出來的 active 不是同一件事。見 ensureRoomDeck()。
+  resolveSelected,
   ROOM_KINDS,
   ROOM_LABELS,
+  setFavoriteCard,
+  setFavoriteEvent,
+  setHiddenWeapon,
+  setLobbyStandSets,
+  setLobbyStandUi,
+  stockTable,
+  substituteCharas,
+  withDeckContent,
 } from "@ulr/deck-library";
 import {
   bandForTotal,
@@ -115,17 +153,33 @@ import {
   parseEquipmentKey,
   parseEventCardKey,
   shortHash,
-  toIndexTable,
+  toCardIdTable,
+  legacyWeaponId,
+  legacyEventId,
 } from "@ulr/rule-schema";
 import { readCatalog, writeCatalog } from "./catalog-store.js";
-import type { DeckSession } from "./deck-core.js";
+import type { CardArtFile, CardArtScan, CardNames } from "./card-art.js";
+import {
+  CARD_ART_BLANKS_DIR,
+  countBlanks,
+  ensureCardArtDir,
+  installBundledBlanks,
+  readCardNames,
+  resolveCardFrame,
+  scanCardArtDir,
+} from "./card-art.js";
+import type { ActiveDeckMode, DeckSession } from "./deck-core.js";
 import {
   applyLanded,
+  applyOfficialReport,
   applyReport,
   autoSave,
   deckEditStateOf,
   enterRoom,
   followDeckOnEdit,
+  officialAutoSave,
+  officialRoomOf,
+  officialSetOf,
   roomDeckPreloadOf,
   expireNotice,
   isApplyDue,
@@ -133,9 +187,12 @@ import {
   newSession,
   resolveActive,
   resolveAll,
+  sameSet,
   seedAllRooms,
+  slotWrite,
   withNotice,
 } from "./deck-core.js";
+import { DeckSeen, worldOf } from "./deck-seen.js";
 import { backupOnce, readLibrary, writeLibrary } from "./deck-store.js";
 import { syncDeckLibrary, type FetchLike } from "./deck-sync.js";
 import { bundledRulePath, resolveDefaultRule } from "./default-rule.js";
@@ -146,10 +203,22 @@ import type { IconState } from "./icon.js";
 import { launchAtLoginEnabled, launchInstance, setLaunchAtLogin } from "./launch.js";
 import { openLogFile } from "./log-file.js";
 import { readRaidBattles, writeRaidBattles } from "./raid-battle-store.js";
-import type { ClientKind, CostRuleMode, MatchPrefs, Profile, ProfileStore } from "./profiles.js";
+import { readRaidOutcomes, writeRaidOutcomes } from "./raid-outcome-store.js";
+import { readRaidLearned, writeRaidLearned } from "./raid-learned-store.js";
+import { readQuestBonus, writeQuestBonus } from "./quest-bonus-store.js";
+import type {
+  ClientKind,
+  CostRuleMode,
+  DeckMode,
+  MatchPrefs,
+  Profile,
+  ProfileStore,
+} from "./profiles.js";
 import {
   addProfile,
+  clientLabel,
   defaultPortFor,
+  isDeckMode,
   EDIT_STEPS,
   EDIT_UNITS,
   loadStore,
@@ -167,9 +236,17 @@ import {
   userDataDirFor,
 } from "./profiles.js";
 import { startRuleFeed } from "./rule-feed.js";
+import { TitleButton } from "./title-button.js";
 import { BUNDLE_REPORT_INTERVAL_MS, createBundleReporter, readPushToken } from "./bundle-report.js";
 import { consumeUpdatedFlag, startAutoUpdate } from "./updater.js";
 import { cleanupStaleFiles } from "./zip-update.js";
+import {
+  BOOT_EXT_DIR,
+  bootExtVersion,
+  exportBootExtension,
+  gameFontDirs,
+  USERSCRIPT_GUIDE_URL,
+} from "./web-client.js";
 
 /**
  * 版本號。**建置時烤進去的**（`scripts/build-tray.mjs` 的 `define`）。
@@ -249,6 +326,8 @@ let tray: Tray | null = null;
 let window: BrowserWindow | null = null;
 let engine: ArbiterEngine | null = null;
 let latest: EngineStatus | null = null;
+/** 桌面版遊戲視窗標題列上的重新整理鈕（見 title-button.ts）。app ready 之後才建。 */
+let titleButton: TitleButton | null = null;
 const logLines: string[] = [];
 
 /**
@@ -411,6 +490,8 @@ function buildMenu(): Menu {
       enabled: false,
     },
     { type: "separator" },
+    // 遊戲畫面被蓋住、白畫面、斷線時的後路。不必已經接上遊戲（見 reloadGamePage）。
+    { label: "重新整理遊戲", click: () => void refreshGame("托盤選單") },
     { label: "設定…", click: () => showWindow() },
     {
       label: "準備功能",
@@ -443,6 +524,32 @@ function buildMenu(): Menu {
   return Menu.buildFromTemplate(items);
 }
 
+/**
+ * 玩家自己按的重新整理（標題列鈕、托盤選單）。**不問、不等對戰結束** —— 玩家按
+ * 下去多半就是因為畫面卡住了；跟 `applyPendingReload` 那種插件自己想重載的不同。
+ */
+async function refreshGame(from: string): Promise<void> {
+  if (engine === null) return;
+  try {
+    await engine.reloadGamePage();
+    log(`⟳ 重新整理遊戲（${from}）`);
+  } catch (err) {
+    log(`✗ 重新整理不了：${err instanceof Error ? err.message : String(err)}（遊戲開著嗎？）`);
+  }
+  pushState();
+}
+
+/** 接上桌面版就把標題列鈕貼上去。同一個遊戲程序重複呼叫不做事。 */
+async function attachTitleButton(): Promise<void> {
+  if (engine === null || titleButton === null) return;
+  try {
+    const pid = await engine.desktopProcessId();
+    if (pid !== null) titleButton.attach(pid);
+  } catch {
+    // 連線正在死；下次接上再試。
+  }
+}
+
 function applyPrefs(next: Partial<LinkPrefs>): void {
   engine?.setPrefs(next);
   const prefs = engine?.prefs;
@@ -457,6 +564,14 @@ function applyPrefs(next: Partial<LinkPrefs>): void {
 
 function pushState(): void {
   window?.webContents.send("ulr:state", snapshot());
+}
+
+/** 一族瀏覽器帶除錯埠開的方式。`target` = 捷徑「目標」欄整行；沒裝就是 `null`。 */
+interface BrowserSetup {
+  exe: string | null;
+  profileDir: string;
+  args: string;
+  target: string | null;
 }
 
 interface Snapshot {
@@ -478,6 +593,13 @@ interface Snapshot {
    * 跟螢幕上不一樣的東西 —— 而那是他最不可能懷疑的地方。
    */
   debugFlag: string;
+  /**
+   * ULR Boot 擴充：放在哪、那裡現在是哪一版、安裝包帶的是哪一版。
+   * `installed` 跟 `bundled` 不一樣 = 按一下「放好」就會更新。
+   */
+  bootExt: { dir: string; installed: string | null; bundled: string | null; guideUrl: string };
+  /** 網頁版教學頁用：這台機器上的 Chrome／Edge 怎麼帶除錯埠開。 */
+  browsers: { chrome: BrowserSetup; edge: BrowserSetup };
   /** 遊戲埠 → 那個埠上有沒有客戶端在回話。見 `gamePorts` 的註解。 */
   gamePorts: Record<number, boolean>;
   /** 目前載入的 COST 規則摘要。`null` = 沒選。 */
@@ -580,6 +702,139 @@ function describeRaidRewardMode(mode: RaidRewardMode): string {
   return mode === "all" ? "全部通知" : mode === "none" ? "不再通知" : "只通知一次";
 }
 
+// ---------------------------------------------------------------------------
+// 模組 › 卡面替換
+// ---------------------------------------------------------------------------
+
+/**
+ * 玩家的卡面放這裡。**不分實例**（跟記錄檔一樣放 `APP_DIR`）：卡面是玩家的
+ * 美術，多開的兩份客戶端本來就該看到同一套。
+ */
+const CARD_ART_DIR = join(APP_DIR, "mods", "cards");
+/** 角色代號 → 中文名。第一次接上遊戲時讀的，之後離線也能對檔名。 */
+const CARD_NAMES_PATH = join(APP_DIR, "mods", "card-names.json");
+
+let cardNames: CardNames | null = readCardNames(CARD_NAMES_PATH);
+let cardArtScan: CardArtScan = { files: [], entries: [] };
+let cardArtWatcher: FSWatcher | null = null;
+let cardArtDebounce: ReturnType<typeof setTimeout> | null = null;
+/** 接上遊戲後每隔幾秒試著讀名字表，讀到就停（標題畫面時 profile 還沒載）。 */
+let cardNamesTimer: ReturnType<typeof setInterval> | null = null;
+
+/** 重讀資料夾並推給引擎。`quiet` 時不寫 log（開機那一次、檔案監看的抖動）。 */
+function reloadCardArt(quiet = false): void {
+  ensureCardArtDir(CARD_ART_DIR);
+  cardArtScan = scanCardArtDir(CARD_ART_DIR, cardNames);
+  engine?.setCardArt(cardArtScan.entries);
+  if (!quiet || cardArtScan.files.length > 0) {
+    const skipped = cardArtScan.files.length - cardArtScan.entries.length;
+    log(
+      `· 卡面替換：資料夾裡 ${cardArtScan.files.length} 張 PNG，送出 ${cardArtScan.entries.length} 張` +
+        (skipped > 0 ? `（${skipped} 張對不到或不合規格，見 模組 › 卡面替換）` : ""),
+    );
+  }
+}
+
+/**
+ * 盯著資料夾：玩家丟一張圖進去，一秒內就換上。
+ *
+ * ⚠ Windows 的 `fs.watch` 一次存檔會連發好幾個事件（建檔、寫入、改時間），
+ * 而且寫到一半就會來 —— 所以等 800ms 沒新事件才重讀，讀到半張檔會被
+ * `pngSize` 當成不是 PNG 而跳過，下一次事件再補。
+ */
+function watchCardArtDir(): void {
+  if (cardArtWatcher !== null) return;
+  try {
+    ensureCardArtDir(CARD_ART_DIR);
+    cardArtWatcher = watch(CARD_ART_DIR, { persistent: false }, () => {
+      if (cardArtDebounce !== null) clearTimeout(cardArtDebounce);
+      cardArtDebounce = setTimeout(() => {
+        cardArtDebounce = null;
+        reloadCardArt();
+        pushState();
+      }, 800);
+    });
+    cardArtWatcher.on("error", () => {
+      cardArtWatcher = null;
+    });
+  } catch {
+    cardArtWatcher = null;
+  }
+}
+
+/** 接上遊戲就去讀名字表；讀到之後名字有變的話重對一次檔名。 */
+function startCardNamesFetch(): void {
+  if (cardNamesTimer !== null) return;
+  const attempt = async (): Promise<void> => {
+    if (engine === null || latest?.connected !== true) return;
+    try {
+      const fresh = await engine.readCardNames();
+      stopCardNamesFetch();
+      const changed = JSON.stringify(fresh) !== JSON.stringify(cardNames);
+      cardNames = fresh;
+      if (changed) {
+        try {
+          mkdirSync(dirname(CARD_NAMES_PATH), { recursive: true });
+          writeFileSync(CARD_NAMES_PATH, `${JSON.stringify(fresh, null, 2)}\n`, "utf8");
+        } catch {
+          // 存不了只是下次開機沒有中文名可對，不是壞
+        }
+        if (cardArtScan.files.some((f) => f.frame === null)) reloadCardArt();
+      }
+    } catch {
+      // 標題畫面 profile 還沒載；下一拍再試
+    }
+  };
+  cardNamesTimer = setInterval(() => void attempt(), 10_000);
+  void attempt();
+}
+
+function stopCardNamesFetch(): void {
+  if (cardNamesTimer !== null) clearInterval(cardNamesTimer);
+  cardNamesTimer = null;
+}
+
+/** 卡面替換那一頁要畫的東西。 */
+interface CardArtPageState {
+  dir: string;
+  files: CardArtFile[];
+  /** 送去頁面的張數。 */
+  sent: number;
+  /** 有沒有中文名可以對檔名。 */
+  names: boolean;
+  /** 空框資料夾裡每種尺寸各有幾張（`168x240` → 15）。 */
+  blanks: Record<string, number>;
+  /** 遊戲那端的狀態。沒接上是 null。 */
+  status: CardArtStatus | null;
+}
+
+const CARD_ART_BLANKS_PATH = join(CARD_ART_DIR, CARD_ART_BLANKS_DIR);
+
+/**
+ * 內建空框複製到玩家資料夾。開機一次、按「開空框資料夾」時再補一次
+ * （玩家可能整個刪掉過）。build-tray.mjs 把 `apps/tray/assets` 搬到 `dist/assets`。
+ */
+function installBlanks(): void {
+  try {
+    const r = installBundledBlanks(join(__dirname, "assets", "card-frames"), CARD_ART_BLANKS_PATH);
+    if (r.bundled === 0) log("✗ 插件裡找不到內建的空框（assets/card-frames）");
+    else if (r.written > 0) log(`· 卡面替換：空框放好 ${r.written} 張（${CARD_ART_BLANKS_PATH}）`);
+  } catch (err) {
+    log(`✗ 空框寫不進資料夾：${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+async function cardArtPageState(): Promise<CardArtPageState> {
+  return {
+    dir: CARD_ART_DIR,
+    files: cardArtScan.files,
+    sent: cardArtScan.entries.length,
+    names: cardNames !== null,
+    blanks: countBlanks(CARD_ART_BLANKS_PATH),
+    status: (await engine?.cardArtStatus().catch(() => null)) ?? null,
+  };
+}
+
 /** 渦那一頁要畫的東西：兩支注入腳本的狀態＋結算面板的模式。 */
 interface RaidPageState {
   rewardMode: RaidRewardMode;
@@ -587,8 +842,10 @@ interface RaidPageState {
   teamShare: boolean;
   autoDelete: boolean;
   autoDeletePrompt: boolean;
+  itemShortcut: boolean;
   view: RaidViewStatus | null;
   reward: RaidRewardStatus | null;
+  items: ItemPanelStatus | null;
 }
 
 async function raidPageState(): Promise<RaidPageState> {
@@ -598,8 +855,64 @@ async function raidPageState(): Promise<RaidPageState> {
     teamShare: profile.raidTeamShare,
     autoDelete: profile.raidAutoDelete,
     autoDeletePrompt: profile.raidAutoDeletePrompt,
+    itemShortcut: profile.raidItemShortcut,
     view: (await engine?.raidViewStatus().catch(() => null)) ?? null,
     reward: (await engine?.raidRewardStatus().catch(() => null)) ?? null,
+    items: (await engine?.itemPanelStatus().catch(() => null)) ?? null,
+  };
+}
+
+/** 任務那一頁要畫的東西：物品捷徑與寶箱標註的開關＋兩支注入腳本的狀態。 */
+interface QuestPageState {
+  stackShortcut: boolean;
+  passShortcut: boolean;
+  treasureMarks: boolean;
+  items: ItemPanelStatus | null;
+  treasure: QuestTreasureStatus | null;
+  /** 學到的 HighLow 開始星數：每一級的最小／最大 step、幾筆。 */
+  bonus: QuestBonusStats;
+}
+
+async function questPageState(): Promise<QuestPageState> {
+  return {
+    stackShortcut: profile.questStackShortcut,
+    passShortcut: profile.questPassShortcut,
+    treasureMarks: profile.questTreasureMarks,
+    items: (await engine?.itemPanelStatus().catch(() => null)) ?? null,
+    treasure: (await engine?.questTreasureStatus().catch(() => null)) ?? null,
+    bonus: summarizeQuestBonus(engine?.questBonusSamples ?? readQuestBonus()),
+  };
+}
+
+/** 迪特赫姆那兩頁（物品捷徑、GEM UP）要畫的東西：兩個開關＋物品欄那支的狀態。 */
+interface DietPageState {
+  itemShortcut: boolean;
+  gemUp: boolean;
+  items: ItemPanelStatus | null;
+}
+
+async function dietPageState(): Promise<DietPageState> {
+  return {
+    itemShortcut: profile.dietItemShortcut,
+    gemUp: profile.dietGemUp,
+    items: (await engine?.itemPanelStatus().catch(() => null)) ?? null,
+  };
+}
+
+/** 獎勵 › 物品捷徑要畫的東西：開關、畫在哪、差距大時先用哪一種＋物品欄那支的狀態。 */
+interface BonusPageState {
+  itemShortcut: boolean;
+  place: BonusItemPlace;
+  order: BonusItemOrder;
+  items: ItemPanelStatus | null;
+}
+
+async function bonusPageState(): Promise<BonusPageState> {
+  return {
+    itemShortcut: profile.bonusItemShortcut,
+    place: profile.bonusItemPlace,
+    order: profile.bonusItemOrder,
+    items: (await engine?.itemPanelStatus().catch(() => null)) ?? null,
   };
 }
 
@@ -687,8 +1000,11 @@ function affordDuel(context: MatchContext): DuelAffordability {
   return canAffordDuel({
     ap: context.ap,
     duelFree: context.duelFree,
-    // ⚠ 費用跟著頻道與 3vs3 走，不是常數 —— 見 `duelApCost`。
-    cost: duelApCost({ multi: ROOM_MULTI, crossplay: context.crossplay }),
+    // ⚠ 費用跟著頻道與 3vs3 走，不是常數。頻道物件自己帶（`required_ap`），
+    // 讀不到才退回 `duelApCost` 那張表。
+    cost:
+      (ROOM_MULTI ? context.requiredAp?.multi : context.requiredAp?.single) ??
+      duelApCost({ multi: ROOM_MULTI, crossplay: context.crossplay }),
   });
 }
 
@@ -712,7 +1028,7 @@ async function startPairing(args: {
   if (pairing !== null) return { ok: false as const, reason: "已經在配對中了。" };
   if (costRuleFull === null) {
     // 沒有規則就沒有「約定」可言 —— 那正是這個功能存在的理由。
-    return { ok: false as const, reason: "自動配對要先選一份 COST 規則（牌組 › Cost 表）。" };
+    return { ok: false as const, reason: "自動配對要先選一份 COST 規則（自訂COST › Cost 表）。" };
   }
   const driver = await engine?.matchDriver().catch(() => null);
   if (!driver) return { ok: false as const, reason: "還沒連上遊戲" };
@@ -1301,6 +1617,15 @@ async function onLobbyQuick(press: LobbyQuickPressed): Promise<void> {
     return;
   }
 
+  // ⚠ 迪城借亞城的 COST 檔位（布萊德借峰亥盧），而那份頻道清單只在玩家經過頻道
+  // 選單時看得到（插件搭遊戲自己那一次請求記下來，不另外問）。插件比遊戲晚接上時
+  // 就會缺 —— 缺著排下去會排進自訂檔，跟同一副牌、知道檔位的人配不到，而兩邊都
+  // 只寫著「排隊中」。所以擋下來、講清楚怎麼補。
+  if (costTiersFor(context.channels, channel) === null) {
+    await engine.showLobbyError(null, "讀不到這個頻道的 COST 檔位 —— 退回頻道選單再進來一次。");
+    return;
+  }
+
   // ⚠⚠ **AP 要在排隊之前擋，不是等開房才知道。** 排下去之後才發現不夠的話，
   // 對手已經被配給我們、已經在等一間永遠不會開的房 —— 而玩家看到的是配對
   // 走到一半跳出「AP不足」。這一關擋掉的正是玩家 2026-08-19 回報的那個畫面。
@@ -1387,10 +1712,28 @@ let bundleReportTimer: ReturnType<typeof setInterval> | null = null;
 let deck: DeckSession | null = null;
 /** 這份 session 是哪個帳號的。**換帳號登入要整份重來。** */
 let deckAccount: string | null = null;
-/** `player.deck_check` 的原值。寫回去時照帶，不動玩家的 UI 偏好。 */
-let deckCheck = true;
-/** 卡片庫存的快取，見 {@link INVENTORY_TTL_MS}。 */
-let inventoryCache: { at: number; data: InventorySnapshot } | null = null;
+/**
+ * 卡片庫存的快取，見 {@link INVENTORY_TTL_MS}。
+ *
+ * 改版後讀庫存不必送請求（讀的是 registry），快取留著只是省一次 evaluate。
+ */
+let inventoryCache: {
+  at: number;
+  data: Inventory;
+  /** 玩家角色卡的格子鍵（見 `InventorySnapshot`），臨時換卡用（見 forGame）。 */
+  charaFiles: CharaFiles;
+} | null = null;
+/**
+ * 官方三牌組模式：上一次在牌組編輯畫面看到的三副。自動存檔的比較基準
+ * （跟插件模式的 `deckSeen` 同一個道理：只存兩次觀察之間真的變了的）。
+ * `null` = 還沒觀察過，那時候一律不存。
+ */
+let officialSeen: DeckContent[] | null = null;
+
+/** 玩家選的牌組替換模式。`null` = 關閉（插件不碰牌組）。 */
+function activeDeckMode(): ActiveDeckMode | null {
+  return profile.deckMode === "off" ? null : profile.deckMode;
+}
 /**
  * 還沒替這條連線讀過帳號指紋。
  *
@@ -1403,42 +1746,133 @@ let deckWaitLogged = false;
 /** 上一拍玩家在不在 Edit 畫面。true → false 那一拍要補存一次他剛改的東西。 */
 let deckMounted = false;
 /**
- * **上一次我們讀到的 Deck1。** 自動存檔的比較基準，見 `autoSave()`。
+ * **上一次我們讀到的 Deck1** —— 客戶端與伺服器**各記一份**。自動存檔的比較
+ * 基準，見 `autoSave()` 與 `deck-seen.ts` 的檔頭。
  *
  * ⚠ 少了它，「寫入失敗」會被誤判成「玩家改過牌」，然後把玩家那副牌覆蓋掉。
- * `null` = 還沒觀察過，那時候一律不存。
+ * `null` = 那個世界還沒觀察過，那時候一律不存。
+ *
+ * ⚠⚠ 記的時候要**誠實說自己動到哪一邊**：快路徑只動客戶端記憶體（`client`），
+ * 只有 `db_editdeck` 寫完讀回來對過那一條才是 `both`。報錯了就等於沒修 ——
+ * 2026-09-20「迪城的牌組1 變成渦那副」正是兩邊被當成同一份的後果。
  */
-let deckLastSeen: DeckContent | null = null;
+const deckSeen = new DeckSeen();
 /** 正在處理一則回報。玩家連點時後面那幾則直接丟掉，不要交錯跑。 */
 let deckBusy = false;
 
 /**
- * **Deck1 現在真正的內容。**
+ * **把牌組庫整份放掉，下一拍重新認帳號。**
+ *
+ * 三個時機：斷線、遊戲頁面重載、以及快路徑讀到的帳號指紋跟手上這份庫不一樣。
+ *
+ * ## ⚠⚠ 為什麼只靠斷線不夠（2026-09-14 實機）
+ *
+ * 小號在**同一個分頁**裡從 A 導向 B 的網址，CDP 連線一路沒斷；登完直接跳進
+ * 對戰大廳，托盤讀 Deck1 一律走快路徑（不讀伺服器、原本也沒有帳號指紋）。
+ * 於是它整整一晚都以為還是 A：
  *
  * ```
- *   玩家人在牌組編輯畫面 → 客戶端記憶體（他正在排的那一副）
- *   不在                → 伺服器（`db_deck1`）
+ *   進房 preload  → 把 A 的牌塞進 B 的 Deck1（「這副牌有 5 張卡你手上沒有」）
+ *   B 選第 1 副   → 拿 B 的 id 去 A 的庫找（「那副牌組不見了」），永遠換不過去
+ *   自動存檔      → B 的 Deck1 存進 A 的檔案
  * ```
  *
- * ⚠⚠ 這個順序不能顛倒。遊戲要等玩家**離開**編輯畫面才把 Deck1 送上伺服器，
- * 所以他人還在那裡時，伺服器上的是舊的。只讀伺服器的話，「改完牌直接按 ◀▶
- * 換牌組」會讓插件判定「沒有編輯要存」，然後把目標牌組蓋進 Deck1 ——
- * **他剛排好的牌當場消失，而且一句話都沒有**。
+ * ## ⚠ `deck` 要清成 `null`，不能只立 `deckPending`
+ *
+ * 只立旗標的話 `onRoomGate`／`onDeckReport` 照樣拿舊的那份庫在跑（它們只看
+ * `deck === null`），等待重認的那幾秒正好是進房 preload 會發生的時候。
+ * 頁面上的 room preload 也要一起清：引擎補裝房間偵測時會把它手上那份推回頁面，
+ * 不清就是把上一個人的牌再推一次。
+ */
+function resetDeckSession(): void {
+  deckPending = true;
+  deckMounted = false;
+  // ⚠ 比較基準也要丟掉（兩份一起）。留著上一條連線／上一個人看到的 Deck1，
+  // 重認後第一次比對會把「這段期間在別處改的牌」誤判成剛剛的編輯。
+  deckSeen.reset();
+  officialSeen = null;
+  inventoryCache = null;
+  deck = null;
+  deckSyncKey = null;
+  if (deckSyncTimer !== null) {
+    clearTimeout(deckSyncTimer);
+    deckSyncTimer = null;
+  }
+  // ⚠ 同步清：引擎的 setRoomDecks 在第一個 await 之前就換掉它手上那份，
+  // 所以緊接著的補裝推下去的已經是空的。
+  if (engine !== null) {
+    void engine.setRoomDecks({ mode: activeDeckMode() ?? "off", decks: {} });
+    gatePendingPushed = null;
+    void syncGatePending();
+  }
+  // 最愛是上一個人的，一起收掉。
+  pushCharaPicker();
+  pushLobbyStand();
+}
+
+/**
+ * 讀到的帳號跟手上這份庫不是同一個人 → 放掉重來，回 `true`。
+ *
+ * ⚠ `null` 是「這一拍認不出來」（還在登入、場景還沒掛上 socket），不是換人 ——
+ * 拿它當換人會讓每次載入中都整份重建一次。
+ */
+function accountChanged(account: string | null): boolean {
+  if (account === null || deckAccount === null || account === deckAccount) return false;
+  log("⟳ 換了帳號登入 —— 牌組庫放掉，重新接上這個帳號的");
+  resetDeckSession();
+  return true;
+}
+
+/**
+ * **Deck1（與另外兩格）現在真正的內容。**
+ *
+ * ```
+ *   玩家人在有牌組列的畫面 → 客戶端記憶體 registry.deck（他正在排的、或進房預載的）
+ *   不在                    → 伺服器那份（頁面記著的；沒記過才 db_deck 一次）
+ * ```
+ *
+ * ⚠⚠ 這個順序不能顛倒。遊戲要等玩家**離開**編輯畫面才把牌組送上伺服器，所以
+ * 他人還在那裡時，伺服器上的是舊的。只讀伺服器的話，「改完牌直接按 ◀▶ 換牌組」
+ * 會被判成「沒有編輯要存」，然後目標牌組蓋進 Deck1 —— **他剛排好的牌當場消失**。
  */
 async function currentDeck1(): Promise<{
+  /** 第 1 格（插件模式的工作槽）。 */
   current: DeckContent;
+  /** 三格，照 `deck_id` 排好（官方三牌組模式用）。 */
+  set: DeckContent[];
   snap: DeckSnapshot | null;
   /** 這一份是從哪裡讀來的。⚠ 自動存畫要看它，見 {@link mayAutoSave}。 */
   where: "edit" | "room" | "server";
+  /** 帳號指紋；認不出來是 `null`。⚠ 換帳號的判斷要看它，見 {@link accountChanged}。 */
+  account: string | null;
+  /** 玩家眼前是第幾格（場景的 `deck_now`）。 */
+  deckNow: number | null;
 } | null> {
   if (engine === null) return null;
   const live = await engine.readEditDeck();
-  // ⚠ 快路徑：拿到記憶體那一份就**不要再去讀伺服器**。讀一次是四趟 WebSocket，
-  // 而換牌組跟每一拍輪詢都會走這裡 —— 那正是「換牌組好慢」的來源。
-  if (live !== null) return { current: parseDeckContent(live.deck), snap: null, where: live.where };
+  // ⚠ 快路徑：拿到記憶體那一份就不必看伺服器那份。
+  if (live !== null) {
+    const set = live.decks.map((d) => fromGame(deckContentFromServer(d)));
+    return {
+      current: set[0] ?? emptyDeckContent(),
+      set,
+      snap: null,
+      where: live.where,
+      account: live.account,
+      deckNow: live.deckNow,
+    };
+  }
   try {
     const snap = await engine.readDecks();
-    return { current: deckContentFromFlat(snap.decks[0] ?? {}), snap, where: "server" };
+    const set = snap.decks.map((d) => fromGame(deckContentFromServer(d)));
+    return {
+      current: set[0] ?? emptyDeckContent(),
+      set,
+      snap,
+      where: "server",
+      account: snap.account,
+      deckNow: snap.deckNow,
+    };
   } catch {
     return null;
   }
@@ -1477,26 +1911,111 @@ function mayAutoSave(where: "edit" | "room" | "server"): boolean {
   return where !== "room";
 }
 
-/** `db_deck*` 帶回來的 cost。伺服器自己會算，帶原值只是少一次畫面跳動。 */
-function deckCostOf(flat: Record<string, unknown> | undefined): number {
-  const cost = flat?.cost;
-  return typeof cost === "number" && Number.isFinite(cost) ? cost : 0;
-}
-
 /** 把庫存讀出來（有快取）。讀不到回 `null` —— 呼叫端**必須**當成「不准寫」。 */
-async function deckInventory(): Promise<InventorySnapshot | null> {
+async function deckInventory(): Promise<Inventory | null> {
   if (engine === null) return null;
   const now = Date.now();
   if (inventoryCache !== null && now - inventoryCache.at < INVENTORY_TTL_MS) {
     return inventoryCache.data;
   }
   try {
-    const data = await engine.readInventory();
-    inventoryCache = { at: now, data };
+    const raw = await engine.readInventory();
+    const data: Inventory = {
+      chara: stockTable(raw.chara),
+      weapon: stockTable(raw.weapon),
+      event: stockTable(raw.event),
+    };
+    const hadSwaps = librarySwaps();
+    inventoryCache = { at: now, data, charaFiles: raw.charaFiles };
+    // 換卡的結果變了（第一次讀到、或玩家剛合成完）→ 頁面的預載與選單卡面要跟上。
+    if (librarySwaps() !== hadSwaps) void pushDeckState().catch(() => {});
     return data;
   } catch {
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// 手上沒有的角色卡：寫進遊戲時臨時換成同一個角色的另一張
+//
+// 2026-09-25 迪城：玩家把沃蘭德 R2 合成成 R5，庫裡那副還寫著 R2，於是每點一次
+// 都「有 1 張卡你手上沒有」。玩家定的規則：**換牌時臨時用最接近的，角色一樣就
+// 行，最好是上位高等的**（`substituteCharas`）。牌組庫裡照舊是 R2。
+//
+// ⚠⚠ 兩個方向都要做，只做一邊會壞：
+//
+//   往遊戲寫（forGame）   Deck1／預載／選單卡面都用換過的
+//   從遊戲讀（fromGame）  讀回 R5 那一副時認回庫裡的 R2 那一副
+//
+// 「Deck1 現在是哪一副」與「伺服器上是不是這一副」全是拿內容 hash 跟庫比的。
+// 少了 fromGame，遊戲裡的 R5 對不上庫裡的 R2：選單失去黃字、開戰前每次都判成
+// 「伺服器上不是它」而重寫一次，自動存檔的比較基準也會混進兩種寫法。
+// ---------------------------------------------------------------------------
+
+/** 已經在記錄裡講過的替換（`from→to`），同一組只講一次。 */
+const swapsLogged = new Set<string>();
+
+function cardLabel(id: number): string {
+  const file = inventoryCache?.charaFiles[String(id)];
+  if (file === undefined) return `#${id}`;
+  return resolveCardFrame(file, cardNames)?.label ?? file;
+}
+
+/** 寫進遊戲的樣子。`quiet` = 只是拿來畫（選單、預載），不寫記錄。 */
+function forGame(content: DeckContent, quiet = false): DeckContent {
+  if (inventoryCache === null) return content;
+  const out = substituteCharas(content, inventoryCache.data, inventoryCache.charaFiles);
+  if (!quiet) {
+    for (const s of out.swaps) {
+      const key = `${s.from}→${s.to}`;
+      if (swapsLogged.has(key)) continue;
+      swapsLogged.add(key);
+      log(
+        `· 手上沒有 ${cardLabel(s.from)}，臨時用 ${cardLabel(s.to)} 代替（牌組庫裡照舊是 ${cardLabel(s.from)}）`,
+      );
+    }
+  }
+  return out.content;
+}
+
+/** 從遊戲讀回來的一副：正好是庫裡某一副換過卡的樣子，就認回那一副。 */
+function fromGame(content: DeckContent): DeckContent {
+  if (deck === null || inventoryCache === null) return content;
+  const want = deckContentHash(content);
+  const rooms = [deck.room, ...ROOM_KINDS.filter((r) => r !== deck!.room)];
+  const all = rooms.flatMap((r) => listDecks(deck!.library, r));
+  if (all.some((d) => deckContentHash(d.content) === want)) return content;
+  for (const d of all) {
+    const out = substituteCharas(d.content, inventoryCache.data, inventoryCache.charaFiles);
+    if (out.swaps.length > 0 && deckContentHash(out.content) === want) return d.content;
+  }
+  return content;
+}
+
+/** 庫裡現在有哪幾副需要換卡、換成什麼（拿來判斷「結果變了沒」）。 */
+function librarySwaps(): string {
+  if (deck === null || inventoryCache === null) return "";
+  const cache = inventoryCache;
+  return ROOM_KINDS.flatMap((r) => listDecks(deck!.library, r))
+    .map((d) => substituteCharas(d.content, cache.data, cache.charaFiles).swaps)
+    .filter((s) => s.length > 0)
+    .map((s) => s.map((x) => `${x.from}>${x.to}`).join(","))
+    .join("|");
+}
+
+/** 一格預載（`slotWrite` 的形狀）換成寫進遊戲的樣子。 */
+function slotForGame<
+  T extends {
+    chara_card_id: (number | null)[];
+    weapon_card_id: (number | null)[];
+    event_card_id: (number | null)[];
+  },
+>(slot: T): T {
+  const content = forGame(
+    { charaId: slot.chara_card_id, weaponId: slot.weapon_card_id, eventId: slot.event_card_id },
+    true,
+  );
+  return { ...slot, chara_card_id: [...content.charaId] };
 }
 
 function saveDeckLibrary(options: { sync?: boolean } = {}): void {
@@ -1562,12 +2081,12 @@ async function runDeckSync(): Promise<void> {
     });
     if (!r.ok) {
       deckSyncStatus = { at: Date.now(), ok: false, text: r.reason };
-      if (!deckSyncFailing) log(`⚠ 牌組雲端同步：${r.reason}（先用本機的，稍後再試）`);
+      if (!deckSyncFailing) log(`⚠ 牌組跨電腦同步：${r.reason}（先用本機的，稍後再試）`);
       deckSyncFailing = true;
       pushState();
       return;
     }
-    if (deckSyncFailing) log("✓ 牌組雲端同步恢復了");
+    if (deckSyncFailing) log("✓ 牌組跨電腦同步恢復了");
     deckSyncFailing = false;
 
     const now = deck;
@@ -1581,18 +2100,18 @@ async function runDeckSync(): Promise<void> {
     const parts: string[] = [];
     if (r.pulled > 0) parts.push(`拉下 ${r.pulled} 副`);
     if (r.deleted > 0) parts.push(`刪掉 ${r.deleted} 副`);
-    if (r.pushed) parts.push("已推上雲端");
+    if (r.pushed) parts.push("已推上 Cloudflare Workers");
     deckSyncStatus = {
       at: Date.now(),
       ok: true,
-      text: parts.length > 0 ? parts.join("、") : "跟雲端一致",
+      text: parts.length > 0 ? parts.join("、") : "跟 Cloudflare Workers 上的一致",
     };
 
     if (r.localChanged) {
       // active 是用內容算的，合併之後重算；還沒觀察過 Deck1 就只清掉被刪掉的那幾副。
       const active =
-        deckLastSeen !== null
-          ? resolveAll(r.library, deckLastSeen)
+        deckSeen.latest !== null
+          ? resolveAll(r.library, deckSeen.latest)
           : (Object.fromEntries(
               ROOM_KINDS.map((room) => {
                 const id = now.active[room];
@@ -1601,7 +2120,7 @@ async function runDeckSync(): Promise<void> {
             ) as DeckSession["active"]);
       deck = { ...now, library: r.library, active };
       saveDeckLibrary({ sync: false });
-      log(`· 牌組雲端同步：${deckSyncStatus.text}（另一台電腦改過的已經合進來）`);
+      log(`· 牌組跨電腦同步：${deckSyncStatus.text}（另一台電腦改過的已經合進來）`);
       await pushDeckState();
     }
     pushState();
@@ -1616,13 +2135,129 @@ async function runDeckSync(): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 牌組編輯畫面的人物篩選與最愛卡片（patch-chara-picker）
+// ---------------------------------------------------------------------------
+
+/** 上一次推給引擎的那份（一樣就不推：pushDeckState 很常跑）。 */
+let charaPickerPushed: string | null = null;
+
+/**
+ * 把 [Chara] 鈕的設定與最愛清單推給引擎。
+ *
+ * 最愛與隱藏的裝備存在牌組庫裡（跟牌組一起上雲），所以牌組庫還沒接上（`deck === null`，
+ * 包括牌組替換關閉時）就是 `favoritesReady: false` —— 最愛鈕與「隱藏裝備」不畫，
+ * 免得點了存不進去。
+ */
+function pushCharaPicker(): void {
+  if (engine === null) return;
+  const state = {
+    mode: profile.charaPicker,
+    favorites: deck === null ? [] : favoriteCards(deck.library),
+    hiddenWeapons: deck === null ? [] : hiddenWeapons(deck.library),
+    favoriteEvents: deck === null ? [] : favoriteEvents(deck.library),
+    favoritesReady: deck !== null,
+  };
+  const text = JSON.stringify(state);
+  if (text === charaPickerPushed) return;
+  charaPickerPushed = text;
+  engine.setCharaPicker(state);
+}
+
+/**
+ * 玩家在牌組編輯畫面按了「最愛卡片」（角色卡或事件卡）或「隱藏裝備」。
+ * 存進牌組庫、排雲端同步、推回畫面。
+ */
+function onCharaPicker(report: CharaPickerReport): void {
+  if (report.type === "chara-picker-error") return;
+  if (deck !== null) {
+    const toggle =
+      report.type === "card-favorite"
+        ? setFavoriteCard
+        : report.type === "event-favorite"
+          ? setFavoriteEvent
+          : setHiddenWeapon;
+    const library = toggle(deck.library, report.card, report.on);
+    if (library !== deck.library) {
+      deck = { ...deck, library };
+      saveDeckLibrary();
+    }
+  }
+  // 頁面已經先動了（樂觀更新）；存不進去（庫還沒接上）時這一推會把它扳回來。
+  charaPickerPushed = null;
+  pushCharaPicker();
+}
+
+// ---------------------------------------------------------------------------
+// 首頁立繪與 Library 愛心複選（patch-lobby-stand）
+// ---------------------------------------------------------------------------
+
+/** 上一次推給引擎的那份（一樣就不推）。 */
+let lobbyStandPushed: string | null = null;
+
+/**
+ * 把最愛角色套組、擺法與大廳元件推給引擎。跟最愛卡片一樣存在牌組庫裡（上雲），所以
+ * 牌組庫還沒接上就是 `ready: false` —— 首頁與 Library 維持官方原樣，免得點了存不進去。
+ */
+function pushLobbyStand(): void {
+  if (engine === null) return;
+  const stand = deck === null ? null : lobbyStand(deck.library);
+  const state = {
+    ready: deck !== null,
+    sets: stand?.sets ?? [],
+    ui: stand?.ui ?? {},
+  };
+  const text = JSON.stringify(state);
+  if (text === lobbyStandPushed) return;
+  lobbyStandPushed = text;
+  engine.setLobbyStand(state);
+}
+
+/** 玩家點了 Library 的愛心、或在首頁編輯模式按了 OK。存進牌組庫、排雲端同步、推回畫面。 */
+function onLobbyStand(report: LobbyStandReport): void {
+  if (report.type === "lobby-stand-error") return;
+  if (deck !== null) {
+    let library = setLobbyStandSets(deck.library, report.sets);
+    if (report.ui !== undefined) library = setLobbyStandUi(library, report.ui);
+    if (library !== deck.library) {
+      deck = { ...deck, library };
+      saveDeckLibrary();
+    }
+  }
+  // 頁面已經先動了；存不進去（庫還沒接上）時這一推會把它扳回來。
+  lobbyStandPushed = null;
+  pushLobbyStand();
+}
+
 async function pushDeckState(): Promise<void> {
-  if (engine === null || deck === null) return;
-  await engine.setDeckEditState(deckEditStateOf(deck));
-  // ⚠ 每一房「進去要用哪一副」也要跟著更新。玩家換了選擇之後不重推的話，
+  if (engine === null) return;
+  // 最愛也在牌組庫裡：庫換了（接上、同步合併、換帳號）就跟著推。
+  pushCharaPicker();
+  pushLobbyStand();
+  const mode = activeDeckMode();
+  if (mode === null) {
+    // 關閉模式：選單拆掉、房間不預載不攔不釘。
+    await engine.clearDeckEdit();
+    await engine.setRoomDecks({ mode: "off", decks: {} });
+    return;
+  }
+  if (deck === null) return;
+  // 選單的卡面與總 COST、進房預載都用寫進遊戲的樣子（手上沒有的角色卡已經
+  // 臨時換過，見 forGame）—— 畫出來的就是實際會用的那一副。
+  const state = deckEditStateOf(deck, mode);
+  await engine.setDeckEditState({
+    ...state,
+    decks: state.decks.map((d) => ({ ...d, content: forGame(d.content, true) })),
+  });
+  // ⚠ 每一房「進去要用哪幾格」也要跟著更新。玩家換了選擇之後不重推的話，
   // 進房時頁面塞的還是上一次那副 —— 而它會**贏過**托盤隨後寫進來的那一份
   // （頁面是在 create() 之前動手的，比較早）。見 `RoomDeckPreload`。
-  await engine.setRoomDecks(roomDeckPreloadOf(deck));
+  const preload = roomDeckPreloadOf(deck, mode);
+  for (const room of ROOM_KINDS) {
+    const p = preload[room];
+    if (p !== undefined) preload[room] = { ...p, slots: p.slots.map(slotForGame) };
+  }
+  await engine.setRoomDecks({ mode, decks: preload });
 }
 
 /**
@@ -1649,12 +2284,25 @@ async function initDeckLibrary(): Promise<void> {
   }
   deckWaitLogged = false;
   deckPending = false;
-  deckCheck = snap.deckCheck;
 
-  const current = deckContentFromFlat(snap.decks[0] ?? {});
+  const current = deckContentFromServer(snap.decks[0]);
   const label = snap.accountLabel ?? undefined;
-  const { library, dropped, existed } = readLibrary(APP_DIR, snap.account, label);
+  const { library, dropped, migrated, existed, adopted } = readLibrary(
+    APP_DIR,
+    snap.account,
+    label,
+  );
   let lib = library;
+  if (adopted !== null) {
+    // 指紋換成玩家名稱之後的第一次：舊指紋存下的那幾份庫併進來（見 readLibrary）。
+    log(
+      `· 牌組庫：把這個角色先前分散的 ${adopted.files.length} 份存檔併回來了（${adopted.decks} 副，一樣的只留一副；舊檔沒動）`,
+    );
+  }
+  if (migrated > 0) {
+    // 改版前的存檔（資產索引）在讀的時候就轉成新卡號了，下面那次存檔會把它寫回新格式。
+    log(`· 牌組庫裡 ${migrated} 副改版前的牌組已轉成新的卡片編號`);
+  }
 
   if (!existed) {
     // 第一次用這個帳號：先把 Deck1 收進來（Deck2/Deck3 由下面的搬遷處理，
@@ -1669,8 +2317,23 @@ async function initDeckLibrary(): Promise<void> {
 
   deckAccount = snap.account;
   deckSyncKey = snap.syncKey;
-  deckLastSeen = current;
-  deck = { ...newSession(lib), active: resolveAll(lib, current) };
+  if (deckSyncKey === null && profile.deckCloudSync) {
+    // 頁面讀不到註冊時間就不給雲端鍵（`@ulr/cdp-adapter` 的 `FINGERPRINT_SNIPPET`）
+    // —— 講清楚是暫停，不然狀態欄空著，玩家會以為同步還在跑。
+    deckSyncStatus = {
+      at: Date.now(),
+      ok: false,
+      text: "暫停：讀不到角色的註冊時間，算不出同步用的鑰匙",
+    };
+  }
+  // 接上的這一刻剛讀完伺服器，而頁面記憶體就是從它來的 —— 兩邊同一份。
+  deckSeen.remember("both", current);
+  officialSeen = null;
+  deck = {
+    ...newSession(lib),
+    active: resolveAll(lib, current),
+    slotNow: snap.deckNow ?? 1,
+  };
 
   try {
     if (backupOnce(APP_DIR, snap))
@@ -1680,7 +2343,8 @@ async function initDeckLibrary(): Promise<void> {
   }
 
   // ⚠ 搬遷要在存檔之前，這樣第一次跑就只寫一次檔。
-  await adoptServerDecks(snap);
+  // 只有插件模式要清 Deck2／Deck3（官方三牌組模式三格都是玩家的牌）。
+  if (activeDeckMode() === "plugin") await adoptServerDecks(snap, existed);
 
   // ⚠ 上面那個 await 中間可能斷線（`deck` 會被重設）。重讀一次，不要沿用
   // await 之前的那個參照。
@@ -1692,7 +2356,11 @@ async function initDeckLibrary(): Promise<void> {
   void deckInventory();
 
   const total = ROOM_KINDS.reduce((n, r) => n + listDecks(settled.library, r).length, 0);
-  log(`✓ 牌組庫已接上（${total} 副）—— 在遊戲的牌組編輯畫面點左下角那個牌盒`);
+  log(
+    activeDeckMode() === "official"
+      ? `✓ 牌組庫已接上（${total} 副，官方三牌組模式：每一房用那一房的前三副）`
+      : `✓ 牌組庫已接上（${total} 副）—— 在遊戲的牌組編輯畫面點左下角那個牌盒`,
+  );
   if (dropped > 0) log(`⚠ 存檔裡有 ${dropped} 副壞掉的記錄，已跳過`);
   saveDeckLibrary({ sync: false });
   await pushDeckState();
@@ -1713,57 +2381,69 @@ async function initDeckLibrary(): Promise<void> {
  * ## ⚠ 為什麼「清空」不只是整理
  *
  * 卡片庫存是**三副共扣同一個池子**。Deck2/Deck3 佔著卡的時候，把同一張卡再
- * 寫進 Deck1 就是同一張用兩次 —— 伺服器會收下 `db_editdeck` 卻不照做，
- * 而插件只看得到一個 ack。2026-08-27 玩家回報的「選了牌組沒反應」就是這個。
- * 清空之後那些卡回到池子，每一副自訂牌組才都用得到它們。
+ * 寫進 Deck1 就是同一張用兩次 —— 改版後伺服器會直接退回 `deck_update`，而
+ * 牌組編輯畫面退回時**不說話**，只是按返回沒反應。清空之後那些卡回到池子，
+ * 每一副自訂牌組才都用得到它們（玩家要的「可用所有事件卡」就是這個）。
+ *
+ * ## 第一次 vs 之後
+ *
+ * - 這個帳號第一次接上（`existed === false`）：照 2026-08-28 的規則放進四房的
+ *   **第 2、3 格**，順序跟玩家在遊戲裡看到的一樣。
+ * - 之後（例如剛從官方三牌組模式切回來、或改版後在官方介面排了新牌）：**接在
+ *   後面**，不覆蓋任何一副。已經在庫裡某一房的（內容一樣）就不再收。
  *
  * ## ⚠ 順序不能顛倒
  *
  * **先搬進庫、存檔，再清伺服器。** 反過來的話，清完到存檔之間任何一個閃失
- * （斷線、當掉）都會讓那兩副牌同時從伺服器和庫裡消失。備份檔是最後一道網，
- * 不是第一道。
+ * （斷線、當掉）都會讓那兩副牌同時從伺服器和庫裡消失。備份檔是最後一道網。
  */
-async function adoptServerDecks(snap: DeckSnapshot): Promise<void> {
+async function adoptServerDecks(snap: DeckSnapshot, existed: boolean): Promise<void> {
   if (engine === null || deck === null) return;
 
-  const flat2 = snap.decks[1] ?? {};
-  const flat3 = snap.decks[2] ?? {};
-  const deck2 = deckContentFromFlat(flat2);
-  const deck3 = deckContentFromFlat(flat3);
+  const deck2 = deckContentFromServer(snap.decks[1]);
+  const deck3 = deckContentFromServer(snap.decks[2]);
   const has2 = !isEmptyDeck(deck2);
   const has3 = !isEmptyDeck(deck3);
   if (!has2 && !has3) return;
 
-  // 1. 先搬進庫並落地
-  deck = migrateServerDecks(deck, has2 ? deck2 : null, has3 ? deck3 : null);
+  // 1. 先搬進庫並落地（已經在庫裡的就不再收）
+  const known = (c: DeckContent): boolean =>
+    deck !== null && ROOM_KINDS.some((r) => resolveActive(deck!.library, r, c) !== null);
+  const take = [has2 && !known(deck2) ? deck2 : null, has3 && !known(deck3) ? deck3 : null];
+  if (!existed) {
+    deck = migrateServerDecks(deck, take[0] ?? null, take[1] ?? null);
+  } else {
+    let library = deck.library;
+    for (const content of take) {
+      if (content === null) continue;
+      for (const room of ROOM_KINDS) library = addDeck(library, room, { content }).library;
+    }
+    deck = { ...deck, library };
+  }
   saveDeckLibrary();
 
-  // 2. 再清伺服器。Deck1 原樣帶回去 —— `db_editdeck` 一次覆寫三副。
-  const empty = deckContentToPayload(emptyDeckContent(), 0);
-  const current = deckContentFromFlat(snap.decks[0] ?? {});
+  // 2. 再清伺服器。Deck1 原樣帶回去 —— `deck_update` 一次覆寫整份。
+  const next = snap.decks.map((d) =>
+    d.deck_id === 1 ? d : withDeckContent(d, emptyDeckContent()),
+  );
   try {
-    const result = await engine.applyDecks(
-      [deckContentToPayload(current, deckCostOf(snap.decks[0])), empty, empty],
-      deckCheck,
-    );
-    if (!result.ack) {
-      log("⚠ 想清空伺服器的 Deck2／Deck3，但伺服器沒回應 —— 牌組已經收進庫裡了，下次再試");
+    const result = await engine.applyDecks(next);
+    if (result.answer !== "ok") {
+      log(
+        result.answer === "rejected"
+          ? "⚠ 想清空伺服器的 Deck2／Deck3，伺服器不收 —— 牌組已經收進庫裡了，下次再試"
+          : "⚠ 想清空伺服器的 Deck2／Deck3，但伺服器沒回應 —— 牌組已經收進庫裡了，下次再試",
+      );
       return;
     }
-    // 讀回來對過才算數（跟換牌組同一條規矩）
-    const after = await engine.readDecks();
-    const left = after.decks
-      .slice(1)
-      .filter((f) => !isEmptyDeck(deckContentFromFlat(f as Record<string, unknown>))).length;
-    if (left > 0) {
-      log(`⚠ Deck2／Deck3 沒清乾淨（還剩 ${left} 副）—— 牌組已經收進庫裡了，下次再試`);
-      return;
-    }
-    deckLastSeen = deckContentFromFlat(after.decks[0] ?? {});
-    inventoryCache = null; // 卡回到池子了，庫存要重讀
+    // deck_update 成功 = 伺服器與記憶體都是這一份（頁面已經就地同步）。
+    deckSeen.remember("both", fromGame(deckContentFromServer(snap.decks[0])));
+    inventoryCache = null;
+    const added = take.filter((c) => c !== null).length;
     log(
-      `✓ 伺服器的 Deck${has2 && has3 ? "2、Deck3" : has2 ? "2" : "3"} 已收進牌組庫並清空 ——` +
-        " 那些卡回到池子，現在每一副自訂牌組都用得到",
+      `✓ 伺服器的 Deck${has2 && has3 ? "2、Deck3" : has2 ? "2" : "3"} 已清空` +
+        (added > 0 ? `（${added} 副收進了牌組庫的每一房）` : "（庫裡本來就有）") +
+        " —— 那些卡回到池子，現在每一副自訂牌組都用得到",
     );
   } catch (err) {
     log(`⚠ 清空 Deck2／Deck3 失敗：${err instanceof Error ? err.message : String(err)}`);
@@ -1773,24 +2453,21 @@ async function adoptServerDecks(snap: DeckSnapshot): Promise<void> {
 /**
  * 真的把一副牌寫進 Deck1。回 `null` = 成功，回字串 = 拒絕或失敗的理由。
  *
- * 四道關卡，順序不能換：
+ * 三道關卡，順序不能換：
  *
  * ```
- *   1. guardDeck1  —— 第一格空的會讓玩家卡死在牌組編輯畫面（兩個出口都被擋）
- *                     ⚠ 只擋伺服器與房間那條；人在 Edit 時寫空 = 幫他按 reset
+ *   1. guardDeck1  —— 第一格空的：房間與伺服器那條都不收（開戰會拿空牌上場）
+ *                     ⚠ 人在 Edit 時寫空 = 幫他按 reset，那條放行
  *   2. 庫存        —— 只送玩家真的有的卡。讀不到庫存就**不寫**
- *   3. ack         —— 沒有 ack 就是沒寫進去
- *   4. 讀回來對過  —— ⚠⚠ 有 ack **也不代表寫進去了**
+ *   3. 伺服器的回答 —— deck_update 回 false 才算寫進去
  * ```
  *
- * ## ⚠⚠ 第 4 道是 2026-08-27 用血換來的
+ * ## 改版前的「讀回來對過」那一道拿掉了
  *
- * 實機上撞到：`ack === true`、記錄檔一行錯誤都沒有、**伺服器上的牌組完全沒變**。
- * 那時候只驗到第 3 道，於是插件以為換成功了 —— 接著自動存檔看到「Deck1 跟
- * 套用中那一副對不起來」，把 Deck1 的內容存進了玩家那副牌，**當場毀掉兩副**。
- *
- * ack 只證明伺服器**回了話**（`sock.once("db_editdeck")` 收到同名事件就算），
- * 不證明它**照做了**。唯一算數的證據是重新讀一次，看內容真的變了。
+ * 舊協定（`db_editdeck`）的 ack 只證明伺服器回了話，2026-08-27 撞過「ack 了卻
+ * 沒寫進去」，所以當時每次都要再讀一次。改版後的 `deck_update` 有明確的回答
+ * （`false` = 成功、`true` = 退回），跟官方牌組編輯畫面認的是同一個 —— 不必再多
+ * 送一次請求去驗（2026-09-13 的規矩：盡量不要多送）。
  */
 /**
  * 寫到哪裡為止。
@@ -1823,12 +2500,12 @@ const failed = (failure: string): WriteResult => ({ failure });
 const wrote = (done: WriteDone): WriteResult => ({ done });
 
 async function writeDeck1(
-  content: DeckContent,
+  requested: DeckContent,
   snapshot: DeckSnapshot | null,
   mode: WriteMode = "commit",
-  label?: string,
 ): Promise<WriteResult> {
   if (engine === null) return failed("還沒接上遊戲。");
+  let content = requested;
 
   // ⚠ 空牌組**不在這裡擋死**（2026-09-12 改）。玩家人在 Edit 畫面時選一副空的，
   // 等於幫他按 reset —— 寫進記憶體的狀態跟遊戲 reset 鈕產生的一模一樣，出口
@@ -1844,6 +2521,9 @@ async function writeDeck1(
   if (guard === null) {
     const inventory = await deckInventory();
     if (inventory === null) return failed("讀不到你的卡片庫存，先不換 —— 再點一次試試。");
+    // 手上沒有的角色卡臨時換成同角色的另一張（見 forGame）。⚠ 底下記進 deckSeen
+    // 的是 `requested`（庫裡的寫法），跟 currentDeck1() 讀回來認的是同一套。
+    content = forGame(content);
     const shortages = findShortages(content, inventory);
     if (shortages.length > 0) {
       return failed(`這副牌有 ${shortages.length} 張卡你手上沒有，沒有換過去。`);
@@ -1857,12 +2537,14 @@ async function writeDeck1(
   // 走這裡是一次 `Runtime.evaluate`，跟原版一樣即時。
   //
   // ⚠ 這裡**不寫伺服器**，而那是對的：遊戲在玩家離開編輯畫面時會自己送
-  // `db_editdeck`，帶的就是我們剛換進去的 deck1。
+  // `deck_update`，帶的就是我們剛換進去的那一份。
   try {
-    const fast = await engine.writeEditDeck(deckContentToPayload(content, 0), label);
+    const fast = await engine.writeEditDeck([slotWrite(1, content)], 1);
     // 編輯畫面：寫完就結束。遊戲會在玩家離開時自己把它送上伺服器。
     if (fast === "ok") {
-      deckLastSeen = content;
+      // ⚠ **只有客戶端**。伺服器上還是舊的那一副，要等玩家離開 Edit 時遊戲
+      // 自己送 —— 而那一趟正是自動存檔唯一收得到他最後一次編輯的機會。
+      deckSeen.remember("client", requested);
       return wrote("edit");
     }
     // 空的那一副只有 Edit 收得下（上面 "ok" 那條）。走到這裡表示玩家不在
@@ -1875,7 +2557,10 @@ async function writeDeck1(
     // `commit` 模式一定要繼續走下去，否則開戰時伺服器上還是舊的那一副，
     // 而畫面看起來完全正常。
     if (fast === "ok-room") {
-      deckLastSeen = content;
+      // ⚠⚠ **只有客戶端**，而且房間場景裡沒有人會把它送上伺服器。這一行就是
+      // 2026-09-20「迪城的牌組1 變成渦那副」的起點：舊制把它記成唯一一份基準，
+      // 於是三秒內讀到伺服器（還躺著上一房那副）就被判成「玩家改了牌」。
+      deckSeen.remember("client", requested);
       if (mode === "front") return wrote("room");
     } else if (fast !== "not-active") {
       return failed(`換不過去：${fast}`);
@@ -1888,35 +2573,29 @@ async function writeDeck1(
     return failed(`換不過去：${err instanceof Error ? err.message : String(err)}`);
   }
 
-  // ── 慢路徑：編輯畫面沒開著 → 只能寫伺服器 ────────────────────────────────
+  // ── 慢路徑：寫伺服器 ──────────────────────────────────────────────────────
   const snap = snapshot ?? (await engine.readDecks());
 
-  // ⚠ Deck2/Deck3 照原樣帶回去 —— `db_editdeck` 一次覆寫三副，不帶就是清空。
-  const result = await engine.applyDecks(
-    [
-      deckContentToPayload(content, deckCostOf(snap.decks[0])),
-      deckContentToPayload(deckContentFromFlat(snap.decks[1] ?? {}), deckCostOf(snap.decks[1])),
-      deckContentToPayload(deckContentFromFlat(snap.decks[2] ?? {}), deckCostOf(snap.decks[2])),
-    ],
-    deckCheck,
-  );
-  if (!result.ack) return failed("伺服器沒有回應，牌組沒有換過去 —— 再點一次試試。");
-
-  // 第 4 道：讀回來對過才算數（見上面那段 ⚠⚠）。
-  let landed: DeckContent;
-  try {
-    const after = await engine.readDecks();
-    landed = deckContentFromFlat(after.decks[0] ?? {});
-  } catch {
-    return failed("換完之後讀不回來，不確定有沒有成功 —— 重開一次牌組畫面看看。");
+  // ⚠ Deck2/Deck3 照原樣帶回去 —— `deck_update` 一次覆寫整份，不帶就是清空。
+  const next = snap.decks.map((d) => (d.deck_id === 1 ? withDeckContent(d, content) : d));
+  // 三副共用一個卡池：Deck2／Deck3 還沒清掉的話，要合起來塞得下才送。
+  if (guard === null) {
+    const inventory = await deckInventory();
+    const others = snap.decks.filter((d) => d.deck_id !== 1).map((d) => deckContentFromServer(d));
+    if (inventory !== null && findSetShortages([content, ...others], inventory).length > 0) {
+      return failed("這副牌跟 Deck2／Deck3 搶同一張卡，沒有換過去 —— 伺服器上那兩副要先清空。");
+    }
   }
-  if (deckContentHash(landed) !== deckContentHash(content)) {
-    // ⚠ 這一行要寫得夠具體，否則玩家只會看到「沒反應」。最可能的原因是
-    // Deck2/Deck3 還佔著同一張卡 —— 三副共扣同一個卡片池。
-    log("✗ 換牌組：伺服器收下了但牌組沒有真的變（Deck2／Deck3 可能還佔著同一張卡）");
-    return failed("伺服器收下了卻沒換 —— 多半是 Deck2／Deck3 還佔著同一張卡，清空它們再試。");
+  const result = await engine.applyDecks(next);
+  if (result.answer === "no-answer") {
+    return failed("伺服器沒有回應，牌組沒有換過去 —— 再點一次試試。");
   }
-  deckLastSeen = landed;
+  if (result.answer === "rejected") {
+    log("✗ 換牌組：伺服器退回了（多半是 Deck2／Deck3 還佔著同一張卡）");
+    return failed("伺服器不收這副 —— 多半是 Deck2／Deck3 還佔著同一張卡。");
+  }
+  // deck_update 回 false：伺服器與記憶體都是這一份（頁面已經就地同步）。
+  deckSeen.remember("both", requested);
   return wrote("server");
 }
 
@@ -1948,19 +2627,20 @@ async function onDeckReport(report: DeckEditReport): Promise<void> {
     }
     const { current, snap } = now;
     // 換帳號登入了 —— 這一則屬於上一個人的庫，丟掉，下一拍整份重來。
-    if (snap !== null && snap.account !== deckAccount) {
-      deckPending = true;
-      deckLastSeen = null;
-      inventoryCache = null;
+    // ⚠ 快路徑也驗（`now.account`），不是只有讀伺服器那條：見 resetDeckSession。
+    if (accountChanged(now.account)) return;
+
+    if (activeDeckMode() === "official") {
+      await onOfficialReport(report, now);
       return;
     }
-    if (snap !== null) deckCheck = snap.deckCheck;
 
     // ⚠ 房間場景看到的變動是 preload 做的，不是玩家的編輯 —— 見 mayAutoSave。
+    // ⚠ 基準要跟**同一個來源**的上一份比（`deckSeen.forSource`），見 deck-seen.ts。
     const saved = mayAutoSave(now.where)
-      ? autoSave(deck, current, deckLastSeen)
+      ? autoSave(deck, current, deckSeen.forSource(now.where))
       : { session: deck, saved: false };
-    deckLastSeen = current;
+    deckSeen.remember(worldOf(now.where), current);
 
     // ⚠ 房裡那組 ◀▶ 切的是**玩家人在的那一房**，不是選單看的那一房。
     //
@@ -1995,6 +2675,115 @@ async function onDeckReport(report: DeckEditReport): Promise<void> {
   } finally {
     deckBusy = false;
   }
+}
+
+// ---------------------------------------------------------------------------
+// 官方三牌組模式（2026-09-24）
+//
+// 每一房的前三副就是那一房的 Deck1..3。進房時三格一起換進客戶端記憶體（頁面
+// 預載），開戰前閘門確認伺服器上是這三副；◀▶ 照官方行為。跟插件模式最大的差別：
+// 三副同時躺在伺服器上，所以**庫存要三副合起來算**（findSetShortages）。
+// ---------------------------------------------------------------------------
+
+type DeckRead = NonNullable<Awaited<ReturnType<typeof currentDeck1>>>;
+
+/**
+ * 把 `room` 那一房的三副換進客戶端記憶體（只動記憶體，一趟網路都不跑）。
+ * 回 `null` = 換好了（或那一房沒有牌組、玩家不在有牌組列的畫面，都不必換）；
+ * 回字串 = 為什麼沒換。
+ */
+async function loadOfficialSet(room: RoomKind): Promise<string | null> {
+  if (engine === null || deck === null) return "還沒接上遊戲。";
+  const set = officialSetOf(deck.library, room);
+  if (set.every((s) => s.entry === null)) return null;
+  const inventory = await deckInventory();
+  if (inventory === null) return "讀不到你的卡片庫存，先不換。";
+  // 手上沒有的角色卡臨時換掉（見 forGame）。三副各自換，合起來還是要塞得下。
+  const contents = set.map((s) => forGame(s.content));
+  const short = findSetShortages(contents, inventory);
+  if (short.length > 0) {
+    return `${ROOM_LABELS[room]}那三副合起來有 ${short.length} 種卡不夠（三副共用一個卡池），沒有換過去。`;
+  }
+  const res = await engine.writeEditDeck(
+    set.map((s, i) => slotWrite(s.deckId, contents[i] ?? s.content)),
+    null,
+  );
+  if (res === "ok" || res === "ok-room" || res === "not-active") return null;
+  return `換不過去：${res}`;
+}
+
+/** 官方三牌組模式的選單回報。`now` 是呼叫端剛讀的那一份。 */
+async function onOfficialReport(report: DeckEditReport, now: DeckRead): Promise<void> {
+  if (deck === null) return;
+  // 先把玩家在 Edit 裡排的存回去（跟插件模式一樣：先存再動，不然換進來的會蓋掉他的牌）。
+  if (now.where !== "room") {
+    const saved = officialAutoSave(deck, now.set, officialSeen);
+    if (saved.saved > 0) deck = saved.session;
+  }
+  officialSeen = now.set;
+  // 官方模式不照渦 BOSS 換牌（那是插件模式「一房很多副」才有的功能）。
+  if (report.type === "raid-pick") return;
+  deck = { ...deck, slotNow: now.deckNow ?? deck.slotNow };
+  const out = applyOfficialReport(deck, report);
+  if (out.session.notice !== null && out.session.notice !== deck.notice) {
+    log(`· ${out.session.notice}`);
+  }
+  deck = out.session;
+  if (out.load) {
+    const why = await loadOfficialSet(deck.room);
+    if (why !== null) {
+      log(`✗ ${why}`);
+    } else {
+      // 剛換進去的就是新的比較基準，不是玩家的編輯。
+      officialSeen = officialSetOf(deck.library, deck.room).map((s) => s.content);
+      if (report.type === "room-switch") log(`· 換上${ROOM_LABELS[deck.room]}的三副`);
+    }
+  }
+  saveDeckLibrary();
+  await pushDeckState();
+}
+
+/**
+ * 官方三牌組模式的開戰前那一道：伺服器上躺的一定要是這一房的三副。
+ * 回 `true` 表示可以放心開打（包含「這一房沒有指派牌組，不歸我們管」）。
+ */
+async function ensureOfficialSet(room: RoomKind | null): Promise<boolean> {
+  if (engine === null || deck === null) return false;
+  if (room === null) return true;
+  // 先讀庫存：伺服器那三副要用它認回庫裡的寫法（fromGame），寫的時候也要換卡。
+  const inventory = await deckInventory();
+  if (deck === null) return false;
+  const set = officialSetOf(deck.library, room);
+  if (set.every((s) => s.entry === null)) return true;
+  let snap: DeckSnapshot;
+  try {
+    snap = await engine.readDecks();
+  } catch (err) {
+    logReadDecksFailure("battle", err);
+    return false;
+  }
+  const server = snap.decks.map((d) => fromGame(deckContentFromServer(d)));
+  const target = set.map((s) => s.content);
+  if (sameSet(server, target)) return true;
+  const effective = set.map((s) => forGame(s.content));
+  if (inventory === null || findSetShortages(effective, inventory).length > 0) {
+    log(`✗ 開戰前換牌組：${ROOM_LABELS[room]}那三副合起來庫存不夠，照伺服器上原本的打`);
+    return false;
+  }
+  const next = snap.decks.map((d) => {
+    const i = set.findIndex((x) => x.deckId === d.deck_id);
+    return i < 0 ? d : withDeckContent(d, effective[i] ?? set[i]!.content);
+  });
+  const result = await engine.applyDecks(next);
+  if (result.answer !== "ok") {
+    log(
+      `✗ 開戰前換牌組：${result.answer === "rejected" ? "伺服器不收" : "伺服器沒有回應"}` +
+        `（${ROOM_LABELS[room]}的三副），照伺服器上原本的打`,
+    );
+    return false;
+  }
+  log(`✓ 開戰前已換上${ROOM_LABELS[room]}的三副`);
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -2067,10 +2856,9 @@ async function frontApplyPending(
   const pending = deck.pending;
   if (pending === null || pending.fronted) return;
 
-  // 名字要一起送過去：房裡那行小字原本寫死「Deck1」，而工作槽永遠是 1，
-  // 那個字對玩家已經沒有意義了 —— 要顯示的是他自己那副牌的名字。
+  // 左下那行字由頁面照狀態畫（`DeckEditState.slots`），這裡只拿名字寫記錄。
   const label = deckLabel(deck, pending.room, pending.id);
-  const result = await writeDeck1(pending.content, snapshot, "front", label);
+  const result = await writeDeck1(pending.content, snapshot, "front");
   if (result.failure !== undefined) {
     deck = withNotice(
       {
@@ -2116,36 +2904,57 @@ async function commitPending(reason: "dwell" | "battle"): Promise<boolean> {
   let snap: DeckSnapshot;
   try {
     snap = await engine.readDecks();
-  } catch {
+  } catch (err) {
     // 讀不到就不寫 —— 沒有比較基準時動 Deck1 是這個專案付過代價的事。
+    //
+    // ⚠⚠ **但一定要說出來**（2026-09-20）。這條路原本一個字都不寫，而它會
+    // 一直失敗下去（`readDecks` 走頁面裡自己開的那條池連線，遊戲剛重載完
+    // 那個東西還不存在）。症狀是「插件說換好了、打起來卻是上一房的牌」，
+    // 而記錄檔完全空白 —— 月的腳本 2026-09-10 就是在這裡卡了 35 秒。
+    logReadDecksFailure(reason, err);
     return false;
   }
-  const server = deckContentFromFlat(snap.decks[0] ?? {});
+  // fromGame 要用庫存；斷線重連後快取是空的，先讀一次（不送請求）。
+  if (inventoryCache === null) await deckInventory();
+  const server = fromGame(deckContentFromServer(snap.decks[0]));
 
   // 伺服器上已經是那一副了（玩家自己在遊戲裡換的、或離開 Edit 時遊戲自己送上
   // 去的）→ 沒有東西要做。
   if (deckContentHash(server) === deckContentHash(pending.content)) {
     deck = applyLanded(deck, pending);
-    deckLastSeen = server;
+    // ⚠ 只記伺服器那一份。客戶端記憶體我們沒碰（玩家可能根本不在有牌組列的
+    // 畫面上），拿這一份去蓋客戶端基準等於替一個沒看過的世界作證。
+    deckSeen.remember("server", server);
     saveDeckLibrary();
     await syncGatePending();
     await pushDeckState();
     return true;
   }
 
-  // ⚠ 名字要帶。房裡那行小字原本寫死「Deck1」，而工作槽永遠是 1 —— 少了它，
-  // 走這條路換過去的那一副會頂著上一副的名字。（選單掛著時 `redraw()` 也會
-  // 把它改對，但玩家不在有牌組列的畫面時只有這裡管得到。）
-  const result = await writeDeck1(
-    pending.content,
-    snap,
-    "commit",
-    deckLabel(deck, pending.room, pending.id),
-  );
+  const result = await writeDeck1(pending.content, snap, "commit");
   if (result.failure !== undefined) {
     // ⚠ 寫不進去就把隊伍清掉，**不要留著反覆重試**。留著的話玩家每按一次
     // 開戰都會被攔一下再失敗一次，而他看到的是「這遊戲卡卡的」。
-    deck = withNotice({ ...deck, pending: null }, result.failure);
+    //
+    // ⚠⚠ **`active` 要照伺服器現況重算**（2026-09-20）。寫失敗的意思是伺服器
+    // 上躺的還是上一房那副，而 `enterRoom` 早就把 `active[room]` 指到玩家想換
+    // 的那一副了 —— 兩者兜在一起，下一次讀到伺服器就會把上一房那副存進他這
+    // 一副（實機：從渦房走到對戰房，迪城的牌組1 整副變成渦那副）。隊伍清掉
+    // 之後 `pending` 那道閘也不再擋，所以這裡非重算不可。
+    // 這跟 `frontApplyPending` 失敗時做的是同一件事。
+    deck = withNotice(
+      {
+        ...deck,
+        pending: null,
+        active: {
+          ...deck.active,
+          [pending.room]: resolveActive(deck.library, pending.room, server),
+        },
+      },
+      result.failure,
+    );
+    // 伺服器那一份基準也要追上：我們剛親眼看到它還是 `server`。
+    deckSeen.remember("server", server);
     log(`✗ ${reason === "battle" ? "開戰前換牌組" : "套用牌組"}：${result.failure}`);
     await syncGatePending();
     await pushDeckState();
@@ -2197,11 +3006,37 @@ function applyDelayMs(): number {
  * 上場。
  */
 async function onRoomGate(report: RoomGateReport): Promise<void> {
-  if (engine === null || deck === null) return;
+  if (engine === null) return;
+  const mode = activeDeckMode();
+  // 關閉模式、或牌組庫還沒接上：攔到的一律立刻放行（頁面理應不會攔，這是保險）。
+  if (mode === null || deck === null) {
+    if (report.type === "room-gate-hold") await engine.releaseRoomGate(true);
+    return;
+  }
 
   if (report.type === "room-changed") {
     const now = await currentDeck1();
     if (now === null) return;
+    // ⚠⚠ 這裡最要緊：換了帳號還往下走的話，enterRoom 會拿上一個人的庫排隊、
+    // frontApplyPending 把那副牌塞進這個人的 Deck1（2026-09-14 實機）。
+    if (accountChanged(now.account) || deck === null) return;
+
+    if (mode === "official") {
+      // 官方三牌組模式：選單跟著人走；頁面沒預載到的話（這一房剛有牌組、腳本
+      // 晚裝上）托盤自己換。伺服器那份等開戰前的閘門寫。
+      if (report.room !== null) {
+        deck = { ...deck, here: report.room, room: report.room, slotNow: now.deckNow ?? 1 };
+        if (report.preloaded !== true) {
+          const why = await loadOfficialSet(report.room);
+          if (why !== null) log(`✗ 進了${ROOM_LABELS[report.room]}：${why}`);
+        }
+      } else {
+        deck = { ...deck, here: null };
+      }
+      await pushDeckState();
+      return;
+    }
+
     const before = deck.pending?.id ?? null;
     // ⚠ `preloaded` 一定要傳下去。它是 true 時客戶端記憶體已經是新的、而伺服器
     // 還是舊的 —— 不傳的話 `queueApply` 會判定「一樣，不必寫」，於是開戰時用的
@@ -2250,18 +3085,114 @@ async function onRoomGate(report: RoomGateReport): Promise<void> {
     // 讓出來，不是直接放棄 —— 但也不能無限等，頁面的看門狗只給 8 秒。
     const waited = await waitForDeckIdle(3_000);
     deckBusy = true;
+    let ok = false;
     try {
       if (!waited) log("⚠ 開戰前換牌組：上一個動作還沒做完，先照現在的牌組打");
       // 開戰前這一次一定要寫到伺服器，等候秒數在這裡不算數。
-      else await commitPending("battle");
+      else if (mode === "official") ok = await ensureOfficialSet(report.room);
+      else ok = await ensureRoomDeck(report.room);
     } catch (err) {
       log(`✗ 開戰前換牌組出錯：${err instanceof Error ? err.message : String(err)}`);
     } finally {
       deckBusy = false;
       // ⚠ **無論如何都要放行。** 見這支的檔頭。
-      await engine?.releaseRoomGate();
+      // ⚠ `ok` 要照實傳：false 時頁面下一場會再攔一次（見 `needGate()`）。
+      await engine?.releaseRoomGate(ok);
     }
+    return;
   }
+
+  if (report.type === "room-gate-timeout") {
+    // 頁面的看門狗放行了 —— 我們沒有在 8 秒內回去，這一場用的是伺服器上原本
+    // 那副。⚠ 這件事一定要留下一行，它正是「怎麼又用錯牌組」的唯一線索。
+    log(`⚠ 開戰前換牌組等太久（${report.event}）—— 頁面自己放行了，這一場用的是伺服器上原本那副`);
+  }
+}
+
+/**
+ * **開戰前的最後一道：伺服器上躺的，一定要是這一房選的那一副。**（2026-09-20）
+ *
+ * 回 `true` 表示「現在可以放心開打」。
+ *
+ * ## ⚠⚠ 為什麼不能只 `commitPending()`
+ *
+ * 那支只處理「托盤自己知道有東西要寫」的情況，而漏掉的那幾條全都會讓玩家拿
+ * 上一房的牌上場，且畫面完全正常：
+ *
+ * ```
+ *   腳本在牌組編輯畫面選完就 scene.start 跳走  遊戲沒機會送 db_editdeck，
+ *                                              而托盤已經當成「換好了」
+ *   提交那一趟失敗                             隊伍被清掉，沒有人會再試
+ *   客戶端記憶體剛好已經是那一副                托盤判「不必排隊」，
+ *                                              伺服器卻還是上一房那副
+ * ```
+ *
+ * 所以這裡**不看任何旗標**：直接讀伺服器，跟這一房 `selected` 的那副比，
+ * 不一樣就當場寫。一次進房只會走到這裡一次（頁面的 `st.verified`）。
+ *
+ * ⚠ 讀不到伺服器時回 `false` 而不是 `true`：那表示我們根本不知道上面躺的是
+ * 什麼，記成「驗過了」等於把之後每一場都放掉。
+ */
+async function ensureRoomDeck(room: RoomKind | null): Promise<boolean> {
+  if (engine === null || deck === null) return false;
+  // 有東西排著隊 → 那條路本來就會讀伺服器、寫進去、對過。
+  if (deck.pending !== null) return await commitPending("battle");
+  if (room === null) return true; // 認不出在哪一房（還在選頻道）→ 不插手
+  const entry = resolveSelected(deck.library, room);
+  if (entry === null) return true; // 這一房沒有指派牌組 → 不是我們該管的
+
+  let snap: DeckSnapshot;
+  try {
+    snap = await engine.readDecks();
+  } catch (err) {
+    logReadDecksFailure("battle", err);
+    return false;
+  }
+  // fromGame 要用庫存；斷線重連後快取是空的，先讀一次（不送請求）。
+  if (inventoryCache === null) await deckInventory();
+  const server = fromGame(deckContentFromServer(snap.decks[0]));
+  deckSeen.remember("server", server);
+  const label = deckLabel(deck, room, entry.id);
+  if (deckContentHash(server) === deckContentHash(entry.content)) {
+    // 本來就是它 —— 順手把 active 對好（伺服器親口說的，這是最硬的證據）。
+    deck = { ...deck, active: { ...deck.active, [room]: entry.id } };
+    return true;
+  }
+
+  log(`· 開戰前發現伺服器上不是「${label}」（${ROOM_LABELS[room]}）—— 現在寫進去`);
+  const result = await writeDeck1(entry.content, snap, "commit");
+  if (result.failure !== undefined) {
+    log(`✗ 開戰前換牌組：${result.failure}`);
+    deck = withNotice(
+      {
+        ...deck,
+        // ⚠ 寫不進去 → active 照伺服器現況重算，不要留著一個假的「套用中」。
+        active: { ...deck.active, [room]: resolveActive(deck.library, room, server) },
+      },
+      result.failure,
+    );
+    await pushDeckState();
+    return false;
+  }
+  deck = { ...deck, active: { ...deck.active, [room]: entry.id } };
+  log(`✓ 開戰前已套用「${label}」（${ROOM_LABELS[room]}）`);
+  await pushDeckState();
+  return true;
+}
+
+/** 上一次抱怨「讀不到伺服器上的牌組」是什麼時候。等候那條路每半秒重試一次。 */
+let readDecksFailLoggedAt = 0;
+
+/** 讀不到伺服器上的牌組。開戰那一次一定要說，等候那條路節流。 */
+function logReadDecksFailure(reason: "dwell" | "battle", err: unknown): void {
+  const now = Date.now();
+  if (reason === "dwell" && now - readDecksFailLoggedAt < 30_000) return;
+  readDecksFailLoggedAt = now;
+  const why = err instanceof Error ? err.message : String(err);
+  log(
+    `✗ ${reason === "battle" ? "開戰前" : "套用牌組"}：讀不到伺服器上的牌組，先不寫（${why}）` +
+      "　—— 牌組沒換成，打起來會是上一次那副",
+  );
 }
 
 /** 等 `deckBusy` 讓出來。逾時回 `false` —— 呼叫端要自己決定怎麼辦。 */
@@ -2299,6 +3230,9 @@ let deckTickRunning = false;
 
 async function deckTickOnce(): Promise<void> {
   if (engine === null || latest?.connected !== true) return;
+  // 關閉模式：插件不碰牌組，連讀都不讀。切回來時 `resetDeckSession()` 會讓下一拍重新接上。
+  const mode = activeDeckMode();
+  if (mode === null) return;
   if (deckPending) {
     await initDeckLibrary();
     return;
@@ -2332,21 +3266,20 @@ async function deckTickOnce(): Promise<void> {
     try {
       const now = await currentDeck1();
       if (now !== null) {
-        // 換帳號只有走到伺服器那條路才驗得到（記憶體裡沒有帳號指紋）。
-        // ⚠ 那不是漏洞：玩家一離開編輯畫面就會走到那條路（`snap !== null`），
-        // 而換帳號一定得先離開。
-        if (now.snap !== null && now.snap.account !== deckAccount) {
-          deckPending = true;
-          deckLastSeen = null;
-          inventoryCache = null;
+        // 換帳號：快路徑現在也帶帳號指紋（2026-09-14 前只有伺服器那條路驗得到，
+        // 而同一個分頁換帳號、登完直接進房的話永遠走不到那條路）。
+        if (accountChanged(now.account)) return;
+        if (mode === "official") {
+          if (officialTick(now, mounted && !wasMounted)) dirty = true;
+          if (dirty) await pushDeckState();
           return;
         }
         // ⚠ 同上：房間場景那一份不能拿來存（見 mayAutoSave）。這一拍是災情
         //   最常發生的地方 —— 玩家什麼都沒做，光是換房就會走到這裡。
         const saved = mayAutoSave(now.where)
-          ? autoSave(deck, now.current, deckLastSeen)
+          ? autoSave(deck, now.current, deckSeen.forSource(now.where))
           : { session: deck, saved: false };
-        deckLastSeen = now.current;
+        deckSeen.remember(worldOf(now.where), now.current);
         if (saved.saved) {
           deck = saved.session;
           saveDeckLibrary();
@@ -2379,6 +3312,75 @@ async function deckTickOnce(): Promise<void> {
   if (dirty) await pushDeckState();
 }
 
+/**
+ * 官方三牌組模式的一拍。回 `true` = 狀態變了，要重推畫面。
+ *
+ * ```
+ *   剛進牌組編輯   認出手上這三副是哪一房的 → 選單跟過去；比較基準重設
+ *   在編輯畫面裡   第 n 格變了 → 存回那一房的第 n 副（officialAutoSave）
+ *   剛離開         遊戲自己把牌組送上伺服器了，最後那幾下編輯在伺服器那份裡
+ * ```
+ *
+ * ⚠ 房間場景裡看到的變動不存（那是進房預載換的），跟插件模式的 `mayAutoSave` 同一條。
+ */
+function officialTick(now: DeckRead, entered: boolean): boolean {
+  if (deck === null) return false;
+  let dirty = false;
+  if (now.deckNow !== null && now.deckNow !== deck.slotNow) {
+    deck = { ...deck, slotNow: now.deckNow };
+    dirty = true;
+  }
+  if (entered && now.where === "edit") {
+    const room = officialRoomOf(deck.library, now.set, deck.room);
+    if (room !== null && room !== deck.room) {
+      log(`· 進了牌組編輯 —— 手上是${ROOM_LABELS[room]}的三副，選單跟過去`);
+      deck = { ...deck, room };
+      dirty = true;
+    }
+    // 剛進來：以眼前這三副當基準，之後的變動才是玩家的編輯。
+    officialSeen = now.set;
+    return dirty;
+  }
+  if (now.where === "room") return dirty;
+  const saved = officialAutoSave(deck, now.set, officialSeen);
+  officialSeen = now.set;
+  if (saved.saved > 0) {
+    deck = saved.session;
+    saveDeckLibrary();
+    dirty = true;
+  }
+  return dirty;
+}
+
+/** 安裝包帶的 ULR Boot 原始檔（`scripts/build-tray.mjs` 把 assets 整包複製過去）。 */
+const BOOT_EXT_SRC = join(__dirname, "assets", "ulr-boot-extension");
+const BOOT_EXT_BUNDLED = bootExtVersion(BOOT_EXT_SRC);
+/** 玩家那邊放著哪一版。快照很常送，不每次讀檔 —— 開機讀一次、放好之後更新。 */
+let bootExtInstalled = bootExtVersion(BOOT_EXT_DIR);
+
+/** 哪一族啟動時要臨時掛 ULR Boot：只有 Edge，而且要已經放好。理由見 `loadExtensionArgs`。 */
+function autoLoadExtDir(family: "chrome" | "edge"): string | null {
+  return family === "edge" && bootExtInstalled !== null ? BOOT_EXT_DIR : null;
+}
+
+/**
+ * 這一族瀏覽器在這台機器上怎麼帶除錯埠開：網頁版教學頁照這個畫「捷徑目標」，
+ * 桌面捷徑也照這個寫。`exe === null` = 沒裝（或裝在找不到的地方）。
+ *
+ * 執行檔開機找一次就好 —— 快照很常送，而裝新瀏覽器之後重開插件不算過分。
+ */
+const browserExe = {
+  chrome: findBrowser(process.env, "chrome")?.path ?? null,
+  edge: findBrowser(process.env, "edge")?.path ?? null,
+};
+
+function browserSetup(family: "chrome" | "edge"): BrowserSetup {
+  const exe = browserExe[family];
+  const profileDir = userDataDirFor(family);
+  const args = buildBrowserShortcutArgs(profileDir, autoLoadExtDir(family));
+  return { exe, profileDir, args, target: exe === null ? null : `"${exe}" ${args}` };
+}
+
 function snapshot(): Snapshot {
   return {
     profile:
@@ -2392,6 +3394,13 @@ function snapshot(): Snapshot {
     launchAtLogin: launchAtLoginEnabled(),
     logPath: logFile.path,
     debugFlag: DEBUG_PORT_SWITCH_AUTO,
+    bootExt: {
+      dir: BOOT_EXT_DIR,
+      installed: bootExtInstalled,
+      bundled: BOOT_EXT_BUNDLED,
+      guideUrl: USERSCRIPT_GUIDE_URL,
+    },
+    browsers: { chrome: browserSetup("chrome"), edge: browserSetup("edge") },
     gamePorts: Object.fromEntries(gamePorts),
     costRule: costRule === null ? null : { ...costRule, fileName: basename(costRule.path) },
     costRuleError: costRuleError,
@@ -2425,10 +3434,12 @@ function showWindow(): void {
   window = new BrowserWindow({
     // 遊戲畫布是 760×680，這裡刻意對齊那個比例 —— 兩個視窗並排時看起來
     // 才像同一套東西，而不是「遊戲旁邊掛了一個工具」。
-    width: 760,
-    height: 640,
-    minWidth: 680,
-    minHeight: 560,
+    // 2026-09-17 字級整體放大 2px（原本照遊戲面板的密度，實際讀起來太小），
+    // 視窗跟著等比例放大，比例不變。
+    width: 860,
+    height: 724,
+    minWidth: 760,
+    minHeight: 620,
     show: false,
     // 兩份實例同時開著時，標題是唯一分得出誰是誰的東西 —— 所以只有多開時才寫。
     title: heading(),
@@ -2494,6 +3505,20 @@ function positionNearTray(): void {
 }
 
 let quitting = false;
+/** 收完之後用同一份配置再開一次自己。見 `restart()`。 */
+let relaunchAfterQuit = false;
+
+/**
+ * 換客戶端種類要重開：引擎綁在啟動時的埠與 user-data-dir 上（跟改埠一樣）。
+ *
+ * ⚠ 新的那份要等舊的**整個收完**才開：`quit()` 會等引擎把頁面上的攔截拆乾淨，
+ * 而單一實例鎖也要先放掉，否則新的那份一起來就撞鎖、安靜地退出。
+ */
+async function restart(): Promise<void> {
+  relaunchAfterQuit = true;
+  await quit();
+}
+
 async function quit(): Promise<void> {
   quitting = true;
   if (probeTimer !== null) clearInterval(probeTimer);
@@ -2515,7 +3540,12 @@ async function quit(): Promise<void> {
   // ⚠ 一定要等引擎收乾淨：它會把頁面上的攔截拆掉。留著孤兒的話遊戲裡的
   // OK 鈕會有 3 秒（心跳）處在沒人管的狀態。
   await engine?.stop();
+  titleButton?.dispose();
   tray?.destroy();
+  if (relaunchAfterQuit) {
+    app.releaseSingleInstanceLock();
+    launchInstance(profile.id);
+  }
   app.quit();
 }
 
@@ -3043,15 +4073,16 @@ function loadCostRule(path: string | null, origin: CostRuleOrigin = "file"): voi
     // ⚠ 罰則跟價格要一起送。只送價格的話，自訂規則的 compressionRule 對
     // 遊戲畫面完全沒有作用 —— 罰則的公式是寫死在客戶端裡的。
     //
-    // ⚠ 裝備與事件卡要**先把規則鍵換成陣列索引**（`wp001` → `"1"`）。注入的
+    // ⚠ 裝備與事件卡要**先把規則鍵換成卡片 id**（`wp001` → `"6"`）。注入的
     // 腳本刻意不認得 `wp` / `ev` 這套命名，見 patch-cost.ts 的說明。
-    const equipment = toIndexTable(rule.equipment, parseEquipmentKey);
-    const eventCards = toIndexTable(rule.eventCards, parseEventCardKey);
+    // 2026-09-23 改版後客戶端只認 id，而且順序重排過 —— 不是索引 +1。
+    const equipment = toCardIdTable(rule.equipment, parseEquipmentKey, legacyWeaponId);
+    const eventCards = toCardIdTable(rule.eventCards, parseEventCardKey, legacyEventId);
     engine?.setCostRule({
       characters: rule.characters,
       monsters: rule.monsters,
-      equipment: equipment.byIndex,
-      eventCards: eventCards.byIndex,
+      equipment: equipment.byId,
+      eventCards: eventCards.byId,
       bands,
     });
     costRuleFull = rule;
@@ -3087,7 +4118,7 @@ function loadCostRule(path: string | null, origin: CostRuleOrigin = "file"): voi
     costRuleHash = null;
     costRuleOrigin = null;
     engine?.setCostRule(null);
-    // ⚠ 記錄**不夠**。記錄在「戰鬥」頁，玩家人在「牌組 › Cost 表」頁，
+    // ⚠ 記錄**不夠**。記錄在「戰鬥」頁，玩家人在「自訂COST › Cost 表」頁，
     // 那一頁只會說「還沒選規則」—— 看起來就是按了沒反應。所以同時留一份
     // 給畫面，由 Cost 頁自己顯示。
     costRuleError = { fileName: basename(path), message, hint: costRuleHint(message) };
@@ -3271,20 +4302,25 @@ app.whenReady().then(() => {
       // 而那是一個全新的頁面 —— 沿用上一條連線的旗標會讓新的那次救不回來。
       if (latest?.connected === true && !status.connected) {
         autoReloadedThisAttach = false;
+        stopCardNamesFetch();
         // ⚠ 牌組庫也要重新確認帳號。玩家關掉遊戲再開很可能**換一個帳號登入**，
         // 而牌組庫是跟著帳號走的 —— 沿用上一個人的庫會把 A 的牌組存進 B 的檔案。
-        deckPending = true;
-        deckMounted = false;
-        // ⚠ 比較基準也要丟掉。留著上一條連線看到的 Deck1，重連後第一次比對
-        // 會把「這段期間玩家在別處改的牌」誤判成他剛剛的編輯。
-        deckLastSeen = null;
-        inventoryCache = null;
+        resetDeckSession();
       }
+      const justConnected = latest?.connected !== true && status.connected;
       latest = status;
       pushState();
       refreshTray();
+      // 卡面替換要用中文檔名對卡，名字表只有客戶端知道 —— 接上就去讀一份。
+      if (justConnected) startCardNamesFetch();
+      if (justConnected) void attachTitleButton();
       // 有規則等著套用的話，這裡是唯一會知道「對戰結束了」的地方。
       void applyPendingReload();
+    },
+    // ⚠⚠ 同一個分頁換帳號**不會斷線**，只會重載 —— 見 resetDeckSession。
+    // 同一個帳號重載也一樣放掉：頁面上的記憶體本來就沒了，重認一次只多讀一趟。
+    onPageReload: () => {
+      if (!deckPending || deck !== null) resetDeckSession();
     },
   });
 
@@ -3293,6 +4329,15 @@ app.whenReady().then(() => {
   // ⚠ 同樣要在 engine 建好之後。這裡只是把玩家上次的選擇交給引擎，真正裝到
   // 頁面上是接上遊戲之後的事（`#syncHiddenStages`）。
   engine.setHiddenStages(profile.hiddenStages);
+  // 人物篩選同理（新的引擎 = 還沒推過）。最愛要等牌組庫接上才有。
+  charaPickerPushed = null;
+  pushCharaPicker();
+  lobbyStandPushed = null;
+  pushLobbyStand();
+  // 卡面替換：資料夾裡的 PNG 交給引擎，接上遊戲時裝；之後盯著資料夾。
+  reloadCardArt(true);
+  installBlanks();
+  watchCardArtDir();
   // 渦擊破結算的 OK 面板模式同理；玩家在遊戲裡的面板上切了也要記回配置。
   engine.setRaidRewardMode(profile.raidRewardMode);
   engine.setRaidShare(profile.raidShare);
@@ -3307,10 +4352,50 @@ app.whenReady().then(() => {
       log(`✗ 打渦紀錄存檔失敗：${err instanceof Error ? err.message : String(err)}`);
     }
   });
+  // 結束的渦拿到獎勵了沒：同理，托盤重開後「今天」的數字接得上（見 raid-outcome-store.ts）
+  engine.setRaidOutcomeState(readRaidOutcomes());
+  engine.onRaidOutcomesChanged((state) => {
+    if (ephemeral) return;
+    try {
+      writeRaidOutcomes(state);
+    } catch (err) {
+      log(`✗ 渦結算紀錄存檔失敗：${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
+  // HighLow 的開始星數同理（見 quest-bonus-store.ts）
+  engine.setQuestBonusSamples(readQuestBonus());
+  engine.onQuestBonusChanged((samples) => {
+    if (ephemeral) return;
+    try {
+      writeQuestBonus(samples);
+    } catch (err) {
+      log(`✗ HighLow 開始星數存檔失敗：${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
+  // 學到的渦獎勵表同理：讀硬碟交給引擎，每學到一次就回寫（見 raid-learned-store.ts）
+  const learnedOnDisk = readRaidLearned();
+  engine.setRaidLearned(learnedOnDisk.table, learnedOnDisk.log);
+  engine.onRaidLearnedChanged((table, learnLog) => {
+    if (ephemeral) return;
+    try {
+      writeRaidLearned(table, learnLog);
+    } catch (err) {
+      log(`✗ 渦獎勵表存檔失敗：${err instanceof Error ? err.message : String(err)}`);
+    }
+  });
   engine.setRaidAutoDelete({
     enabled: profile.raidAutoDelete,
     prompt: profile.raidAutoDeletePrompt,
   });
+  engine.setItemShortcut(profile.raidItemShortcut);
+  engine.setQuestItemShortcut("stack", profile.questStackShortcut);
+  engine.setQuestItemShortcut("passes", profile.questPassShortcut);
+  engine.setDietOverlay("dietStack", profile.dietItemShortcut);
+  engine.setDietOverlay("gemUp", profile.dietGemUp);
+  engine.setBonusItemShortcut(profile.bonusItemShortcut);
+  engine.setBonusItemOrder(profile.bonusItemOrder);
+  engine.setBonusItemPlace(profile.bonusItemPlace);
+  engine.setQuestTreasure(profile.questTreasureMarks);
   engine.onRaidAutoDeleteChanged((setting) => {
     profile = { ...profile, raidAutoDelete: setting.enabled, raidAutoDeletePrompt: setting.prompt };
     if (!ephemeral) {
@@ -3338,6 +4423,17 @@ app.whenReady().then(() => {
     profile = { ...profile, display };
     if (!ephemeral) store = updateProfile(profile.id, { display });
     log(`· 畫面設定改為 解析度 ${display.render}、畫面大小 ${display.size}（在遊戲裡改的）`);
+  });
+
+  titleButton = new TitleButton({
+    rendererDir: join(__dirname, "renderer"),
+    onClick: () => void refreshGame("標題列按鈕"),
+    log,
+    env: (() => {
+      const env: NodeJS.ProcessEnv = { ...process.env };
+      for (const key of ENV_KEYS_TO_STRIP) delete env[key];
+      return env;
+    })(),
   });
 
   tray = new Tray(nativeImage.createFromBuffer(trayIconPng("idle")));
@@ -3378,12 +4474,14 @@ app.whenReady().then(() => {
   });
   ipcMain.handle(
     "ulr:profile-edit",
-    (
-      _event,
-      id: string,
-      patch: { name?: string; port?: number; link?: string; kind?: ClientKind },
-    ) => {
-      editProfile(id, patch);
+    (_event, id: string, patch: { name?: string; port?: number; kind?: ClientKind }) => {
+      // 只挑這三格。中間人不給改（見 Profile.link），渲染層送什麼來都不收。
+      const { name, port, kind } = patch;
+      editProfile(id, {
+        ...(name !== undefined ? { name } : {}),
+        ...(port !== undefined ? { port } : {}),
+        ...(kind !== undefined ? { kind } : {}),
+      });
       return snapshot();
     },
   );
@@ -3484,6 +4582,44 @@ app.whenReady().then(() => {
     return next;
   });
 
+  /**
+   * 牌組替換模式（插件／官方三牌組／關閉）。
+   *
+   * 切換時牌組庫**整份重新接上**（`resetDeckSession()`，下一拍 `initDeckLibrary()`）：
+   * 兩種模式對伺服器三格的用法不一樣 —— 插件模式要把 Deck2／Deck3 收進庫裡清空，
+   * 官方模式三格都是玩家的牌 —— 而接上那一步正是分流的地方。關閉就把選單拆掉、
+   * 房間不再預載不再攔。
+   */
+  ipcMain.handle("ulr:deck-mode", async (_event, raw: unknown): Promise<DeckMode> => {
+    if (!isDeckMode(raw) || raw === profile.deckMode) return profile.deckMode;
+    profile = { ...profile, deckMode: raw };
+    if (!ephemeral) store = updateProfile(profile.id, { deckMode: raw });
+    log(
+      raw === "plugin"
+        ? "· 牌組替換：插件模式（四房各存牌組、只用 Deck1；Deck2／Deck3 會收進庫裡清空）"
+        : raw === "official"
+          ? "· 牌組替換：官方三牌組（進房換上那一房的前三副）"
+          : "· 牌組替換：關閉（插件不碰牌組）",
+    );
+    resetDeckSession();
+    await pushDeckState();
+    pushState();
+    return profile.deckMode;
+  });
+
+  /**
+   * 牌組編輯畫面 [Chara] 鈕的代表卡（`L1`..`L5`／`R`），`off` = 不畫那顆鈕。
+   * 立刻生效：只是推新狀態，頁面下次打開角色一覽就用新的挑法。
+   */
+  ipcMain.handle("ulr:chara-picker", (_event, raw: unknown): CharaPickerMode => {
+    if (!isCharaPickerMode(raw) || raw === profile.charaPicker) return profile.charaPicker;
+    profile = { ...profile, charaPicker: raw };
+    if (!ephemeral) store = updateProfile(profile.id, { charaPicker: raw });
+    pushCharaPicker();
+    pushState();
+    return profile.charaPicker;
+  });
+
   /** 雲端牌組同步開關。打開時馬上同步一輪。 */
   ipcMain.handle("ulr:deck-cloud-sync", (_event, on: unknown): boolean => {
     if (typeof on === "boolean") {
@@ -3491,12 +4627,12 @@ app.whenReady().then(() => {
       profile = { ...profile, deckCloudSync: on };
       if (!ephemeral) store = updateProfile(profile.id, { deckCloudSync: on });
       if (on) {
-        log("· 牌組雲端同步已開啟");
+        log("· 牌組跨電腦同步已開啟");
         void runDeckSync();
       } else {
         if (deckSyncTimer !== null) clearTimeout(deckSyncTimer);
         deckSyncTimer = null;
-        log("· 牌組雲端同步已關閉（只用這台電腦的）");
+        log("· 牌組跨電腦同步已關閉（只用這台電腦的）");
       }
       pushState();
     }
@@ -3652,6 +4788,37 @@ app.whenReady().then(() => {
 
   ipcMain.handle("ulr:raid-state", async (): Promise<RaidPageState> => raidPageState());
 
+  // -------------------------------------------------------------------------
+  // 模組：卡面替換
+  // -------------------------------------------------------------------------
+
+  ipcMain.handle("ulr:mods-cards-state", async (): Promise<CardArtPageState> => cardArtPageState());
+
+  /**
+   * 開資料夾。⚠ 路徑是主程序定的，渲染層只能說「開那個資料夾」——
+   * 跟 `open-external` 的白名單同一條原則。
+   */
+  ipcMain.handle("ulr:mods-cards-open", async (): Promise<CardArtPageState> => {
+    ensureCardArtDir(CARD_ART_DIR);
+    const err = await shell.openPath(CARD_ART_DIR);
+    if (err !== "") log(`✗ 開不了卡面資料夾：${err}`);
+    return cardArtPageState();
+  });
+
+  ipcMain.handle("ulr:mods-cards-reload", async (): Promise<CardArtPageState> => {
+    reloadCardArt();
+    pushState();
+    return cardArtPageState();
+  });
+
+  /** 開空框資料夾。玩家整個刪掉過的話先補回來。 */
+  ipcMain.handle("ulr:mods-cards-open-blanks", async (): Promise<CardArtPageState> => {
+    installBlanks();
+    const err = await shell.openPath(CARD_ART_BLANKS_PATH);
+    if (err !== "") log(`✗ 開不了空框資料夾：${err}`);
+    return cardArtPageState();
+  });
+
   ipcMain.handle("ulr:raid-reward-mode", async (_event, raw: unknown): Promise<RaidPageState> => {
     if (isRaidRewardMode(raw)) {
       // 跟 `ulr:stages-set` 同一招：先改記憶體、非臨時配置才落地。
@@ -3680,7 +4847,11 @@ app.whenReady().then(() => {
       profile = { ...profile, raidTeamShare: on };
       if (!ephemeral) store = updateProfile(profile.id, { raidTeamShare: on });
       engine?.setRaidTeamShare(on);
-      log(on ? "· 分享打渦隊伍已開啟" : "· 分享打渦隊伍已關閉（下一輪會把雲端上自己的隊伍撤掉）");
+      log(
+        on
+          ? "· 分享打渦隊伍已開啟"
+          : "· 分享打渦隊伍已關閉（下一輪會把 Cloudflare Workers 上自己的隊伍撤掉）",
+      );
       pushState();
     }
     return raidPageState();
@@ -3698,6 +4869,101 @@ app.whenReady().then(() => {
       pushState();
     }
     return raidPageState();
+  });
+
+  ipcMain.handle("ulr:raid-item-shortcut", async (_event, on: unknown): Promise<RaidPageState> => {
+    if (typeof on === "boolean") {
+      profile = { ...profile, raidItemShortcut: on };
+      if (!ephemeral) store = updateProfile(profile.id, { raidItemShortcut: on });
+      engine?.setItemShortcut(on);
+      log(on ? "· 渦房物品捷徑已開啟" : "· 渦房物品捷徑已關閉（好友與物品鈕放回來）");
+      pushState();
+    }
+    return raidPageState();
+  });
+
+  ipcMain.handle("ulr:quest-state", (): Promise<QuestPageState> => questPageState());
+
+  ipcMain.handle(
+    "ulr:quest-item-shortcut",
+    // `part`：`stack` 水沙捷徑、`passes` 通行證捷徑，各自開關。
+    async (_event, part: unknown, on: unknown): Promise<QuestPageState> => {
+      if ((part === "stack" || part === "passes") && typeof on === "boolean") {
+        const key = part === "stack" ? "questStackShortcut" : "questPassShortcut";
+        profile = { ...profile, [key]: on };
+        if (!ephemeral) store = updateProfile(profile.id, { [key]: on });
+        engine?.setQuestItemShortcut(part, on);
+        const name = part === "stack" ? "水沙捷徑" : "通行證捷徑";
+        log(on ? `· 任務房${name}已開啟` : `· 任務房${name}已關閉`);
+        pushState();
+      }
+      return questPageState();
+    },
+  );
+
+  ipcMain.handle("ulr:diet-state", (): Promise<DietPageState> => dietPageState());
+
+  ipcMain.handle(
+    "ulr:diet-toggle",
+    // `part`：`dietStack` 水捷徑、`gemUp` GEM UP，各自開關。
+    async (_event, part: unknown, on: unknown): Promise<DietPageState> => {
+      if ((part === "dietStack" || part === "gemUp") && typeof on === "boolean") {
+        const key = part === "dietStack" ? "dietItemShortcut" : "dietGemUp";
+        profile = { ...profile, [key]: on };
+        if (!ephemeral) store = updateProfile(profile.id, { [key]: on });
+        engine?.setDietOverlay(part, on);
+        const name = part === "dietStack" ? "物品捷徑" : "GEM UP";
+        log(on ? `· 迪城${name}已開啟` : `· 迪城${name}已關閉`);
+        pushState();
+      }
+      return dietPageState();
+    },
+  );
+
+  ipcMain.handle("ulr:bonus-state", (): Promise<BonusPageState> => bonusPageState());
+
+  // 三選一：無捷徑（off）、按鈕左上（above）、蓋在使用物品上（cover）。關的時候位置不動，
+  // 下次打開還是上次選的地方
+  ipcMain.handle("ulr:bonus-mode", async (_event, mode: unknown): Promise<BonusPageState> => {
+    if (mode === "off" || isBonusItemPlace(mode)) {
+      const on = mode !== "off";
+      const place = mode === "off" ? profile.bonusItemPlace : mode;
+      profile = { ...profile, bonusItemShortcut: on, bonusItemPlace: place };
+      if (!ephemeral)
+        store = updateProfile(profile.id, { bonusItemShortcut: on, bonusItemPlace: place });
+      engine?.setBonusItemPlace(place);
+      engine?.setBonusItemShortcut(on);
+      log(
+        mode === "off"
+          ? "· 獎勵遊戲物品捷徑已關閉"
+          : mode === "cover"
+            ? "· 獎勵遊戲物品捷徑：蓋在使用物品上"
+            : "· 獎勵遊戲物品捷徑：畫在按鈕左上",
+      );
+      pushState();
+    }
+    return bonusPageState();
+  });
+
+  ipcMain.handle("ulr:bonus-order", async (_event, order: unknown): Promise<BonusPageState> => {
+    if (isBonusItemOrder(order)) {
+      profile = { ...profile, bonusItemOrder: order };
+      if (!ephemeral) store = updateProfile(profile.id, { bonusItemOrder: order });
+      engine?.setBonusItemOrder(order);
+      pushState();
+    }
+    return bonusPageState();
+  });
+
+  ipcMain.handle("ulr:quest-treasure", async (_event, on: unknown): Promise<QuestPageState> => {
+    if (typeof on === "boolean") {
+      profile = { ...profile, questTreasureMarks: on };
+      if (!ephemeral) store = updateProfile(profile.id, { questTreasureMarks: on });
+      engine?.setQuestTreasure(on);
+      log(on ? "· 任務地圖寶箱標註已開啟" : "· 任務地圖寶箱標註已關閉");
+      pushState();
+    }
+    return questPageState();
   });
 
   /** 重新推一次。給「等太久放棄了」那個收尾狀態用的按鈕。 */
@@ -3747,10 +5013,167 @@ app.whenReady().then(() => {
     return DEBUG_PORT_SWITCH_AUTO;
   });
 
+  /**
+   * 換這份配置的客戶端種類，然後重開自己（見 `restart()`）。
+   *
+   * ⚠ 命令列開的臨時配置不收：它不在清單裡，重開時 `--profile <id>` 找不到它，
+   * 會落到別份配置上。
+   */
+  ipcMain.handle("ulr:client-kind", async (_event, raw: unknown) => {
+    if (raw !== "desktop" && raw !== "chrome" && raw !== "edge") return snapshot();
+    if (ephemeral || raw === profile.kind) return snapshot();
+    log(`· 客戶端改為 ${raw}，重開插件`);
+    editProfile(profile.id, { kind: raw });
+    await restart();
+    return snapshot();
+  });
+
+  /** 瀏覽器那一族。桌面版沒有這些按鈕，按到了也不做事。 */
+  const browserFamily = (): "chrome" | "edge" | null =>
+    profile.kind === "chrome" || profile.kind === "edge" ? profile.kind : null;
+
+  /**
+   * 用插件專用的 profile 開瀏覽器，帶 `--remote-debugging-port=0`。
+   * 已經開著（而且有除錯埠）就不重開 —— 玩家可能正在裡面打。
+   *
+   * `family` 可以跟這份配置接的客戶端不同（設置 › 啟動 那兩顆鈕）：開出來的是
+   * 那一族自己的 profile，插件不一定接它，給 Moon 之類的外部腳本用。
+   */
+  async function openBrowser(family: "chrome" | "edge", extPage: string | null) {
+    try {
+      const r = await ensureBrowser({
+        family,
+        // ⚠ 別族不能用 profile.port：桌面版配置的埠上坐著桌面版遊戲，問得到
+        // 就會被當成「這個瀏覽器已經開著」，然後什麼都沒開。
+        port: family === profile.kind ? profile.port : browserDebugPort(family),
+        profileDir: userDataDirFor(family),
+        alwaysAutoPort: true,
+        // Edge 每次啟動都臨時掛上 ULR Boot（見 loadExtensionArgs）。資料夾裡沒有
+        // 擴充就不帶，照常開。
+        ...(autoLoadExtDir(family) !== null ? { extraArgs: loadExtensionArgs(BOOT_EXT_DIR) } : {}),
+        startUrl: extPage,
+        onNotice: (m) => log(`· ${m}`),
+      });
+      // 已經開著：再叫一次同一個 profile，網址會交給那個實例開成新分頁。
+      if (!r.launched && extPage !== null) {
+        const exe = findBrowser(process.env, family);
+        if (exe !== null) {
+          const env = { ...process.env };
+          delete env["ELECTRON_RUN_AS_NODE"];
+          spawn(exe.path, [`--user-data-dir=${r.profileDir}`, extPage], {
+            detached: true,
+            stdio: "ignore",
+            env,
+          }).unref();
+        }
+      }
+      const label = clientLabel(family);
+      log(`· ${label}${r.launched ? "已開啟" : "已經開著"}（除錯埠 :${r.port}）`);
+      return { ok: true, text: `${label} ${r.launched ? "已開啟" : "已經開著"}` };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log(`⚠ 開 ${clientLabel(family)} 失敗：${msg.split("\n")[0]}`);
+      return {
+        ok: false,
+        text:
+          e instanceof BrowserNotFoundError
+            ? `找不到 ${clientLabel(family)}`
+            : "開了，但沒有除錯埠 —— 這個設定檔的視窗可能已經開著。全部關掉再按一次。",
+      };
+    }
+  }
+
+  ipcMain.handle("ulr:browser-open", async (_event, page?: unknown) => {
+    const family = browserFamily();
+    if (family === null) return { ok: false, text: "" };
+    // 只收一個固定值：渲染層不能叫我們開任意網址（同 open-external 的原則）。
+    return openBrowser(family, page === "extensions" ? `${family}://extensions` : null);
+  });
+
+  /**
+   * 指定哪一族開，跟這份配置接哪種客戶端無關。只收 chrome／edge；
+   * `page` 只收 `"extensions"`（裝 ULR Boot 那一步）。
+   */
+  ipcMain.handle("ulr:browser-launch", async (_event, raw: unknown, page?: unknown) => {
+    if (raw !== "chrome" && raw !== "edge") return { ok: false, text: "" };
+    return openBrowser(raw, page === "extensions" ? `${raw}://extensions` : null);
+  });
+
+  /**
+   * 在桌面放一個帶除錯埠的捷徑。內容跟教學頁上那行「目標」一字不差
+   * （同一個 `browserSetup()`）。同名的直接蓋掉 —— 旗標改了再按一次就是更新。
+   */
+  ipcMain.handle("ulr:browser-shortcut", async (_event, raw: unknown) => {
+    if (raw !== "chrome" && raw !== "edge") return { ok: false, text: "" };
+    const s = browserSetup(raw);
+    if (s.exe === null) return { ok: false, text: `找不到 ${clientLabel(raw)}` };
+    const name = `ULR ${clientLabel(raw)}`;
+    const lnk = join(app.getPath("desktop"), `${name}.lnk`);
+    const ok = shell.writeShortcutLink(lnk, "create", {
+      target: s.exe,
+      args: s.args,
+      cwd: dirname(s.exe),
+      icon: s.exe,
+      iconIndex: 0,
+      description: `${clientLabel(raw)}（帶除錯埠，ULR Companion 用）`,
+    });
+    log(ok ? `· 桌面捷徑：${lnk}` : `⚠ 寫不出桌面捷徑：${lnk}`);
+    return ok
+      ? { ok: true, text: `桌面多了「${name}」` }
+      : { ok: false, text: "寫不出捷徑 —— 桌面資料夾可能被防毒或權限擋住。" };
+  });
+
+  /** 把捷徑「目標」整行放進剪貼簿。字串由主程序決定（同 `copy-debug-flag`）。 */
+  ipcMain.handle("ulr:browser-copy-target", async (_event, raw: unknown) => {
+    if (raw !== "chrome" && raw !== "edge") return { ok: false, text: "" };
+    const t = browserSetup(raw).target;
+    if (t === null) return { ok: false, text: `找不到 ${clientLabel(raw)}` };
+    clipboard.writeText(t);
+    return { ok: true, text: "已複製" };
+  });
+
+  /** 同一件事存成 .cmd，給想放捷徑、或不開插件也要開的人。 */
+  ipcMain.handle("ulr:browser-save-cmd", async () => {
+    const family = browserFamily();
+    if (family === null) return { ok: false, text: "" };
+    const owner = window;
+    const opts = {
+      defaultPath: join(app.getPath("desktop"), `ULR-${clientLabel(profile.kind)}.cmd`),
+      filters: [{ name: "cmd", extensions: ["cmd"] }],
+    };
+    const r = await (owner === null
+      ? dialog.showSaveDialog(opts)
+      : dialog.showSaveDialog(owner, opts));
+    if (r.canceled || r.filePath === undefined) return { ok: false, text: "" };
+    writeFileSync(r.filePath, buildBrowserLaunchCmd(family), "ascii");
+    return { ok: true, text: `已存到 ${r.filePath}` };
+  });
+
+  /**
+   * 把 ULR Boot 放到 `BOOT_EXT_DIR`，打開那個資料夾。字型從玩家的桌面版遊戲拿
+   * （見 `gameFontDirs`），拿不到就只放程式。
+   */
+  ipcMain.handle("ulr:boot-ext-install", async () => {
+    try {
+      const install = detectGameInstall();
+      const fontDirs = install === null ? [] : gameFontDirs(install.resourcesDir);
+      const r = exportBootExtension(BOOT_EXT_SRC, BOOT_EXT_DIR, fontDirs);
+      bootExtInstalled = r.version;
+      log(`· ULR Boot ${r.version ?? "?"} 放到 ${r.dir}（字型 ${r.fonts} 個）`);
+      void shell.openPath(r.dir);
+      pushState();
+      return { ok: true, text: r.fonts > 0 ? "已放好" : "已放好（沒找到遊戲字型，會用系統字）" };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log(`⚠ 放 ULR Boot 失敗：${msg}`);
+      return { ok: false, text: msg };
+    }
+  });
+
   ipcMain.handle("ulr:open-external", async (_event, url: string) => {
     // ⚠ 白名單，不是「開啟渲染層給的任何東西」。渲染層被塞了一段腳本時，
     // `shell.openExternal` 是它唯一能碰到外面的東西。
-    if (!/^https:\/\/(github\.com|ulgg\.online)\//.test(url)) return false;
+    if (!/^https:\/\/(github\.com|ulgg\.online|hackmd\.io)\//.test(url)) return false;
     await shell.openExternal(url);
     return true;
   });
@@ -3769,6 +5192,10 @@ app.whenReady().then(() => {
   // 每一則都是他親手點的，而寫進 Deck1 只發生在他點了某一副牌組的時候。
   engine.onDeckEdit((report) => void onDeckReport(report));
   deckTimer = setInterval(() => void deckTick(), DECK_TICK_MS);
+  // 最愛卡片鈕（存進牌組庫，跟牌組一起上雲）。
+  engine.onCharaPicker((report) => onCharaPicker(report));
+  // Library 愛心複選與首頁立繪的擺法（同樣存進牌組庫）。
+  engine.onLobbyStand((report) => onLobbyStand(report));
 
   // 進了哪一房、開戰前先套牌組（WP-19）。
   // ⚠ 這一拍要比 `DECK_TICK_MS`（4 秒）密 —— 等候秒數預設 3 秒，用 4 秒的拍子

@@ -52,17 +52,19 @@ describe("整理清單", () => {
     expect(s.profiles[0]?.prefs.speedFactor).toBe(1);
   });
 
-  it("⚠ 中間人預設是雲端，而且舊設定檔的 linkPort 要被丟掉", () => {
-    // 搬過來的話每個既有使用者都會停在一個永遠配不到對手的本機中間人上，
-    // 而畫面上完全看不出來 —— 狀態列寫「還沒配到對手」，那句話在對手真的
-    // 沒裝插件時也是同一句。
+  it("⚠ 存下來的連線目標一律讀成預設 —— 畫面上已經沒有那一格可以改回來", () => {
+    // 照讀的話，以前填過 local 或別的網址的人就永遠停在一個配不到對手的地方，
+    // 而狀態列只寫「還沒配到對手」，那句話在對手真的沒裝插件時也是同一句。
     expect(defaultProfile("desktop").link).toBe(DEFAULT_LINK_TARGET);
     const migrated = normalizeStore({ profiles: [{ id: "a", linkPort: 9350 }] });
     expect(migrated.profiles[0]?.link).toBe(DEFAULT_LINK_TARGET);
-    // 明確填的值照留（開發者的 local 逃生口）。
     expect(normalizeStore({ profiles: [{ id: "a", link: "local" }] }).profiles[0]?.link).toBe(
-      "local",
+      DEFAULT_LINK_TARGET,
     );
+    expect(
+      updateIn(normalizeStore({ profiles: [{ id: "a" }] }), "a", { link: "local" }).profiles[0]
+        ?.link,
+    ).toBe(DEFAULT_LINK_TARGET);
   });
 
   it("lastUsedId 指向一份不存在的配置就當作沒設", () => {
@@ -231,6 +233,16 @@ describe("這個實例要用哪一份", () => {
     // 舊用法：純數字 = 本機的那個埠。
     const legacy = resolveProfile(storeOf(59222), ["--port", "1221", "--link-port", "9360"]);
     expect(legacy.profile.link).toBe("9360");
+  });
+
+  it("⚠ --link 也蓋過存下來的配置（開發時雙開測試唯一的入口），而且不落地", () => {
+    const store = storeOf(59222);
+    const r = resolveProfile(store, ["--port", "59222", "--link", "local"]);
+    expect(r.ephemeral).toBe(false);
+    expect(r.profile.link).toBe("local");
+    expect(store.profiles[0]?.link).toBe(DEFAULT_LINK_TARGET);
+    // 不帶就是預設。
+    expect(resolveProfile(store, ["--port", "59222"]).profile.link).toBe(DEFAULT_LINK_TARGET);
   });
 
   it("--kind 拿清單裡第一份那種客戶端（開發時 npm run tray 走這條）", () => {
@@ -445,22 +457,37 @@ describe("這個實例要用哪一份", () => {
     expect(p).not.toHaveProperty("band");
   });
 
-  it("地點那格收兩種抽法與 000~013，認不得的退回亞城池", () => {
-    expect(normalizeMatchPrefs({ stage: "arcadia" }).stage).toBe("arcadia");
-    expect(normalizeMatchPrefs({ stage: "official" }).stage).toBe("official");
-    expect(normalizeMatchPrefs({ stage: "007" }).stage).toBe("007");
-    expect(normalizeMatchPrefs({ stage: "013" }).stage).toBe("013");
-    expect(normalizeMatchPrefs({ stage: "../etc" }).stage).toBe("arcadia");
-    expect(normalizeMatchPrefs({ stage: "099" }).stage).toBe("arcadia");
-    expect(normalizeMatchPrefs({ stage: 13 }).stage).toBe("arcadia");
+  it("地點那格收兩種抽法與 000~009、011~014，認不得的退回亞城池", () => {
+    const v2 = (stage: unknown) => normalizeMatchPrefs({ stage, stageCodes: 2 }).stage;
+    expect(v2("arcadia")).toBe("arcadia");
+    expect(v2("official")).toBe("official");
+    expect(v2("007")).toBe("007");
+    expect(v2("011")).toBe("011");
+    expect(v2("014")).toBe("014");
+    expect(v2("../etc")).toBe("arcadia");
+    expect(v2("099")).toBe("arcadia");
+    expect(v2("010")).toBe("arcadia");
+    expect(v2(13)).toBe("arcadia");
+    expect(normalizeMatchPrefs({ stage: "007", stageCodes: 2 }).stageCodes).toBe(2);
   });
 
   /**
-   * ⚠ `014` 是**官方選單裡的「隨機」**，不是一張地圖。舊設定檔（與中間某一版
-   * 只有兩種抽法的設定檔）存過它，而它的意思正是「不要插件替我抽」。
+   * ⚠ 沒有 `stageCodes: 2` 的是 2026-09-23 改版前寫的設定檔：那時 `014` 是
+   * **官方選單裡的「隨機」**（意思是「不要插件替我抽」），隱藏地圖是 010~013。
+   * 改版後隱藏地圖整段往後挪一格，014 變成聖域的凱旋門。
    */
-  it("舊設定檔的 014 是「官方隨機」，不是一張地圖", () => {
+  it("改版前的設定檔：014 是「官方隨機」，010~013 搬到同一張圖現在的代號", () => {
     expect(normalizeMatchPrefs({ stage: "014" }).stage).toBe("official");
+    expect(normalizeMatchPrefs({ stage: "010" }).stage).toBe("011");
+    expect(normalizeMatchPrefs({ stage: "013" }).stage).toBe("014");
+    expect(normalizeMatchPrefs({ stage: "007" }).stage).toBe("007");
+    expect(normalizeMatchPrefs({ stage: "014" }).stageCodes).toBe(2);
+  });
+
+  it("⚠ 存過一次之後 014 就是凱旋門 —— 同一份設定檔讀第二次不能又變回官方隨機", () => {
+    const once = normalizeMatchPrefs({ stage: "013" });
+    const twice = normalizeMatchPrefs(JSON.parse(JSON.stringify(once)));
+    expect(twice.stage).toBe("014");
   });
 });
 

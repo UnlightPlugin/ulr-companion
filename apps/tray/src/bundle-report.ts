@@ -184,11 +184,12 @@ export function createBundleReporter(options: BundleReporterOptions): BundleRepo
       until.set(key, wait === undefined ? Number.POSITIVE_INFINITY : now() + wait);
 
       const main = bundles.find((b) => b.startsWith("client/runtime.")) ?? bundles[0];
-      if (outcome === "promoted") say(key, outcome, `✓ 已把這一版遊戲的檔名更新到雲端（${main}）`);
+      if (outcome === "promoted")
+        say(key, outcome, `✓ 已把這一版遊戲的檔名更新到 Cloudflare Workers（${main}）`);
       else if (outcome === "pending")
         say(key, outcome, `· 已回報這一版遊戲的檔名，等其他玩家確認（${main}）`);
       else if (outcome === "rejected")
-        say(key, outcome, `✗ 雲端不收這份遊戲檔名：${JSON.stringify(sent.body)}`);
+        say(key, outcome, `✗ Cloudflare Workers 不收這份遊戲檔名：${JSON.stringify(sent.body)}`);
       else if (outcome === "error") say(key, outcome, `✗ 回報遊戲檔名失敗：HTTP ${sent.status}`);
       return outcome;
     } catch (err) {

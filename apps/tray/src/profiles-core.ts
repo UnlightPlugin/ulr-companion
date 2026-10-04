@@ -21,16 +21,28 @@ import type { StagePick } from "@ulr/arbiter-engine";
 import {
   browserDebugPort,
   browserProfileDir,
+  DEFAULT_BONUS_ITEM_ORDER,
+  DEFAULT_BONUS_ITEM_PLACE,
+  DEFAULT_CHARA_PICKER_MODE,
   DEFAULT_DEBUG_PORT,
   DEFAULT_DISPLAY_STATE,
   DEFAULT_RAID_REWARD_MODE,
   desktopUserDataDir,
+  isBonusItemOrder,
+  isBonusItemPlace,
+  isCharaPickerMode,
   isRaidRewardMode,
   isRenderMode,
   isSizeMode,
   normalizeTint,
 } from "@ulr/cdp-adapter";
-import type { DisplayState, RaidRewardMode } from "@ulr/cdp-adapter";
+import type {
+  BonusItemOrder,
+  BonusItemPlace,
+  CharaPickerMode,
+  DisplayState,
+  RaidRewardMode,
+} from "@ulr/cdp-adapter";
 
 /**
  * 客戶端種類。不影響接線方式（三種都是 CDP），影響的是**預設埠、
@@ -94,29 +106,53 @@ export const DEFAULT_COST_RULE_MODE: CostRuleMode = "default";
  */
 export interface MatchPrefs {
   /**
-   * 這一場開在哪 —— `arcadia`（插件從 000~010 抽）、`official`（伺服器抽），
-   * 或是一個三位數的地點代號（`000`~`013`）。
+   * 這一場開在哪 —— `arcadia`（插件從亞城池抽）、`official`（伺服器抽），
+   * 或是一個三位數的地點代號（`000`~`009`、`011`~`014`）。
    *
    * ⚠ **指定一張不等於就開在那張。** 開房的只有 host，所以任何一方指定的地圖
    * 對另一邊都是單方面的。協商規則見 `@ulr/arbiter-engine` 的 `negotiateStage`：
    * 亞城隨機 ＞ 官方隨機 ＞ 指定的地圖，兩邊各指一張時擲骰子。
    */
   stage: StagePick;
+  /**
+   * `stage` 用的是哪一套代號。**一律寫 2**（2026-09-23 改版後那一套）。
+   *
+   * ⚠ 這一格存在的理由是 `"014"`：改版前它是「官方隨機」，改版後是聖域的凱旋門。
+   * 沒有這一格的設定檔分不出是哪一個，只能照舊的意思搬（見 {@link normalizeStage}）。
+   */
+  stageCodes: 2;
 }
 
 /** 新裝就是這樣：亞城池抽地點。 */
 export const DEFAULT_MATCH_PREFS: MatchPrefs = {
   stage: DEFAULT_STAGE_PICK,
+  stageCodes: 2,
 };
 
 /**
- * 舊設定檔那格是三位數的地點代號（`000`~`014`），中間有一版只剩兩種抽法。
+ * 2026-09-23 改版前的地點代號 → 現在的。隱藏地圖整段往後挪了一格（見
+ * `@ulr/cdp-adapter` 的 `HIDDEN_STAGES`），`014` 是當時的「官方隨機」。
+ */
+const LEGACY_STAGE_CODES: Readonly<Record<string, StagePick>> = {
+  "010": "011",
+  "011": "012",
+  "012": "013",
+  "013": "014",
+  "014": "official",
+};
+
+/**
+ * 設定檔裡那一格 → 現在的選擇。
  *
  * ⚠ **要搬，不能直接丟。** 直接丟的話每個既有使用者升級之後都會被拉回預設。
- * `014` 對應 `official`（他明確說過「不要插件替我抽」），其餘三位數代號現在
- * 又是合法的選項了 —— 指定某一張回來了，所以那些人拿回的是他當初選的那張。
+ * 沒有 `stageCodes: 2` 的設定檔是改版前寫的：`014` 對應 `official`（他明確說過
+ * 「不要插件替我抽」），`010`〜`013` 是當時的隱藏地圖，搬到同一張圖現在的代號。
  */
-function normalizeStage(raw: unknown): StagePick {
+function normalizeStage(raw: unknown, codes: unknown): StagePick {
+  if (codes !== 2 && typeof raw === "string") {
+    const moved = LEGACY_STAGE_CODES[raw];
+    if (moved !== undefined) return moved;
+  }
   if (raw === RANDOM_STAGE) return "official";
   return normalizeStagePick(raw);
 }
@@ -132,7 +168,8 @@ export function normalizeMatchPrefs(raw: unknown): MatchPrefs {
     // ⚠ 這對**填過約定檔位的人是一次行為改變**：他下次排隊排的是牌組算出來的
     // 那一檔。那是刻意的（見 `MatchPrefs` 的說明），而且是**唯一**誠實的做法
     // —— 悄悄沿用舊值的話，他會排在一條沒有 UI 顯示、也沒有 UI 改得掉的隊伍上。
-    stage: normalizeStage(r["stage"]),
+    stage: normalizeStage(r["stage"], r["stageCodes"]),
+    stageCodes: 2,
   };
 }
 
@@ -143,11 +180,15 @@ export interface Profile {
   /** 遊戲的 CDP 埠。**這也是實例的身分**（見 `main.ts` 的 userData 分離）。 */
   port: number;
   /**
-   * 中間人在哪。**要跟對手指到同一個**，預設值就是為了不用設定。
+   * 中間人在哪。**要跟對手指到同一個**，所以存下來的配置一律是雲端。
    *
-   * 一個字串而不是埠號，因為它現在有兩種可能（階段 3）：
-   * `local` = 同一台電腦上的另一個插件（雙開）；`wss://…` = 雲端的中間人，
-   * 那才配得到真正的對手。解析在 `parseLinkTarget()`，怎麼填都對。
+   * ⚠ **畫面上不給改**（玩家 2026-10-04），設定檔裡寫了別的也會被讀回雲端
+   * （見 `normalizeProfile()`）。唯一的例外是命令列的 `--link`，只活在那一次
+   * 啟動裡、不落地 —— 開發時雙開測試用 `--link local`。
+   *
+   * 一個字串而不是埠號，因為它有兩種可能：`local` = 同一台電腦上的另一個插件
+   * （雙開）；`wss://…` = 雲端的中間人，那才配得到真正的對手。解析在
+   * `parseLinkTarget()`。
    */
   link: string;
   kind: ClientKind;
@@ -256,6 +297,28 @@ export interface Profile {
    */
   deckCloudSync: boolean;
   /**
+   * 牌組替換模式（2026-09-24 玩家要的三選一）：
+   *
+   * ```
+   *   plugin    四房各存自訂牌組，全部經過 Deck1 切換；Deck2／Deck3 收進庫裡清空，
+   *             所以每一張卡都能放進任何一副（三副共用一個卡池）
+   *   official  四房各有自己的官方三牌組（庫裡那一房的前三副），進房時三格一起換；
+   *             三副合起來受卡池限制，跟官方一樣
+   *   off       插件不碰牌組
+   * ```
+   *
+   * 舊設定檔沒有這一欄 → `plugin`（改版前唯一的行為）。
+   */
+  deckMode: DeckMode;
+  /**
+   * 牌組編輯畫面 [Chara] 鈕：角色一覽裡每個角色用哪一張卡代表（`L1`..`L5`、
+   * `R` = 最高等 R 卡），`off` = 不畫那顆鈕。手上沒有那一張就挑最接近的。
+   *
+   * 玩家 2026-09-26 訂的預設：L5。舊設定檔沒有這一欄 → L5。
+   * 最愛卡片**不在這裡** —— 那個跟著帳號走、跟牌組一起上雲（`DeckLibrary.favorites`）。
+   */
+  charaPicker: CharaPickerMode;
+  /**
    * 渦擊破結算的 OK 面板怎麼演：`all` 官方原樣一頁一頁按、`once` 一張摘要
    * 一顆 OK、`none` 不演（記錄檔照記）。預設 `once`。
    *
@@ -285,6 +348,39 @@ export interface Profile {
    */
   raidAutoDeletePrompt: boolean;
   /**
+   * 渦房的物品捷徑：藏 FRIENDLIST／ITEM 兩顆鈕，改放回 AP 的水與渦探知機（一點就用）。
+   * 預設關 —— 會藏掉官方的鈕，要的人自己開（玩家 2026-09-26：「這功能是可開關的」）。
+   */
+  raidItemShortcut: boolean;
+  /**
+   * 任務房的水沙捷徑：FRIENDLIST 上方疊水與沙漏（一點就用）。
+   * 預設關，跟渦房那個一樣。跟通行證捷徑分開開關（玩家 2026-09-26：「兩者分開」）。
+   */
+  questStackShortcut: boolean;
+  /** 任務房的通行證捷徑：下方中間放通行證、標名字。預設關。 */
+  questPassShortcut: boolean;
+  /** 任務地圖的寶箱標註：每格旁邊畫寶箱實際是什麼。預設關（官方原樣）。 */
+  questTreasureMarks: boolean;
+  /** 迪城的水捷徑：FRIENDLIST 上方疊精靈／古代／魔女（一點就用）。預設關，跟另外兩房一樣。 */
+  dietItemShortcut: boolean;
+  /**
+   * 迪城的 GEM UP：大廳那張加成圖＋倒數，上面多一行百分比。
+   * 預設開 —— 只是顯示、沒有加成時什麼都不畫（玩家 2026-09-26：在迪城和小號互刷賺 GEM）。
+   */
+  dietGemUp: boolean;
+  /**
+   * 獎勵遊戲的物品捷徑：猜錯時畫一顆建議用的道具（石楠／四葉草／跳越星），
+   * 一點就用。預設關，跟另外三房一樣（玩家 2026-09-27：「物品捷徑功能開關」）。
+   */
+  bonusItemShortcut: boolean;
+  /** 獎勵遊戲差距大於 3（或小石楠用完）時先用哪一種。預設石楠5。 */
+  bonusItemOrder: BonusItemOrder;
+  /**
+   * 獎勵遊戲的捷徑畫在哪：`above` 按鈕左上、`cover` 直接蓋在「使用物品」上
+   * （玩家 2026-10-03）。開關另外看 `bonusItemShortcut`；預設上方 —— 原本就畫在那。
+   */
+  bonusItemPlace: BonusItemPlace;
+  /**
    * 畫面設定：`render` 繪製解析度（off／auto／x2／x3）、`size` 畫面大小
    * （x1／x1.25／x1.5／x2／fullscreen）。預設關、×1 —— 跟官方一樣。
    *
@@ -292,6 +388,18 @@ export interface Profile {
    * → 預設值。
    */
   display: DisplayState;
+}
+
+/** 牌組替換模式，見 {@link Profile.deckMode}。 */
+export type DeckMode = "plugin" | "official" | "off";
+
+export const DECK_MODES: readonly DeckMode[] = ["plugin", "official", "off"] as const;
+
+/** 預設是插件模式 —— 改版前唯一的行為，已經在用的人不該被換掉。 */
+export const DEFAULT_DECK_MODE: DeckMode = "plugin";
+
+export function isDeckMode(value: unknown): value is DeckMode {
+  return typeof value === "string" && (DECK_MODES as readonly string[]).includes(value);
 }
 
 /** 等候套用的預設秒數。 */
@@ -443,10 +551,9 @@ export function clampPort(value: unknown, fallback: number): number {
 }
 
 /**
- * 中間人那一格。空的、壞的一律回預設（**雲端**）—— 這格填錯不該讓插件開不起來。
+ * 命令列 `--link` 的值。空的、壞的一律回預設（**雲端**）。
  *
- * ⚠ 只收字串。舊設定檔那個 `linkPort`（數字）**刻意不搬過來** —— 見
- * `normalizeProfile()`。
+ * ⚠ 存下來的配置不走這支 —— 那邊一律是雲端，見 `normalizeProfile()`。
  */
 export function normalizeLink(raw: unknown): string {
   if (typeof raw !== "string") return DEFAULT_LINK_TARGET;
@@ -483,15 +590,14 @@ export function normalizeProfile(raw: unknown): Profile | null {
     id,
     name: raw2 === "" || legacyAutoName ? clientLabel(kind) : raw2,
     port: clampPort(r["port"], defaultPortFor(kind)),
-    // ⚠ **舊設定檔的 `linkPort` 刻意丟掉，不搬過來。**
+    // ⚠ **存下來的中間人一律讀成雲端**，`link` 與舊的 `linkPort` 都不看。
     //
-    // 它一定是某個本機的埠（那時候只有本機中間人），而本機中間人只配得到
-    // 同一台電腦上的另一個插件。搬過來的話，每個既有使用者升級之後都會停在
-    // 一個永遠配不到對手的中間人上，而畫面上完全看不出來 —— 狀態列寫
-    // 「還沒配到對手」，那句話在對手真的沒裝插件時也是同一句。
+    // 畫面上已經沒有那一格（玩家 2026-10-04）—— 照讀的話，以前填過 `local`
+    // 或別的網址的人就永遠改不回來，停在一個配不到對手的中間人上，而狀態列
+    // 只會寫「還沒配到對手」，那句話在對手真的沒裝插件時也是同一句。
     //
-    // 開發者要本機的話，在 進階 › 配置 那一格填 `local` 就有了。
-    link: normalizeLink(r["link"]),
+    // 開發者要本機的話用命令列 `--link local`（見 `resolveProfile()`）。
+    link: DEFAULT_LINK_TARGET,
     kind,
     prefs: normalizePrefs(r["prefs"] as Partial<LinkPrefs> | undefined),
     readyTint: normalizeTint(typeof r["readyTint"] === "number" ? r["readyTint"] : null),
@@ -509,6 +615,10 @@ export function normalizeProfile(raw: unknown): Profile | null {
     applyDelaySeconds: normalizeApplyDelaySeconds(r["applyDelaySeconds"]),
     // 舊設定檔沒有這一欄 → 開（玩家訂的預設）。
     deckCloudSync: r["deckCloudSync"] !== false,
+    // 舊設定檔沒有這一欄 → 插件模式（改版前唯一的行為）。
+    deckMode: isDeckMode(r["deckMode"]) ? r["deckMode"] : DEFAULT_DECK_MODE,
+    // 舊設定檔沒有這一欄 → L5（玩家訂的預設）。
+    charaPicker: isCharaPickerMode(r["charaPicker"]) ? r["charaPicker"] : DEFAULT_CHARA_PICKER_MODE,
     // 舊設定檔沒有這一欄 → once（一張摘要）。
     raidRewardMode: isRaidRewardMode(r["raidRewardMode"])
       ? r["raidRewardMode"]
@@ -519,6 +629,23 @@ export function normalizeProfile(raw: unknown): Profile | null {
     raidTeamShare: r["raidTeamShare"] !== false,
     raidAutoDelete: r["raidAutoDelete"] === true,
     raidAutoDeletePrompt: r["raidAutoDeletePrompt"] !== false,
+    // 舊設定檔沒有這一欄 → 關（官方原樣）。
+    raidItemShortcut: r["raidItemShortcut"] === true,
+    // 舊設定檔沒有這三欄 → 關（官方原樣）。
+    questStackShortcut: r["questStackShortcut"] === true,
+    questPassShortcut: r["questPassShortcut"] === true,
+    questTreasureMarks: r["questTreasureMarks"] === true,
+    // 舊設定檔沒有這兩欄 → 水捷徑關（官方原樣）、GEM UP 開（純顯示）。
+    dietItemShortcut: r["dietItemShortcut"] === true,
+    dietGemUp: r["dietGemUp"] !== false,
+    // 舊設定檔沒有這三欄 → 關（官方原樣）、石楠5 優先、畫在上方。
+    bonusItemShortcut: r["bonusItemShortcut"] === true,
+    bonusItemOrder: isBonusItemOrder(r["bonusItemOrder"])
+      ? r["bonusItemOrder"]
+      : DEFAULT_BONUS_ITEM_ORDER,
+    bonusItemPlace: isBonusItemPlace(r["bonusItemPlace"])
+      ? r["bonusItemPlace"]
+      : DEFAULT_BONUS_ITEM_PLACE,
     // 舊設定檔沒有這一欄 → 關、×1（官方原樣）。
     display: normalizeDisplay(r["display"]),
   };
@@ -580,11 +707,22 @@ export function defaultProfile(kind: ClientKind = "desktop"): Profile {
     // 停三秒才寫伺服器。見 `applyDelaySeconds`。
     applyDelaySeconds: DEFAULT_APPLY_DELAY_SECONDS,
     deckCloudSync: true,
+    deckMode: DEFAULT_DECK_MODE,
+    charaPicker: DEFAULT_CHARA_PICKER_MODE,
     raidRewardMode: DEFAULT_RAID_REWARD_MODE,
     raidShare: true,
     raidTeamShare: true,
     raidAutoDelete: false,
     raidAutoDeletePrompt: true,
+    raidItemShortcut: false,
+    questStackShortcut: false,
+    questPassShortcut: false,
+    questTreasureMarks: false,
+    dietItemShortcut: false,
+    dietGemUp: true,
+    bonusItemShortcut: false,
+    bonusItemOrder: DEFAULT_BONUS_ITEM_ORDER,
+    bonusItemPlace: DEFAULT_BONUS_ITEM_PLACE,
     display: { ...DEFAULT_DISPLAY_STATE },
   };
 }
@@ -735,7 +873,23 @@ export function resolveProfile(
     const i = argv.indexOf(`--${name}`);
     return i === -1 ? undefined : argv[i + 1];
   };
+  /**
+   * `--link` 蓋過配置裡的中間人，**只在這一次啟動**。
+   *
+   * ⚠ 任何一條路選到的配置都要吃 —— 畫面上的那一格拿掉之後，這是開發時
+   * 雙開測試（`--link local`）唯一的入口。不落地：`profiles.json` 讀回來
+   * 一律是雲端，下次不帶參數開就回到正常。
+   */
+  const linkFlag = flag("link") ?? flag("link-port");
+  const pick = (r: { profile: Profile; ephemeral: boolean }) =>
+    linkFlag === undefined ? r : { ...r, profile: { ...r.profile, link: normalizeLink(linkFlag) } };
+  return pick(resolveProfileOnly(store, flag));
+}
 
+function resolveProfileOnly(
+  store: ProfileStore,
+  flag: (name: string) => string | undefined,
+): { profile: Profile; ephemeral: boolean } {
   const wantId = flag("profile");
   if (wantId !== undefined) {
     const hit = store.profiles.find((p) => p.id === wantId);
@@ -748,10 +902,9 @@ export function resolveProfile(
     const hit = store.profiles.find((p) => p.port === port);
     if (hit !== undefined) return { profile: hit, ephemeral: false };
     if (port > 0) {
-      const link = normalizeLink(flag("link") ?? flag("link-port"));
       // 名字裡不要放埠 —— 視窗標題與狀態列本來就會補上，會變成「臨時 :9334 :9334」。
       return {
-        profile: { ...defaultProfile("desktop"), name: "臨時", port, link },
+        profile: { ...defaultProfile("desktop"), name: "臨時", port },
         ephemeral: true,
       };
     }
