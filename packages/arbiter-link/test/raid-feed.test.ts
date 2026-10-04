@@ -229,7 +229,7 @@ describe("RaidFeedBook", () => {
     book.ingest(parse("support", [support()]), NOW);
     book.ingest(parse("own", [own()]), NOW + 1000);
     const [r] = book.dueBatch(NOW + RAID_FEED_BATCH_MS);
-    expect(r && formatRaidFeedLine(r)).toBe("燈皇 藍蟲🔵🐛 325/1200");
+    expect(r && formatRaidFeedLine(r)).toBe("燈皇 藍蟲🔵🐛 325/1200｜濁濫");
   });
 
   it("發了之後才知道 stage：那則訊息要重畫", () => {
@@ -243,7 +243,7 @@ describe("RaidFeedBook", () => {
     expect(c.messages).toEqual(["m1"]);
     const m = book.message("m1");
     expect(m?.dirty).toBe(true);
-    expect(m && book.renderMessage(m, "123")).toBe("🆕 燈皇 藍蟲🔵🐛 325/1200");
+    expect(m && book.renderMessage(m, "123")).toBe("🆕 燈皇 藍蟲🔵🐛 325/1200｜濁濫");
     expect(book.nextWake(NOW + 60_000)).toBe(NOW + 60_000);
   });
 
@@ -268,7 +268,7 @@ describe("RaidFeedBook", () => {
     // 時間到了 alarm 重畫，用最新的 HP
     c = book.ingest(parse("support", [support({ hp: 150 })]), NOW + 50_000);
     expect(book.expireStates(NOW + 60_000).messages).toEqual(["m1"]);
-    expect(book.renderMessage(m, null, NOW + 60_000)).toBe("🆕 燈皇 ❓蟲🐛 150/1200");
+    expect(book.renderMessage(m, null, NOW + 60_000)).toBe("🆕 燈皇 ❓蟲🐛 150/1200｜濁濫");
     book.rendered(m, NOW + 60_000);
     // 離上次改超過一分鐘：馬上改
     book.ingest(parse("support", [support({ hp: 100 })]), NOW + 130_000);
@@ -410,7 +410,7 @@ describe("ulrmap 查表", () => {
     const asked = book.needsLookup(NOW);
     book.applyLookup(asked, parseRewardLookup(LOOKUP_SAMPLE), NOW);
     const [r] = book.dueBatch(NOW + RAID_FEED_BATCH_MS);
-    expect(r && formatRaidFeedLine(r)).toBe("燈皇 紅蟲🔴🐛 325/1200");
+    expect(r && formatRaidFeedLine(r)).toBe("燈皇 紅蟲🔴🐛 325/1200｜濁濫");
     expect(book.list(NOW)[0]?.fragment).toBe("life");
   });
 
@@ -424,7 +424,7 @@ describe("ulrmap 查表", () => {
     const c = book.applyLookup(asked, parseRewardLookup(LOOKUP_SAMPLE), NOW + 1000);
     expect(c.messages).toEqual(["m1"]);
     const m = book.message("m1");
-    expect(m && book.renderMessage(m, null)).toBe("🆕 燈皇 紅蟲🔴🐛 325/1200");
+    expect(m && book.renderMessage(m, null)).toBe("🆕 燈皇 紅蟲🔴🐛 325/1200｜濁濫");
   });
 
   it("表裡沒有：30 分鐘內不再查", () => {
@@ -495,7 +495,7 @@ describe("BOSS 狀態", () => {
     );
     expect(c.messages).toEqual(["m1"]);
     const m = book.message("m1")!;
-    expect(book.renderMessage(m, null, NOW)).toBe("🆕 燈皇 ❓蟲🐛 325/1200｜麻");
+    expect(book.renderMessage(m, null, NOW)).toBe("🆕 燈皇 ❓蟲🐛 325/1200｜濁濫｜麻");
     book.rendered(m, NOW);
     const old = book.ingest(
       parse("own", [
@@ -527,13 +527,13 @@ describe("BOSS 狀態", () => {
     expect(book.nextWake(NOW)).toBe(NOW + 26 * S);
     expect(book.expireStates(NOW + 25 * S).messages).toEqual([]);
     expect(book.expireStates(NOW + 26 * S).messages).toEqual(["m1"]);
-    expect(book.renderMessage(m, null, NOW + 26 * S)).toBe("🆕 燈皇 ❓蟲🐛 325/1200｜移-9");
+    expect(book.renderMessage(m, null, NOW + 26 * S)).toBe("🆕 燈皇 ❓蟲🐛 325/1200｜濁濫｜移-9");
     book.rendered(m, NOW + 26 * S);
     expect(m.stateExpiry).toBe(NOW + 120 * S);
     book.rendered(m, NOW + 120 * S);
     // 狀態都過期了，下一次重畫是渦本身到期（標 ⌛）
     expect(m.stateExpiry).toBe(support().limit);
-    expect(book.renderMessage(m, null, NOW + 120 * S)).toBe("🆕 燈皇 ❓蟲🐛 325/1200");
+    expect(book.renderMessage(m, null, NOW + 120 * S)).toBe("🆕 燈皇 ❓蟲🐛 325/1200｜濁濫");
   });
 
   it("打倒了：重畫成 ☠️ 0/上限，狀態不再顯示也不再等它到期", () => {
@@ -584,7 +584,7 @@ describe("打倒、不見了、到期", () => {
     expect(c.raids).toEqual([raidFeedId(a)]);
     expect(c.messages).toEqual(["m1"]);
     expect(book.renderMessage(m, null, NOW)).toBe(
-      "🆕 新增 2 個公開渦\n燈皇 ❓蟲🐛☠️ 0/1200\nB ❓蟲🐛 284/1200",
+      "🆕 新增 2 個公開渦\n燈皇 ❓蟲🐛☠️ 0/1200\nB ❓蟲🐛 284/1200｜濁濫",
     );
   });
 
@@ -617,7 +617,7 @@ describe("打倒、不見了、到期", () => {
     book.rendered(m, NOW);
     const c = book.ingest(parse("support", [alive({ hp: 200 })]), NOW + MIN);
     expect(c.messages).toEqual(["m1"]);
-    expect(book.renderMessage(m, null, NOW + MIN)).toBe("🆕 燈皇 ❓蟲🐛 200/1200");
+    expect(book.renderMessage(m, null, NOW + MIN)).toBe("🆕 燈皇 ❓蟲🐛 200/1200｜濁濫");
   });
 
   it("到期時刻往前跳（伺服器改成死亡＋10 分）= 打倒", () => {

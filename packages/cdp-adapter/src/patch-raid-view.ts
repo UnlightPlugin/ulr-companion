@@ -23,6 +23,8 @@
  *   ⑩ 更新鈕：Profound 計數（raid_owned）下面一顆「Refresh」＝重進渦房
  *   ⑪ 渦碼沒回應時解開畫面（官方 bug，見下）
  *   ⑫ SUPPORT 公開清單：名字右邊接碎片色（只看公開渦表，見「⑫ SUPPORT 公開清單」那段）
+ *   ⑬ BOSS 被動（硬化／吸收／潛伏／濁濫／夜霧／隱身／收穫／磁暴）：伺服器不送，照規則算（見「BOSS 被動」那段）。
+ *      清單列與詳細面板排在 BOSS 狀態前面，SUPPORT 接在 BOSS 名右邊；狗的硬化／吸收帶剩餘時間
  * ```
  *
  * ## ⑪ 輸入渦碼後整個渦房點不動（2026-09-26 實機查到的）
@@ -112,6 +114,7 @@
 
 import { embedJson } from "./embed.js";
 import { RAID_STATUS_COLORS, RAID_STATUSES } from "./raid-status.js";
+import { RAID_PASSIVE_COLOR, RAID_PASSIVE_RULES } from "./raid-passive.js";
 import { RAID_SUPPORT_HOOK_BODY } from "./raid-support.js";
 import {
   RAID_FRAGMENTS,
@@ -125,7 +128,7 @@ import type { RaidLearnedTable } from "./raid-learned.js";
 const FLAG = "__ulrRaidView";
 
 /** 腳本版本。**改動注入腳本裡任何一行就 +1**，修 bug 也算。 */
-export const RAID_VIEW_SCRIPT_VERSION = 29;
+export const RAID_VIEW_SCRIPT_VERSION = 30;
 
 /** ⑪ 塞進官方 RaidUITexts.error 的鍵（官方的 raid_error 拿鍵查字）。 */
 export const RAID_CODE_NO_REPLY_KEY = "ULR_CODE_NO_REPLY";
@@ -704,6 +707,9 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
       RAID_STATUSES.map((s) => [s.code, { short: s.short, kind: s.kind }]),
     ),
     statusColors: RAID_STATUS_COLORS,
+    // BOSS 被動什麼時候開（raid-passive.ts；Discord 那份在 arbiter-link）
+    passives: RAID_PASSIVE_RULES,
+    passiveColor: RAID_PASSIVE_COLOR,
     // 官方獎勵碼（跟 patch-raid-reward 同一份）：1 角色、2 武器／事件卡（slot 0 武器、2 事件）、3 道具、4 部件、5 GEM
     rewardTypes: { chara: 1, slot: 2, avatarItem: 3, avatarPart: 4, gem: 5 },
     slotWeapon: 0,
@@ -1216,7 +1222,8 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
       var e = entryOf(st, r);
       var fi = r ? fragInfo(st, G, r) : null;
       var states = bossStates(st, r);
-      var key = (r ? r.profound_id : "?") + "|" + entrySig(e) + "|" + fragSig(fi) + "|" + stateSig(states) + "|" + G.textures.exists(STATE_TEX);
+      var pas = rowPassives(G, r);
+      var key = (r ? r.profound_id : "?") + "|" + entrySig(e) + "|" + fragSig(fi) + "|" + stateSig(states) + "|" + passiveSig(pas) + "|" + G.textures.exists(STATE_TEX);
       var deco = name.__ulrRaidView;
       if (deco && deco.key === key) {
         for (var k = 0; k < deco.objs.length; k++) deco.objs[k].setVisible(name.visible);
@@ -1233,6 +1240,7 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
         if (x + ICON > maxX) break;
         x = addItemIcon(R, G, x, name.y, items[j], ICON, name.depth, objs);
       }
+      if (pas.length) x = addPassiveTags(R, G, x + 2, name.y, pas, name.depth, maxX, objs, timers, null) - 4;
       if (states.length) addStateIcons(R, G, x + 2, name.y, states, name.depth, 12, maxX, objs, timers, null);
       for (var v = 0; v < objs.length; v++) objs[v].setVisible(name.visible);
       if (!deco) st.rows.push(name);
@@ -1279,11 +1287,12 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
       if (!d || !alive(d.raid_name)) continue;
       var n = typeof d.profound_code === "string" ? supportRaid(R, d) : null;
       var fi = n ? pubFrag(publicOf(st, { code: null, limit: n.limit, founder: n.founder_name }), null) : null;
-      // 公開渦表 30 秒換一次，碎片晚到也要補上
-      var key = fragSig(fi);
+      // BOSS 被動：接在 BOSS 名（mons_name，x 223、寬 96）右邊，只畫一個（每隻 BOSS 同時最多開一個）
+      var pas = n ? activePassives(passiveIdsOf(G, n.monster_id), n.hp, n.hp_max, Date.now()).slice(0, 1) : [];
+      // 公開渦表 30 秒換一次，碎片晚到也要補上；被動跨門檻／換班也重畫
+      var key = fragSig(fi) + "|" + passiveSig(pas);
       if (d.__ulrKey !== key) {
-        if (d.ulr_frag) safeDestroy(d.ulr_frag);
-        d.ulr_frag = null;
+        dropSupportDeco(d);
         d.__ulrKey = key;
         if (fi) {
           var name = d.raid_name, objs = [];
@@ -1291,13 +1300,33 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
           addFragIcon(R, G, x, name.y, fi, ICON, name.depth, objs);
           d.ulr_frag = objs[0] || null;
         }
+        if (pas.length && alive(d.mons_name)) {
+          var mons = d.mons_name, pobjs = [], timers = [];
+          var maxX = alive(d.founder) ? d.founder.x - 4 : mons.x + mons.width;
+          addPassiveTags(R, G, mons.x + Math.min(textWidth(mons), mons.width) + 4, mons.y, pas, mons.depth, maxX, pobjs, timers, null);
+          // 官方收列時拿 Object.values 裡有 destroy 的一起收，所以一個物件一個欄位（陣列它不收）
+          d.ulr_pas = pobjs[0] || null;
+          d.ulr_pas_t = pobjs[1] || null;
+          d.__ulrPasUntil = timers.length ? timers[0].until : null;
+        }
       }
-      // 開面板的淡入是官方先收好名單才跑的，沒有這顆：跟著名字的透明度與位置走
-      if (alive(d.ulr_frag)) {
-        if (d.ulr_frag.alpha !== d.raid_name.alpha) d.ulr_frag.setAlpha(d.raid_name.alpha);
-        d.ulr_frag.y = d.raid_name.y;
+      // 開面板的淡入是官方先收好名單才跑的，沒有這幾顆：跟著名字的透明度與位置走
+      var followers = [d.ulr_frag, d.ulr_pas, d.ulr_pas_t];
+      for (var f = 0; f < followers.length; f++) {
+        var o = followers[f];
+        if (!alive(o)) continue;
+        if (o.alpha !== d.raid_name.alpha) o.setAlpha(d.raid_name.alpha);
+        o.y = d.raid_name.y + (o === d.ulr_pas_t ? 1 : 0);
       }
+      if (alive(d.ulr_pas_t) && typeof d.__ulrPasUntil === "number") tickTimers([{ text: d.ulr_pas_t, until: d.__ulrPasUntil }]);
     }
+  }
+  function dropSupportDeco(d) {
+    if (d.ulr_frag) safeDestroy(d.ulr_frag);
+    if (d.ulr_pas) safeDestroy(d.ulr_pas);
+    if (d.ulr_pas_t) safeDestroy(d.ulr_pas_t);
+    d.ulr_frag = d.ulr_pas = d.ulr_pas_t = null;
+    d.__ulrPasUntil = null;
   }
   function clearSupport() {
     var G = gameOf();
@@ -1306,8 +1335,11 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
     for (var i = 0; i < rows.length; i++) {
       var d = rows[i];
       if (!d) continue;
-      if (d.ulr_frag) safeDestroy(d.ulr_frag);
+      dropSupportDeco(d);
       delete d.ulr_frag;
+      delete d.ulr_pas;
+      delete d.ulr_pas_t;
+      delete d.__ulrPasUntil;
       delete d.__ulrKey;
     }
   }
@@ -1674,6 +1706,31 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
     // 狀態有持續時間：叫托盤馬上傳（公開渦通知），不等打完回渦房那一輪 —— 那時多半已經過期
     report({ type: "raid-stage" });
   }
+  // 戰鬥裡 BOSS 的被動框（官方 opponent_passive）：伺服器每次送「這一側開著哪些被動 id」，
+  // 官方就把框點亮（skill_passive 第 1 格）或變暗（第 0 格）。亮暗一變就記一筆（時刻、HP、亮著的 id），
+  // 拿來驗 raid-passive.ts 的規則 —— 例如狗第 19／49 分到底有沒有硬化（2026-10-04 玩家記得沒有，
+  // 原版伺服器碼說有）。記在 window，重裝不清。
+  var PASSIVE_LOG = "__ulrRaidPassiveLog";
+  function watchBossPassives(st, G) {
+    var M = G.scene.keys.MainA;
+    var c = M ? M._chara1 || null : null;
+    var b = st.battle;
+    if (!b || !c || c.card_id !== b.boss || !Array.isArray(M.opponent_passive) || !M.opponent_passive.length) return;
+    var on = [];
+    for (var i = 0; i < M.opponent_passive.length; i++) {
+      var p = M.opponent_passive[i];
+      var base = p ? p.passive_base : null;
+      var id = p && typeof p.getData === "function" ? p.getData("passive_id") : null;
+      if (base && base.frame && String(base.frame.name) === "1" && typeof id === "number") on.push(id);
+    }
+    var sig = b.id + "|" + on.join(",");
+    if (sig === st.passiveSig) return;
+    st.passiveSig = sig;
+    var hpT = M.opponent_HP, hp = hpT && hpT.text !== undefined ? parseInt(String(hpT.text).split(",").join(""), 10) : NaN;
+    var log = window[PASSIVE_LOG] || (window[PASSIVE_LOG] = []);
+    log.push({ at: Date.now(), raid: b.id, card: c.card_id, hp: isFinite(hp) ? hp : c.hp, hpMax: c.hp_max, on: on });
+    if (log.length > 300) log.shift();
+  }
   /** [{type, turn}] → [{type, until, count}]。認不得的丟掉。 */
   function statesOf(raw) {
     var out = [];
@@ -1794,7 +1851,9 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
     return cx;
   }
   function hangStateTip(sc, G, hit, code, depth, tip) {
-    var clip = stateClip(G, code);
+    hangTip(sc, hit, stateClip(G, code), depth, tip);
+  }
+  function hangTip(sc, hit, clip, depth, tip) {
     if (!clip) return;
     try {
       hit.setInteractive();
@@ -1814,6 +1873,102 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
       var want = remainText(t.until);
       if (t.text.text !== want) t.text.setText(want);
     }
+  }
+
+  // ---- BOSS 被動（硬化、吸收、潛伏、濁濫、夜霧、隱身、收穫、磁暴）--------------
+  //
+  // 伺服器不送「現在開哪個」，但規則固定（raid-passive.ts，抄原版伺服器的 check_*_passive）：
+  // 狗看現實時間的分鐘、蟲／海／龜看渦的 HP。帶哪些被動看 CharaCards 那一列的 passive
+  // （清單的 monster_id 就是那一列的 id），什麼時候開照 CFG.passives 算。
+  // 分鐘直接用 UTC 的（日本／台灣跟 UTC 差整數小時，分鐘一樣）。
+  var passiveIdCache = {};
+  function passiveIdsOf(G, monsterId) {
+    if (typeof monsterId !== "number") return [];
+    if (passiveIdCache[monsterId]) return passiveIdCache[monsterId];
+    var cards = null;
+    try { cards = G.cache.json.get("CharaCards"); } catch (e) {}
+    if (!Array.isArray(cards) || !cards.length) return [];
+    var out = [];
+    for (var i = 0; i < cards.length; i++) {
+      var c = cards[i];
+      if (!c || c.id !== monsterId || !Array.isArray(c.passive)) continue;
+      for (var j = 0; j < c.passive.length; j++) {
+        var p = c.passive[j];
+        var id = p && typeof p === "object" ? p.id : p;
+        if (typeof id === "number") out.push(id);
+      }
+      break;
+    }
+    passiveIdCache[monsterId] = out;
+    return out;
+  }
+  /** 現在開著的被動 [{id, short, until}]（until 是時間制那一段結束的時刻，HP 制是 null）。 */
+  function activePassives(ids, hp, hpMax, now) {
+    var out = [], on = {};
+    if (!ids.length || (typeof hp === "number" && hp <= 0)) return out;
+    var minuteNo = Math.floor(now / 60000), min = minuteNo % 60;
+    for (var i = 0; i < CFG.passives.length; i++) {
+      var rule = CFG.passives[i];
+      if (ids.indexOf(rule.id) < 0) continue;
+      if (typeof rule.unless === "number" && on[rule.unless]) continue;
+      var until = null;
+      if (rule.minutes) {
+        var span = null;
+        for (var k = 0; k < rule.minutes.length; k++) if (min >= rule.minutes[k][0] && min <= rule.minutes[k][1]) span = rule.minutes[k];
+        if (!span) continue;
+        until = (minuteNo - min + span[1] + 1) * 60000;
+      } else {
+        if (typeof hp !== "number" || typeof hpMax !== "number" || !rule.hpAtMost) continue;
+        if (Math.floor(hpMax * rule.hpAtMost[0] / rule.hpAtMost[1]) < hp) continue;
+        if (rule.hpAbove && hp <= Math.floor(hpMax * rule.hpAbove[0] / rule.hpAbove[1])) continue;
+      }
+      on[rule.id] = true;
+      out.push({ id: rule.id, short: rule.short, until: until });
+    }
+    return out;
+  }
+  function rowPassives(G, r) {
+    return r ? activePassives(passiveIdsOf(G, r.monster_id), r.hp, r.hp_max, Date.now()) : [];
+  }
+  function passiveSig(list) {
+    var p = [];
+    for (var i = 0; i < list.length; i++) p.push(list[i].id + ":" + list[i].until);
+    return p.join(",");
+  }
+  /** 官方的被動名稱＋說明（PassiveSkills.json，遊戲語言）；滑上去用。 */
+  function passiveClip(G, id) {
+    try {
+      var J = G.cache.json.get("PassiveSkills") || [];
+      for (var i = 0; i < J.length; i++) {
+        if (!J[i] || J[i].id !== id) continue;
+        var lg = gameLang();
+        var name = String(J[i]["name_" + lg] || J[i].name_tcn || "");
+        var info = String(J[i]["info_" + lg] || J[i].info_tcn || "").split("|")[0];
+        return name + (info ? "\\n" + info : "");
+      }
+    } catch (e) {}
+    return null;
+  }
+  /** 一排被動：兩字標籤（＋時間制的剩餘時間）。寬度到 maxX 就停。回傳下一個 x。 */
+  function addPassiveTags(sc, G, x, y, list, depth, maxX, out, timers, tip) {
+    var cx = x;
+    for (var i = 0; i < list.length; i++) {
+      var p = list[i], objs = [];
+      var t = sc.add.text(cx, y, p.short, { fontFamily: FONT, fontSize: 11, resolution: 2, color: CFG.passiveColor }).setOrigin(0, 0.5).setDepth(depth).setStroke("black", 2);
+      objs.push(t);
+      var w = t.width, tt = null;
+      if (p.until !== null) {
+        tt = sc.add.text(cx + w + 1, y + 1, remainText(p.until), { fontFamily: FONT, fontSize: 9, resolution: 2, color: "#ffffff" }).setOrigin(0, 0.5).setDepth(depth).setStroke("black", 2);
+        objs.push(tt);
+        w += 1 + tt.width;
+      }
+      if (maxX !== null && cx + w > maxX) { destroyAll(objs); break; }
+      for (var k = 0; k < objs.length; k++) out.push(objs[k]);
+      if (tt) timers.push({ text: tt, until: p.until });
+      if (tip) hangTip(sc, t, passiveClip(G, p.id), depth, tip);
+      cx += w + 4;
+    }
+    return cx;
   }
   // 發現渦：raid_title 每發現一個就換一份。人不在渦房（還在任務裡）也要先收著 ——
   // 連著發現兩個才進渦房，前一個會被蓋掉。進了渦房、清單上有了再對。
@@ -1916,8 +2071,9 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
     var fi = fragInfo(st, G, r);
     var pt = R.raid_detail_point_text;
     var states = bossStates(st, r);
+    var pas = rowPassives(G, r);
     var key = r.profound_id + "|" + entrySig(e) + "|" + fragSig(fi) + "|" + nameT.text + "|" + nameT.x + "|" + (alive(pt) ? pt.text : "-") +
-      "|" + stateSig(states) + "|" + G.textures.exists(STATE_TEX);
+      "|" + stateSig(states) + "|" + passiveSig(pas) + "|" + G.textures.exists(STATE_TEX);
     if (st.info && st.info.key === key && st.info.objs.every(alive)) { tickTimers(st.info.timers); return; }
     dropInfo(st);
     var objs = [], tip = [], timers = [];
@@ -1936,12 +2092,13 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
       if (x + ICON > maxX) break;
       x = addItemIcon(R, G, x, nameT.y, items[j], ICON, depth, objs);
     }
-    // BOSS 狀態：名字下一行、怪物名（276 右對齊、y 58 起）左邊空著的那一段
-    if (states.length) {
+    // BOSS 被動與狀態：名字下一行、怪物名（276 右對齊、y 58 起）左邊空著的那一段；被動在前
+    if (states.length || pas.length) {
       var mons = R.raid_detail_mons_name;
       var sy = alive(mons) ? mons.y + (mons.height || 16) / 2 : 66;
       var sMax = alive(mons) ? mons.x - mons.width - 6 : 200;
-      addStateIcons(R, G, 72, sy, states, depth, 14, sMax, objs, timers, tip);
+      var sx = pas.length ? addPassiveTags(R, G, 72, sy, pas, depth, sMax, objs, timers, tip) : 72;
+      if (states.length) addStateIcons(R, G, sx, sy, states, depth, 14, sMax, objs, timers, tip);
     }
     addPointsTip(R, depth, objs, tip);
     st.info = { key: key, objs: objs, tip: tip, timers: timers };
@@ -2637,7 +2794,7 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
       var G = gameOf();
       // 戰鬥裡（Raid 睡著）也要看：開打那一刻的戰鬥設定帶著 stage；任務裡發現渦也是
       if (G) {
-        try { watchBattleStage(st, G); watchBossStates(st, G); } catch (e) { st.reason = "battle stage: " + String((e && e.message) || e); }
+        try { watchBattleStage(st, G); watchBossStates(st, G); watchBossPassives(st, G); } catch (e) { st.reason = "battle stage: " + String((e && e.message) || e); }
         try { hookDamage(st, G); } catch (e) { st.reason = "battle damage: " + String((e && e.message) || e); }
         st.primed = true;
         try { ensureStateIcons(G); } catch (e) {}

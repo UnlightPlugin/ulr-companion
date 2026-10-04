@@ -13,6 +13,7 @@
     "./match-queue": "./src/match-queue.ts",
     "./raid-share": "./src/raid-share.ts",
     "./raid-feed": "./src/raid-feed.ts",
+    "./raid-passive": "./src/raid-passive.ts",
     "./deck-sync": "./src/deck-sync.ts"
   },
   "dependencies": {

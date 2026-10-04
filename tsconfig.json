@@ -41,6 +41,7 @@
       "@ulr/arbiter-link/rooms": ["packages/arbiter-link/src/rooms.ts"],
       "@ulr/arbiter-link/match-queue": ["packages/arbiter-link/src/match-queue.ts"],
       "@ulr/arbiter-link/raid-feed": ["packages/arbiter-link/src/raid-feed.ts"],
+      "@ulr/arbiter-link/raid-passive": ["packages/arbiter-link/src/raid-passive.ts"],
       "@ulr/arbiter-engine": ["packages/arbiter-engine/src/index.ts"]
     }
   },

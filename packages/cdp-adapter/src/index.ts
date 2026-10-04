@@ -484,6 +484,9 @@ export {
 } from "./raid-status.js";
 export type { RaidStatusInfo, RaidStatusKind, RaidStatusLabel } from "./raid-status.js";
 
+export { RAID_PASSIVE_COLOR, RAID_PASSIVE_RULES } from "./raid-passive.js";
+export type { RaidPassiveRule } from "./raid-passive.js";
+
 export {
   buildRaidViewPatchScript,
   buildRaidViewSetAutoDeleteExpression,

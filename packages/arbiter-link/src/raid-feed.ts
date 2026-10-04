@@ -33,6 +33,7 @@
  * ⚠ 這一份**不 import 任何 Node 模組**：Worker 與插件共用。
  */
 
+import { activeRaidPassives, nextRaidPassiveChange, raidPassiveIdsOf } from "./raid-passive.js";
 import { raidTeamRef } from "./raid-share.js";
 
 export const RAID_FEED_PATH = "/raid-feed";
@@ -498,7 +499,23 @@ export function formatRaidFeedStates(states: readonly RaidFeedState[], now?: num
 // Discord 文字（照舊 bot 的 `raid_notification_text.py`）
 // ---------------------------------------------------------------------------
 
-/** 一行：`發現者 紅海🔴🐙 12000/20000｜✨6★｜麻 移-9`。`now` 給了就不列過期的狀態。 */
+/**
+ * BOSS 現在開著的被動（硬化、夜霧…，見 `raid-passive.ts`），`硬化`；沒有是空字串。
+ * 時間制的要 `now`。
+ */
+export function formatRaidFeedPassive(
+  r: Pick<RaidFeedIn, "mons" | "name" | "hp" | "hpMax">,
+  now?: number,
+): string {
+  return activeRaidPassives(raidPassiveIdsOf(r), r.hp, r.hpMax, now)
+    .map((p) => p.short)
+    .join(" ");
+}
+
+/**
+ * 一行：`發現者 紅海🔴🐙 12000/20000｜✨6★｜夜霧｜麻 移-9`。`now` 給了就不列過期的狀態、
+ * 也才標時間制的被動（硬化／吸收）。
+ */
 export function formatRaidFeedLine(
   r: RaidFeedIn & { lookupFragment?: RaidFragmentKey | null },
   now?: number,
@@ -520,10 +537,11 @@ export function formatRaidFeedLine(
   }
   const hp = r.hp !== null && r.hpMax !== null ? ` ${r.hp}/${r.hpMax}` : "";
   const rarity = r.rarity !== null && r.rarity > 1 ? `｜✨${r.rarity}★` : "";
-  // 死了、到期了，狀態就沒意義了
-  const states =
-    dead === "" && expired === "" && r.states ? formatRaidFeedStates(r.states, now) : "";
-  return `${r.founder} ${raid}${hp}${rarity}${states === "" ? "" : `｜${states}`}`;
+  // 死了、到期了，狀態與被動就沒意義了
+  const alive = dead === "" && expired === "";
+  const passive = alive ? formatRaidFeedPassive(r, now) : "";
+  const states = alive && r.states ? formatRaidFeedStates(r.states, now) : "";
+  return `${r.founder} ${raid}${hp}${rarity}${passive === "" ? "" : `｜${passive}`}${states === "" ? "" : `｜${states}`}`;
 }
 
 /** 一批：一個就一行，多個加標題。`roleId` 有給就在最後一行 mention。 */
@@ -650,7 +668,9 @@ export class RaidFeedBook {
       // 有事才改訊息：碎片知道了、打倒了、看到新的狀態。只有 HP 變了不改（不然編輯紀錄一直洗）
       const statesChanged =
         newerStates && JSON.stringify(next.states) !== JSON.stringify(old.states ?? null);
-      if (raidFeedFragment(next) !== before || died || revived || statesChanged) {
+      // HP 跨過門檻、被動換了（夜霧開了、潛伏換成濁濫）也算有事
+      const passiveChanged = formatRaidFeedPassive(next) !== formatRaidFeedPassive(old);
+      if (raidFeedFragment(next) !== before || died || revived || statesChanged || passiveChanged) {
         this.#markDirty(next, changes);
       } else if (next.hp !== old.hp || next.hpMax !== old.hpMax) {
         // 只有 HP 變了：也改，但同一則最多一分鐘一次（排在上次改之後一分鐘）
@@ -738,8 +758,8 @@ export class RaidFeedBook {
   }
 
   /**
-   * 這則訊息下一次要自己重畫的時刻：顯示著的狀態最早到期的那一刻、或還活著的渦到期
-   * （要標 ⌛）的那一刻。死了的渦兩樣都不顯示。
+   * 這則訊息下一次要自己重畫的時刻：顯示著的狀態最早到期的那一刻、還活著的渦到期
+   * （要標 ⌛）的那一刻、或時間制的被動換班（狗每 10 分鐘一次）。死了的渦都不顯示。
    */
   #stateExpiryOf(m: RaidFeedMessage, now: number): number | null {
     let next: number | null = null;
@@ -752,6 +772,8 @@ export class RaidFeedBook {
       at(r.limit);
       if (r.limit <= now) continue;
       for (const st of r.states ?? []) if (st.until !== null) at(st.until);
+      const shift = nextRaidPassiveChange(raidPassiveIdsOf(r), now);
+      if (shift !== null) at(shift);
     }
     return next;
   }
