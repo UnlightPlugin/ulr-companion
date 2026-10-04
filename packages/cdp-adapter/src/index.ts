@@ -46,6 +46,7 @@ export {
 
 export {
   attachToGamePage,
+  GameFrameAppearedError,
   GamePageNotFoundError,
   selectGamePage,
   toPageTargets,
@@ -104,6 +105,52 @@ export type {
 } from "./patch-cost-toggle.js";
 
 export {
+  buildCharaPickerPatchScript,
+  buildCharaPickerStateExpression,
+  CHARA_PICKER_MODES,
+  CHARA_PICKER_SCRIPT_VERSION,
+  CHARA_PICKER_STATUS_EXPRESSION,
+  CHARA_PICKER_UNINSTALL_EXPRESSION,
+  DEFAULT_CHARA_PICKER_MODE,
+  DEFAULT_CHARA_PICKER_POLL_MS,
+  isCharaPickerMode,
+  isCharaPickerReport,
+  parseCharaPickerStatus,
+  PICK_CARD_SNIPPET,
+  WEAPON_VIEW_SNIPPET,
+} from "./patch-chara-picker.js";
+export type {
+  CharaPickerMode,
+  CharaPickerPatchOptions,
+  CharaPickerReport,
+  CharaPickerState,
+  CharaPickerStatus,
+} from "./patch-chara-picker.js";
+
+export {
+  buildLobbyStandPatchScript,
+  buildLobbyStandStateExpression,
+  DEFAULT_LOBBY_STAND_POLL_MS,
+  isLobbyStandReport,
+  LOBBY_STAND_LIMIT,
+  LOBBY_STAND_SETS_LIMIT,
+  LOBBY_STAND_SCRIPT_VERSION,
+  LOBBY_STAND_STATUS_EXPRESSION,
+  LOBBY_STAND_UNINSTALL_EXPRESSION,
+  LOBBY_UI_GROUPS,
+  parseLobbyStandStatus,
+} from "./patch-lobby-stand.js";
+export type {
+  LobbyStandLayout,
+  LobbyStandSet,
+  LobbyUiLayout,
+  LobbyStandPatchOptions,
+  LobbyStandReport,
+  LobbyStandState,
+  LobbyStandStatus,
+} from "./patch-lobby-stand.js";
+
+export {
   buildDisplayPatchScript,
   buildDisplayStateExpression,
   DEFAULT_DISPLAY_POLL_MS,
@@ -123,7 +170,15 @@ export {
   MIN_SIZE_ZOOM,
   SIZE_PRESETS,
 } from "./patch-display.js";
+export {
+  buildShellDisplayScript,
+  parseShellDisplayStatus,
+  SHELL_DISPLAY_RESET_EXPRESSION,
+  SHELL_DISPLAY_VERSION,
+} from "./shell-display.js";
+export type { ShellDisplayStatus } from "./shell-display.js";
 export { fillGameWindow, parseWindowFillOutput } from "./window-fill.js";
+export { pickReloadTarget, reloadGamePage, ReloadTargetNotFoundError } from "./reload-page.js";
 export type { WindowFillResult } from "./window-fill.js";
 export { planBrowserWindow, sameSize } from "./browser-window.js";
 export type { BrowserWindowResult, WindowBounds } from "./browser-window.js";
@@ -178,6 +233,7 @@ export {
   parseLobbyStatus,
   ROOM_ERROR_AP_SHORT,
   ROOM_ERROR_DECK_INVALID,
+  WAIT_LAYOUT,
 } from "./patch-lobby.js";
 export type {
   LobbyPatchOptions,
@@ -208,14 +264,28 @@ export {
   SHOP_SCRIPT_VERSION,
   SHOP_STATUS_EXPRESSION,
   SHOP_UNINSTALL_EXPRESSION,
+  SHOP_WEAPON_ITEM,
 } from "./patch-shop.js";
-export type { ShopPatchOptions, ShopStatus } from "./patch-shop.js";
+export type { ShopBatchResult, ShopPatchOptions, ShopStatus } from "./patch-shop.js";
+
+export {
+  buildLotPatchScript,
+  DEFAULT_LOT_POLL_MS,
+  DIM_LABEL,
+  DIM_TOOLTIP,
+  LOT_DIM_STORAGE_KEY,
+  LOT_DIM_TINT,
+  LOT_SCRIPT_VERSION,
+  LOT_STATUS_EXPRESSION,
+  LOT_UNINSTALL_EXPRESSION,
+  parseLotStatus,
+} from "./patch-lot.js";
+export type { LotPatchOptions, LotStatus } from "./patch-lot.js";
 
 export {
   buildNavPatchScript,
   DEFAULT_NAV_ARM_TIMEOUT_MS,
   DEFAULT_NAV_POLL_MS,
-  DEFAULT_NAV_PORT_TIMEOUT_MS,
   isNavReport,
   NAV_BACK_EVENT,
   NAV_HOST_SCENES,
@@ -247,11 +317,119 @@ export type {
 } from "./patch-asset-guard.js";
 
 export {
+  buildInputRescuePatchScript,
+  INPUT_RESCUE_BATTLE_SCENE,
+  INPUT_RESCUE_SCRIPT_VERSION,
+  INPUT_RESCUE_STATUS_EXPRESSION,
+  INPUT_RESCUE_UNINSTALL_EXPRESSION,
+  isInputRescueReport,
+  parseInputRescueStatus,
+  timedOutEvent,
+} from "./patch-input-rescue.js";
+export type {
+  InputRescuePatchOptions,
+  InputRescueReport,
+  InputRescueStatus,
+} from "./patch-input-rescue.js";
+
+export {
+  AP_RESTORE_ITEM_IDS,
+  BONUS_CLOVER,
+  BONUS_HEATHER_1,
+  BONUS_HEATHER_3,
+  BONUS_HEATHER_5,
+  BONUS_ITEM_ORDERS,
+  BONUS_PRECISE_ITEM_IDS,
+  BONUS_STAR,
+  buildItemPanelPatchScript,
+  buildItemPanelSetBonusOrderExpression,
+  buildItemPanelSetBonusPlaceExpression,
+  buildItemPanelSetPartExpression,
+  buildItemPanelSetShortcutExpression,
+  DEFAULT_BONUS_ITEM_ORDER,
+  DEFAULT_BONUS_ITEM_PLACE,
+  DIET_STACK_ITEM_IDS,
+  GEM_BOOST_TYPE,
+  HIDDEN_RAID_ITEM_IDS,
+  ITEM_PANEL_SCRIPT_VERSION,
+  ITEM_PANEL_STATUS_EXPRESSION,
+  ITEM_PANEL_UNINSTALL_EXPRESSION,
+  isBonusItemOrder,
+  isBonusItemPlace,
+  parseItemPanelStatus,
+  QUEST_PASS_LABELS,
+  QUEST_STACK_ITEM_IDS,
+  RAID_DETECTOR_1,
+  RAID_DETECTOR_2,
+  RAID_ITEM_KIND,
+  SHORTCUT_FRIEND_SLOT_ID,
+  SHORTCUT_ITEM_SLOT_ID,
+} from "./patch-item-panel.js";
+export type {
+  BonusItemOrder,
+  BonusItemPlace,
+  BonusPart,
+  DietPart,
+  ItemPanelPart,
+  ItemPanelPatchOptions,
+  ItemPanelStatus,
+  QuestShortcutPart,
+} from "./patch-item-panel.js";
+
+export {
+  appendQuestBonusSample,
+  isQuestBonusReport,
+  parseQuestBonusSamples,
+  QUEST_BONUS_SAMPLE_CAP,
+  summarizeQuestBonus,
+} from "./quest-bonus.js";
+export type { QuestBonusReport, QuestBonusSample, QuestBonusStats } from "./quest-bonus.js";
+
+export {
+  buildQuestTreasurePatchScript,
+  buildQuestTreasureSetBonusExpression,
+  buildQuestTreasureSetExpression,
+  parseQuestTreasureStatus,
+  QUEST_TREASURE_SCRIPT_VERSION,
+  QUEST_TREASURE_STATUS_EXPRESSION,
+  QUEST_TREASURE_UNINSTALL_EXPRESSION,
+} from "./patch-quest-treasure.js";
+export type { QuestTreasurePatchOptions, QuestTreasureStatus } from "./patch-quest-treasure.js";
+export { QUEST_TREASURE_TABLE } from "./quest-treasure-data.js";
+export type { QuestTreasureEntry } from "./quest-treasure-data.js";
+
+export {
+  buildCardArtPatchScript,
+  CARD_ART_ATLAS,
+  CARD_ART_SCRIPT_VERSION,
+  CARD_ART_STATUS_EXPRESSION,
+  CARD_ART_UNINSTALL_EXPRESSION,
+  DEFAULT_CARD_ART_POLL_MS,
+  isCardArtReport,
+  parseCardArtStatus,
+} from "./patch-card-art.js";
+export type {
+  CardArtEntry,
+  CardArtFailure,
+  CardArtPatchOptions,
+  CardArtReport,
+  CardArtStatus,
+} from "./patch-card-art.js";
+
+export {
+  CARD_FRAME_EXTRACT_EXPRESSION,
+  CARD_FRAME_HEIGHT,
+  CARD_FRAME_WIDTH,
+  parseCardFrameExtractResult,
+} from "./card-art-extract.js";
+export type { CardFrameExtractResult, ExtractedCardFrame } from "./card-art-extract.js";
+
+export {
   buildRaidSurrenderPatchScript,
   DEFAULT_RAID_SURRENDER_POLL_MS,
-  DEFAULT_RAID_SURRENDER_PORT_TIMEOUT_MS,
   isRaidSurrenderReport,
   parseRaidSurrenderStatus,
+  RAID_SURRENDER_ICON,
   RAID_SURRENDER_RULE,
   RAID_SURRENDER_SCRIPT_VERSION,
   RAID_SURRENDER_STATUS_EXPRESSION,
@@ -276,11 +454,14 @@ export {
   RAID_BOOKMARK_ITEM,
   RAID_FAIRY_MONS,
   RAID_FRAGMENTS,
+  RAID_MAP_COUNT,
   RAID_MATERIAL_ITEMS,
   RAID_OWN_FRAME_TINT,
   RAID_SPECIAL_TINT,
+  RAID_STAGE_START_MAP,
   RAID_TICKET_PREFIX,
   RAID_TREASURE_TABLE,
+  raidStageByMap,
   raidTierOf,
   specialOfEntry,
   ticketOfEntry,
@@ -308,23 +489,26 @@ export {
   buildRaidViewSetAutoDeleteExpression,
   buildRaidViewSetPublicExpression,
   buildRaidViewSetTeamsExpression,
-  isRaidBattleReport,
-  isRaidRefreshReport,
+  buildRaidViewSetLearnedExpression,
+  RAID_LEARN_GIVE_UP_MS,
   RAID_BATTLE_PENDING_MAX_MS,
   RAID_BATTLE_TAIL_MS,
+  RAID_UNKNOWN_TINT,
+  isRaidBattleReport,
+  isRaidRefreshReport,
+  isRaidStageReport,
+  isRaidTrackReport,
   RAID_VIEW_MANUAL_REFRESH_COOLDOWN_MS,
   DEFAULT_RAID_AUTO_DELETE,
   DEFAULT_RAID_VIEW_POLL_MS,
-  DEFAULT_RAID_VIEW_REFRESH_MS,
   isRaidAutoDeleteReport,
   isRaidAutoDeleteSettingReport,
   isRaidCodesReport,
   parseRaidViewSnapshot,
+  parseRaidViewSnapshotListed,
   parseRaidViewStatus,
   RAID_VIEW_SNAPSHOT_EXPRESSION,
-  RAID_ICON_SOURCES,
-  RAID_MATERIAL_WEAPON_INDEX,
-  RAID_TIER4_FRAME_TINT,
+  RAID_CODE_NO_REPLY_KEY,
   RAID_VIEW_LABELS,
   RAID_VIEW_SCRIPT_VERSION,
   RAID_VIEW_STATUS_EXPRESSION,
@@ -340,8 +524,11 @@ export type {
   RaidPublicInfo,
   RaidPublicMap,
   RaidRefreshReport,
+  RaidSnapshotMeta,
   RaidSnapshotRow,
+  RaidStageReport,
   RaidStateRef,
+  RaidTrackReport,
   RaidTeamsMap,
   RaidTeamView,
   RaidViewPatchOptions,
@@ -349,13 +536,37 @@ export type {
 } from "./patch-raid-view.js";
 
 export {
+  appendLearnLog,
+  isRaidLearnReport,
+  learnedFromSample,
+  mergeLearned,
+  parseLearnedTable,
+  parseLearnLog,
+  RAID_LEARN_LOG_MAX,
+  rebuildLearned,
+  raidRewardKey,
+  rankTiers,
+  tierAt,
+} from "./raid-learned.js";
+export type {
+  RaidLearnedEntry,
+  RaidLearnedTable,
+  RaidLearnReport,
+  RaidLearnSample,
+  RaidRankTier,
+  RaidRewardCode,
+} from "./raid-learned.js";
+
+export {
   buildRaidRewardPatchScript,
   buildRaidRewardSetModeExpression,
   DEFAULT_RAID_REWARD_MODE,
   isRaidRewardMode,
+  isRaidItemDeltaReport,
   isRaidRewardModeReport,
   isRaidRewardReport,
   parseRaidRewardStatus,
+  RAID_LEDGER_WATCH,
   RAID_REWARD_LABELS,
   RAID_REWARD_MODES,
   RAID_REWARD_SCRIPT_VERSION,
@@ -363,6 +574,8 @@ export {
   RAID_REWARD_UNINSTALL_EXPRESSION,
 } from "./patch-raid-reward.js";
 export type {
+  RaidItemDeltaReport,
+  RaidLedgerItem,
   RaidRewardEntry,
   RaidRewardMode,
   RaidRewardModeReport,
@@ -377,29 +590,36 @@ export {
   ARCADIA_STAGES,
   buildCreateRoomExpression,
   buildJoinRoomExpression,
+  buildMatchRoomScript,
   canAffordDuel,
   CHANNEL_NAMES,
   COST_RANGES,
   costTiersFor,
+  CROSSPLAY_CHANNELS,
   DEFAULT_ROOM_NAME,
   duelApCost,
   findOwnRoom,
   HIDDEN_STAGES,
   isStageCode,
+  MATCH_ROOM_SCRIPT_VERSION,
+  RANDOM_STAGE_CODE,
   ROOM_NAME_MAX_LENGTH,
   SELECTABLE_STAGES,
   STAGE_CODES,
   STAGES,
-  MATCH_ROOM_INSTALL_EXPRESSION,
+  stageValue,
   MATCH_ROOM_UNINSTALL_EXPRESSION,
 } from "./match-room.js";
 export type {
   ChannelInfo,
   CreateRoomOptions,
   CreateRoomResult,
+  DeckKeySet,
   DuelAffordability,
   JoinRoomResult,
   MatchContext,
+  MatchRoomScriptOptions,
+  RequiredAp,
   RoomDeck,
   RoomEntry,
   StageCode,
@@ -477,6 +697,8 @@ export {
   BrowserPortTimeoutError,
   browserProfileDir,
   buildBrowserArgs,
+  buildBrowserLaunchCmd,
+  buildBrowserShortcutArgs,
   DEFAULT_BROWSER_POLL_MS,
   DEFAULT_BROWSER_PROFILE_DIR,
   DEFAULT_BROWSER_READY_TIMEOUT_MS,
@@ -484,6 +706,7 @@ export {
   ensureBrowser,
   findBrowser,
   isDebugPortLive,
+  loadExtensionArgs,
 } from "./browser.js";
 export type {
   BrowserArgsOptions,
@@ -609,6 +832,7 @@ export {
 export type {
   DeckEditContent,
   DeckEditItem,
+  DeckEditSlot,
   DeckEditPatchOptions,
   DeckEditReport,
   DeckEditState,
@@ -624,15 +848,18 @@ export {
   GATED_EVENTS,
   isRoomGateReport,
   parseRoomGateStatus,
+  buildRoomGateReleaseExpression,
   ROOM_GATE_RELEASE_EXPRESSION,
   ROOM_GATE_SCRIPT_VERSION,
   ROOM_GATE_STATUS_EXPRESSION,
   ROOM_GATE_UNINSTALL_EXPRESSION,
 } from "./patch-room-gate.js";
 export type {
+  DeckMode,
   GateRoom,
   RoomChangedReport,
   RoomDeckPreload,
+  RoomGateDecks,
   RoomGateHoldReport,
   RoomGateOptions,
   RoomGateReport,
@@ -655,12 +882,20 @@ export {
 } from "./deck-write.js";
 export type {
   DeckApplyResult,
-  DeckPayload,
+  DeckSlotWrite,
   DeckSnapshot,
   EditDeckRead,
-  FlatDeck,
   InventorySnapshot,
+  ServerDeck,
 } from "./deck-write.js";
 
 export { CdpAdapter, createCdpAdapter, NotConnectedError, REPORT_BINDING_NAME } from "./adapter.js";
 export type { CdpAdapterOptions, CostPatchInstallation } from "./adapter.js";
+export {
+  parseRaidPublishedSnapshot,
+  parseRaidSupportSnapshot,
+  RAID_PUBLISHED_SNAPSHOT_EXPRESSION,
+  RAID_SUPPORT_SNAPSHOT_EXPRESSION,
+  type RaidPublishedRow,
+  type RaidSupportRow,
+} from "./raid-support.js";

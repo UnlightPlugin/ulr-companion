@@ -53,6 +53,28 @@ import {
   parseCostToggleStatus,
 } from "./patch-cost-toggle.js";
 import type {
+  CharaPickerReport,
+  CharaPickerState,
+  CharaPickerStatus,
+} from "./patch-chara-picker.js";
+import {
+  buildCharaPickerPatchScript,
+  buildCharaPickerStateExpression,
+  CHARA_PICKER_STATUS_EXPRESSION,
+  CHARA_PICKER_UNINSTALL_EXPRESSION,
+  isCharaPickerReport,
+  parseCharaPickerStatus,
+} from "./patch-chara-picker.js";
+import type { LobbyStandReport, LobbyStandState, LobbyStandStatus } from "./patch-lobby-stand.js";
+import {
+  buildLobbyStandPatchScript,
+  buildLobbyStandStateExpression,
+  isLobbyStandReport,
+  LOBBY_STAND_STATUS_EXPRESSION,
+  LOBBY_STAND_UNINSTALL_EXPRESSION,
+  parseLobbyStandStatus,
+} from "./patch-lobby-stand.js";
+import type {
   DisplayFullscreenReport,
   DisplaySettingsReport,
   DisplayState,
@@ -73,6 +95,12 @@ import type { BrowserWindowResult, WindowBounds } from "./browser-window.js";
 import { planBrowserWindow, sameSize } from "./browser-window.js";
 import type { WindowFillResult } from "./window-fill.js";
 import { fillGameWindow } from "./window-fill.js";
+import type { ShellDisplayStatus } from "./shell-display.js";
+import {
+  buildShellDisplayScript,
+  parseShellDisplayStatus,
+  SHELL_DISPLAY_RESET_EXPRESSION,
+} from "./shell-display.js";
 import type { NavReport, NavStatus } from "./patch-nav.js";
 import {
   buildNavPatchScript,
@@ -89,6 +117,50 @@ import {
   isAssetRepairReport,
   parseAssetGuardStatus,
 } from "./patch-asset-guard.js";
+import type { InputRescueReport, InputRescueStatus } from "./patch-input-rescue.js";
+import {
+  buildInputRescuePatchScript,
+  INPUT_RESCUE_STATUS_EXPRESSION,
+  INPUT_RESCUE_UNINSTALL_EXPRESSION,
+  isInputRescueReport,
+  parseInputRescueStatus,
+} from "./patch-input-rescue.js";
+import type {
+  BonusItemOrder,
+  BonusItemPlace,
+  ItemPanelPart,
+  ItemPanelPatchOptions,
+  ItemPanelStatus,
+} from "./patch-item-panel.js";
+import {
+  buildItemPanelPatchScript,
+  buildItemPanelSetBonusOrderExpression,
+  buildItemPanelSetBonusPlaceExpression,
+  buildItemPanelSetPartExpression,
+  buildItemPanelSetShortcutExpression,
+  ITEM_PANEL_STATUS_EXPRESSION,
+  ITEM_PANEL_UNINSTALL_EXPRESSION,
+  parseItemPanelStatus,
+} from "./patch-item-panel.js";
+import type { QuestTreasureStatus } from "./patch-quest-treasure.js";
+import type { QuestBonusReport, QuestBonusStats } from "./quest-bonus.js";
+import { isQuestBonusReport } from "./quest-bonus.js";
+import {
+  buildQuestTreasurePatchScript,
+  buildQuestTreasureSetBonusExpression,
+  buildQuestTreasureSetExpression,
+  parseQuestTreasureStatus,
+  QUEST_TREASURE_STATUS_EXPRESSION,
+  QUEST_TREASURE_UNINSTALL_EXPRESSION,
+} from "./patch-quest-treasure.js";
+import type { CardArtEntry, CardArtReport, CardArtStatus } from "./patch-card-art.js";
+import {
+  buildCardArtPatchScript,
+  CARD_ART_STATUS_EXPRESSION,
+  CARD_ART_UNINSTALL_EXPRESSION,
+  isCardArtReport,
+  parseCardArtStatus,
+} from "./patch-card-art.js";
 import type { RaidSurrenderReport, RaidSurrenderStatus } from "./patch-raid-surrender.js";
 import {
   buildRaidSurrenderPatchScript,
@@ -106,18 +178,30 @@ import type {
   RaidPublicMap,
   RaidRefreshReport,
   RaidSnapshotRow,
+  RaidStageReport,
   RaidTeamsMap,
+  RaidTrackReport,
   RaidViewStatus,
 } from "./patch-raid-view.js";
+import {
+  parseRaidPublishedSnapshot,
+  parseRaidSupportSnapshot,
+  RAID_PUBLISHED_SNAPSHOT_EXPRESSION,
+  RAID_SUPPORT_SNAPSHOT_EXPRESSION,
+  type RaidPublishedRow,
+  type RaidSupportRow,
+} from "./raid-support.js";
 import type {
   RaidRewardMode,
   RaidRewardModeReport,
+  RaidItemDeltaReport,
   RaidRewardReport,
   RaidRewardStatus,
 } from "./patch-raid-reward.js";
 import {
   buildRaidRewardPatchScript,
   buildRaidRewardSetModeExpression,
+  isRaidItemDeltaReport,
   isRaidRewardModeReport,
   isRaidRewardReport,
   parseRaidRewardStatus,
@@ -129,17 +213,23 @@ import {
   buildRaidViewSetAutoDeleteExpression,
   buildRaidViewSetPublicExpression,
   buildRaidViewSetTeamsExpression,
+  buildRaidViewSetLearnedExpression,
   isRaidAutoDeleteReport,
   isRaidAutoDeleteSettingReport,
   isRaidBattleReport,
   isRaidCodesReport,
   isRaidRefreshReport,
+  isRaidStageReport,
+  isRaidTrackReport,
   parseRaidViewSnapshot,
+  parseRaidViewSnapshotListed,
   parseRaidViewStatus,
   RAID_VIEW_SNAPSHOT_EXPRESSION,
   RAID_VIEW_STATUS_EXPRESSION,
   RAID_VIEW_UNINSTALL_EXPRESSION,
 } from "./patch-raid-view.js";
+import { isRaidLearnReport } from "./raid-learned.js";
+import type { RaidLearnedTable, RaidLearnReport } from "./raid-learned.js";
 import type { PenaltyBand, PenaltyPatchReport } from "./patch-penalty.js";
 import {
   buildPenaltyPatchScript,
@@ -151,12 +241,13 @@ import type {
   CreateRoomResult,
   JoinRoomResult,
   MatchContext,
+  MatchRoomScriptOptions,
   RoomEntry,
 } from "./match-room.js";
 import {
   buildCreateRoomExpression,
   buildJoinRoomExpression,
-  MATCH_ROOM_INSTALL_EXPRESSION,
+  buildMatchRoomScript,
 } from "./match-room.js";
 import type { LobbyReport, LobbyState, LobbyStatus } from "./patch-lobby.js";
 import {
@@ -182,6 +273,13 @@ import {
   SHOP_STATUS_EXPRESSION,
   SHOP_UNINSTALL_EXPRESSION,
 } from "./patch-shop.js";
+import type { LotStatus } from "./patch-lot.js";
+import {
+  buildLotPatchScript,
+  LOT_STATUS_EXPRESSION,
+  LOT_UNINSTALL_EXPRESSION,
+  parseLotStatus,
+} from "./patch-lot.js";
 import type { HiddenStage, HiddenStageStatus } from "./patch-stage.js";
 import {
   buildHiddenStageScript,
@@ -217,28 +315,24 @@ import {
   isDeckEditReport,
   parseDeckEditStatus,
 } from "./patch-deck-edit.js";
-import type {
-  GateRoom,
-  RoomDeckPreload,
-  RoomGateReport,
-  RoomGateStatus,
-} from "./patch-room-gate.js";
+import type { RoomGateDecks, RoomGateReport, RoomGateStatus } from "./patch-room-gate.js";
 import {
   buildRoomGatePendingExpression,
   buildRoomGateDecksExpression,
   buildRoomGateScript,
   isRoomGateReport,
   parseRoomGateStatus,
-  ROOM_GATE_RELEASE_EXPRESSION,
+  buildRoomGateReleaseExpression,
   ROOM_GATE_STATUS_EXPRESSION,
   ROOM_GATE_UNINSTALL_EXPRESSION,
 } from "./patch-room-gate.js";
 import type {
   DeckApplyResult,
-  DeckPayload,
+  DeckSlotWrite,
   DeckSnapshot,
   EditDeckRead,
   InventorySnapshot,
+  ServerDeck,
 } from "./deck-write.js";
 import {
   DECK_READ_EXPRESSION,
@@ -253,7 +347,7 @@ import {
   parseInventorySnapshot,
 } from "./deck-write.js";
 import type { GamePageSession } from "./session.js";
-import { attachToGamePage } from "./session.js";
+import { attachToGamePage, GameFrameAppearedError, isGameFrameTarget } from "./session.js";
 import { discoverDebuggerUrl, WebSocketTransport } from "./transport.js";
 import type { WsWatchReport } from "./ws-events.js";
 import { buildWsWatchScript, isWsWatchReport } from "./ws-events.js";
@@ -326,6 +420,8 @@ export class CdpAdapter {
   #session: GamePageSession | null = null;
   #tracker: ExecutionContextTracker | null = null;
   #context: GameExecutionContext | null = null;
+  /** 對桌面版外殼頁面的 session（要用時才 attach，見 {@link applyShellDisplay}）。 */
+  #shellSessionId: string | null = null;
   #reportHandlers = new Set<(report: CostPatchReport) => void>();
   #penaltyHandlers = new Set<(report: PenaltyPatchReport) => void>();
   #wsHandlers = new Set<(report: WsWatchReport) => void>();
@@ -334,16 +430,25 @@ export class CdpAdapter {
   #lobbyHandlers = new Set<(report: LobbyReport) => void>();
   #deckEditHandlers = new Set<(report: DeckEditReport) => void>();
   #costToggleHandlers = new Set<(report: CostToggleReport) => void>();
+  #charaPickerHandlers = new Set<(report: CharaPickerReport) => void>();
+  #lobbyStandHandlers = new Set<(report: LobbyStandReport) => void>();
   #displayHandlers = new Set<(report: DisplaySettingsReport) => void>();
   #displayFullscreenHandlers = new Set<(report: DisplayFullscreenReport) => void>();
   #displayWindowHandlers = new Set<(report: DisplayWindowReport) => void>();
   #navHandlers = new Set<(report: NavReport) => void>();
   #raidSurrenderHandlers = new Set<(report: RaidSurrenderReport) => void>();
+  #cardArtHandlers = new Set<(report: CardArtReport) => void>();
   #assetRepairHandlers = new Set<(report: AssetRepairReport) => void>();
+  #inputRescueHandlers = new Set<(report: InputRescueReport) => void>();
   #raidRewardHandlers = new Set<(report: RaidRewardReport) => void>();
+  #raidItemDeltaHandlers = new Set<(report: RaidItemDeltaReport) => void>();
   #raidCodesHandlers = new Set<(report: RaidCodesReport) => void>();
   #raidBattleHandlers = new Set<(report: RaidBattleReport) => void>();
   #raidRefreshHandlers = new Set<(report: RaidRefreshReport) => void>();
+  #raidStageHandlers = new Set<(report: RaidStageReport) => void>();
+  #raidTrackHandlers = new Set<(report: RaidTrackReport) => void>();
+  #raidLearnHandlers = new Set<(report: RaidLearnReport) => void>();
+  #questBonusHandlers = new Set<(report: QuestBonusReport) => void>();
   #raidAutoDeleteHandlers = new Set<(report: RaidAutoDeleteReport) => void>();
   #raidAutoDeleteSettingHandlers = new Set<(report: RaidAutoDeleteSettingReport) => void>();
   #raidRewardModeHandlers = new Set<(report: RaidRewardModeReport) => void>();
@@ -373,6 +478,7 @@ export class CdpAdapter {
     // 新的 target、新的 execution context。舊的 contextId 留著會讓重連後每次
     // evaluate 都撞 "Session with given id not found"。
     this.#context = null;
+    this.#shellSessionId = null;
 
     transport.onClose((reason) => {
       this.#context = null;
@@ -394,11 +500,25 @@ export class CdpAdapter {
     // 接上「已經在跑的遊戲」時會永遠等不到 context。
     this.#tracker = new ExecutionContextTracker(client, session.sessionId);
 
+    // ⚠ attach 的是遊戲的 out-of-process iframe 時（2026-09-23 起的桌面版），殼
+    // 重建 iframe 會讓那個 target 消失，但 WebSocket 還連著 —— transport 的
+    // onClose 不會響，插件會安靜地對一個不存在的 session 下命令。把它當斷線。
+    client.on("Target.detachedFromTarget", (params) => {
+      const sid = (params as { sessionId?: unknown }).sessionId;
+      if (sid !== undefined && sid === this.#shellSessionId) {
+        this.#shellSessionId = null;
+        return;
+      }
+      if (sid !== session.sessionId) return;
+      this.#context = null;
+      dispatch(this.#closeHandlers, "遊戲的 iframe target 消失了（detachedFromTarget）");
+    });
     client.on("Runtime.executionContextsCleared", (_params, sid) => {
       if (sid === session.sessionId) this.#context = null;
     });
+    // 外殼的腳本也用同一個 binding 回報（全螢幕、Esc 退回上一個大小）
     client.on("Runtime.bindingCalled", (params, sid) => {
-      if (sid !== session.sessionId) return;
+      if (sid !== session.sessionId && (sid === undefined || sid !== this.#shellSessionId)) return;
       this.#onBindingCalled(params);
     });
 
@@ -426,12 +546,38 @@ export class CdpAdapter {
 
     if (this.#context !== null) return this.#context;
 
-    const context = await findGameContext(client, tracker, {
-      sessionId: session.sessionId,
-      timeoutMs: timeoutMs ?? this.#options.contextTimeoutMs ?? DEFAULT_CONTEXT_TIMEOUT_MS,
-    });
-    this.#context = context;
-    return context;
+    // ⚠ 接的是 file:// 外殼、旁邊卻沒有遊戲 iframe：可能是舊客戶端（iframe 跟外殼
+    // 同一個程序，外殼裡等得到 Phaser），也可能是桌面版重載的空檔（新 iframe 還沒
+    // 生出來，外殼裡永遠等不到）。兩種在這一刻分不出來，所以邊等邊看 target 清單，
+    // 遊戲 iframe 一冒出來就丟 `GameFrameAppearedError` 讓呼叫端重挑。
+    // `setDiscoverTargets` 會把已經存在的 target 補送一次，所以不會漏掉剛好在
+    // attach 之後才出現的那個。
+    const watchFrame = session.shellTargetId === null && session.safeUrl.startsWith("file://");
+    const abort = new AbortController();
+    const offs: (() => void)[] = [];
+    if (watchFrame) {
+      const check = (params: Record<string, unknown>): void => {
+        if (isGameFrameTarget(params["targetInfo"])) abort.abort(new GameFrameAppearedError());
+      };
+      offs.push(
+        client.on("Target.targetCreated", check),
+        client.on("Target.targetInfoChanged", check),
+      );
+      void client.send("Target.setDiscoverTargets", { discover: true }).catch(() => {});
+    }
+    try {
+      const context = await findGameContext(client, tracker, {
+        sessionId: session.sessionId,
+        timeoutMs: timeoutMs ?? this.#options.contextTimeoutMs ?? DEFAULT_CONTEXT_TIMEOUT_MS,
+        signal: abort.signal,
+      });
+      this.#context = context;
+      return context;
+    } finally {
+      for (const off of offs) off();
+      if (watchFrame)
+        void client.send("Target.setDiscoverTargets", { discover: false }).catch(() => {});
+    }
   }
 
   /**
@@ -508,8 +654,8 @@ export class CdpAdapter {
    * ⚠ 只是裝介面，本身不會動到任何東西。真正會改變遊戲狀態的是
    * `createRoom()` / `joinRoom()`，那兩支必須由玩家明確觸發。
    */
-  async installMatchRoom(): Promise<string> {
-    return await this.evaluate<string>(MATCH_ROOM_INSTALL_EXPRESSION);
+  async installMatchRoom(options: MatchRoomScriptOptions): Promise<string> {
+    return await this.evaluate<string>(buildMatchRoomScript(options));
   }
 
   /** 現在在哪個頻道、選了哪副牌組、叫什麼名字。 */
@@ -524,13 +670,18 @@ export class CdpAdapter {
    * ⚠ 這是遊戲廣播給大廳**每一個人**的公開資料（MatchingLobby 的房間列就是
    * 用它畫的，含雙方牌組縮圖），不是隱藏資訊。但**不得**拿來挑對手。
    */
-  async roomSnapshot(): Promise<{ seq: number; live: boolean; rooms: RoomEntry[] }> {
+  async roomSnapshot(): Promise<{
+    seq: number;
+    live: boolean;
+    started: boolean;
+    rooms: RoomEntry[];
+  }> {
     const raw = await this.evaluate<string>("window.__ulrMatch.rooms_snapshot()");
-    return JSON.parse(raw) as { seq: number; live: boolean; rooms: RoomEntry[] };
+    return JSON.parse(raw) as { seq: number; live: boolean; started: boolean; rooms: RoomEntry[] };
   }
 
   /**
-   * 開一間房。⚠ **會消耗 AP 5**，而且會出現在公開的房間清單上。
+   * 開一間房。⚠ **會消耗 AP**，而且會出現在公開的房間清單上。
    */
   async createRoom(options: CreateRoomOptions): Promise<CreateRoomResult> {
     const raw = await this.evaluate<string>(buildCreateRoomExpression(options));
@@ -543,7 +694,7 @@ export class CdpAdapter {
     return JSON.parse(raw) as JoinRoomResult;
   }
 
-  /** 收掉自己開的房。取消配對時一定要叫，否則清單上會留空房。 */
+  /** 收掉自己開著的那一間房。取消配對時一定要叫，否則清單上會留空房。 */
   async cancelRoom(): Promise<string> {
     return await this.evaluate<string>("window.__ulrMatch.cancel()");
   }
@@ -597,7 +748,7 @@ export class CdpAdapter {
   }
 
   /**
-   * 角色與怪物的**中文名**（`charaProfile` / `monsProfile`）。
+   * 角色與怪物的**中文名**（改版後是 `Characters`；之前 `charaProfile` / `monsProfile`）。
    *
    * 編輯 COST 的介面靠這個活著 —— 玩家看得懂「艾伯李斯特」，看不懂 `cc001_01`。
    */
@@ -607,10 +758,10 @@ export class CdpAdapter {
   }
 
   /**
-   * 讀出玩家目前的三副牌組與帳號指紋（WP-18）。
+   * 讀**伺服器那份**牌組與帳號指紋（WP-18）。
    *
-   * 走的是**自己開的 game 服務連線**，不是玩家當下那條 socket —— 理由見
-   * `deck-write.ts` 檔頭的「服務分池」。所以玩家人在哪個畫面都讀得到。
+   * 頁面記過伺服器那份就直接用，一趟網路都不跑；這次開遊戲還沒記過才 `db_deck`
+   * 一次（走自己開的 lobby 連線）。見 `deck-write.ts` 檔頭。
    */
   async readDecks(): Promise<DeckSnapshot> {
     const raw = await this.evaluate<string>(DECK_READ_EXPRESSION);
@@ -618,25 +769,21 @@ export class CdpAdapter {
   }
 
   /**
-   * **覆寫玩家的三副牌組。**
+   * **把整份牌組寫進伺服器**（`deck_update`），成功後客戶端記憶體就地跟上。
    *
-   * ⚠ 這支會改變玩家的帳號狀態，而且原版介面沒有「復原」。呼叫端必須是玩家
-   * 明確按下的動作，而且**要先有備份**（`readDecks()` 存起來）。
+   * ⚠ 這支會改變玩家的帳號狀態，而且原版介面沒有「復原」。呼叫端要先有備份，
+   * 並且先驗過庫存（三副共用一個卡池）。
    *
-   * ⚠ `ack === false` 表示伺服器沒收到 —— 多半是送錯服務池。這時候**不要**
-   * 把本地狀態當成已寫入。
+   * ⚠ `answer !== "ok"` 時**不要**把本地狀態當成已寫入。
    */
-  async applyDecks(decks: DeckPayload[], deckCheck: boolean): Promise<DeckApplyResult> {
-    const raw = await this.evaluate<string>(buildDeckApplyExpression(decks, deckCheck));
+  async applyDecks(decks: ServerDeck[]): Promise<DeckApplyResult> {
+    const raw = await this.evaluate<string>(buildDeckApplyExpression(decks));
     return parseDeckApplyResult(raw);
   }
 
   /**
-   * 讀**牌組編輯畫面正在編輯的那一副**（客戶端記憶體）。畫面沒開著回 `null`。
-   *
-   * ⚠ 玩家拖卡片改的是記憶體，遊戲要等他離開畫面才送上伺服器 —— 所以人在
-   * 那個畫面時，這支才是真相，`readDecks()` 讀到的是舊的。詳見
-   * `deck-write.ts` 的 {@link EDIT_DECK_READ_EXPRESSION}。
+   * 讀**玩家眼前那份**（客戶端記憶體）＋頁面記著的伺服器那份。不在有牌組列的
+   * 畫面時回 `null`。見 `deck-write.ts` 的 {@link EDIT_DECK_READ_EXPRESSION}。
    */
   async readEditDeck(): Promise<EditDeckRead | null> {
     const raw = await this.evaluate<string>(EDIT_DECK_READ_EXPRESSION);
@@ -644,22 +791,14 @@ export class CdpAdapter {
   }
 
   /**
-   * **換牌組的快路徑**：直接換掉編輯畫面正在用的那個記憶體物件並重畫，
-   * 一次網路都不跑（原版 ◀▶ 就是這樣，見 {@link buildEditDeckWriteExpression}）。
-   *
-   * 回 `ok` / `not-active`（畫面沒開著，呼叫端要改走 {@link applyDecks}）。
-   *
-   * ⚠ **這支不會寫進伺服器。** 玩家離開編輯畫面時遊戲會自己送出去。
-   */
-  /**
-   * 把一副牌畫到玩家**現在看得到的那個畫面**上（牌組編輯畫面，或任務／渦／
+   * 把幾格牌組畫到玩家**現在看得到的那個畫面**上（牌組編輯畫面，或任務／渦／
    * 對戰房）。⚠ 只動客戶端記憶體，**不碰伺服器**。
    *
-   * `label` 是要顯示在房裡那行小字上的牌組名（房間場景才有意義）。不給就不動
-   * 那行字。
+   * 回 `ok` / `ok-room` / `not-active` / `empty-room`，意思見
+   * {@link buildEditDeckWriteExpression}。
    */
-  async writeEditDeck(deck: DeckPayload, label?: string): Promise<string> {
-    return await this.evaluate<string>(buildEditDeckWriteExpression(deck, label));
+  async writeEditDeck(slots: DeckSlotWrite[], pin: number | null): Promise<string> {
+    return await this.evaluate<string>(buildEditDeckWriteExpression(slots, pin));
   }
 
   /** 讀玩家的卡片庫存。「只用真的有的卡」那條線靠它。 */
@@ -836,7 +975,23 @@ export class CdpAdapter {
     const session = this.#session;
     if (client === null || session === null) throw new NotConnectedError();
     this.#context = null;
-    await client.send("Page.reload", undefined, session.sessionId);
+    if (session.shellTargetId === null) {
+      await client.send("Page.reload", undefined, session.sessionId);
+      return;
+    }
+    // 遊戲在外殼的 out-of-process iframe 裡：Page.reload 只收頂層 target，
+    // 對外殼下（它會重新拿 Steam 票證、換新 token）。遊戲 iframe 那個 target
+    // 會跟著換掉 → Target.detachedFromTarget → 引擎重連。
+    const shell = await client.send<{ sessionId?: unknown }>("Target.attachToTarget", {
+      targetId: session.shellTargetId,
+      flatten: true,
+    });
+    if (typeof shell.sessionId !== "string") throw new Error("attach 不到外殼頁面");
+    try {
+      await client.send("Page.reload", undefined, shell.sessionId);
+    } finally {
+      await client.send("Target.detachFromTarget", { sessionId: shell.sessionId }).catch(() => {});
+    }
   }
 
   /**
@@ -990,18 +1145,23 @@ export class CdpAdapter {
   }
 
   /**
-   * 把「每一房進去要用哪一副」事先推給頁面，讓房間場景**第一幀就畫對的牌**。
+   * 把模式與「每一房進去要用哪幾格」事先推給頁面，讓房間場景**第一幀就畫對的牌**。
    *
-   * 見 `patch-room-gate.ts` 的 {@link RoomDeckPreload} —— 這是唯一會把牌組內容
-   * 下放到頁面的東西，而且只為了時序，決定權仍然整個在 Node。
+   * 見 `patch-room-gate.ts` 的 {@link RoomDeckPreload} —— 只為了時序，決定權
+   * 仍然整個在 Node。
    */
-  async setRoomDecks(decks: Partial<Record<GateRoom, RoomDeckPreload>>): Promise<string> {
-    return await this.evaluate<string>(buildRoomGateDecksExpression(decks));
+  async setRoomDecks(payload: RoomGateDecks): Promise<string> {
+    return await this.evaluate<string>(buildRoomGateDecksExpression(payload));
   }
 
-  /** 放行被攔下來的那一下開戰。 */
-  async releaseRoomGate(): Promise<string> {
-    return await this.evaluate<string>(ROOM_GATE_RELEASE_EXPRESSION);
+  /**
+   * 放行被攔下來的那一下開戰。
+   *
+   * `ok` = 伺服器上現在躺的就是這一房該用的那副。`false` 時頁面不會把這一房
+   * 記成驗過，下一場開戰會再攔一次 —— 見 `needGate()`。
+   */
+  async releaseRoomGate(ok: boolean = true): Promise<string> {
+    return await this.evaluate<string>(buildRoomGateReleaseExpression(ok));
   }
 
   async uninstallRoomGate(): Promise<string> {
@@ -1016,10 +1176,10 @@ export class CdpAdapter {
   /**
    * 跳出遊戲自己的錯誤對話框（「這個牌組不符合遊戲規則」）。
    *
-   * `code` 是 `Match.room_error[lang]` 的索引 —— 用代碼而不是字串，玩家的
-   * 客戶端是什麼語言就顯示什麼語言。
+   * `code` 是 `MatchUITexts.error` 的鍵（`NOT_ENOUGH_AP` 之類）—— 用代碼而不是字串，
+   * 玩家的客戶端是什麼語言就顯示什麼語言。
    */
-  async showLobbyError(code: number | null, message?: string): Promise<string> {
+  async showLobbyError(code: string | null, message?: string): Promise<string> {
     return await this.evaluate<string>(buildLobbyErrorExpression(code, message));
   }
 
@@ -1090,6 +1250,69 @@ export class CdpAdapter {
     return await this.evaluate<string>(COST_TOGGLE_UNINSTALL_EXPRESSION);
   }
 
+  // ── 牌組編輯畫面的「人物篩選」與「最愛卡片」 ─────────────────────────────
+
+  /** 訂閱「玩家按了最愛卡片鈕」。存不存、存到哪是呼叫端的事。 */
+  onCharaPicker(handler: (report: CharaPickerReport) => void): () => void {
+    this.#charaPickerHandlers.add(handler);
+    return () => this.#charaPickerHandlers.delete(handler);
+  }
+
+  /**
+   * 把 [Chara] 鈕、Favorite 鈕與最愛卡片鈕裝到牌組編輯畫面。`Runtime.evaluate` 裝的：
+   * 不必重載，但**遊戲一重載就沒了**。
+   */
+  async installCharaPicker(state: CharaPickerState): Promise<CharaPickerStatus> {
+    const raw = await this.evaluate<string>(
+      buildCharaPickerPatchScript({ bindingName: REPORT_BINDING_NAME, state }),
+    );
+    return parseCharaPickerStatus(raw);
+  }
+
+  /** 推新狀態。回 `"not-installed"` 就要改叫 `installCharaPicker`。 */
+  async setCharaPickerState(state: CharaPickerState): Promise<string> {
+    return await this.evaluate<string>(buildCharaPickerStateExpression(state));
+  }
+
+  async charaPickerStatus(): Promise<CharaPickerStatus> {
+    const raw = await this.evaluate<string>(CHARA_PICKER_STATUS_EXPRESSION);
+    return parseCharaPickerStatus(raw);
+  }
+
+  async uninstallCharaPicker(): Promise<string> {
+    return await this.evaluate<string>(CHARA_PICKER_UNINSTALL_EXPRESSION);
+  }
+
+  // ── 首頁立繪（多張、編輯模式）與 Library 愛心複選 ───────────────────────────
+
+  /** 訂閱「玩家改了最愛角色／存了首頁擺法」。存不存、存到哪是呼叫端的事。 */
+  onLobbyStand(handler: (report: LobbyStandReport) => void): () => void {
+    this.#lobbyStandHandlers.add(handler);
+    return () => this.#lobbyStandHandlers.delete(handler);
+  }
+
+  /** `Runtime.evaluate` 裝的：不必重載，但**遊戲一重載就沒了**。 */
+  async installLobbyStand(state: LobbyStandState): Promise<LobbyStandStatus> {
+    const raw = await this.evaluate<string>(
+      buildLobbyStandPatchScript({ bindingName: REPORT_BINDING_NAME, state }),
+    );
+    return parseLobbyStandStatus(raw);
+  }
+
+  /** 推新狀態。回 `"not-installed"` 就要改叫 `installLobbyStand`。 */
+  async setLobbyStandState(state: LobbyStandState): Promise<string> {
+    return await this.evaluate<string>(buildLobbyStandStateExpression(state));
+  }
+
+  async lobbyStandStatus(): Promise<LobbyStandStatus> {
+    const raw = await this.evaluate<string>(LOBBY_STAND_STATUS_EXPRESSION);
+    return parseLobbyStandStatus(raw);
+  }
+
+  async uninstallLobbyStand(): Promise<string> {
+    return await this.evaluate<string>(LOBBY_STAND_UNINSTALL_EXPRESSION);
+  }
+
   // ── 畫面設定（解析度／畫面大小／全螢幕）＋ Option 的 plugin 分頁 ──────────
 
   /** 玩家在 Option 的 plugin 分頁改了畫面設定（頁面已經自己套用了，這裡只是要存）。 */
@@ -1120,6 +1343,90 @@ export class CdpAdapter {
 
   async uninstallDisplayPatch(): Promise<string> {
     return await this.evaluate<string>(DISPLAY_UNINSTALL_EXPRESSION);
+  }
+
+  /**
+   * 遊戲在外殼的 out-of-process iframe 裡（2026-09-23 起的桌面版）→ 畫面大小與
+   * 全螢幕要對外殼下，見 `shell-display.ts`。網頁版（遊戲就是頂層頁面）是 false。
+   */
+  get hasShell(): boolean {
+    return this.#session?.shellTargetId != null;
+  }
+
+  /** 照設定調外殼的 zoom 與視窗大小（或進出全螢幕）。沒有外殼回 `null`。 */
+  async applyShellDisplay(state: DisplayState): Promise<ShellDisplayStatus | null> {
+    const raw = await this.#evaluateInShell(
+      buildShellDisplayScript({ bindingName: REPORT_BINDING_NAME, state }),
+    );
+    return raw === undefined ? null : parseShellDisplayStatus(raw);
+  }
+
+  /**
+   * 接到的就是 file:// 外殼本身（桌面版重載的空檔，遊戲 iframe 還沒生出來）時，
+   * 直接在它身上套畫面大小。不是這種情況回 `null`。
+   *
+   * ⚠ 重載會把外殼的 zoom 洗掉，視窗卻還是插件調過的大小 —— 遊戲縮在左上角、
+   * 外殼在 iframe 底下的官方教學圖整片露出來（玩家 2026-09-25 回報）。等遊戲載完
+   * 才套要好幾秒，外殼腳本又不需要遊戲，所以一接上就先套。之後接到 iframe 時
+   * `applyShellDisplay` 會再套一次（同版本只 apply，不重裝）。
+   */
+  async applyDisplayToAttachedShell(state: DisplayState): Promise<ShellDisplayStatus | null> {
+    const client = this.#client;
+    const session = this.#session;
+    if (client === null || session === null) throw new NotConnectedError();
+    if (session.shellTargetId !== null || !session.safeUrl.startsWith("file://")) return null;
+    const res = await client.send<{ result?: { value?: unknown }; exceptionDetails?: unknown }>(
+      "Runtime.evaluate",
+      {
+        expression: buildShellDisplayScript({ bindingName: REPORT_BINDING_NAME, state }),
+        returnByValue: true,
+        userGesture: true,
+      },
+      session.sessionId,
+    );
+    return res.exceptionDetails === undefined ? parseShellDisplayStatus(res.result?.value) : null;
+  }
+
+  /** 外殼還原成官方的 ×1（插件拆掉時）。沒有外殼或沒裝過都回 `"not-installed"`。 */
+  async resetShellDisplay(): Promise<string> {
+    const raw = await this.#evaluateInShell(SHELL_DISPLAY_RESET_EXPRESSION);
+    return typeof raw === "string" ? raw : "not-installed";
+  }
+
+  /**
+   * 在外殼頁面執行。第一次用時才 attach，之後沿用（外殼重載時 target 不變，
+   * binding 也還在）。
+   *
+   * ⚠ 帶 `userGesture`：全螢幕要使用者手勢，玩家是在 iframe 裡點的，手勢不會
+   * 傳到這條命令上。
+   */
+  async #evaluateInShell(expression: string): Promise<unknown> {
+    const client = this.#client;
+    const session = this.#session;
+    if (client === null || session === null) throw new NotConnectedError();
+    if (session.shellTargetId === null) return undefined;
+    if (this.#shellSessionId === null) {
+      const attached = await client.send<{ sessionId?: unknown }>("Target.attachToTarget", {
+        targetId: session.shellTargetId,
+        flatten: true,
+      });
+      if (typeof attached.sessionId !== "string") throw new Error("attach 不到外殼頁面");
+      this.#shellSessionId = attached.sessionId;
+      await client.send("Runtime.addBinding", { name: REPORT_BINDING_NAME }, attached.sessionId);
+    }
+    const res = await client.send<{
+      result?: { value?: unknown };
+      exceptionDetails?: { text?: string; exception?: { description?: string } };
+    }>(
+      "Runtime.evaluate",
+      { expression, returnByValue: true, awaitPromise: true, userGesture: true },
+      this.#shellSessionId,
+    );
+    if (res.exceptionDetails !== undefined) {
+      const detail = res.exceptionDetails.exception?.description ?? res.exceptionDetails.text;
+      throw new Error(`注入外殼的程式拋例外：${detail ?? "(沒有細節)"}`);
+    }
+    return res.result?.value;
   }
 
   /** 頁面進了／出了 HTML 全螢幕（桌面版進去之後要靠 {@link fillGameWindow} 推滿螢幕）。 */
@@ -1227,6 +1534,29 @@ export class CdpAdapter {
     return await this.evaluate<string>(SHOP_UNINSTALL_EXPRESSION);
   }
 
+  // ── 暗房（抽卡）預覽：已有的調暗、事件卡標持有數 ────────────────────
+
+  /**
+   * 暗房預覽的補丁。跟商店那支一樣走 `Runtime.evaluate`、不回報：持有數是
+   * 頁面自己從 registry 與官方抽卡回應算的，勾選狀態存在頁面 localStorage。
+   * **遊戲一重載就會被沖掉**，重連時要再裝一次。
+   *
+   * ⚠ `mounted: false` 只代表玩家不在暗房，**不是失敗**。腳本會自己盯著。
+   */
+  async installLotPatch(): Promise<LotStatus> {
+    const raw = await this.evaluate<string>(buildLotPatchScript());
+    return parseLotStatus(raw);
+  }
+
+  async lotStatus(): Promise<LotStatus> {
+    const raw = await this.evaluate<string>(LOT_STATUS_EXPRESSION);
+    return parseLotStatus(raw);
+  }
+
+  async uninstallLotPatch(): Promise<string> {
+    return await this.evaluate<string>(LOT_UNINSTALL_EXPRESSION);
+  }
+
   // ── 返回鈕左邊的直連捷徑列（DUEL／RAID／QUEST／DECK） ─────────────────
 
   /** 訂閱「玩家點了捷徑」。成功失敗都會來一則，`ok: false` 時看 `reason`。 */
@@ -1289,6 +1619,37 @@ export class CdpAdapter {
     return await this.evaluate<string>(RAID_SURRENDER_UNINSTALL_EXPRESSION);
   }
 
+  // ── 卡面替換（MOD） ─────────────────────────────────────────────────────
+
+  /** 訂閱「這一批卡面全部處理完了」（每張都成功或失敗）。 */
+  onCardArt(handler: (report: CardArtReport) => void): () => void {
+    this.#cardArtHandlers.add(handler);
+    return () => this.#cardArtHandlers.delete(handler);
+  }
+
+  /**
+   * 把玩家的 PNG 換進卡面圖集（`CharaCardImages`）。先拆再裝，所以拿新的清單再叫一次就是
+   * 「重新載入」。圖片解碼是非同步的，剛裝完 `applied` 多半是 0、`pending`
+   * 是張數 —— 結果看 status 或 `onCardArt`。
+   *
+   * 跟其他 `Runtime.evaluate` 裝的東西一樣：不必重載，但**遊戲一重載就沒了**。
+   */
+  async installCardArtPatch(entries: readonly CardArtEntry[]): Promise<CardArtStatus> {
+    const raw = await this.evaluate<string>(
+      buildCardArtPatchScript({ bindingName: REPORT_BINDING_NAME, entries }),
+    );
+    return parseCardArtStatus(raw);
+  }
+
+  async cardArtStatus(): Promise<CardArtStatus> {
+    const raw = await this.evaluate<string>(CARD_ART_STATUS_EXPRESSION);
+    return parseCardArtStatus(raw);
+  }
+
+  async uninstallCardArtPatch(): Promise<string> {
+    return await this.evaluate<string>(CARD_ART_UNINSTALL_EXPRESSION);
+  }
+
   // ── 開機資料檔的防護 ────────────────────────────────────────────────────
 
   /** 訂閱「補抓了一支開機資料檔」（或重試到放棄）。 */
@@ -1317,6 +1678,117 @@ export class CdpAdapter {
     return await this.evaluate<string>(ASSET_GUARD_UNINSTALL_EXPRESSION);
   }
 
+  // ── 伺服器沒回、官方鎖住畫面的解鎖 ────────────────────────────────────────
+
+  /** 訂閱「官方某個請求逾時、鎖住的畫面被我們解開了」。 */
+  onInputRescue(handler: (report: InputRescueReport) => void): () => void {
+    this.#inputRescueHandlers.add(handler);
+    return () => this.#inputRescueHandlers.delete(handler);
+  }
+
+  /**
+   * 盯著官方請求的逾時：逾時後還關著點擊的場景就打開（戰鬥中不動）。
+   * 遊戲一重載就沒了，每次接上都要裝。
+   */
+  async installInputRescue(): Promise<InputRescueStatus> {
+    const raw = await this.evaluate<string>(
+      buildInputRescuePatchScript({ bindingName: REPORT_BINDING_NAME }),
+    );
+    return parseInputRescueStatus(raw);
+  }
+
+  async inputRescueStatus(): Promise<InputRescueStatus> {
+    const raw = await this.evaluate<string>(INPUT_RESCUE_STATUS_EXPRESSION);
+    return parseInputRescueStatus(raw);
+  }
+
+  async uninstallInputRescue(): Promise<string> {
+    return await this.evaluate<string>(INPUT_RESCUE_UNINSTALL_EXPRESSION);
+  }
+
+  // ── 物品欄：點得到外面、渦房／任務房排序、兩房的物品捷徑 ─────────────────
+
+  /**
+   * 包物品欄面板類別（開窗不再擋整個畫面、渦房／任務房的排序、搜索框蓋在物品欄上）
+   * ＋渦房與任務房的物品捷徑。腳本自己輪詢等面板類別載進來、等玩家進房。
+   * 遊戲一重載就沒了，每次接上都要裝。
+   */
+  async installItemPanelPatch(options: ItemPanelPatchOptions): Promise<ItemPanelStatus> {
+    const raw = await this.evaluate<string>(buildItemPanelPatchScript(options));
+    return parseItemPanelStatus(raw);
+  }
+
+  async itemPanelStatus(): Promise<ItemPanelStatus> {
+    return parseItemPanelStatus(await this.evaluate<string>(ITEM_PANEL_STATUS_EXPRESSION));
+  }
+
+  /** 開關渦房的物品捷徑。回 `"ok"` 或 `"not-installed"`。 */
+  async setItemShortcut(on: boolean): Promise<string> {
+    return await this.evaluate<string>(buildItemPanelSetShortcutExpression(on));
+  }
+
+  /**
+   * 開關任務房（水沙／通行證）、迪城（水／GEM UP）或獎勵遊戲的其中一塊。
+   * 回 `"ok"` 或 `"not-installed"`。
+   */
+  async setItemPanelPart(part: ItemPanelPart, on: boolean): Promise<string> {
+    return await this.evaluate<string>(buildItemPanelSetPartExpression(part, on));
+  }
+
+  /** 換獎勵遊戲差距大時先用哪一種道具。回 `"ok"` 或 `"not-installed"`。 */
+  async setBonusItemOrder(order: BonusItemOrder): Promise<string> {
+    return await this.evaluate<string>(buildItemPanelSetBonusOrderExpression(order));
+  }
+
+  /** 換獎勵遊戲的捷徑畫在哪（上方／蓋在使用物品上）。回 `"ok"` 或 `"not-installed"`。 */
+  async setBonusItemPlace(place: BonusItemPlace): Promise<string> {
+    return await this.evaluate<string>(buildItemPanelSetBonusPlaceExpression(place));
+  }
+
+  async uninstallItemPanelPatch(): Promise<string> {
+    return await this.evaluate<string>(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  }
+
+  // ── 任務地圖的寶箱標註 ──────────────────────────────────────────────────
+
+  /**
+   * 任務地圖每格旁邊畫寶箱的實際內容；順便學 HighLow 格的開始星數（`onQuestBonus`）。
+   * 腳本自己輪詢等玩家開任務地圖；不送請求。
+   */
+  async installQuestTreasurePatch(
+    enabled: boolean,
+    bonusStats: QuestBonusStats = {},
+  ): Promise<QuestTreasureStatus> {
+    const raw = await this.evaluate<string>(
+      buildQuestTreasurePatchScript({ enabled, bindingName: REPORT_BINDING_NAME, bonusStats }),
+    );
+    return parseQuestTreasureStatus(raw);
+  }
+
+  /** 推學到的開始星數下去。回 `"ok"` 或 `"not-installed"`。 */
+  async setQuestBonusStats(stats: QuestBonusStats): Promise<string> {
+    return await this.evaluate<string>(buildQuestTreasureSetBonusExpression(stats));
+  }
+
+  /** 進了一次任務 HighLow 格的獎勵遊戲（學開始星數的原料）。 */
+  onQuestBonus(handler: (report: QuestBonusReport) => void): () => void {
+    this.#questBonusHandlers.add(handler);
+    return () => this.#questBonusHandlers.delete(handler);
+  }
+
+  async questTreasureStatus(): Promise<QuestTreasureStatus> {
+    return parseQuestTreasureStatus(await this.evaluate<string>(QUEST_TREASURE_STATUS_EXPRESSION));
+  }
+
+  /** 開關標註。回 `"ok"` 或 `"not-installed"`。 */
+  async setQuestTreasure(on: boolean): Promise<string> {
+    return await this.evaluate<string>(buildQuestTreasureSetExpression(on));
+  }
+
+  async uninstallQuestTreasurePatch(): Promise<string> {
+    return await this.evaluate<string>(QUEST_TREASURE_UNINSTALL_EXPRESSION);
+  }
+
   // ── 渦房的獎勵標記 ──────────────────────────────────────────────────────
 
   /**
@@ -1329,6 +1801,7 @@ export class CdpAdapter {
     publicMap?: RaidPublicMap,
     autoDelete?: RaidAutoDeleteSetting,
     teams?: RaidTeamsMap,
+    learned?: RaidLearnedTable,
   ): Promise<RaidViewStatus> {
     const raw = await this.evaluate<string>(
       buildRaidViewPatchScript({
@@ -1336,6 +1809,7 @@ export class CdpAdapter {
         ...(publicMap === undefined ? {} : { publicMap }),
         ...(autoDelete === undefined ? {} : { autoDelete }),
         ...(teams === undefined ? {} : { teams }),
+        ...(learned === undefined ? {} : { learned }),
       }),
     );
     return parseRaidViewStatus(raw);
@@ -1346,10 +1820,39 @@ export class CdpAdapter {
     return await this.evaluate<string>(buildRaidViewSetTeamsExpression(teams));
   }
 
+  /** 推學到的渦獎勵表下去。回 `"ok"` 或 `"not-installed"`。 */
+  async setRaidViewLearned(table: RaidLearnedTable): Promise<string> {
+    return await this.evaluate<string>(buildRaidViewSetLearnedExpression(table));
+  }
+
+  /** 收到一次渦結算、對得回清單上的渦（學獎勵表的原料）。 */
+  onRaidLearn(handler: (report: RaidLearnReport) => void): () => void {
+    this.#raidLearnHandlers.add(handler);
+    return () => this.#raidLearnHandlers.delete(handler);
+  }
+
   /** 玩家按了渦房的更新鈕（⑩）。 */
   onRaidRefresh(handler: (report: RaidRefreshReport) => void): () => void {
     this.#raidRefreshHandlers.add(handler);
     return () => this.#raidRefreshHandlers.delete(handler);
+  }
+
+  /** 頁面記下了某個渦新的 stage（發現畫面或開打）。 */
+  onRaidStage(handler: (report: RaidStageReport) => void): () => void {
+    this.#raidStageHandlers.add(handler);
+    return () => this.#raidStageHandlers.delete(handler);
+  }
+
+  /** 官方重讀了一份道具清單（變多的列出來）。對結算有沒有真的入帳用。 */
+  onRaidItemDelta(handler: (report: RaidItemDeltaReport) => void): () => void {
+    this.#raidItemDeltaHandlers.add(handler);
+    return () => this.#raidItemDeltaHandlers.delete(handler);
+  }
+
+  /** 一個渦從清單上結束了（或結束後結算才到）。查「獎勵被吞」用。 */
+  onRaidTrack(handler: (report: RaidTrackReport) => void): () => void {
+    this.#raidTrackHandlers.add(handler);
+    return () => this.#raidTrackHandlers.delete(handler);
   }
 
   /** 打完一場渦、量到了傷害（⑨）。 */
@@ -1391,8 +1894,25 @@ export class CdpAdapter {
   }
 
   /** 自己渦清單上的渦（插件互傳要上傳的）。人不在渦房是空陣列。 */
+  /** 同 {@link raidViewSnapshot}，外加頁面手上有沒有清單（沒有時空清單不代表渦都不見了）。 */
+  async raidViewSnapshotListed(): Promise<{ rows: RaidSnapshotRow[]; listed: boolean }> {
+    return parseRaidViewSnapshotListed(await this.evaluate<string>(RAID_VIEW_SNAPSHOT_EXPRESSION));
+  }
+
   async raidViewSnapshot(): Promise<RaidSnapshotRow[]> {
     return parseRaidViewSnapshot(await this.evaluate<string>(RAID_VIEW_SNAPSHOT_EXPRESSION));
+  }
+
+  /** SUPPORT 公開清單（玩家最後一次打開 SUPPORT 時拿到的，沒有渦碼）。不送請求。見 raid-support.ts。 */
+  async raidSupportSnapshot(): Promise<RaidSupportRow[]> {
+    return parseRaidSupportSnapshot(await this.evaluate<string>(RAID_SUPPORT_SNAPSHOT_EXPRESSION));
+  }
+
+  /** 自己按「送出」公開的渦（只有參加資格「無限制」的）。不送請求。見 raid-support.ts。 */
+  async raidPublishedSnapshot(): Promise<RaidPublishedRow[]> {
+    return parseRaidPublishedSnapshot(
+      await this.evaluate<string>(RAID_PUBLISHED_SNAPSHOT_EXPRESSION),
+    );
   }
 
   async uninstallRaidViewPatch(): Promise<string> {
@@ -1628,6 +2148,7 @@ export class CdpAdapter {
     this.#tracker = null;
     this.#context = null;
     this.#session = null;
+    this.#shellSessionId = null;
     this.#reportHandlers.clear();
     this.#penaltyHandlers.clear();
     this.#wsHandlers.clear();
@@ -1685,6 +2206,14 @@ export class CdpAdapter {
       dispatch(this.#costToggleHandlers, parsed);
       return;
     }
+    if (isCharaPickerReport(parsed)) {
+      dispatch(this.#charaPickerHandlers, parsed);
+      return;
+    }
+    if (isLobbyStandReport(parsed)) {
+      dispatch(this.#lobbyStandHandlers, parsed);
+      return;
+    }
     if (isDisplaySettingsReport(parsed)) {
       dispatch(this.#displayHandlers, parsed);
       return;
@@ -1721,8 +2250,28 @@ export class CdpAdapter {
       dispatch(this.#raidRefreshHandlers, parsed);
       return;
     }
+    if (isRaidStageReport(parsed)) {
+      dispatch(this.#raidStageHandlers, parsed);
+      return;
+    }
+    if (isRaidTrackReport(parsed)) {
+      dispatch(this.#raidTrackHandlers, parsed);
+      return;
+    }
+    if (isRaidLearnReport(parsed)) {
+      dispatch(this.#raidLearnHandlers, parsed);
+      return;
+    }
+    if (isQuestBonusReport(parsed)) {
+      dispatch(this.#questBonusHandlers, parsed);
+      return;
+    }
     if (isRaidRewardReport(parsed)) {
       dispatch(this.#raidRewardHandlers, parsed);
+      return;
+    }
+    if (isRaidItemDeltaReport(parsed)) {
+      dispatch(this.#raidItemDeltaHandlers, parsed);
       return;
     }
     if (isRaidRewardModeReport(parsed)) {
@@ -1733,8 +2282,16 @@ export class CdpAdapter {
       dispatch(this.#raidSurrenderHandlers, parsed);
       return;
     }
+    if (isCardArtReport(parsed)) {
+      dispatch(this.#cardArtHandlers, parsed);
+      return;
+    }
     if (isAssetRepairReport(parsed)) {
       dispatch(this.#assetRepairHandlers, parsed);
+      return;
+    }
+    if (isInputRescueReport(parsed)) {
+      dispatch(this.#inputRescueHandlers, parsed);
       return;
     }
     if (isRoomGateReport(parsed)) {

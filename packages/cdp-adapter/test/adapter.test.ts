@@ -56,6 +56,18 @@ describe("CdpAdapter", () => {
     expect(adapter.session?.targetId).toBe("SHELL");
   });
 
+  it("attach 的 target 消失（detachedFromTarget）也算斷線 —— WebSocket 還連著", async () => {
+    const t = fakeGame();
+    const adapter = await connected(t);
+    const reasons: string[] = [];
+    adapter.onDisconnect((r) => reasons.push(r));
+
+    t.emitEvent("Target.detachedFromTarget", { sessionId: "別人的" });
+    expect(reasons).toHaveLength(0);
+    t.emitEvent("Target.detachedFromTarget", { sessionId: SESSION });
+    expect(reasons).toHaveLength(1);
+  });
+
   it("Runtime.enable 之前就要開始追 context —— 補送的事件不能漏掉", async () => {
     const t = fakeGame();
     await connected(t);
@@ -189,5 +201,162 @@ describe("CdpAdapter", () => {
     expect(adapter.connected).toBe(true);
     await adapter.disconnect();
     expect(adapter.connected).toBe(false);
+  });
+});
+
+describe("CdpAdapter — 桌面版外殼（2026-09-23 起遊戲是 out-of-process iframe）", () => {
+  const FRAME_SESSION = "FRAME-SESSION";
+  const SHELL_SESSION = "SHELL-SESSION";
+
+  function fakeDesktop(): FakeTransport {
+    return fakeGame()
+      .respond("Target.getTargets", () => ({
+        targetInfos: [
+          {
+            targetId: "SHELL",
+            type: "page",
+            url: "file:///E:/game/index.html",
+            title: "UNLIGHT: Revive",
+          },
+          {
+            targetId: "FRAME",
+            type: "iframe",
+            url: "https://www.playunlight.online/?x=1",
+            title: "",
+          },
+        ],
+      }))
+      .respond("Target.attachToTarget", (m) => ({
+        sessionId: m.params?.["targetId"] === "SHELL" ? SHELL_SESSION : FRAME_SESSION,
+      }))
+      .respond("Runtime.evaluate", () => ({
+        result: { value: JSON.stringify({ installed: true, version: 1, size: "x1.5", zoom: 1.5 }) },
+      }));
+  }
+
+  it("畫面大小對外殼下：第一次才 attach，帶 userGesture，binding 也掛上", async () => {
+    const t = fakeDesktop();
+    const adapter = await connected(t);
+    expect(adapter.hasShell).toBe(true);
+
+    const status = await adapter.applyShellDisplay({ render: "auto", size: "x1.5" });
+    await adapter.applyShellDisplay({ render: "auto", size: "x1.5" });
+
+    expect(status).toMatchObject({ installed: true, size: "x1.5", zoom: 1.5 });
+    const attaches = t.sent.filter((m) => m.method === "Target.attachToTarget");
+    expect(attaches.map((m) => m.params?.["targetId"])).toEqual(["FRAME", "SHELL"]);
+    const bindings = t.sent.filter((m) => m.method === "Runtime.addBinding");
+    expect(bindings.map((m) => m.sessionId)).toEqual([FRAME_SESSION, SHELL_SESSION]);
+    const evals = t.sent.filter((m) => m.method === "Runtime.evaluate");
+    expect(evals).toHaveLength(2);
+    for (const e of evals) {
+      expect(e.sessionId).toBe(SHELL_SESSION);
+      expect(e.params?.["userGesture"]).toBe(true);
+    }
+  });
+
+  it("外殼的回報（Esc 退出全螢幕）也送到訂閱者；別的 session 的不收", async () => {
+    const t = fakeDesktop();
+    const adapter = await connected(t);
+    const seen: unknown[] = [];
+    adapter.onDisplaySettings((r) => seen.push(r));
+    const payload = JSON.stringify({ type: "display-settings", render: "auto", size: "x1.5" });
+
+    t.emitEvent("Runtime.bindingCalled", { name: REPORT_BINDING_NAME, payload }, SHELL_SESSION);
+    expect(seen).toHaveLength(0); // 還沒 attach 外殼
+
+    await adapter.applyShellDisplay({ render: "auto", size: "fullscreen" });
+    t.emitEvent("Runtime.bindingCalled", { name: REPORT_BINDING_NAME, payload }, SHELL_SESSION);
+    t.emitEvent("Runtime.bindingCalled", { name: REPORT_BINDING_NAME, payload }, "別人的");
+    expect(seen).toEqual([{ type: "display-settings", render: "auto", size: "x1.5" }]);
+  });
+
+  it("外殼 session 消失不算斷線，下次用時重新 attach", async () => {
+    const t = fakeDesktop();
+    const adapter = await connected(t);
+    const reasons: string[] = [];
+    adapter.onDisconnect((r) => reasons.push(r));
+    await adapter.applyShellDisplay({ render: "auto", size: "x1" });
+
+    t.emitEvent("Target.detachedFromTarget", { sessionId: SHELL_SESSION });
+    expect(reasons).toHaveLength(0);
+    await adapter.applyShellDisplay({ render: "auto", size: "x1" });
+    expect(t.sent.filter((m) => m.method === "Target.attachToTarget")).toHaveLength(3);
+  });
+
+  it("網頁版沒有外殼：什麼都不送", async () => {
+    const t = fakeGame();
+    const adapter = await connected(t);
+    const before = t.sent.length;
+    expect(adapter.hasShell).toBe(false);
+    expect(await adapter.applyShellDisplay({ render: "auto", size: "x2" })).toBeNull();
+    expect(await adapter.resetShellDisplay()).toBe("not-installed");
+    expect(t.sent.length).toBe(before);
+  });
+});
+
+describe("CdpAdapter — 桌面版重載的空檔（只挑得到外殼）", () => {
+  function shellOnly(): FakeTransport {
+    return fakeGame()
+      .respond("Page.getFrameTree", () => ({ frameTree: { frame: { id: "TOP" } } }))
+      .respond("Target.setDiscoverTargets", () => ({}));
+  }
+
+  it("等 Phaser 的時候遊戲 iframe 冒出來 → 丟 GameFrameAppearedError，不空等到逾時", async () => {
+    const t = shellOnly();
+    const adapter = await connected(t);
+    const waiting = adapter.waitForGame(5000);
+    const outcome = waiting.then(
+      () => "found",
+      (err: unknown) => (err as Error).name,
+    );
+
+    // 剛建立時網址是空的 —— 還不能算
+    t.emitEvent("Target.targetCreated", { targetInfo: { type: "iframe", url: "" } });
+    t.emitEvent("Target.targetInfoChanged", {
+      targetInfo: { type: "iframe", url: "https://www.playunlight.online/?x=1" },
+    });
+
+    expect(await outcome).toBe("GameFrameAppearedError");
+    const discover = t.sent.filter((m) => m.method === "Target.setDiscoverTargets");
+    expect(discover.map((m) => m.params?.["discover"])).toEqual([true, false]);
+  });
+
+  it("畫面大小不等遊戲，直接對接到的外殼套（帶 userGesture）", async () => {
+    const t = shellOnly().respond("Runtime.evaluate", () => ({
+      result: { value: JSON.stringify({ installed: true, version: 1, size: "x1.5", zoom: 1.5 }) },
+    }));
+    const adapter = await connected(t);
+
+    const status = await adapter.applyDisplayToAttachedShell({ render: "auto", size: "x1.5" });
+
+    expect(status).toMatchObject({ installed: true, size: "x1.5", zoom: 1.5 });
+    const evals = t.sent.filter((m) => m.method === "Runtime.evaluate");
+    expect(evals).toHaveLength(1);
+    expect(evals[0]?.sessionId).toBe(SESSION);
+    expect(evals[0]?.params?.["userGesture"]).toBe(true);
+    expect(evals[0]?.params).not.toHaveProperty("contextId");
+  });
+
+  it("接到的是遊戲 iframe（或網頁版）就不套", async () => {
+    const t = fakeGame().respond("Target.getTargets", () => ({
+      targetInfos: [
+        { targetId: "SHELL", type: "page", url: "file:///E:/game/index.html" },
+        { targetId: "FRAME", type: "iframe", url: "https://www.playunlight.online/?x=1" },
+      ],
+    }));
+    const adapter = await connected(t);
+    expect(await adapter.applyDisplayToAttachedShell({ render: "auto", size: "x2" })).toBeNull();
+    expect(t.sent.some((m) => m.method === "Runtime.evaluate")).toBe(false);
+  });
+
+  it("別的 iframe 不算；舊客戶端照樣在外殼裡等", async () => {
+    const t = shellOnly();
+    const adapter = await connected(t);
+    const waiting = adapter.waitForGame(80);
+    t.emitEvent("Target.targetCreated", {
+      targetInfo: { type: "iframe", url: "https://example.com/ad" },
+    });
+    await expect(waiting).rejects.toThrow(/Phaser/);
   });
 });
