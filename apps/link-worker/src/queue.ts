@@ -268,7 +268,7 @@ export class MatchQueueRoom extends DurableObject {
           encodeQueue({
             t: "q-incompatible",
             v: LINK_PROTOCOL_VERSION,
-            reason: `協定版本 ${msg.v} 與中間人的 ${LINK_PROTOCOL_VERSION} 不相容`,
+            reason: `協定版本 ${msg.v} 與 Cloudflare Workers 的 ${LINK_PROTOCOL_VERSION} 不相容`,
           }),
         );
         return;

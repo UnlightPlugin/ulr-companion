@@ -29,6 +29,8 @@
       { "name": "RAIDS", "class_name": "RaidBoardRoom" },
       // 雲端牌組庫（deck-vault.ts）。一個角色一個實例，寫 storage。
       { "name": "DECKS", "class_name": "DeckVaultRoom" },
+      // 公開渦通知（raid-feed.ts）。全世界一個實例，寫 storage（Discord 訊息 id 要撐過回收）。
+      { "name": "FEEDS", "class_name": "RaidFeedRoom" },
     ],
   },
 
@@ -44,7 +46,14 @@
     { "tag": "v2", "new_sqlite_classes": ["MatchQueueRoom"] },
     { "tag": "v3", "new_sqlite_classes": ["RaidBoardRoom"] },
     { "tag": "v4", "new_sqlite_classes": ["DeckVaultRoom"] },
+    { "tag": "v5", "new_sqlite_classes": ["RaidFeedRoom"] },
   ],
+
+  // 公開渦通知要 mention 的 Discord 身分組（@渦4：課金渦，獎勵好、血量多，叫大家一起打）。不是秘密。
+  // ⚠ webhook 是秘密，不要寫在這裡：`npx wrangler secret put DISCORD_WEBHOOK_URL`
+  "vars": {
+    "DISCORD_RAID4_ROLE_ID": "1522642682642563174",
+  },
 
   // console.log 會進 Cloudflare 的觀測後台。⚠ 因此 log 一律只印截短的房號，
   // 見 `guard.ts` 的 `shortRoom()`。

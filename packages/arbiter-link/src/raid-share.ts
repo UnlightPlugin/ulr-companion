@@ -25,6 +25,14 @@
  *     暴力反推不實際
  *   · GET 只回問到的那幾把 key，**沒有「列出全部」這條路**
  *
+ * ## ⚠ 2026-09-23 改版後：鍵換成發現者＋到期時刻
+ *
+ * 改版後渦碼只有發現者看得到（別人清單上是 null），SUPPORT 清單也還沒移植，
+ * 拿渦碼當鍵就沒有人查得到。現在的鍵見 {@link raidRowShareKey}：
+ * `SHA-256(種類＋發現者＋到期時刻)`，清單上每個人都算得出來。發現者一樣只在雜湊裡；
+ * 知道名字又猜得到時刻的人算得出鍵，但拿到的只有 stage 與 BOSS 狀態，拿不到渦碼。
+ * 隊伍看板的鍵同理，見 {@link raidTeamRef}。
+ *
  * ## 上傳什麼
  *
  * 只有畫圖示要用的：TL、rarity、stage、mons、HP、到期時刻、狀態。
@@ -94,6 +102,27 @@ export async function raidShareKey(code: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   const hex = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
   return hex.slice(0, RAID_SHARE_KEY_LENGTH);
+}
+
+/**
+ * 改版後（2026-09-23）的鍵：渦碼只有發現者看得到，清單上其他人都是 null，拿渦碼當鍵
+ * 就只有發現者查得到。改用**發現者＋到期時刻**（清單上每個人都有、跟 ulgg 對渦的方法一樣），
+ * 分兩種各一把：
+ *
+ * - `stage`：stage 不會變，誰傳都一樣
+ * - `states`：BOSS 狀態，只在「開打那一刻」看得到。看板同一把 key 後到的為準，
+ *   所以上傳前先查，**自己看到的比看板上的新才傳**（不然托盤重開會把舊的蓋回去）
+ *
+ * 看板上一樣沒有名字：發現者只在雜湊裡。
+ */
+export type RaidRowShareKind = "stage" | "states";
+
+export async function raidRowShareKey(
+  founder: string,
+  limit: number,
+  kind: RaidRowShareKind,
+): Promise<string> {
+  return raidShareKey(`${kind}\n${founder}\n${limit}`);
 }
 
 export function isRaidShareKey(v: unknown): v is string {
@@ -221,24 +250,33 @@ export class RaidBoard {
 // 跟對戰房看得到別人牌組同一個道理；不想分享去插件面板關。
 //
 // ```
-//   插件 A 打完一場 ─ POST /raid-teams {key: H(渦碼), player: H(渦碼, 名字), teams} ─▶ 看板
-//   插件 B 點榜上的名字 ─ GET /raid-teams?keys=H(渦碼) ──────────────────────────▶ 看板
-//   B 自己把榜上每個名字算一次 H(渦碼, 名字)，對得上的就是那個人的隊伍
+//   插件 A 打完一場 ─ POST /raid-teams {key: H(渦), player: H(渦, 名字), teams} ─▶ 看板
+//   插件 B 點榜上的名字 ─ GET /raid-teams?keys=H(渦) ────────────────────────▶ 看板
+//   B 自己把榜上每個名字算一次 H(渦, 名字)，對得上的就是那個人的隊伍
 // ```
+//
+// ## 「渦」是發現者＋發現時刻（2026-09-23 改版後）
+//
+// 改版前用渦碼。改版後渦碼只有發現者看得到（別人清單上是 null），拿它當鍵就只有發現者
+// 查得到。改用 {@link raidTeamRef}：發現者＋`found_at`，清單上每個人都有。
+// 不用到期時刻（`/raids` 那把用的）：渦死後伺服器把 limit 改成「死亡＋10 分」，鍵會變。
 //
 // ## ⚠ 雲端上一樣沒有名字
 //
-// 玩家那一把 key 是「渦碼＋名字」一起雜湊：查的人本來就在排行榜上看得到名字，
-// 自己算得出來；雲端被整批讀走也只有一堆雜湊，對不回名字，更對不回渦碼。
+// 玩家那一把 key 是「渦＋名字」一起雜湊：查的人本來就在排行榜上看得到名字，
+// 自己算得出來；雲端被整批讀走也只有一堆雜湊，對不回名字。
 // 同一個人在不同渦的 key 也不一樣，串不起來「某某人打過哪些渦」。
 //
 // ## 一支隊伍 = 一副牌的內容 ＋ 用它打的累計
 //
-// 牌組內容就是 `db_deck*` 那 27 格（跟 `@ulr/deck-library` 的 DeckContent 同形狀），
-// 累計是那個人插件自己量的：傷害與分數都是榜上自己那一列打完減開打前（伺服器歸屬給
-// 他的數字，跟傷害統計同一套）。回合是伺服器收下的 turn_limit、AP 是 `ap_spend × 回合`
-// （官方回合面板同一條算式）。⚠ 戰鬥中 dmgTo對手 的加總不能拿來當傷害：裡面有別人
-// 掛的狀態跳血與 BOSS 自傷（2026-09-13 實測一場掉 56 血、榜上記 20）。
+// 牌組 27 格。⚠ **欄位名是改版前的**（Worker 的形狀驗證沿用，不必重新部署），
+// 改版後裝的是新 id：`chara` = CharaCards 的 `chara`（"cc035"、"mc1003_02"）、
+// `charaIndex` = CharaCards 的 `id`、`weapon` = WeaponCards 的 `id`、`eventIndex` = EventCards 的 `id`。
+// 改版前的舊資料跟著渦過期早就沒了。
+//
+// 累計是那個人插件自己量的（見 cdp-adapter 的 patch-raid-view ⑨）：傷害是戰鬥中伺服器送的
+// `damage_opponent` 裡自己攻擊打的加總（改版後榜上沒有 damage 了；狀態跳血、BOSS 自傷不算），分數是榜上自己的 point 打完減開打前。
+// 回合是伺服器收下的 turn_limit、AP 是 `清單的 ap × 回合`（官方回合面板同一條算式）。
 // ---------------------------------------------------------------------------
 
 export const RAID_TEAMS_PATH = "/raid-teams";
@@ -268,7 +306,7 @@ export interface SharedTeam {
   turns: number;
   /** 花掉的 AP 加總 */
   ap: number;
-  /** 打掉的傷害加總（排行榜上自己那一列的 damage，打完減開打前） */
+  /** 打掉的傷害加總（戰鬥中自己攻擊的 damage_opponent；狀態跳血不算） */
   damage: number;
   /** 單場最高傷害（ulgg 的統計頁也列這個） */
   best: number;
@@ -278,9 +316,9 @@ export interface SharedTeam {
 
 /** 上傳的一筆：某個渦裡某個人的全部隊伍。 */
 export interface SharedTeamsUpload {
-  /** 渦的 key（跟 `/raids` 同一把） */
+  /** `raidTeamKey(渦)` */
   key: string;
-  /** `raidPlayerKey(渦碼, 名字)` */
+  /** `raidPlayerKey(渦, 名字)` */
   player: string;
   /** 渦的到期時刻；過了看板就丟 */
   limit: number;
@@ -299,9 +337,22 @@ export interface SharedRaidTeams {
   players: SharedTeamsPlayer[];
 }
 
-/** 渦碼＋名字 → 玩家那一把 key。前綴 "team" 讓它跟渦的 key 不可能撞在一起。 */
-export async function raidPlayerKey(code: string, name: string): Promise<string> {
-  const bytes = new TextEncoder().encode(`team\n${code.trim()}\n${name}`);
+/**
+ * 隊伍看板上的「渦」：發現者＋發現時刻（清單的 `founder`、`found_at`）。
+ * ⚠ 頁面（patch-raid-view 的 teamRef）用同一個寫法拼，兩邊要一起改。
+ */
+export function raidTeamRef(founder: string, foundAt: number): string {
+  return `${founder}@${foundAt}`;
+}
+
+/** 渦（{@link raidTeamRef}）→ 隊伍看板上渦的 key。前綴讓它跟 `/raids` 的 key 不會撞。 */
+export async function raidTeamKey(ref: string): Promise<string> {
+  return raidShareKey(`teams\n${ref}`);
+}
+
+/** 渦＋名字 → 玩家那一把 key。前綴 "team" 讓它跟渦的 key 不可能撞在一起。 */
+export async function raidPlayerKey(ref: string, name: string): Promise<string> {
+  const bytes = new TextEncoder().encode(`team\n${ref.trim()}\n${name}`);
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   const hex = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
   return hex.slice(0, RAID_SHARE_KEY_LENGTH);

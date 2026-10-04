@@ -25,6 +25,7 @@
 
 import { MAX_DECK_SYNC_BODY_BYTES, parseDeckSyncPath } from "@ulr/arbiter-link/deck-sync";
 import { LINK_PROTOCOL_VERSION } from "@ulr/arbiter-link/protocol";
+import { MAX_RAID_FEED_BODY_BYTES, RAID_FEED_PATH } from "@ulr/arbiter-link/raid-feed";
 import {
   MAX_RAID_SHARE_BODY_BYTES,
   MAX_RAID_TEAMS_BODY_BYTES,
@@ -50,12 +51,14 @@ export { LinkRoom } from "./room.js";
 export { MatchQueueRoom } from "./queue.js";
 export { RaidBoardRoom } from "./raid-board.js";
 export { DeckVaultRoom } from "./deck-vault.js";
+export { RaidFeedRoom } from "./raid-feed.js";
 
 interface Env {
   ROOMS: DurableObjectNamespace;
   QUEUES: DurableObjectNamespace;
   RAIDS: DurableObjectNamespace;
   DECKS: DurableObjectNamespace;
+  FEEDS: DurableObjectNamespace;
 }
 
 export default {
@@ -171,6 +174,19 @@ export default {
       } catch {
         // 看板掛了只是沒有共享圖示，插件那邊會當作查不到。
         return new Response("board unavailable", { status: 503 });
+      }
+    }
+
+    // 公開渦通知（見 `@ulr/arbiter-link/raid-feed`、docs/raid-feed.md）。全世界一本帳，一個實例。
+    // ⚠ 這條路由上有發現者名稱（Discord 本來就公開它），但**永遠沒有渦碼**。
+    if (url.pathname === RAID_FEED_PATH) {
+      const length = Number(request.headers.get("content-length") ?? "0");
+      if (length > MAX_RAID_FEED_BODY_BYTES) return new Response("too big", { status: 413 });
+      try {
+        return await env.FEEDS.getByName("feed").fetch(request);
+      } catch {
+        // 帳本掛了只是少一則通知，插件那邊會當作查不到。
+        return new Response("feed unavailable", { status: 503 });
       }
     }
 

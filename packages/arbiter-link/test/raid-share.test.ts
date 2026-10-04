@@ -17,8 +17,11 @@ import {
   RAID_BOARD_CAPACITY,
   RaidBoard,
   raidPlayerKey,
+  raidRowShareKey,
   raidShareKey,
   RaidTeamBoard,
+  raidTeamKey,
+  raidTeamRef,
 } from "@ulr/arbiter-link";
 
 const NOW = 1_789_270_000_000;
@@ -37,6 +40,15 @@ const upload = (over: Record<string, unknown> = {}) => ({
     { type: "curse", until: null, count: 4 },
   ],
   ...over,
+});
+
+describe("raidRowShareKey（改版後：發現者＋到期時刻）", () => {
+  it("跟給 ulgg 的 Python 範例（tools/ulgg/ulr_raid_share.py 的 self_test）算出一樣的鍵", async () => {
+    // ⚠ 改了演算法，Python 那份的向量要一起改
+    expect(await raidRowShareKey("燈皇", 1790337757565, "stage")).toBe("aacda4c63eeae29c");
+    expect(await raidRowShareKey("燈皇", 1790337757565, "states")).toBe("5a2594021b7b3977");
+    expect(await raidRowShareKey("Owlic", 1790328501134, "stage")).toBe("ec4972be39ec3b89");
+  });
 });
 
 describe("raidShareKey", () => {
@@ -200,13 +212,20 @@ describe("打渦隊伍", () => {
     ...over,
   });
 
-  it("玩家 key：渦碼＋名字一起雜湊；換渦就不一樣，也不會跟渦的 key 撞", async () => {
-    const k = await raidPlayerKey("H59pGlAk1F2y", "燈皇");
+  it("玩家 key：渦（發現者＋發現時刻）＋名字一起雜湊；換渦就不一樣，也不會跟渦的 key 撞", async () => {
+    const ref = raidTeamRef("路德", 1790321644930);
+    expect(ref).toBe("路德@1790321644930");
+    const k = await raidPlayerKey(ref, "燈皇");
     expect(k).toMatch(/^[0-9a-f]{16}$/);
-    expect(await raidPlayerKey(" H59pGlAk1F2y ", "燈皇")).toBe(k);
-    expect(await raidPlayerKey("H59pGlAk1F2z", "燈皇")).not.toBe(k);
-    expect(await raidPlayerKey("H59pGlAk1F2y", "燈皇2")).not.toBe(k);
-    expect(k).not.toBe(await raidShareKey("H59pGlAk1F2y"));
+    expect(await raidPlayerKey(raidTeamRef("路德", 1790321644931), "燈皇")).not.toBe(k);
+    expect(await raidPlayerKey(raidTeamRef("路德2", 1790321644930), "燈皇")).not.toBe(k);
+    expect(await raidPlayerKey(ref, "燈皇2")).not.toBe(k);
+    const raid = await raidTeamKey(ref);
+    expect(raid).toMatch(/^[0-9a-f]{16}$/);
+    expect(raid).not.toBe(k);
+    // 跟 /raids 那兩把（發現者＋到期時刻）不會撞
+    expect(raid).not.toBe(await raidShareKey(ref));
+    expect(raid).not.toBe(await raidRowShareKey("路德", 1790321644930, "stage"));
   });
 
   it("形狀驗證：整份壞回 null；壞的一筆、壞的一支各自丟掉", () => {
@@ -244,6 +263,17 @@ describe("打渦隊伍", () => {
       NOW,
     )!;
     expect(many[0]!.teams).toHaveLength(MAX_RAID_TEAMS_PER_PLAYER);
+  });
+
+  it("改版後的新 id 過得了驗證（Worker 不必重新部署）：CharaCards 的 chara／id、武器 5005、怪物卡", () => {
+    const fresh = team({
+      chara: ["cc035", "cc033", "mc1003_02"],
+      charaIndex: [350, 330, 30108],
+      weapon: [21, 5005, null],
+      eventIndex: [31, 31, 31, 34, 34, 28, 28, 34, 34, 34, 28, 28, 71, 80, 31, 31, 28, 28],
+    });
+    const out = normalizeTeamsUpload({ entries: [entry({ teams: [fresh] })] }, NOW)!;
+    expect(out[0]!.teams).toEqual([fresh]);
   });
 
   it("看板：同一個人整份取代、傳空的就拿掉；只回問到的渦；渦過期整批消失", () => {

@@ -71,7 +71,7 @@ export class LinkNode {
 
     // 雲端：中間人是別人開的，這邊只當客戶端。
     if (target.kind === "remote") {
-      options.onLog?.(`  中間人：${target.endpoint}`);
+      options.onLog?.(`  對戰握手連到 ${target.endpoint}`);
       client.start();
       return node;
     }
@@ -110,14 +110,14 @@ export class LinkNode {
         port: this.#port,
         ...(onLog !== undefined ? { onLog } : {}),
       });
-      onLog?.(`  這個插件是中間人（127.0.0.1:${this.#port}）`);
+      onLog?.(`  這個插件開了本機轉送（127.0.0.1:${this.#port}）`);
     } catch (err) {
       this.#broker = null;
       if (err instanceof AddressInUseError) {
-        onLog?.(`  中間人已經有人在當了（:${this.#port}），這邊當客戶端`);
+        onLog?.(`  本機轉送已經有別的插件開了（:${this.#port}），這邊接它`);
         return;
       }
-      onLog?.(`✗ 開不了中間人：${err instanceof Error ? err.message : String(err)}`);
+      onLog?.(`✗ 開不了本機轉送：${err instanceof Error ? err.message : String(err)}`);
     }
   }
 }

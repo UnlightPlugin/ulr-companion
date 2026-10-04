@@ -290,7 +290,7 @@ export class QueueWatcher {
     watch.deadline = setTimeout(() => {
       if (gen !== watch.generation) return;
       watch.deadline = null;
-      this.#giveUp(watch, "中間人沒有回人數（多半是舊版），改用輪詢。");
+      this.#giveUp(watch, "Cloudflare Workers 沒有回人數（多半是舊版），改用輪詢。");
     }, ms);
   }
 

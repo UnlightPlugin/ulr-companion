@@ -416,7 +416,7 @@ export class MatchQueue {
           message: {
             t: "q-incompatible",
             v: LINK_PROTOCOL_VERSION,
-            reason: `協定版本 ${message.v} 與中間人的 ${LINK_PROTOCOL_VERSION} 不相容`,
+            reason: `協定版本 ${message.v} 與本機轉送的 ${LINK_PROTOCOL_VERSION} 不相容`,
           },
         },
       ];

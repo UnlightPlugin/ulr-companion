@@ -19,6 +19,7 @@ export default defineConfig({
       "@ulr/arbiter-link/protocol": r("./packages/arbiter-link/src/protocol.ts"),
       "@ulr/arbiter-link/match-queue": r("./packages/arbiter-link/src/match-queue.ts"),
       "@ulr/arbiter-link/rooms": r("./packages/arbiter-link/src/rooms.ts"),
+      "@ulr/arbiter-link/raid-feed": r("./packages/arbiter-link/src/raid-feed.ts"),
       "@ulr/arbiter-link": r("./packages/arbiter-link/src/index.ts"),
       "@ulr/arbiter-engine": r("./packages/arbiter-engine/src/index.ts"),
     },

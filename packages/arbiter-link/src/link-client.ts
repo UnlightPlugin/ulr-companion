@@ -249,7 +249,9 @@ export class LinkClient {
     try {
       socket = new WebSocket(roomUrl(this.#options.endpoint, room));
     } catch (err) {
-      this.#options.onLog?.(`✗ 連不上中間人：${err instanceof Error ? err.message : String(err)}`);
+      this.#options.onLog?.(
+        `✗ 連不上 ${this.#options.endpoint}：${err instanceof Error ? err.message : String(err)}`,
+      );
       this.#scheduleReconnect();
       return;
     }
@@ -279,7 +281,7 @@ export class LinkClient {
       if (this.#status !== "incompatible") this.#setStatus("offline");
       else this.#emit();
       if (code === CLOSE_TOO_FAST) {
-        this.#options.onLog?.("⚠ 側通道被中間人限流，一分鐘後再試");
+        this.#options.onLog?.(`⚠ 側通道被 ${this.#options.endpoint} 限流，一分鐘後再試`);
       }
       this.#scheduleReconnect(
         reconnectDelayFor(code, this.#options.reconnectMs ?? DEFAULT_RECONNECT_MS),

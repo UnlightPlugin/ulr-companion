@@ -157,6 +157,7 @@ export {
   RAID_SHARE_MAX_AHEAD_MS,
   RAID_SHARE_PATH,
   RaidBoard,
+  raidRowShareKey,
   raidShareKey,
   MAX_RAID_TEAM_ENTRIES_PER_POST,
   MAX_RAID_TEAMS_BODY_BYTES,
@@ -166,8 +167,11 @@ export {
   RAID_TEAMS_PATH,
   RaidTeamBoard,
   raidPlayerKey,
+  raidTeamKey,
+  raidTeamRef,
 } from "./raid-share.js";
 export type {
+  RaidRowShareKind,
   SharedRaid,
   SharedRaidState,
   SharedRaidTeams,

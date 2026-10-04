@@ -88,7 +88,7 @@ export class LinkBroker {
       server.once("listening", () => {
         server.off("error", onError);
         // 監聽起來之後的錯誤不該讓插件崩掉 —— 中間人掛了只是功能退回單邊。
-        server.on("error", (err) => options.onLog?.(`✗ 中間人出錯：${err.message}`));
+        server.on("error", (err) => options.onLog?.(`✗ 本機轉送出錯：${err.message}`));
         resolve(new LinkBroker(server, options.onLog));
       });
     });
