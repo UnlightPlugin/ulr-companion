@@ -309,6 +309,11 @@ export function raidFeedFragment(
 // POST 一個陣列 [{monsterId, rarity, mapIndex}]，回命中的那幾組與它們的獎勵（不用登入）。
 // 排名獎勵裡 itemBucket 是 "cmem" 的那一項就是碎片。實測 locale=zh-TW 回的名稱仍是簡體，
 // 所以繁簡都認。對不上（表裡沒有、或有多行）的組不會出現在回應裡。
+//
+// 渦 I 的排名獎勵是渦幣（"ccoin"），不是碎片（2026-10-04 實測：赤死獸 30110 ★1 區塊 3 回「银币」）。
+// 渦幣跟碎片是同一格、同一個餘數（cmem_0..4 記憶～死亡 ↔ ccoin_0..4 鐵銅銀金白金），所以銀幣就是藍。
+// 以前只認 cmem，渦 I 有人加入了也查不到、要等有人開打才知道。碎片優先，沒有碎片才看渦幣
+// （渦 II 以上的後段名次也會發鐵幣，不能拿來當那個渦的顏色）。
 // ---------------------------------------------------------------------------
 
 export const RAID_REWARD_LOOKUP_URL =
@@ -338,7 +343,19 @@ const FRAGMENT_BY_NAME: readonly (readonly [RegExp, RaidFragmentKey])[] = [
   [/死亡/, "death"],
 ];
 
-/** ulrmap 的回應 → 組 → 碎片（排名獎勵裡第一個 `cmem`）。壞的回應回空表。 */
+/** 渦幣 → 同一格的碎片。⚠ 白金要排在金前面（「白金」也含「金」）。 */
+const FRAGMENT_BY_COIN: readonly (readonly [RegExp, RaidFragmentKey])[] = [
+  [/白金/, "death"],
+  [/鐵|铁/, "memory"],
+  [/銅|铜/, "time"],
+  [/銀|银/, "soul"],
+  [/金/, "life"],
+];
+
+/**
+ * ulrmap 的回應 → 組 → 碎片（排名獎勵裡第一個 `cmem`；沒有碎片的話第一個 `ccoin`，渦 I 那種）。
+ * 壞的回應回空表。
+ */
 export function parseRewardLookup(body: unknown): Map<string, RaidFragmentKey> {
   const out = new Map<string, RaidFragmentKey>();
   if (!Array.isArray(body)) return out;
@@ -359,23 +376,34 @@ export function parseRewardLookup(body: unknown): Map<string, RaidFragmentKey> {
     ) {
       continue;
     }
-    const rewards = (e.rewards as Record<string, unknown>[])
-      .filter((x) => x !== null && typeof x === "object")
-      .filter((x) => x.rewardType === "ranking" && x.itemBucket === "cmem")
+    const ranking = (e.rewards as Record<string, unknown>[])
+      .filter((x) => x !== null && typeof x === "object" && x.rewardType === "ranking")
       .sort((a, b) => Number(a.sortOrder ?? 0) - Number(b.sortOrder ?? 0));
-    for (const x of rewards) {
-      const name = typeof x.itemName === "string" ? x.itemName : "";
-      const hit = FRAGMENT_BY_NAME.find(([re]) => re.test(name));
-      if (hit !== undefined) {
-        out.set(
-          rewardLookupKey({ monsterId: e.monsterId, rarity: e.rarity, mapIndex: e.mapIndex }),
-          hit[1],
-        );
-        break;
-      }
+    const hit =
+      firstOf(ranking, "cmem", FRAGMENT_BY_NAME) ?? firstOf(ranking, "ccoin", FRAGMENT_BY_COIN);
+    if (hit !== null) {
+      out.set(
+        rewardLookupKey({ monsterId: e.monsterId, rarity: e.rarity, mapIndex: e.mapIndex }),
+        hit,
+      );
     }
   }
   return out;
+}
+
+/** 排好的排名獎勵裡，第一個這一類、名字認得的。 */
+function firstOf(
+  ranking: readonly Record<string, unknown>[],
+  bucket: string,
+  names: readonly (readonly [RegExp, RaidFragmentKey])[],
+): RaidFragmentKey | null {
+  for (const x of ranking) {
+    if (x.itemBucket !== bucket) continue;
+    const name = typeof x.itemName === "string" ? x.itemName : "";
+    const hit = names.find(([re]) => re.test(name));
+    if (hit !== undefined) return hit[1];
+  }
+  return null;
 }
 
 /**

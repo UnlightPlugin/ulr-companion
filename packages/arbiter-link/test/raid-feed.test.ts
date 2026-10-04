@@ -374,6 +374,44 @@ describe("parseRewardLookup", () => {
     expect(m.get("30130:6:9")).toBe("memory");
   });
 
+  it("渦 I 只有渦幣：同一格的顏色（2026-10-04 實測赤死獸回「银币」= 藍）", () => {
+    const coin = (itemName: string, sortOrder: number) => ({
+      rewardType: "ranking",
+      itemBucket: "ccoin",
+      itemName,
+      sortOrder,
+    });
+    const m = parseRewardLookup([
+      { monsterId: 30110, rarity: 1, mapIndex: 3, rewards: [coin("银币", 3), coin("银币", 4)] },
+      { monsterId: 30110, rarity: 1, mapIndex: 1, rewards: [coin("鐵幣", 3)] },
+      { monsterId: 30110, rarity: 1, mapIndex: 2, rewards: [coin("铜币", 3)] },
+      { monsterId: 30110, rarity: 1, mapIndex: 4, rewards: [coin("金币", 3)] },
+      { monsterId: 30110, rarity: 1, mapIndex: 5, rewards: [coin("白金币", 3)] },
+    ]);
+    expect(m.get("30110:1:3")).toBe("soul");
+    expect(m.get("30110:1:1")).toBe("memory");
+    expect(m.get("30110:1:2")).toBe("time");
+    expect(m.get("30110:1:4")).toBe("life");
+    expect(m.get("30110:1:5")).toBe("death");
+  });
+
+  it("有碎片就看碎片，不看後段名次的渦幣", () => {
+    // 2026-10-04 實測靈龜：記憶的碎片（4、5）＋ 铁币（6）；排在前面的渦幣也不搶
+    const m = parseRewardLookup([
+      {
+        monsterId: 30120,
+        rarity: 1,
+        mapIndex: 5,
+        rewards: [
+          { rewardType: "ranking", itemBucket: "ccoin", itemName: "金币", sortOrder: 1 },
+          { rewardType: "ranking", itemBucket: "cmem", itemName: "记忆的碎片", sortOrder: 4 },
+          { rewardType: "ranking", itemBucket: "ccoin", itemName: "铁币", sortOrder: 6 },
+        ],
+      },
+    ]);
+    expect(m.get("30120:1:5")).toBe("memory");
+  });
+
   it("壞的回應回空表", () => {
     expect(parseRewardLookup(null).size).toBe(0);
     expect(parseRewardLookup({ error: 1 }).size).toBe(0);
