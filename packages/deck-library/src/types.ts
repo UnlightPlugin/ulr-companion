@@ -78,24 +78,32 @@
  * 這條規則插件必須自己 100% 守住，不能指望伺服器兜底。見 `guardDeck1()`。
  */
 
-/** 一副牌組的內容。就是 `db_deck*` 那 27 個欄位，攤成陣列。 */
+import type { LobbyStand } from "./lobby-stand.js";
+
+/**
+ * 一副牌組的內容。就是伺服器 `deck` 那三個陣列（`chara_card_id`／
+ * `weapon_card_id`／`event_card_id`），全部是**卡片 id**。
+ *
+ * ## 2026-09-23 改版前是另一個形狀
+ *
+ * 舊版存的是資產索引（`chara` 前綴＋`charaIndex`、武器與事件卡的索引），改版後
+ * 客戶端與伺服器只認 id，而且武器／事件卡的順序重排過（索引 +1 ≠ id）。存檔裡
+ * 的舊格式由 `parseDeckContent()` 查對照表轉過來（`@ulr/rule-schema` 的
+ * `legacyCharaId`／`legacyWeaponId`／`legacyEventId`）。改版後才出的新卡沒有
+ * 舊索引，只存得進這個新形狀。
+ */
 export interface DeckContent {
   /**
-   * 三個槽位放的是誰。角色是 `cc069`、怪物是 `mc001_01`，空槽是 `null`。
-   *
-   * ⚠ 前綴決定 `charaIndex` 該查哪份資產：`cc` 查 `cc_asset`、`mc` 查
-   * `mc_asset`。查錯不會報錯，會拿到一張**存在但不相干**的卡。
+   * 三個槽位的 `CharaCards[].id`（角色與怪物同一張表），空槽是 `null`。
    */
-  chara: (string | null)[];
-  /** 三個槽位在資產 `frames` 裡的索引。 */
-  charaIndex: (number | null)[];
-  /** 三個槽位的武器索引。沒裝是 `null`。 */
-  weapon: (number | null)[];
+  charaId: (number | null)[];
+  /** 三個槽位的 `WeaponCards[].id`。沒裝是 `null`。 */
+  weaponId: (number | null)[];
   /**
-   * 18 格事件卡。**每個角色槽底下 6 格**（`Math.floor(格號 / 6)` 就是槽號），
-   * 所以角色槽是空的時候，它底下那 6 格放不了東西。
+   * 18 格 `EventCards[].id`。**每個角色槽底下 6 格**（`Math.floor(格號 / 6)`
+   * 就是槽號），所以角色槽是空的時候，它底下那 6 格放不了東西。
    */
-  eventIndex: (number | null)[];
+  eventId: (number | null)[];
 }
 
 /** 角色槽數。 */
@@ -225,12 +233,14 @@ export interface Tombstone {
 /**
  * 一個帳號的牌組庫。
  *
- * ⚠ `account` 是玩家 id 的**指紋**（SHA-256 的前 8 個 hex），不是 id 本身。
- * **規格書** §12（不是牌組庫規格的 §12）：id 是高熵字串，不得離開本機，更不能
- * 上雲。指紋只用來分辨「這份庫是誰的」，反推不回 id。
+ * ⚠ `account` 是**玩家名稱**的指紋（SHA-256 的前 8 個 hex），只用來分辨「這份
+ * 庫是誰的」、當檔名。2026-09-25 以前是 `player_id` 的指紋 —— 改版後那個值每次
+ * 登入都換，一個角色會散成好幾份庫（見 `@ulr/cdp-adapter` 的 `FINGERPRINT_SNIPPET`）。
+ * 名稱是公開的，所以這個指紋**不能**拿去當雲端的門票。
  */
 export interface DeckLibrary {
-  version: 1;
+  /** 2 = 內容存卡片 id（2026-09-23 改版後）。1 是舊的資產索引，讀的時候轉。 */
+  version: 2;
   account: string;
   /** 玩家顯示名稱，純粹給人看的（`Lv.129 燈皇` 那個名字）。 */
   accountLabel?: string;
@@ -259,12 +269,69 @@ export interface DeckLibrary {
    * 第一副 —— 見 `resolveSelected()`。
    */
   selected: Record<RoomKind, string | null>;
+  /**
+   * **最愛卡片**（牌組編輯畫面「最愛卡片」鈕），見 {@link FavoriteCards}。
+   * 舊版存檔沒有這一欄 = 還沒設過（不是「清空了」）—— 同步時沒有這欄的那一邊
+   * 不參與比較。
+   */
+  favorites?: FavoriteCards;
+  /**
+   * **隱藏的裝備**（牌組編輯 Equipment 分頁的「隱藏裝備」鈕），見 {@link HiddenWeapons}。
+   * 沒有這一欄 = 還沒設過，規則跟 `favorites` 一樣。
+   */
+  hiddenWeapons?: HiddenWeapons;
+  /**
+   * **最愛的事件卡**（牌組編輯 Event 分頁的「最愛卡片」鈕），見 {@link FavoriteEvents}。
+   * 沒有這一欄 = 還沒設過，規則跟 `favorites` 一樣。
+   */
+  favoriteEvents?: FavoriteEvents;
+  /**
+   * **首頁立繪**（Library 愛心的複選＋首頁編輯模式的擺法），見 {@link LobbyStand}。
+   * 沒有這一欄 = 還沒設過，規則跟 `favorites` 一樣。
+   */
+  lobbyStand?: LobbyStand;
+}
+
+/**
+ * 最愛的事件卡。存事件卡 id（`EventCards[].id`，跟 `DeckContent.eventId` 同一種）。
+ *
+ * **跟角色卡的最愛分開存**：事件卡 id 是 1..125，跟角色卡 id（1..30135）重疊
+ * （2026-09-26 查的），放同一個清單會把「劍3卡」跟 id 3 的角色卡搞混。
+ * 跟最愛一樣上雲（玩家 2026-09-26：「一樣要存到雲端內」），形狀與合併規則也一樣。
+ */
+export type FavoriteEvents = FavoriteCards;
+
+/**
+ * 隱藏的裝備。存武器卡 id（`WeaponCards[].id`，跟 `DeckContent.weaponId` 同一種）。
+ * 只在 Equipment 分頁的 [Chara Weapon] 開著時生效（叮噹星、可可果這類很少用的）。
+ *
+ * **跟最愛一樣上雲**（玩家 2026-09-26：「手動隱藏的也和最愛卡牌一樣要在雲端儲存」），
+ * 形狀與合併規則也一樣：整份一個時間戳、較新的整份贏。
+ */
+export type HiddenWeapons = FavoriteCards;
+
+/**
+ * 最愛卡片。存角色卡的卡片 id（`CharaCards[].id`，跟 `DeckContent.charaId` 同一種），
+ * **不存角色鍵** —— 玩家 2026-09-26：「最愛角色指的是最愛卡片」，把 R1 史特靈加進
+ * 最愛，就只該看到 R1 史特靈，不是史特靈的每一張。
+ *
+ * 2026-09-26 當天第一版存的是角色鍵（`charas`）；那一版沒發出去，讀到就當沒設過。
+ *
+ * **跟牌組一起上雲**（玩家 2026-09-26：「最愛角色和插件牌組一樣也要在雲端存起來」）。
+ * 整份一個時間戳、較新的整份贏：玩家一次只會在一台電腦上點這顆鈕，逐筆合併換來
+ * 的只有「取消最愛會被另一台救回來」那種要墓碑才解得掉的問題。
+ */
+export interface FavoriteCards {
+  /** 照玩家加入的順序。 */
+  cards: number[];
+  /** ISO 8601。整份最後一次改動的時間。 */
+  updatedAt: string;
 }
 
 /** 空的牌組庫。 */
 export function emptyLibrary(account: string, accountLabel?: string): DeckLibrary {
   const lib: DeckLibrary = {
-    version: 1,
+    version: 2,
     account,
     collections: { raid: [], alexandria: [], quest: [], dietherm: [] },
     tombstones: { raid: [], alexandria: [], quest: [], dietherm: [] },
@@ -277,16 +344,15 @@ export function emptyLibrary(account: string, accountLabel?: string): DeckLibrar
 /** 空牌組 —— 三格角色、三把武器、18 格事件卡全 `null`。 */
 export function emptyDeckContent(): DeckContent {
   return {
-    chara: new Array<string | null>(CHARA_SLOTS).fill(null),
-    charaIndex: new Array<number | null>(CHARA_SLOTS).fill(null),
-    weapon: new Array<number | null>(CHARA_SLOTS).fill(null),
-    eventIndex: new Array<number | null>(EVENT_SLOTS).fill(null),
+    charaId: new Array<number | null>(CHARA_SLOTS).fill(null),
+    weaponId: new Array<number | null>(CHARA_SLOTS).fill(null),
+    eventId: new Array<number | null>(EVENT_SLOTS).fill(null),
   };
 }
 
 /** 這副牌組是不是完全空的（三格角色都沒有）。 */
 export function isEmptyDeck(content: DeckContent): boolean {
-  return content.charaIndex.every((x) => x === null || x === undefined);
+  return content.charaId.every((x) => x === null || x === undefined);
 }
 
 /**
@@ -298,7 +364,7 @@ export function isEmptyDeck(content: DeckContent): boolean {
  * 見本檔開頭「Deck1 的第一格永遠不能是空的」。
  */
 export function guardDeck1(content: DeckContent): string | null {
-  const first = content.charaIndex[0];
+  const first = content.charaId[0];
   if (first === null || first === undefined) {
     return "Deck1 的第一格不能是空的 —— 寫空了會讓你卡死在牌組編輯畫面，兩個出口都出不去。";
   }

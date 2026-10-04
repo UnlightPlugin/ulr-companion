@@ -1,106 +1,177 @@
 import { describe, expect, it } from "vitest";
 import {
-  charaNumberOf,
-  charaStock,
-  charaVariantOf,
-  eventStock,
+  charaRank,
+  findSetShortages,
   findShortages,
-  isRareVariant,
-  weaponStock,
+  stockOf,
+  stockTable,
+  substituteCharas,
 } from "../src/inventory.js";
-import type { Inventory } from "../src/inventory.js";
+import type { CharaFiles, Inventory } from "../src/inventory.js";
 import { emptyDeckContent } from "../src/types.js";
+import type { DeckContent } from "../src/types.js";
 
 /**
- * 2026-08-24 從實機（Lv.129 的帳號）量到的真實資料。
- *
- * 當時 Deck1 的三張卡是 charaIndex 684 / 674 / 665，分別是
- * `cc069_05`(L5)、`cc068_05`(L5)、`cc067_r01`(R1)。
+ * 2026-09-24 改版後的庫存形狀：registry 裡 `[{card_id, quantity}]`，
+ * 角色與怪物同一份（CharaCards 的 id，怪物是 1001 起）。
  */
 const REAL: Inventory = {
-  chara: {
-    "69": "27,28,23,7,1,0,0,0,0,0", // cc069：L1-L5 有貨，R 版全 0
-    "68": "12,9,4,2,3,0,0,0,0,0",
-    "67": "5,0,0,0,0,2,0,0,0,0", // cc067：L1 有 5 張，R1 有 2 張
-  },
-  event: { "2": 150, "6": 2, "20": 1, "67": 258 },
+  chara: stockTable([
+    { card_id: 685, quantity: 1 }, // cc069_05
+    { card_id: 675, quantity: 3 }, // cc068_05
+    { card_id: 666, quantity: 2 }, // cc067_r01
+    { card_id: 1001, quantity: 4 }, // mc001_01
+  ]),
+  weapon: stockTable([{ card_id: 6, quantity: 2 }]),
+  event: stockTable([
+    { card_id: 2, quantity: 150 },
+    { card_id: 20, quantity: 1 },
+  ]),
 };
 
-describe("角色卡索引 → 庫存的映射（實機驗證過的 %10 規則）", () => {
-  it("charaIndex 拆成角色編號與變體格", () => {
-    // 684 = cc069 的第 5 格（cc069_05，L5）
-    expect(charaNumberOf(684)).toBe(69);
-    expect(charaVariantOf(684)).toBe(4);
-    // 665 = cc067 的第 6 格（cc067_r01，R1）
-    expect(charaNumberOf(665)).toBe(67);
-    expect(charaVariantOf(665)).toBe(5);
+describe("stockTable", () => {
+  it("registry 的列表攤成 id → 數量", () => {
+    expect(stockTable([{ card_id: 5, quantity: 3 }])).toEqual({ "5": 3 });
   });
 
-  it("變體格 > 4 就是 r 版 —— 這是遊戲自己用的判斷式", () => {
-    expect(isRareVariant(684)).toBe(false); // cc069_05
-    expect(isRareVariant(665)).toBe(true); // cc067_r01
+  it("數量 0、壞掉的列一律丟掉 —— 讀不到跟沒有同樣保守", () => {
+    expect(
+      stockTable([
+        { card_id: 5, quantity: 0 },
+        { card_id: "6", quantity: 1 },
+        null,
+        { quantity: 2 },
+      ]),
+    ).toEqual({});
+    expect(stockTable("不是陣列")).toEqual({});
   });
 
-  it("查得到實機那三張卡的持有量", () => {
-    expect(charaStock(REAL, 684)).toBe(1); // cc069_05：CSV[4] = 1
-    expect(charaStock(REAL, 674)).toBe(3); // cc068_05：CSV[4] = 3
-    expect(charaStock(REAL, 665)).toBe(2); // cc067_r01：CSV[5] = 2
-  });
-
-  it("讀不到一律當 0 —— 寧可擋下來，也不要送出玩家沒有的卡", () => {
-    expect(charaStock(REAL, 10)).toBe(0); // 沒有這個角色編號
-    expect(charaStock(REAL, 689)).toBe(0); // cc069_r05：CSV[9] = 0
-    expect(charaStock({ chara: { "69": "壞掉的資料" }, event: {} }, 684)).toBe(0);
-    expect(charaStock({ chara: { "69": "1,2" }, event: {} }, 684)).toBe(0); // CSV 太短
-  });
-});
-
-describe("事件卡與武器", () => {
-  it("事件卡直接查數量", () => {
-    expect(eventStock(REAL, 2)).toBe(150);
-    expect(eventStock(REAL, 20)).toBe(1);
-    expect(eventStock(REAL, 999)).toBe(0);
-  });
-
-  it("武器庫存表沒給時回 null —— 「不知道」不等於「沒有」", () => {
-    expect(weaponStock(REAL, 65)).toBeNull();
-    expect(weaponStock({ ...REAL, weapon: { "65": 2 } }, 65)).toBe(2);
-    expect(weaponStock({ ...REAL, weapon: { "65": 2 } }, 7)).toBe(0);
+  it("查不到的卡是 0", () => {
+    expect(stockOf(REAL.chara, 685)).toBe(1);
+    expect(stockOf(REAL.chara, 999)).toBe(0);
   });
 });
 
 describe("findShortages", () => {
-  it("卡都有的時候是空的", () => {
+  it("卡都有的時候是空的（怪物也一樣驗，改版後同一張表）", () => {
     const deck = emptyDeckContent();
-    deck.chara = ["cc069", "cc067", null];
-    deck.charaIndex = [684, 665, null];
-    deck.eventIndex[0] = 2;
+    deck.charaId = [685, 666, 1001];
+    deck.eventId[0] = 2;
+    deck.weaponId[0] = 6;
     expect(findShortages(deck, REAL)).toEqual([]);
   });
 
   it("同一張卡在牌組裡出現多次要一起數", () => {
     const deck = emptyDeckContent();
-    deck.chara = ["cc069", null, null];
-    deck.charaIndex = [684, null, null];
-    // ev20 只有 1 張，卻放了 2 格
-    deck.eventIndex[0] = 20;
-    deck.eventIndex[1] = 20;
-    const short = findShortages(deck, REAL);
-    expect(short).toEqual([{ kind: "event", index: 20, need: 2, have: 1 }]);
+    deck.charaId = [685, null, null];
+    // 事件卡 20 只有 1 張，卻放了 2 格
+    deck.eventId[0] = 20;
+    deck.eventId[1] = 20;
+    expect(findShortages(deck, REAL)).toEqual([{ kind: "event", id: 20, need: 2, have: 1 }]);
   });
 
-  it("怪物槽不驗 —— mc_asset 的索引規則還沒實機量過", () => {
+  it("沒有的武器照樣擋", () => {
     const deck = emptyDeckContent();
-    deck.chara = ["mc001_01", null, null];
-    deck.charaIndex = [3, null, null]; // 硬套 %10 會把它算成 cc001 的第 3 格
-    expect(findShortages(deck, REAL)).toEqual([]);
+    deck.charaId = [685, null, null];
+    deck.weaponId = [7, null, null];
+    expect(findShortages(deck, REAL)).toEqual([{ kind: "weapon", id: 7, need: 1, have: 0 }]);
+  });
+});
+
+describe("findSetShortages —— 三副共用一個卡池", () => {
+  it("單看每一副都夠，合起來超量就擋", () => {
+    const a = emptyDeckContent();
+    a.charaId = [685, null, null];
+    const b = emptyDeckContent();
+    b.charaId = [685, null, null]; // cc069_05 只有 1 張
+    expect(findShortages(a, REAL)).toEqual([]);
+    expect(findShortages(b, REAL)).toEqual([]);
+    expect(findSetShortages([a, b], REAL)).toEqual([{ kind: "chara", id: 685, need: 2, have: 1 }]);
   });
 
-  it("武器庫存表沒給就不擋", () => {
-    const deck = emptyDeckContent();
-    deck.chara = ["cc069", null, null];
-    deck.charaIndex = [684, null, null];
-    deck.weapon = [65, null, null];
-    expect(findShortages(deck, REAL)).toEqual([]);
+  it("空牌組不佔任何東西", () => {
+    expect(findSetShortages([emptyDeckContent(), emptyDeckContent()], REAL)).toEqual([]);
+  });
+});
+
+describe("charaRank", () => {
+  it("L1..L5 = 1..5、R1..R5 = 6..10", () => {
+    expect(charaRank("cc035_01")).toEqual({ chara: "cc035", rank: 1 });
+    expect(charaRank("cc035_05")).toEqual({ chara: "cc035", rank: 5 });
+    expect(charaRank("cc035_r02")).toEqual({ chara: "cc035", rank: 7 });
+  });
+
+  it("怪物、記憶碎片認不出來", () => {
+    expect(charaRank("mc001_01")).toBeNull();
+    expect(charaRank("cmem_6")).toBeNull();
+  });
+});
+
+/** 實機 2026-09-25 的格子鍵（CharaCards 的 filename）。沃蘭德是 cc035。 */
+const FILES: CharaFiles = {
+  "341": "cc035_01",
+  "343": "cc035_03",
+  "345": "cc035_05",
+  "346": "cc035_r01",
+  "347": "cc035_r02",
+  "348": "cc035_r03",
+  "349": "cc035_r04",
+  "350": "cc035_r05",
+  "110": "cc011_r05",
+  "330": "cc033_r05",
+};
+
+function charas(ids: (number | null)[]): DeckContent {
+  const deck = emptyDeckContent();
+  deck.charaId = ids;
+  return deck;
+}
+
+function inv(stock: Record<string, number>): Inventory {
+  return { chara: stock, weapon: {}, event: {} };
+}
+
+describe("substituteCharas —— 手上沒有的角色卡臨時換成同角色的另一張", () => {
+  it("迪城 Deck1：沃蘭德 R2 合成成 R5 了 → 用 R5，其他格不動", () => {
+    const stock = inv({ "350": 1, "110": 1, "330": 1, "343": 4 });
+    const out = substituteCharas(charas([347, 110, 330]), stock, FILES);
+    expect(out.content.charaId).toEqual([350, 110, 330]);
+    expect(out.swaps).toEqual([{ slot: 0, from: 347, to: 350 }]);
+    expect(findShortages(out.content, stock)).toEqual([]);
+  });
+
+  it("比原本高的取最接近的：R3、R5 都有 → R3", () => {
+    const out = substituteCharas(charas([347]), inv({ "348": 1, "350": 1 }), FILES);
+    expect(out.content.charaId).toEqual([348]);
+  });
+
+  it("沒有更高的 → 取比原本低的裡面最高的", () => {
+    const out = substituteCharas(charas([350]), inv({ "341": 1, "345": 1, "346": 1 }), FILES);
+    expect(out.content.charaId).toEqual([346]); // R1（6）高過 L5（5）
+  });
+
+  it("庫存夠的卡一張都不碰，回傳同一個參照", () => {
+    const deck = charas([350, 110, 330]);
+    const out = substituteCharas(deck, inv({ "350": 1, "110": 1, "330": 1, "348": 1 }), FILES);
+    expect(out.content).toBe(deck);
+    expect(out.swaps).toEqual([]);
+  });
+
+  it("換上去的卡同一副裡已經用掉了就不能再拿", () => {
+    // 350 只有一張，已經在第二格；只剩 L3 可用
+    const out = substituteCharas(charas([347, 350, null]), inv({ "350": 1, "343": 1 }), FILES);
+    expect(out.content.charaId).toEqual([343, 350, null]);
+  });
+
+  it("這個角色一張都沒有 → 原樣留著，交給 findShortages 擋", () => {
+    const stock = inv({ "110": 1 });
+    const out = substituteCharas(charas([347]), stock, FILES);
+    expect(out.content.charaId).toEqual([347]);
+    expect(findShortages(out.content, stock)).toHaveLength(1);
+  });
+
+  it("不認得的卡（沒有格子鍵）不動", () => {
+    const out = substituteCharas(charas([9999]), inv({ "350": 1 }), FILES);
+    expect(out.swaps).toEqual([]);
   });
 });

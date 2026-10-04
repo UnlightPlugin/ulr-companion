@@ -20,6 +20,8 @@ import {
   ROOM_KINDS,
   emptyDeckContent,
 } from "./types.js";
+import { deckContentHash } from "./hash.js";
+import { copyLobbyStand } from "./lobby-stand.js";
 
 /**
  * 產生一個牌組 id。
@@ -274,6 +276,33 @@ export function moveDeck(
 }
 
 /**
+ * 兩副**交換位置**（官方三牌組模式：從選單挑一副放進眼前那一格）。
+ *
+ * ⚠ 不能用兩次 {@link moveDeck} 湊：搬第一副時其他幾副會跟著位移，第二次搬的
+ * 目標位置就錯了一格。兩副的 `updatedAt` 都往前推，理由跟 `moveDeck` 一樣：
+ * 排列順序靠它才傳得到另一台電腦。
+ */
+export function swapDecks(
+  library: DeckLibrary,
+  room: RoomKind,
+  idA: string,
+  idB: string,
+  now: Date = new Date(),
+): DeckLibrary {
+  const current = [...(library.collections[room] ?? [])];
+  const a = current.findIndex((d) => d.id === idA);
+  const b = current.findIndex((d) => d.id === idB);
+  if (a < 0 || b < 0 || a === b) return library;
+  const at = now.toISOString();
+  const da = current[a];
+  const db = current[b];
+  if (da === undefined || db === undefined) return library;
+  current[a] = { ...db, updatedAt: at };
+  current[b] = { ...da, updatedAt: at };
+  return replaceRoom(library, room, current);
+}
+
+/**
  * 記住「這一房我要用哪一副」（WP-19）。
  *
  * 玩家在選單裡點一副就記，**跟寫不寫得進 Deck1 無關** —— 意圖跟事實是兩件事，
@@ -286,8 +315,146 @@ export function setSelected(library: DeckLibrary, room: RoomKind, id: string | n
   };
 }
 
+/**
+ * 把一張角色卡加進／移出最愛（牌組編輯畫面的「最愛卡片」鈕）。
+ *
+ * 沒變就回同一個物件（不動時間戳）—— 時間戳一動雲端就會推一次。加入的接在最後。
+ */
+export function setFavoriteCard(
+  library: DeckLibrary,
+  card: number,
+  on: boolean,
+  now: Date = new Date(),
+): DeckLibrary {
+  return toggleCardList(library, "favorites", card, on, now);
+}
+
+/** 最愛卡片，沒設過是空陣列。 */
+export function favoriteCards(library: DeckLibrary): number[] {
+  return [...(library.favorites?.cards ?? [])];
+}
+
+/**
+ * 把一把武器加進／移出隱藏清單（牌組編輯 Equipment 分頁的「隱藏裝備」鈕）。
+ * 規則跟 {@link setFavoriteCard} 一樣：沒變就回同一個物件。
+ */
+export function setHiddenWeapon(
+  library: DeckLibrary,
+  card: number,
+  on: boolean,
+  now: Date = new Date(),
+): DeckLibrary {
+  return toggleCardList(library, "hiddenWeapons", card, on, now);
+}
+
+/** 隱藏的裝備，沒設過是空陣列。 */
+export function hiddenWeapons(library: DeckLibrary): number[] {
+  return [...(library.hiddenWeapons?.cards ?? [])];
+}
+
+/**
+ * 把一張事件卡加進／移出最愛（牌組編輯 Event 分頁的「最愛卡片」鈕）。
+ * 規則跟 {@link setFavoriteCard} 一樣：沒變就回同一個物件。
+ */
+export function setFavoriteEvent(
+  library: DeckLibrary,
+  card: number,
+  on: boolean,
+  now: Date = new Date(),
+): DeckLibrary {
+  return toggleCardList(library, "favoriteEvents", card, on, now);
+}
+
+/** 最愛的事件卡，沒設過是空陣列。 */
+export function favoriteEvents(library: DeckLibrary): number[] {
+  return [...(library.favoriteEvents?.cards ?? [])];
+}
+
+function toggleCardList(
+  library: DeckLibrary,
+  field: "favorites" | "hiddenWeapons" | "favoriteEvents",
+  card: number,
+  on: boolean,
+  now: Date,
+): DeckLibrary {
+  const current = library[field]?.cards ?? [];
+  const has = current.includes(card);
+  if (has === on) return library;
+  const cards = on ? [...current, card] : current.filter((c) => c !== card);
+  return { ...library, [field]: { cards, updatedAt: now.toISOString() } };
+}
+
 function emptySelected(): Record<RoomKind, string | null> {
   return { raid: null, alexandria: null, quest: null, dietherm: null };
+}
+
+/**
+ * **把另一份庫的牌組併進來**（每一房接在後面）。回傳併了幾副。
+ *
+ * 給「同一個角色被存成好幾份庫」的善後用：2026-09-23 改版後帳號指紋每次登入都
+ * 在變（見 `@ulr/cdp-adapter` 的 `FINGERPRINT_SNIPPET`），一個角色散成好幾個檔。
+ *
+ * - 內容跟這一房已有的某一副**一樣**就不收 —— 那幾份庫裡有很多是同一副 Deck1
+ *   的複本（每次被當成新帳號都收一次），全收的話每房會多出一排一模一樣的牌。
+ * - id 撞到就不收（同一副牌從同一份舊庫被抄過來兩次）。
+ * - 名字、BOSS 標籤、`updatedAt` 原樣帶過來。
+ * - `selected` 只在這一房還沒有選擇時才接過來，而且那一副要真的有收進來。
+ * - **墓碑不帶** —— 那是別份庫刪過的東西，這份庫沒有需要擋回來的。
+ */
+export function absorbLibrary(
+  target: DeckLibrary,
+  source: DeckLibrary,
+): { library: DeckLibrary; added: number } {
+  let added = 0;
+  const collections = { ...target.collections };
+  const selected = { ...(target.selected ?? emptySelected()) };
+  for (const room of ROOM_KINDS) {
+    const list = [...(collections[room] ?? [])];
+    const hashes = new Set(list.map((d) => deckContentHash(d.content)));
+    const ids = new Set(list.map((d) => d.id));
+    for (const entry of source.collections[room] ?? []) {
+      const hash = deckContentHash(entry.content);
+      if (hashes.has(hash) || ids.has(entry.id)) continue;
+      list.push({
+        ...entry,
+        content: {
+          charaId: [...entry.content.charaId],
+          weaponId: [...entry.content.weaponId],
+          eventId: [...entry.content.eventId],
+        },
+        bosses: [...entry.bosses],
+      });
+      hashes.add(hash);
+      ids.add(entry.id);
+      added++;
+    }
+    collections[room] = list;
+    const want = source.selected?.[room] ?? null;
+    if (selected[room] === null && want !== null && list.some((d) => d.id === want)) {
+      selected[room] = want;
+    }
+  }
+  const out: DeckLibrary = { ...target, collections, selected };
+  // 最愛卡片：這份還沒設過才接過來（設過就是玩家在這一份上的選擇，不蓋）。
+  if (out.favorites === undefined && source.favorites !== undefined) {
+    out.favorites = { cards: [...source.favorites.cards], updatedAt: source.favorites.updatedAt };
+  }
+  if (out.hiddenWeapons === undefined && source.hiddenWeapons !== undefined) {
+    out.hiddenWeapons = {
+      cards: [...source.hiddenWeapons.cards],
+      updatedAt: source.hiddenWeapons.updatedAt,
+    };
+  }
+  if (out.favoriteEvents === undefined && source.favoriteEvents !== undefined) {
+    out.favoriteEvents = {
+      cards: [...source.favoriteEvents.cards],
+      updatedAt: source.favoriteEvents.updatedAt,
+    };
+  }
+  if (out.lobbyStand === undefined && source.lobbyStand !== undefined) {
+    out.lobbyStand = copyLobbyStand(source.lobbyStand);
+  }
+  return { library: out, added };
 }
 
 /**

@@ -11,12 +11,15 @@
  * 「插件把我的牌組吃了」。
  */
 
+import { legacyCharaId, legacyEventId, legacyWeaponId } from "@ulr/rule-schema";
+import { parseLobbyStand, serializeLobbyStand } from "./lobby-stand.js";
 import {
   CHARA_SLOTS,
   EVENT_SLOTS,
   type DeckContent,
   type DeckEntry,
   type DeckLibrary,
+  type FavoriteCards,
   type Tombstone,
   RAID_BOSSES,
   ROOM_KINDS,
@@ -55,13 +58,49 @@ function fixed<T>(src: unknown, length: number, read: (v: unknown) => T): T[] {
   return out;
 }
 
+/**
+ * 這一份是不是 2026-09-23 改版前的舊格式（資產索引，不是卡片 id）。
+ *
+ * 認的是 `charaIndex`／`eventIndex` 這兩個欄位名 —— 新格式沒有它們。
+ */
+export function isLegacyDeckContent(raw: unknown): boolean {
+  return isRecord(raw) && ("charaIndex" in raw || "eventIndex" in raw);
+}
+
+/**
+ * 讀一副的內容。新舊兩種形狀都收：
+ *
+ * ```
+ *   新（v2）  { charaId, weaponId, eventId }            直接讀
+ *   舊（v1）  { chara, charaIndex, weapon, eventIndex }  查對照表轉成 id
+ * ```
+ *
+ * ⚠ 舊格式的角色槽要**同時**看 `chara`（前綴 `mc` 是怪物）與 `charaIndex` ——
+ * 兩張資產表的索引是各自從 0 數的，只看數字會把怪物讀成不相干的角色。
+ *
+ * ⚠ 對照表查不到的格子會變成空的。現有的對照表涵蓋改版前的每一張卡（角色 700、
+ * 怪物 138、武器 238、事件卡 110），所以實際上不會發生；真的發生時寧可空著，
+ * 也不要留一個會被當成新 id 的舊索引 —— 那會變成一張不相干的卡。
+ */
 export function parseDeckContent(raw: unknown): DeckContent {
   const r = isRecord(raw) ? raw : {};
+  if (isLegacyDeckContent(r)) {
+    const chara = fixed(r.chara, CHARA_SLOTS, cellString);
+    const charaIndex = fixed(r.charaIndex, CHARA_SLOTS, cellNumber);
+    const convert = (index: number | null, to: (n: number) => number | null): number | null =>
+      index === null ? null : to(index);
+    return {
+      charaId: charaIndex.map((index, slot) =>
+        convert(index, (n) => legacyCharaId(chara[slot] ?? null, n)),
+      ),
+      weaponId: fixed(r.weapon, CHARA_SLOTS, cellNumber).map((i) => convert(i, legacyWeaponId)),
+      eventId: fixed(r.eventIndex, EVENT_SLOTS, cellNumber).map((i) => convert(i, legacyEventId)),
+    };
+  }
   return {
-    chara: fixed(r.chara, CHARA_SLOTS, cellString),
-    charaIndex: fixed(r.charaIndex, CHARA_SLOTS, cellNumber),
-    weapon: fixed(r.weapon, CHARA_SLOTS, cellNumber),
-    eventIndex: fixed(r.eventIndex, EVENT_SLOTS, cellNumber),
+    charaId: fixed(r.charaId, CHARA_SLOTS, cellNumber),
+    weaponId: fixed(r.weaponId, CHARA_SLOTS, cellNumber),
+    eventId: fixed(r.eventId, EVENT_SLOTS, cellNumber),
   };
 }
 
@@ -95,6 +134,11 @@ function parseTombstone(raw: unknown): Tombstone | null {
 export interface ParseResult {
   library: DeckLibrary;
   dropped: number;
+  /**
+   * 有幾副是從改版前的舊格式轉過來的（見 {@link parseDeckContent}）。
+   * 呼叫端拿它決定要不要寫一行「已轉成新卡號」並立刻存回新格式。
+   */
+  migrated: number;
 }
 
 /**
@@ -108,10 +152,10 @@ export function parseLibrary(raw: string | unknown, fallbackAccount: string): Pa
     try {
       data = JSON.parse(raw);
     } catch {
-      return { library: emptyLibrary(fallbackAccount), dropped: 0 };
+      return { library: emptyLibrary(fallbackAccount), dropped: 0, migrated: 0 };
     }
   }
-  if (!isRecord(data)) return { library: emptyLibrary(fallbackAccount), dropped: 0 };
+  if (!isRecord(data)) return { library: emptyLibrary(fallbackAccount), dropped: 0, migrated: 0 };
 
   const account = isAccountFingerprint(data.account) ? data.account : fallbackAccount;
   const label = typeof data.accountLabel === "string" ? data.accountLabel : undefined;
@@ -119,6 +163,7 @@ export function parseLibrary(raw: string | unknown, fallbackAccount: string): Pa
 
   const collections = isRecord(data.collections) ? data.collections : {};
   let dropped = 0;
+  let migrated = 0;
   for (const room of ROOM_KINDS) {
     const list = collections[room];
     if (!Array.isArray(list)) continue;
@@ -135,6 +180,7 @@ export function parseLibrary(raw: string | unknown, fallbackAccount: string): Pa
         continue;
       }
       seen.add(entry.id);
+      if (isRecord(item) && isLegacyDeckContent(item.content)) migrated++;
       lib.collections[room].push(entry);
     }
   }
@@ -165,7 +211,36 @@ export function parseLibrary(raw: string | unknown, fallbackAccount: string): Pa
     const id = selected[room];
     if (typeof id === "string" && id !== "") lib.selected[room] = id;
   }
-  return { library: lib, dropped };
+
+  // 最愛卡片。舊版存檔沒有這一欄 → 不設（跟「清空了」不一樣，見 DeckLibrary.favorites）。
+  const favorites = parseFavorites(data.favorites);
+  if (favorites !== null) lib.favorites = favorites;
+  // 隱藏的裝備：同一個形狀、同一套規則。
+  const hiddenWeapons = parseFavorites(data.hiddenWeapons);
+  if (hiddenWeapons !== null) lib.hiddenWeapons = hiddenWeapons;
+  const favoriteEvents = parseFavorites(data.favoriteEvents);
+  if (favoriteEvents !== null) lib.favoriteEvents = favoriteEvents;
+  // 首頁立繪：同一套「沒有這欄 = 沒設過」。
+  const stand = parseLobbyStand(data.lobbyStand);
+  if (stand !== null) lib.lobbyStand = stand;
+  return { library: lib, dropped, migrated };
+}
+
+/**
+ * 只收正整數 id（這是從網路上收來的）。當天第一版存角色鍵的 `{ charas }` 沒有
+ * `cards` → 當沒設過（見 FavoriteCards）。
+ */
+function parseFavorites(raw: unknown): FavoriteCards | null {
+  if (!isRecord(raw) || typeof raw.updatedAt !== "string" || !Array.isArray(raw.cards)) {
+    return null;
+  }
+  const cards: number[] = [];
+  for (const c of raw.cards) {
+    if (Number.isSafeInteger(c) && (c as number) > 0 && !cards.includes(c as number)) {
+      cards.push(c as number);
+    }
+  }
+  return { cards, updatedAt: raw.updatedAt };
 }
 
 /**
@@ -181,10 +256,9 @@ export function serializeLibrary(library: DeckLibrary): string {
       id: d.id,
       name: d.name,
       content: {
-        chara: d.content.chara,
-        charaIndex: d.content.charaIndex,
-        weapon: d.content.weapon,
-        eventIndex: d.content.eventIndex,
+        charaId: d.content.charaId,
+        weaponId: d.content.weaponId,
+        eventId: d.content.eventId,
       },
       updatedAt: d.updatedAt,
       bosses: d.bosses,
@@ -197,11 +271,27 @@ export function serializeLibrary(library: DeckLibrary): string {
   const selected: Record<string, string | null> = {};
   for (const room of ROOM_KINDS) selected[room] = library.selected?.[room] ?? null;
 
-  const out: Record<string, unknown> = { version: 1, account: library.account };
+  const out: Record<string, unknown> = { version: 2, account: library.account };
   if (library.accountLabel !== undefined) out.accountLabel = library.accountLabel;
   out.collections = collections;
   out.tombstones = tombstones;
   out.selected = selected;
+  if (library.favorites !== undefined) {
+    out.favorites = { cards: library.favorites.cards, updatedAt: library.favorites.updatedAt };
+  }
+  if (library.hiddenWeapons !== undefined) {
+    out.hiddenWeapons = {
+      cards: library.hiddenWeapons.cards,
+      updatedAt: library.hiddenWeapons.updatedAt,
+    };
+  }
+  if (library.favoriteEvents !== undefined) {
+    out.favoriteEvents = {
+      cards: library.favoriteEvents.cards,
+      updatedAt: library.favoriteEvents.updatedAt,
+    };
+  }
+  if (library.lobbyStand !== undefined) out.lobbyStand = serializeLobbyStand(library.lobbyStand);
   return JSON.stringify(out, null, 2);
 }
 
@@ -210,50 +300,46 @@ export function libraryFileName(account: string): string {
   return `decks-${account}.json`;
 }
 
-/** 把 `db_deck*` 的扁平回傳攤成 `DeckContent`。 */
-export function deckContentFromFlat(flat: Record<string, unknown>): DeckContent {
-  const chara: (string | null)[] = [];
-  const charaIndex: (number | null)[] = [];
-  const weapon: (number | null)[] = [];
-  for (let i = 1; i <= CHARA_SLOTS; i++) {
-    chara.push(cellString(flat[`chara${i}`]));
-    charaIndex.push(cellNumber(flat[`charaIndex${i}`]));
-    weapon.push(cellNumber(flat[`weapon${i}`]));
-  }
-  const eventIndex: (number | null)[] = [];
-  for (let i = 1; i <= EVENT_SLOTS; i++) eventIndex.push(cellNumber(flat[`event${i}`]));
-  return { chara, charaIndex, weapon, eventIndex };
-}
-
 /**
- * `db_editdeck` 送出去的那個形狀。
+ * 伺服器那一副的樣子（`registry.deck` 的元素、`db_deck` 與 `deck_update` 的形狀）。
  *
- * ⚠ 這裡**故意不 import `@ulr/cdp-adapter` 的 `DeckPayload`** —— 這個 package
- * 是純函式，不該依賴 CDP 那一層。兩邊的欄位一模一樣，結構型別讓它直接餵得
- * 進去；哪天形狀漂移了，托盤那邊會在型別上當場紅起來，正是我們要的。
+ * ⚠ 這裡**故意不 import `@ulr/cdp-adapter` 的型別** —— 這個 package 是純函式，
+ * 不該依賴 CDP 那一層。結構型別讓兩邊直接互通；形狀漂移了托盤那邊會當場紅。
  */
-export interface DeckPayloadShape {
-  chara: (string | null)[];
-  charaIndex: (number | null)[];
-  /** 18 格。 */
-  eventIndex: (number | null)[];
-  weapon: (number | null)[];
+export interface ServerDeckShape {
+  deck_id: number;
+  /** 1 = 這一副是「主牌組」（開機時 `deck_now` 從它來、大廳立繪用它）。 */
+  main: number;
+  chara_card_id: (number | null)[];
+  weapon_card_id: (number | null)[];
+  event_card_id: (number | null)[];
+  /** 閃卡特效的狀態。牌組庫不管它，寫回去時照原樣帶。 */
+  card_effect: unknown[];
+  /** 伺服器算的。寫回去時照原樣帶，伺服器會自己重算。 */
   cost: number;
 }
 
-/**
- * 反過來：`DeckContent` → `db_editdeck` 要送的那個物件。
- *
- * ⚠ 欄位名是 `eventIndex` 不是 `event` —— 送出去的形狀跟 `db_deck*` **收回來的
- * 不一樣**（收回來是扁平的 `event1..event18`，送出去是陣列）。2026-08-24 實測
- * 確認過這個形狀伺服器會 ack 並生效。
- */
-export function deckContentToPayload(content: DeckContent, cost = 0): DeckPayloadShape {
+/** 伺服器那一副 → `DeckContent`。 */
+export function deckContentFromServer(
+  deck: Partial<ServerDeckShape> | null | undefined,
+): DeckContent {
+  const d = isRecord(deck) ? deck : {};
   return {
-    chara: [...content.chara],
-    charaIndex: [...content.charaIndex],
-    eventIndex: [...content.eventIndex],
-    weapon: [...content.weapon],
-    cost,
+    charaId: fixed(d.chara_card_id, CHARA_SLOTS, cellNumber),
+    weaponId: fixed(d.weapon_card_id, CHARA_SLOTS, cellNumber),
+    eventId: fixed(d.event_card_id, EVENT_SLOTS, cellNumber),
+  };
+}
+
+/**
+ * 把 `content` 換進伺服器那一副，其餘欄位（`deck_id`、`main`、`card_effect`、
+ * `cost`）照原樣留著。回傳新物件，不動 `base`。
+ */
+export function withDeckContent<T extends ServerDeckShape>(base: T, content: DeckContent): T {
+  return {
+    ...base,
+    chara_card_id: [...content.charaId],
+    weapon_card_id: [...content.weaponId],
+    event_card_id: [...content.eventId],
   };
 }

@@ -13,10 +13,9 @@ import {
 import { emptyDeckContent, emptyLibrary } from "../src/types.js";
 import type { DeckLibrary, Tombstone } from "../src/types.js";
 
-function deckWith(charaIndex: number): ReturnType<typeof emptyDeckContent> {
+function deckWith(charaId: number): ReturnType<typeof emptyDeckContent> {
   const c = emptyDeckContent();
-  c.chara[0] = "cc069";
-  c.charaIndex[0] = charaIndex;
+  c.charaId[0] = charaId;
   return c;
 }
 
@@ -32,7 +31,7 @@ describe("hash", () => {
   it("null 與 undefined 的空格算成同一個 —— 存檔往返不該算成有變動", () => {
     const a = emptyDeckContent();
     const b = emptyDeckContent();
-    b.charaIndex[1] = undefined as unknown as null;
+    b.charaId[1] = undefined as unknown as null;
     expect(deckContentCanonical(a)).toBe(deckContentCanonical(b));
   });
 

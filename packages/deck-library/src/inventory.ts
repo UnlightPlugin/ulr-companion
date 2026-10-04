@@ -1,182 +1,225 @@
 /**
  * 庫存：這張卡玩家到底有沒有（WP-18）
  * ====================================
- * 牌組庫寫牌組是繞過客戶端直接送 `db_editdeck` 的，**伺服器驗不驗持有量未知**
- * （沒測，也不該去測 —— 那等於試探能不能組出沒有的卡，測出來是「可以」的話
- * 帳號就處在違規狀態了）。
+ * 牌組庫寫牌組是繞過牌組編輯畫面直接送 `deck_update` 的，**伺服器驗不驗持有量
+ * 未知**（沒測，也不該去測 —— 那等於試探能不能組出沒有的卡，測出來是「可以」
+ * 的話帳號就處在違規狀態了）。
  *
- * 所以這條線由插件自己守：**只用 `db_characard` / `db_eventcard` /
- * `db_item_weapon` 回報的實際庫存**。伺服器驗不驗都無所謂，因為我們從來不送
- * 玩家沒有的東西。
+ * 所以這條線由插件自己守：**只用客戶端 registry 裡的實際庫存**。伺服器驗不驗都
+ * 無所謂，因為我們從來不送玩家沒有的東西。
  *
- * ## 角色卡的索引規則（2026-08-24 實機驗證）
- *
- * 每個角色在 `cc_asset.frames` 裡佔**連續的 10 格**：
+ * ## 2026-09-23 改版後的庫存形狀
  *
  * ```
- *   +0..4  cc069_01 .. cc069_05    普通版 L1-L5   rarity 5
- *   +5..9  cc069_r01 .. cc069_r05  稀有版 R1-R5   rarity 6-10
+ *   registry.chara_card   [{ card_id, quantity }]   角色與怪物同一份（CharaCards 的 id）
+ *   registry.weapon_card  [{ card_id, quantity }]
+ *   registry.event_card   [{ card_id, quantity }]
  * ```
  *
- * 而 `db_characard` 的值是**同樣 10 個位置**的 CSV，一一對應：
+ * 全部以**卡片 id** 為鍵，跟牌組內容（`DeckContent`）同一套 —— 改版前那套
+ * 「角色 CSV 第幾格」「怪物不驗」的規則都不需要了。讀這份不必跑任何網路請求：
+ * 遊戲開機（`PreBoot`）與進牌組編輯（`Edit.init`）時自己會更新它。
  *
- * ```
- *   db_characard["69"] = "27,28,23,7,1,0,0,0,0,0"
- *                         L1 L2 L3 L4 L5 R1..R5
- * ```
+ * ## ⚠ 三副共用同一個卡池
  *
- * 對照當時 Deck1 的三張卡：
- *
- * | charaIndex | %10 | frame       | CSV 位置 | 持有 |
- * | ---------- | --- | ----------- | -------- | ---- |
- * | 684        | 4   | cc069_05    | [4]      | 1    |
- * | 674        | 4   | cc068_05    | [4]      | —    |
- * | 665        | 5   | cc067_r01   | [5]      | —    |
- *
+ * 牌組編輯畫面算「剩幾張」時會扣掉**三副**用掉的（2026-09-24 讀 `Edit` 的原始碼）。
  * 所以：
  *
- * ```
- *   角色編號 = floor(charaIndex / 10) + 1
- *   CSV 位置 = charaIndex % 10
- * ```
+ * - 插件模式（只用 Deck1）：Deck2／Deck3 清空之後，整個庫存都是 Deck1 的
+ *   → {@link findShortages} 拿一副跟整個庫存比。
+ * - 官方三牌組模式：三副要**一起**塞得進庫存 → {@link findSetShortages}。
  *
- * ⚠ **這不是我們推出來的慣例，是遊戲自己在用的。** Quest 場景載語音時就寫
- * `this.deck1.charaIndex[0] % 10 > 4`（>4 表示 r 版）。
+ * ⚠ 超量的牌組寫進客戶端記憶體之後，玩家離開牌組編輯時遊戲送的 `deck_update`
+ * 會被伺服器退回，而新版 Edit 退回時**不顯示任何錯誤**，只是讓玩家留在原畫面
+ * —— 看起來就是「按返回沒反應」。這支擋的正是那個。
  */
 
 import type { DeckContent } from "./types.js";
 
-/** 一個角色在 `cc_asset.frames` 裡佔的格數，也是 `db_characard` CSV 的長度。 */
-export const CHARA_VARIANTS = 10;
+/** 一種卡的庫存清單（registry 的原樣）。 */
+export interface StockRow {
+  card_id: number;
+  quantity: number;
+}
 
 /**
- * 玩家的庫存。欄位就是那幾個 `db_*` 呼叫的原樣回傳。
+ * 玩家的庫存，三種卡各一份「id → 數量」。
  *
- * ⚠ 這裡**只放數量**，不放 id、不放 session token。
+ * ⚠ 這裡**只放數量**，不放玩家 id、不放 session token。
  */
 export interface Inventory {
-  /** `db_characard`：`{ "69": "27,28,23,7,1,0,0,0,0,0" }` */
-  chara: Record<string, string>;
-  /** `db_eventcard`：`{ "2": 150, "67": 258 }`（2026-08-24 實測） */
-  event: Record<string, number | string>;
-  /**
-   * `db_item_weapon`：`{ 武器索引: 數量 }`。
-   *
-   * 2026-08-24 實機驗證：讀到 238 種武器，拿去驗兩副真的裝了武器的牌組
-   * （`[65,7,86]` 與 `[170,136,135]`）全部通過。格式若不對，這些武器會被
-   * 判成「沒有」而報缺貨 —— 沒報，所以 key 確實是武器索引。
-   */
-  weapon?: Record<string, number | string>;
+  chara: Record<string, number>;
+  weapon: Record<string, number>;
+  event: Record<string, number>;
 }
 
-/** 角色卡的 `charaIndex` 對應到哪個角色編號。 */
-export function charaNumberOf(charaIndex: number): number {
-  return Math.floor(charaIndex / CHARA_VARIANTS) + 1;
+/** registry 的 `[{card_id, quantity}]` → `{ id: 數量 }`。壞掉的列丟掉。 */
+export function stockTable(rows: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!Array.isArray(rows)) return out;
+  for (const row of rows) {
+    if (typeof row !== "object" || row === null) continue;
+    const id = (row as { card_id?: unknown }).card_id;
+    const qty = Number((row as { quantity?: unknown }).quantity);
+    if (typeof id !== "number" || !Number.isFinite(id)) continue;
+    if (!Number.isFinite(qty) || qty <= 0) continue;
+    out[String(id)] = (out[String(id)] ?? 0) + qty;
+  }
+  return out;
 }
 
-/** 角色卡的 `charaIndex` 對應到 CSV 的第幾格（0..9）。 */
-export function charaVariantOf(charaIndex: number): number {
-  return charaIndex % CHARA_VARIANTS;
-}
-
-/** 這個 `charaIndex` 是不是稀有（r）版。遊戲自己用的判斷式。 */
-export function isRareVariant(charaIndex: number): boolean {
-  return charaVariantOf(charaIndex) > 4;
-}
-
-/**
- * 玩家有幾張這個 `charaIndex` 的角色卡。
- *
- * 查不到（沒有這個角色編號、CSV 太短、值不是數字）一律回 `0` —— 「讀不到」
- * 跟「沒有」在這裡要同樣保守，寧可擋下來也不要送出玩家沒有的卡。
- */
-export function charaStock(inventory: Inventory, charaIndex: number): number {
-  const csv = inventory.chara[String(charaNumberOf(charaIndex))];
-  if (typeof csv !== "string") return 0;
-  const cell = csv.split(",")[charaVariantOf(charaIndex)];
-  if (cell === undefined) return 0;
-  const n = Number(cell.trim());
-  return Number.isFinite(n) && n > 0 ? n : 0;
-}
-
-/** 玩家有幾張這張事件卡。 */
-export function eventStock(inventory: Inventory, eventIndex: number): number {
-  const raw = inventory.event[String(eventIndex)];
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? n : 0;
-}
-
-/** 玩家有幾把這個武器。庫存表沒給就回 `null` —— 「不知道」不等於「沒有」。 */
-export function weaponStock(inventory: Inventory, weaponIndex: number): number | null {
-  if (inventory.weapon === undefined) return null;
-  const raw = inventory.weapon[String(weaponIndex)];
-  if (raw === undefined) return 0;
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? n : 0;
+/** 玩家有幾張這張卡。查不到一律 `0` —— 「讀不到」跟「沒有」同樣保守。 */
+export function stockOf(table: Record<string, number>, id: number): number {
+  const n = table[String(id)];
+  return typeof n === "number" && Number.isFinite(n) && n > 0 ? n : 0;
 }
 
 /** 一項庫存不足。 */
 export interface StockShortage {
   kind: "chara" | "event" | "weapon";
-  /** 卡的索引（`charaIndex` / `eventIndex` / 武器索引）。 */
-  index: number;
-  /** 這副牌組要用幾張。 */
+  /** 卡片 id。 */
+  id: number;
+  /** 這（幾）副牌組一共要用幾張。 */
   need: number;
   /** 玩家實際有幾張。 */
   have: number;
 }
 
+function tally(into: Map<number, number>, ids: readonly (number | null)[]): void {
+  for (const id of ids) {
+    if (id === null || id === undefined) continue;
+    into.set(id, (into.get(id) ?? 0) + 1);
+  }
+}
+
 /**
- * **這副牌組全部的卡，玩家都真的有嗎。**
+ * **這幾副牌組合起來，玩家的庫存塞得下嗎。** 回傳空陣列表示塞得下。
  *
- * 回傳空陣列表示都有。
+ * 同一張卡在同一副、或不同副裡出現幾次就算幾張（三副共用一個卡池）。
+ */
+export function findSetShortages(
+  contents: readonly DeckContent[],
+  inventory: Inventory,
+): StockShortage[] {
+  const need = {
+    chara: new Map<number, number>(),
+    weapon: new Map<number, number>(),
+    event: new Map<number, number>(),
+  };
+  for (const c of contents) {
+    tally(need.chara, c.charaId);
+    tally(need.weapon, c.weaponId);
+    tally(need.event, c.eventId);
+  }
+  const out: StockShortage[] = [];
+  for (const kind of ["chara", "weapon", "event"] as const) {
+    for (const [id, n] of need[kind]) {
+      const have = stockOf(inventory[kind], id);
+      if (have < n) out.push({ kind, id, need: n, have });
+    }
+  }
+  return out;
+}
+
+/**
+ * **這副牌組全部的卡，玩家都真的有嗎。** 回傳空陣列表示都有。
  *
- * ⚠ 這裡是拿**整個庫存**比對，沒有扣掉「其他牌組正在用的」—— 那是故意的：
- * 牌組庫的前提就是 Deck2/Deck3 已經清空、同一時間只有一副躺在伺服器上，
- * 所以整個庫存都是這副的。呼叫端如果沒有清空 Deck2/Deck3 就用這支，
- * 會放行一些實際上被佔住的卡。
- *
- * ⚠ 怪物卡（`mc` 開頭）**不驗**。`mc_asset` 的索引規則沒有實機量過，硬套
- * 角色那套 `%10` 幾乎一定是錯的，錯的方向還是「把有的卡判成沒有」。
- * 要驗之前先量 `db_monstercard` 跟 `mc_asset` 的對應。
+ * ⚠ 這裡是拿**整個庫存**比對，沒有扣掉「其他牌組正在用的」—— 插件模式的前提
+ * 就是 Deck2/Deck3 已經清空、同一時間只有一副躺在伺服器上。其他情況用
+ * {@link findSetShortages} 把三副一起算。
  */
 export function findShortages(content: DeckContent, inventory: Inventory): StockShortage[] {
-  const out: StockShortage[] = [];
+  return findSetShortages([content], inventory);
+}
 
-  // 同一張卡在同一副牌組裡可能出現多次（事件卡尤其常見），要先數過。
-  const charaNeed = new Map<number, number>();
-  const eventNeed = new Map<number, number>();
-  const weaponNeed = new Map<number, number>();
+/** 玩家角色卡：卡片 id → 格子鍵（`cc035_r02`）。見 cdp-adapter 的 `InventorySnapshot`。 */
+export type CharaFiles = Record<string, string>;
 
-  content.charaIndex.forEach((idx, slot) => {
-    if (idx === null || idx === undefined) return;
-    // 怪物槽跳過 —— 見上面那段 ⚠
-    const who = content.chara[slot];
-    if (typeof who === "string" && who.startsWith("mc")) return;
-    charaNeed.set(idx, (charaNeed.get(idx) ?? 0) + 1);
+/**
+ * 格子鍵拆成「哪個角色」與「階」：L1..L5 = 1..5、R1..R5 = 6..10。
+ * 認不出來（怪物、記憶碎片…）回 `null`。
+ */
+export function charaRank(file: string): { chara: string; rank: number } | null {
+  const m = /^(cc\d+)_(r?)(\d+)$/.exec(file);
+  if (m === null) return null;
+  const level = Number(m[3]);
+  if (!Number.isInteger(level) || level < 1) return null;
+  return { chara: m[1] ?? "", rank: m[2] === "r" ? 5 + level : level };
+}
+
+/** 一張被臨時換掉的角色卡。 */
+export interface CharaSwap {
+  /** 第幾格角色（0..2）。 */
+  slot: number;
+  from: number;
+  to: number;
+}
+
+/**
+ * **牌組裡手上沒有的角色卡，臨時換成同一個角色手上有的另一張。**
+ *
+ * 2026-09-25 迪城回報「Deck1 跟 Deck4 不能選」：玩家把沃蘭德 R2 合成成 R5，
+ * 庫裡那副還寫著 R2，庫存 0 張，於是每點一次都「有 1 張卡你手上沒有」。
+ * 玩家定的規則：**角色一樣就行，最好是上位高等的** —— 角色本身不會消失。
+ *
+ * ```
+ *   比原本高（或同階）的有 → 取最接近的那一張（R2 沒了、R3 R5 都有 → R3）
+ *   沒有                    → 取比原本低的裡面最高的
+ *   這個角色一張都沒有      → 原樣留著，交給 findShortages 照舊擋下來
+ * ```
+ *
+ * - 只動**不夠**的那幾格；庫存夠的一張都不碰。
+ * - 換上去的卡也要夠：同一副裡其他格已經用掉的會扣掉。
+ * - ⚠ **不改牌組庫**。這是寫進遊戲那一刻才做的事，庫裡那副照舊是 R2。
+ *
+ * 沒有東西可換時回傳的 `content` 就是傳進來的那一個（同一個參照）。
+ */
+export function substituteCharas(
+  content: DeckContent,
+  inventory: Inventory,
+  files: CharaFiles,
+): { content: DeckContent; swaps: CharaSwap[] } {
+  const used = new Map<number, number>();
+  tally(used, content.charaId);
+  const usable = (id: number): boolean => stockOf(inventory.chara, id) > (used.get(id) ?? 0);
+
+  let byChara: Map<string, { id: number; rank: number }[]> | null = null;
+  const sameChara = (chara: string): { id: number; rank: number }[] => {
+    if (byChara === null) {
+      byChara = new Map();
+      for (const [key, file] of Object.entries(files)) {
+        const info = charaRank(file);
+        if (info === null) continue;
+        const list = byChara.get(info.chara) ?? [];
+        list.push({ id: Number(key), rank: info.rank });
+        byChara.set(info.chara, list);
+      }
+    }
+    return byChara.get(chara) ?? [];
+  };
+
+  const swaps: CharaSwap[] = [];
+  const charaId = content.charaId.slice();
+  charaId.forEach((id, slot) => {
+    if (id === null || id === undefined) return;
+    if ((used.get(id) ?? 0) <= stockOf(inventory.chara, id)) return;
+    const file = files[String(id)];
+    const self = file === undefined ? null : charaRank(file);
+    if (self === null) return;
+    const owned = sameChara(self.chara).filter((c) => c.id !== id && usable(c.id));
+    const up = owned
+      .filter((c) => c.rank >= self.rank)
+      .sort((a, b) => a.rank - b.rank || a.id - b.id);
+    const down = owned
+      .filter((c) => c.rank < self.rank)
+      .sort((a, b) => b.rank - a.rank || a.id - b.id);
+    const to = up[0]?.id ?? down[0]?.id;
+    if (to === undefined) return;
+    charaId[slot] = to;
+    used.set(id, (used.get(id) ?? 0) - 1);
+    used.set(to, (used.get(to) ?? 0) + 1);
+    swaps.push({ slot, from: id, to });
   });
-  for (const idx of content.eventIndex) {
-    if (idx === null || idx === undefined) continue;
-    eventNeed.set(idx, (eventNeed.get(idx) ?? 0) + 1);
-  }
-  for (const idx of content.weapon) {
-    if (idx === null || idx === undefined) continue;
-    weaponNeed.set(idx, (weaponNeed.get(idx) ?? 0) + 1);
-  }
-
-  for (const [index, need] of charaNeed) {
-    const have = charaStock(inventory, index);
-    if (have < need) out.push({ kind: "chara", index, need, have });
-  }
-  for (const [index, need] of eventNeed) {
-    const have = eventStock(inventory, index);
-    if (have < need) out.push({ kind: "event", index, need, have });
-  }
-  for (const [index, need] of weaponNeed) {
-    const have = weaponStock(inventory, index);
-    if (have === null) continue; // 庫存表沒給，不擋
-    if (have < need) out.push({ kind: "weapon", index, need, have });
-  }
-
-  return out;
+  if (swaps.length === 0) return { content, swaps };
+  return { content: { ...content, charaId }, swaps };
 }

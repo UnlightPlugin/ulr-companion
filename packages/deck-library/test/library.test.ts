@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  absorbLibrary,
   addDeck,
   displayName,
   findDeck,
@@ -7,6 +8,7 @@ import {
   moveDeck,
   removeDeck,
   renameDeck,
+  setSelected,
   updateDeckContent,
 } from "../src/library.js";
 import { emptyDeckContent, emptyLibrary, guardDeck1, isEmptyDeck } from "../src/types.js";
@@ -32,8 +34,7 @@ describe("Deck1 的安全閘", () => {
 
   it("第一格有卡就放行 —— 二三格空著沒關係", () => {
     const deck = emptyDeckContent();
-    deck.chara[0] = "cc069";
-    deck.charaIndex[0] = 684;
+    deck.charaId[0] = 685;
     expect(guardDeck1(deck)).toBeNull();
     expect(isEmptyDeck(deck)).toBe(false);
   });
@@ -70,7 +71,7 @@ describe("增刪改", () => {
   it("換內容會更新 updatedAt", () => {
     const { lib, ids } = seed(["甲"]);
     const content = emptyDeckContent();
-    content.charaIndex[0] = 684;
+    content.charaId[0] = 685;
     const next = updateDeckContent(
       lib,
       "dietherm",
@@ -79,7 +80,7 @@ describe("增刪改", () => {
       new Date("2026-08-24T12:00:00Z"),
     );
     const entry = findDeck(next, "dietherm", ids[0]!);
-    expect(entry?.content.charaIndex[0]).toBe(684);
+    expect(entry?.content.charaId[0]).toBe(685);
     expect(entry?.updatedAt).toBe("2026-08-24T12:00:00.000Z");
   });
 
@@ -125,5 +126,42 @@ describe("顯示名稱", () => {
     expect(displayName(list[0]!, 0)).toBe("Deck1");
     expect(displayName(list[1]!, 1)).toBe("Deck2");
     expect(displayName(list[2]!, 2)).toBe("有名字");
+  });
+});
+
+describe("absorbLibrary（同一個角色散成好幾份庫時併回來）", () => {
+  const content = (first: number) => {
+    const c = emptyDeckContent();
+    c.charaId[0] = first;
+    return c;
+  };
+
+  it("內容一樣的不重收、不一樣的接在後面，名字標籤原樣帶過來", () => {
+    let target = emptyLibrary("aaaaaaaa");
+    target = addDeck(target, "raid", { content: content(1) }).library;
+    let source = emptyLibrary("bbbbbbbb");
+    source = addDeck(source, "raid", { content: content(1) }).library; // 複本
+    source = addDeck(source, "raid", {
+      name: "龜",
+      content: content(2),
+      bosses: ["turtle"],
+    }).library;
+    const r = absorbLibrary(target, source);
+    expect(r.added).toBe(1);
+    const list = listDecks(r.library, "raid");
+    expect(list.map((d) => d.content.charaId[0])).toEqual([1, 2]);
+    expect(list[1]!.name).toBe("龜");
+    expect(list[1]!.bosses).toEqual(["turtle"]);
+    expect(r.library.account).toBe("aaaaaaaa");
+  });
+
+  it("selected 只在這一房還沒選時接過來；墓碑不帶", () => {
+    let source = emptyLibrary("bbbbbbbb");
+    const added = addDeck(source, "quest", { content: content(3) });
+    source = setSelected(added.library, "quest", added.entry.id);
+    source = removeDeck(addDeck(source, "quest", { content: content(4) }).library, "quest", "x");
+    const r = absorbLibrary(emptyLibrary("aaaaaaaa"), source);
+    expect(r.library.selected.quest).toBe(added.entry.id);
+    expect(r.library.tombstones.quest).toEqual([]);
   });
 });

@@ -1,60 +1,108 @@
 import { describe, expect, it } from "vitest";
 import {
-  deckContentFromFlat,
-  deckContentToPayload,
+  deckContentFromServer,
   isAccountFingerprint,
+  isLegacyDeckContent,
   libraryFileName,
+  parseDeckContent,
   parseLibrary,
   serializeLibrary,
+  withDeckContent,
 } from "../src/serialize.js";
 import { addDeck } from "../src/library.js";
 import { emptyDeckContent, emptyLibrary } from "../src/types.js";
 
-/** 2026-08-24 從實機讀到的 `db_deck1` 形狀（28 個欄位）。 */
-const FLAT_DECK1: Record<string, unknown> = {
-  chara1: "cc069",
-  chara2: "cc068",
-  chara3: "cc067",
-  charaIndex1: 684,
-  charaIndex2: 674,
-  charaIndex3: 665,
-  weapon1: null,
-  weapon2: null,
-  weapon3: null,
-  cost: 68,
-  ...Object.fromEntries(Array.from({ length: 18 }, (_, i) => [`event${i + 1}`, null])),
+/** 2026-09-24 從實機讀到的 `registry.deck[2]`（改版後的形狀）。 */
+const SERVER_DECK3 = {
+  deck_id: 3,
+  main: 0,
+  chara_card_id: [427, 110, 330],
+  weapon_card_id: [22, 56, 123],
+  event_card_id: [34, 34, 28, 28, 28, 28, 71, 80, 31, 31, 28, 28, 28, 34, 34, 34, 28, 28],
+  card_effect: [],
+  cost: 111,
 };
 
-describe("db_deck 的扁平格式 ↔ DeckContent", () => {
+describe("伺服器的 deck ↔ DeckContent", () => {
   it("讀得出實機那副牌", () => {
-    const c = deckContentFromFlat(FLAT_DECK1);
-    expect(c.chara).toEqual(["cc069", "cc068", "cc067"]);
-    expect(c.charaIndex).toEqual([684, 674, 665]);
-    expect(c.weapon).toEqual([null, null, null]);
-    expect(c.eventIndex).toHaveLength(18);
-    expect(c.eventIndex.every((x) => x === null)).toBe(true);
+    const c = deckContentFromServer(SERVER_DECK3);
+    expect(c.charaId).toEqual([427, 110, 330]);
+    expect(c.weaponId).toEqual([22, 56, 123]);
+    expect(c.eventId).toHaveLength(18);
   });
 
-  it("送出去的形狀跟收回來的不一樣 —— eventIndex 是陣列不是 event1..18", () => {
-    const c = deckContentFromFlat(FLAT_DECK1);
-    const payload = deckContentToPayload(c, 68);
-    expect(Object.keys(payload).sort()).toEqual(
-      ["chara", "charaIndex", "cost", "eventIndex", "weapon"].sort(),
-    );
-    expect(payload.eventIndex).toHaveLength(18);
-    expect(payload).not.toHaveProperty("event1");
+  it("換內容時 deck_id／main／card_effect／cost 照原樣留著", () => {
+    const next = withDeckContent(SERVER_DECK3, emptyDeckContent());
+    expect(next.deck_id).toBe(3);
+    expect(next.main).toBe(0);
+    expect(next.cost).toBe(111);
+    expect(next.chara_card_id).toEqual([null, null, null]);
+    expect(next.event_card_id).toHaveLength(18);
+    // 不動原本那份
+    expect(SERVER_DECK3.chara_card_id).toEqual([427, 110, 330]);
   });
 
   it("欄位缺了也不會炸，缺的當空格", () => {
-    const c = deckContentFromFlat({ chara1: "cc069", charaIndex1: 684 });
-    expect(c.charaIndex).toEqual([684, null, null]);
-    expect(c.eventIndex).toHaveLength(18);
+    const c = deckContentFromServer({ chara_card_id: [685] });
+    expect(c.charaId).toEqual([685, null, null]);
+    expect(c.eventId).toHaveLength(18);
+    expect(deckContentFromServer(null).charaId).toEqual([null, null, null]);
+  });
+});
+
+describe("改版前的舊存檔轉成新卡號", () => {
+  /**
+   * 玩家本機牌組庫裡任務房的第一副（2026-09-22 存的舊格式）。伺服器上的 Deck3
+   * 就是從它來的 —— 角色與事件卡一張不差；武器那兩格玩家改版後換成了專武，
+   * 舊的是冰劍／水擊槍（名字對過：舊 135 冰劍 = 新 165、舊 136 水擊槍 = 新 166）。
+   */
+  const LEGACY = {
+    chara: ["cc043", "cc011", "cc033"],
+    charaIndex: [426, 109, 329],
+    weapon: [170, 136, 135],
+    eventIndex: [80, 80, 67, 67, 67, 67, 20, 41, 70, 70, 67, 67, 67, 80, 80, 80, 67, 67],
+  };
+
+  it("認得出舊格式", () => {
+    expect(isLegacyDeckContent(LEGACY)).toBe(true);
+    expect(isLegacyDeckContent(deckContentFromServer(SERVER_DECK3))).toBe(false);
   });
 
-  it("字串數字也讀得進來 —— 伺服器有些欄位是字串", () => {
-    const c = deckContentFromFlat({ charaIndex1: "684", event1: "2" });
-    expect(c.charaIndex[0]).toBe(684);
-    expect(c.eventIndex[0]).toBe(2);
+  it("角色、事件卡轉出來跟伺服器那副一樣；武器照名字對到新 id", () => {
+    const c = parseDeckContent(LEGACY);
+    expect(c.charaId).toEqual(SERVER_DECK3.chara_card_id);
+    expect(c.eventId).toEqual(SERVER_DECK3.event_card_id);
+    expect(c.weaponId).toEqual([22, 166, 165]); // 萬聖節叉子、水擊槍、冰劍
+  });
+
+  it("怪物查怪物那張表 —— 同一個索引在角色表是另一張卡", () => {
+    const c = parseDeckContent({ chara: ["mc001_01", "cc001", null], charaIndex: [0, 0, null] });
+    expect(c.charaId).toEqual([1001, 1, null]);
+  });
+
+  it("舊資產的最後一組不照編號走（cc078、mc073）", () => {
+    const c = parseDeckContent({
+      chara: ["cc078", "mc073_01", null],
+      charaIndex: [690, 135, null],
+    });
+    expect(c.charaId).toEqual([771, 20042, null]);
+  });
+
+  it("整份存檔讀進來會記下轉了幾副，存回去就是新格式", () => {
+    const raw = JSON.stringify({
+      version: 1,
+      account: "4858c81f",
+      collections: {
+        quest: [{ id: "d1", name: "", content: LEGACY, updatedAt: "2026-09-22T00:00:00.000Z" }],
+      },
+    });
+    const { library, migrated } = parseLibrary(raw, "4858c81f");
+    expect(migrated).toBe(1);
+    const text = serializeLibrary(library);
+    expect(text).not.toContain("charaIndex");
+    const again = parseLibrary(text, "4858c81f");
+    expect(again.migrated).toBe(0);
+    expect(again.library).toEqual(library);
   });
 });
 
@@ -76,7 +124,7 @@ describe("帳號指紋", () => {
 describe("存檔往返", () => {
   it("存了再讀回來是同一份", () => {
     let lib = emptyLibrary("4858c81f", "燈皇");
-    const content = deckContentFromFlat(FLAT_DECK1);
+    const content = deckContentFromServer(SERVER_DECK3);
     lib = addDeck(lib, "dietherm", { name: "壓 C 用", content }).library;
     lib = addDeck(lib, "raid", { name: "渦用" }).library;
 
@@ -142,7 +190,7 @@ describe("解析一律容錯，永遠不丟例外", () => {
           {
             id: "d1",
             name: "短的",
-            content: { chara: ["cc069"], charaIndex: [684], eventIndex: [2, 2] },
+            content: { charaId: [685], eventId: [2, 2] },
             updatedAt: "x",
           },
         ],
@@ -150,9 +198,9 @@ describe("解析一律容錯，永遠不丟例外", () => {
     });
     const { library } = parseLibrary(raw, "0000dead");
     const deck = library.collections.quest[0]!;
-    expect(deck.content.chara).toEqual(["cc069", null, null]);
-    expect(deck.content.eventIndex).toHaveLength(18);
-    expect(deck.content.eventIndex.slice(0, 3)).toEqual([2, 2, null]);
+    expect(deck.content.charaId).toEqual([685, null, null]);
+    expect(deck.content.eventId).toHaveLength(18);
+    expect(deck.content.eventId.slice(0, 3)).toEqual([2, 2, null]);
   });
 
   it("檔案裡的帳號不合法時退回當下這個帳號", () => {
@@ -164,6 +212,6 @@ describe("解析一律容錯，永遠不丟例外", () => {
     let lib = emptyLibrary("4858c81f");
     lib = addDeck(lib, "quest", { name: "還沒配", content: emptyDeckContent() }).library;
     const { library: back } = parseLibrary(serializeLibrary(lib), "4858c81f");
-    expect(back.collections.quest[0]?.content.charaIndex).toEqual([null, null, null]);
+    expect(back.collections.quest[0]?.content.charaId).toEqual([null, null, null]);
   });
 });

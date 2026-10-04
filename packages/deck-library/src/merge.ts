@@ -34,22 +34,38 @@
  * （跟 `parseLibrary()` 同一條規矩，否則同步會反覆橫跳）。
  */
 
+import { copyLobbyStand, newerLobbyStand, type LobbyStand } from "./lobby-stand.js";
 import { parseLibrary, serializeLibrary } from "./serialize.js";
 import { planSync, summarize, type SyncPlan } from "./sync.js";
 import {
   type DeckEntry,
   type DeckLibrary,
+  type FavoriteCards,
+  type FavoriteEvents,
+  type HiddenWeapons,
   type RoomKind,
   type Tombstone,
   ROOM_KINDS,
   emptyLibrary,
 } from "./types.js";
 
-/** 雲端上那份。形狀是 `DeckLibrary` 去掉本機專屬的三欄。 */
+/**
+ * 雲端上那份。形狀是 `DeckLibrary` 去掉本機專屬的三欄。
+ *
+ * `favorites`（最愛卡片）是 2026-09-26 加的：雲端 Worker 把 `doc` 當不透明的物件
+ * 存，所以不必改伺服器。舊版托盤讀不懂這一欄、推上來的文件會沒有它 —— 那只會
+ * 讓新版下一輪再推一次（沒有這欄的那一邊不參與比較），不會把最愛清掉。
+ * `hiddenWeapons`（隱藏的裝備）、`favoriteEvents`（最愛的事件卡）同一天加的，同一套規則。
+ * `lobbyStand`（首頁立繪）2026-10-02 加的，也是同一套。
+ */
 export interface SyncDocument {
-  version: 1;
+  version: 2;
   collections: Record<RoomKind, DeckEntry[]>;
   tombstones: Record<RoomKind, Tombstone[]>;
+  favorites?: FavoriteCards;
+  hiddenWeapons?: HiddenWeapons;
+  favoriteEvents?: FavoriteEvents;
+  lobbyStand?: LobbyStand;
 }
 
 /** 本地庫 → 要上雲的那份。 */
@@ -60,7 +76,30 @@ export function toSyncDocument(library: DeckLibrary): SyncDocument {
     collections[room] = [...(library.collections[room] ?? [])];
     tombstones[room] = [...(library.tombstones[room] ?? [])];
   }
-  return { version: 1, collections, tombstones };
+  const doc: SyncDocument = { version: 2, collections, tombstones };
+  if (library.favorites !== undefined) doc.favorites = copyFavorites(library.favorites);
+  if (library.hiddenWeapons !== undefined) {
+    doc.hiddenWeapons = copyFavorites(library.hiddenWeapons);
+  }
+  if (library.favoriteEvents !== undefined) {
+    doc.favoriteEvents = copyFavorites(library.favoriteEvents);
+  }
+  if (library.lobbyStand !== undefined) doc.lobbyStand = copyLobbyStand(library.lobbyStand);
+  return doc;
+}
+
+function copyFavorites(f: FavoriteCards): FavoriteCards {
+  return { cards: [...f.cards], updatedAt: f.updatedAt };
+}
+
+/** 兩邊的最愛卡片取較新的一份；只有一邊有就是那一邊，平手本地贏。 */
+function newerFavorites(
+  local: FavoriteCards | undefined,
+  remote: FavoriteCards | undefined,
+): FavoriteCards | undefined {
+  if (remote === undefined) return local;
+  if (local === undefined || remote.updatedAt > local.updatedAt) return copyFavorites(remote);
+  return local;
 }
 
 /**
@@ -73,6 +112,10 @@ export function libraryFromSyncDocument(doc: SyncDocument, account: string): Dec
     lib.collections[room] = [...(doc.collections[room] ?? [])];
     lib.tombstones[room] = [...(doc.tombstones[room] ?? [])];
   }
+  if (doc.favorites !== undefined) lib.favorites = copyFavorites(doc.favorites);
+  if (doc.hiddenWeapons !== undefined) lib.hiddenWeapons = copyFavorites(doc.hiddenWeapons);
+  if (doc.favoriteEvents !== undefined) lib.favoriteEvents = copyFavorites(doc.favoriteEvents);
+  if (doc.lobbyStand !== undefined) lib.lobbyStand = copyLobbyStand(doc.lobbyStand);
   return lib;
 }
 
@@ -198,12 +241,33 @@ export function mergeLibraries(local: DeckLibrary, remote: SyncDocument | null):
     merged.tombstones[room] = [...graves.values()];
   }
 
+  // 4. 最愛卡片：整份比時間（理由見 FavoriteCards）
+  const favorites = newerFavorites(local.favorites, remoteLib.favorites);
+  if (favorites === undefined) delete merged.favorites;
+  else merged.favorites = favorites;
+  // 5. 隱藏的裝備：同一套
+  const hiddenWeapons = newerFavorites(local.hiddenWeapons, remoteLib.hiddenWeapons);
+  if (hiddenWeapons === undefined) delete merged.hiddenWeapons;
+  else merged.hiddenWeapons = hiddenWeapons;
+  // 6. 最愛的事件卡：同一套
+  const favoriteEvents = newerFavorites(local.favoriteEvents, remoteLib.favoriteEvents);
+  if (favoriteEvents === undefined) delete merged.favoriteEvents;
+  else merged.favoriteEvents = favoriteEvents;
+  // 7. 首頁立繪：同一套
+  const stand = newerLobbyStand(local.lobbyStand, remoteLib.lobbyStand);
+  if (stand === undefined) delete merged.lobbyStand;
+  else merged.lobbyStand = stand;
+
   const document = toSyncDocument(merged);
   const localChanged = serializeLibrary(merged) !== serializeLibrary(local);
   // 雲端還沒有東西、本地也是空的 → 沒東西可推（新帳號第一次開，不必為此寫一筆）
   const remoteChanged =
     remote === null
-      ? ROOM_KINDS.some(
+      ? document.favorites !== undefined ||
+        document.hiddenWeapons !== undefined ||
+        document.favoriteEvents !== undefined ||
+        document.lobbyStand !== undefined ||
+        ROOM_KINDS.some(
           (room) => document.collections[room].length > 0 || document.tombstones[room].length > 0,
         )
       : syncDocumentText(document) !== syncDocumentText(remote);
@@ -218,7 +282,10 @@ export function mergeLibraries(local: DeckLibrary, remote: SyncDocument | null):
  */
 export function parseSyncDocument(raw: unknown): SyncDocument | null {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
-  if ((raw as { version?: unknown }).version !== 1) return null;
+  // 1 = 改版前的舊格式（內容是資產索引），2 = 卡片 id。兩種都收 —— 另一台電腦
+  // 還沒更新時推上來的是 1，parseLibrary() 會把內容轉成新卡號。
+  const version = (raw as { version?: unknown }).version;
+  if (version !== 1 && version !== 2) return null;
   const { library } = parseLibrary(raw, "00000000");
   return toSyncDocument(library);
 }

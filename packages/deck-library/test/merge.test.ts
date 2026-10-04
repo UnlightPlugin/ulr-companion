@@ -19,10 +19,9 @@ import { serializeLibrary } from "../src/serialize.js";
 import { emptyDeckContent, emptyLibrary } from "../src/types.js";
 import type { DeckLibrary } from "../src/types.js";
 
-function deckWith(charaIndex: number): ReturnType<typeof emptyDeckContent> {
+function deckWith(charaId: number): ReturnType<typeof emptyDeckContent> {
   const c = emptyDeckContent();
-  c.chara[0] = "cc069";
-  c.charaIndex[0] = charaIndex;
+  c.charaId[0] = charaId;
   return c;
 }
 
@@ -93,7 +92,7 @@ describe("mergeLibraries", () => {
     const r = mergeLibraries(b, toSyncDocument(a2));
     expect(r.localChanged).toBe(true);
     expect(r.remoteChanged).toBe(false);
-    expect(r.library.collections.dietherm[0]!.content.charaIndex[0]).toBe(9);
+    expect(r.library.collections.dietherm[0]!.content.charaId[0]).toBe(9);
     expect(r.library.selected.dietherm).toBe(ids[0]);
     expect(r.library.accountLabel).toBe("燈皇");
   });
@@ -172,12 +171,12 @@ describe("mergeLibraries", () => {
     const a2 = updateDeckContent(a, "dietherm", ids[0]!, deckWith(11), T1);
     const b2 = updateDeckContent(b, "dietherm", ids[0]!, deckWith(12), T2);
     const r = mergeLibraries(b2, toSyncDocument(a2));
-    expect(r.library.collections.dietherm[0]!.content.charaIndex[0]).toBe(12);
+    expect(r.library.collections.dietherm[0]!.content.charaId[0]).toBe(12);
     expect(r.localChanged).toBe(false);
     expect(r.remoteChanged).toBe(true);
     // 反方向：A 拿 B 的合併結果 → 拉
     const r2 = mergeLibraries(a2, r.document);
-    expect(r2.library.collections.dietherm[0]!.content.charaIndex[0]).toBe(12);
+    expect(r2.library.collections.dietherm[0]!.content.charaId[0]).toBe(12);
     expect(r2.localChanged).toBe(true);
     expect(r2.remoteChanged).toBe(false);
   });
@@ -209,8 +208,25 @@ describe("parseSyncDocument", () => {
   it("不是物件、版本不對 → null（不要拿去合併，更不要蓋掉）", () => {
     expect(parseSyncDocument(null)).toBeNull();
     expect(parseSyncDocument([])).toBeNull();
-    expect(parseSyncDocument({ version: 2, collections: {} })).toBeNull();
+    expect(parseSyncDocument({ version: 3, collections: {} })).toBeNull();
     expect(parseSyncDocument("{}")).toBeNull();
+  });
+
+  it("舊版（1）也收 —— 還沒更新的那台推上來的，內容會轉成新卡號", () => {
+    const doc = parseSyncDocument({
+      version: 1,
+      collections: {
+        quest: [
+          {
+            id: "d1",
+            name: "",
+            content: { chara: ["cc001"], charaIndex: [0], weapon: [], eventIndex: [] },
+            updatedAt: "2026-09-22T00:00:00.000Z",
+          },
+        ],
+      },
+    });
+    expect(doc?.collections.quest[0]?.content.charaId).toEqual([1, null, null]);
   });
 
   it("壞掉的那一副丟掉，其他照收", () => {

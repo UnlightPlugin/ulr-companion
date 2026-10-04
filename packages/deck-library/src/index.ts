@@ -28,6 +28,9 @@ export type {
   DeckContent,
   DeckEntry,
   DeckLibrary,
+  FavoriteCards,
+  FavoriteEvents,
+  HiddenWeapons,
   RaidBoss,
   RoomCostDisplay,
   RoomKind,
@@ -35,23 +38,25 @@ export type {
 } from "./types.js";
 
 export {
-  CHARA_VARIANTS,
-  charaNumberOf,
-  charaStock,
-  charaVariantOf,
-  eventStock,
+  charaRank,
+  findSetShortages,
   findShortages,
-  isRareVariant,
-  weaponStock,
+  stockOf,
+  stockTable,
+  substituteCharas,
 } from "./inventory.js";
-export type { Inventory, StockShortage } from "./inventory.js";
+export type { CharaFiles, CharaSwap, Inventory, StockRow, StockShortage } from "./inventory.js";
 
 export {
   TOMBSTONE_TTL_DAYS,
+  absorbLibrary,
   addDeck,
   decksForBoss,
   displayName,
+  favoriteCards,
+  favoriteEvents,
   findDeck,
+  hiddenWeapons,
   listDecks,
   listTombstones,
   makeDeckId,
@@ -62,12 +67,31 @@ export {
   renameDeck,
   resolveSelected,
   setDeckBosses,
+  setFavoriteCard,
+  setFavoriteEvent,
+  setHiddenWeapon,
   setSelected,
+  swapDecks,
   updateDeckContent,
   upsertDeck,
 } from "./library.js";
 
 export { deckContentCanonical, deckContentHash, deckEntryHash } from "./hash.js";
+
+export {
+  LOBBY_STAND_MAX,
+  LOBBY_STAND_SETS_MAX,
+  isCharaKey,
+  isUiGroupKey,
+  lobbyStand,
+  parseLobbyStand,
+  parseStandLayout,
+  parseStandSet,
+  parseUiLayout,
+  setLobbyStandSets,
+  setLobbyStandUi,
+} from "./lobby-stand.js";
+export type { LobbyStand, StandLayout, StandSet, UiLayout } from "./lobby-stand.js";
 
 export { isSyncNeeded, planSync, summarize } from "./sync.js";
 export type { DeckRef, DeckStamp, LibrarySummary, SyncPlan } from "./sync.js";
@@ -82,12 +106,13 @@ export {
 export type { MergeResult, SyncDocument } from "./merge.js";
 
 export {
-  deckContentFromFlat,
-  deckContentToPayload,
+  deckContentFromServer,
   isAccountFingerprint,
+  isLegacyDeckContent,
   libraryFileName,
   parseDeckContent,
   parseLibrary,
   serializeLibrary,
+  withDeckContent,
 } from "./serialize.js";
-export type { DeckPayloadShape, ParseResult } from "./serialize.js";
+export type { ParseResult, ServerDeckShape } from "./serialize.js";

@@ -28,10 +28,9 @@ import type { DeckContent, DeckEntry } from "./types.js";
 export function deckContentCanonical(content: DeckContent): string {
   const cell = (v: unknown): string => (v === null || v === undefined ? "-" : String(v));
   return [
-    content.chara.map(cell).join(","),
-    content.charaIndex.map(cell).join(","),
-    content.weapon.map(cell).join(","),
-    content.eventIndex.map(cell).join(","),
+    content.charaId.map(cell).join(","),
+    content.weaponId.map(cell).join(","),
+    content.eventId.map(cell).join(","),
   ].join("|");
 }
 
