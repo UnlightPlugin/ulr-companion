@@ -15,6 +15,11 @@ import {
   parseEquipmentKey,
   parseEventCardKey,
   toIndexTable,
+  legacyEventId,
+  legacyWeaponId,
+  LEGACY_EVENT_IDS,
+  LEGACY_WEAPON_IDS,
+  toCardIdTable,
 } from "@ulr/rule-schema";
 
 describe("組鍵", () => {
@@ -89,5 +94,45 @@ describe("toIndexTable", () => {
 
   it("沒有表就是空的，不是錯誤 —— 只定價角色的規則是最常見的形態", () => {
     expect(toIndexTable(undefined, parseEquipmentKey)).toEqual({ byIndex: {}, unmapped: [] });
+  });
+});
+
+describe("2026-09-23 改版：舊索引 → 新卡片 id", () => {
+  // 名字是 2026-09-24 對著改版後的客戶端與爬蟲的舊清單核對的。
+  it("順序重排過 —— 索引 +1 不是 id", () => {
+    expect(legacyWeaponId(0)).toBe(1); // 妖魔短劍
+    expect(legacyWeaponId(1)).toBe(6); // 勇者短劍（新 WeaponCards[1] 是妖魔彈藥）
+    expect(legacyWeaponId(3)).toBe(2); // 妖魔彈藥
+    expect(legacyWeaponId(237)).toBe(277); // 成熟可可果
+    expect(legacyEventId(0)).toBe(1); // 劍1卡
+    expect(legacyEventId(91)).toBe(40); // 聖水
+    expect(legacyEventId(109)).toBe(103); // 槍3·盾3卡
+  });
+
+  it("佔位卡「グレゴールの武器2」改名成武器3，不是夾在中間的斯托爾茲玫瑰", () => {
+    expect(legacyWeaponId(211)).toBe(223);
+    expect(legacyWeaponId(212)).toBe(222); // 斯托爾茲玫瑰，舊版就有
+  });
+
+  it("一對一：舊索引全部有對到、新 id 不重複", () => {
+    expect(LEGACY_WEAPON_IDS).toHaveLength(238);
+    expect(LEGACY_EVENT_IDS).toHaveLength(110);
+    expect(new Set(LEGACY_WEAPON_IDS).size).toBe(238);
+    expect(new Set(LEGACY_EVENT_IDS).size).toBe(110);
+  });
+
+  it("超出表的索引回 null", () => {
+    expect(legacyWeaponId(238)).toBeNull();
+    expect(legacyEventId(110)).toBeNull();
+  });
+
+  it("toCardIdTable：規則鍵直接換成新 id；認不得的收進 unmapped", () => {
+    expect(
+      toCardIdTable({ wp001: 3, wp999: 1, wp1: 2 }, parseEquipmentKey, legacyWeaponId),
+    ).toEqual({ byId: { "6": 3 }, unmapped: ["wp999", "wp1"] });
+    expect(toCardIdTable({ ev091: 0 }, parseEventCardKey, legacyEventId)).toEqual({
+      byId: { "40": 0 },
+      unmapped: [],
+    });
   });
 });

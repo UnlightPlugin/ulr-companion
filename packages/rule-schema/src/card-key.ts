@@ -37,6 +37,9 @@
  * 讓一副超標的隊伍看起來合法。
  */
 
+import { LEGACY_EVENT_IDS, LEGACY_WEAPON_IDS } from "./legacy-card-ids.js";
+import { LEGACY_CHARA_IDS, LEGACY_MONSTER_IDS } from "./legacy-chara-ids.js";
+
 /** 裝備鍵的前綴。`avatar_item.weapon[1]` → `wp001` */
 export const EQUIPMENT_KEY_PREFIX = "wp";
 
@@ -121,4 +124,62 @@ export function toIndexTable(
     byIndex[String(index)] = cost;
   }
   return { byIndex, unmapped };
+}
+
+// ---------------------------------------------------------------------------
+// 2026-09-23 改版：舊索引 → 新卡片 id
+// ---------------------------------------------------------------------------
+
+/**
+ * 舊的武器索引（規則鍵 `wp001` 解出來的那個數字、舊牌組庫存的 `weapon[]`）
+ * → 改版後 `WeaponCards[].id`。認不得回 `null`。
+ *
+ * ⚠ 改版把陣列**重排**了，索引 +1 不是 id（舊 weapon[1] 勇者短劍 = 新 id 6）。
+ * 對照表是逐張核對產生的，見 `legacy-card-ids.ts`。
+ */
+export function legacyWeaponId(index: number): number | null {
+  return LEGACY_WEAPON_IDS[index] ?? null;
+}
+
+/** 舊的事件卡索引（`ev091`、舊牌組庫的 `eventIndex[]`）→ 改版後 `EventCards[].id`。 */
+export function legacyEventId(index: number): number | null {
+  return LEGACY_EVENT_IDS[index] ?? null;
+}
+
+/**
+ * 舊牌組庫的一個角色槽（`chara[i]` 決定查哪份資產、`charaIndex[i]` 是索引）
+ * → 改版後 `CharaCards[].id`。認不得回 `null`。
+ *
+ * ⚠ 前綴決定查哪一張表：`mc` 開頭是怪物（`mc_asset`），其餘是角色（`cc_asset`）。
+ * 兩張表的索引是各自從 0 數起的，查錯表會拿到一張**存在但不相干**的卡。
+ */
+export function legacyCharaId(chara: string | null, index: number): number | null {
+  const table =
+    typeof chara === "string" && chara.startsWith("mc") ? LEGACY_MONSTER_IDS : LEGACY_CHARA_IDS;
+  return table[index] ?? null;
+}
+
+/**
+ * 「規則鍵 → COST」換成「新卡片 id → COST」（改版後 `patch-cost` 認的鍵）。
+ *
+ * 跟 {@link toIndexTable} 同一套：認不得的鍵（壞格式、或舊索引在對照表外）
+ * 收進 `unmapped`，不丟掉。
+ */
+export function toCardIdTable(
+  table: Readonly<Record<string, number>> | undefined,
+  parse: (key: string) => number | null,
+  toId: (index: number) => number | null,
+): { byId: Record<string, number>; unmapped: string[] } {
+  const byId: Record<string, number> = {};
+  const unmapped: string[] = [];
+  for (const [key, cost] of Object.entries(table ?? {})) {
+    const index = parse(key);
+    const id = index === null ? null : toId(index);
+    if (id === null) {
+      unmapped.push(key);
+      continue;
+    }
+    byId[String(id)] = cost;
+  }
+  return { byId, unmapped };
 }

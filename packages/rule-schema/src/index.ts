@@ -36,7 +36,13 @@ export {
   EQUIPMENT_KEY_PREFIX,
   EVENT_CARD_KEY_PREFIX,
   CARD_INDEX_PAD,
+  legacyWeaponId,
+  legacyEventId,
+  legacyCharaId,
+  toCardIdTable,
 } from "./card-key.js";
+export { LEGACY_EVENT_IDS, LEGACY_WEAPON_IDS } from "./legacy-card-ids.js";
+export { LEGACY_CHARA_IDS, LEGACY_MONSTER_IDS } from "./legacy-chara-ids.js";
 
 export { buildCatalog, catalogSize, parseCatalog, slotLabel, CATALOG_VERSION } from "./catalog.js";
 export type {
