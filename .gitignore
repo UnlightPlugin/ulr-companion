@@ -51,3 +51,8 @@ rules/*.rule.json
 # 版控就會有第二份內容可以漂移，而且 diff 看不出來。要發給人就當場壓。
 rules/*.rar
 rules/*.zip
+
+# 探測遊戲時的拋棄式腳本與傾印（probe-game 的 *.tmp.mts、tools/.scratch-*）
+*.tmp.mts
+tools/.scratch-*
+__pycache__/

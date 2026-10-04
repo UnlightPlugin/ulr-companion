@@ -37,8 +37,16 @@ npx tsx apps/companion/src/index.ts probe --port 59223
 `DevToolsActivePort` 第一行：
 
 ```powershell
-Get-Content "$env:APPDATA\UNLIGHT-Revive\DevToolsActivePort"   # 桌面版
+Get-Content "$env:APPDATA\UNLIGHT Revive\DevToolsActivePort"   # 桌面版（有空格）
 Get-Content "$env:USERPROFILE\ulr-cdp-profile\DevToolsActivePort"  # 網頁版
+```
+
+⚠ 桌面版的資料夾 2026-09-23 改過名：`UNLIGHT-Revive`（連字號）→ `UNLIGHT Revive`
+（空格）。舊資料夾還在，裡面留著一份**舊的** DevToolsActivePort，讀到它會連到死埠
+（2026-09-26 就這樣白查了一輪）。拿不準就看跑著的客戶端命令列上的 `--user-data-dir=`：
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name='UNLIGHT Revive.exe'" | Select-Object -ExpandProperty CommandLine
 ```
 
 「明明遊戲開著卻連不上」先看這個檔，不要先懷疑腳本。
@@ -166,7 +174,7 @@ var A = window.__ulrArbiter;
   A ? "已裝" : "沒裝",
   "held=" + !!A.held,
   "tinted=" + A.tinted,
-  "listeners=" + sc.ok.listenerCount("pointerout"),
+  "listeners=" + sc.decide_btn.listenerCount("pointerup"), // 改版前叫 sc.ok
 ].join("  ");
 ```
 
