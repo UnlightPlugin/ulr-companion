@@ -71,8 +71,11 @@ export const DEBUG_PORT_SWITCH = `--remote-debugging-port=${DEFAULT_DEBUG_PORT}`
  *   初始化（前提：Steam 客戶端要在跑）
  * - `main.js` 沒有 requestSingleInstanceLock，多開不互擋
  * - 遊戲本來就會讀自訂 switch（x / y / fullscreen），不排斥額外參數
+ *
+ * ⚠ 2026-09-23 更新改名：`UNLIGHTRevive.exe` → `UNLIGHT Revive.exe`（多一個空格），
+ *   位置也從 `win-unpacked\` 搬到遊戲根目錄（見 game-install.ts）。
  */
-export const GAME_EXECUTABLE = "UNLIGHTRevive.exe";
+export const GAME_EXECUTABLE = "UNLIGHT Revive.exe";
 
 /**
  * spawn 子程序前一定要從環境變數移除的鍵。
@@ -153,8 +156,10 @@ export const OVERLAY_ANCHOR_NOTE =
 // ---------------------------------------------------------------------------
 
 /**
- * 網頁版的來源。**不含 port** —— 遊戲每次開在 `GAME_PORTS.quest` 範圍內的
- * 隨機 port，所以 port 是執行期才決定的。
+ * 網頁版的來源。**不含 port**。
+ *
+ * ⚠ 2026-09-23 改版前頁面開在 `GAME_PORTS.quest`（:14012~14021）的隨機 port；
+ *   改版後那幾個 port 連不上了，頁面就在這個來源本身（:443）。
  */
 export const GAME_ORIGIN = "https://www.playunlight.online";
 
@@ -177,7 +182,8 @@ export const GAME_BUNDLE_DIR = "client/";
  */
 export const GAME_MAIN_BUNDLE_PREFIX = "main.";
 
-export const GAME_STYLESHEET = "stylesheets/style-steam.css";
+/** 2026-09-23 改版後真頁面（連 Steam 流程）用的是 style-dmm.css，不再是 style-steam.css。 */
+export const GAME_STYLESHEET = "stylesheets/style-dmm.css";
 
 export const GAME_TITLE = "UNLIGHT:Revive";
 
@@ -193,7 +199,25 @@ export const GAME_CANVAS = {
 } as const;
 
 /**
- * 角色卡資產的 Phaser 快取鍵。
+ * 2026-09-23 改版後的卡片資料（`this.load.json(…)` 開機載入）。舊的
+ * `cc_asset`／`mc_asset`／`avatar_item`／`event_info` **全部不存在了**。
+ *
+ * ```
+ *   CharaCards   陣列，角色**與怪物**都在這一份：{ id, filename, chara, kind, level, rarity, cost, … }
+ *                  filename 跟舊資產一樣（cc078_04 / cc078_r04 / mc001_01），id = 牌組裡的 chara_card_id
+ *   WeaponCards  陣列 { id, name_*, cost, atk[], def[], chara }，id = weapon_card_id
+ *   EventCards   陣列 { id, name_*, cost, … }，id = event_card_id
+ * ```
+ *
+ * ⚠ 武器／事件卡的陣列**順序跟舊版不一樣**，舊索引要經過
+ * `@ulr/rule-schema` 的 `legacyWeaponId`／`legacyEventId` 才對得到 id。
+ */
+export const CHARA_CARDS_KEY = "CharaCards";
+export const WEAPON_CARDS_KEY = "WeaponCards";
+export const EVENT_CARDS_KEY = "EventCards";
+
+/**
+ * 角色卡資產的 Phaser 快取鍵（**2026-09-23 改版前**；改版後見 {@link CHARA_CARDS_KEY}）。
  *
  * 這份 JSON 的 `frames[]` 是**每張角色卡一筆**，欄位有 `filename`
  * （`cc078_04` / `cc078_r04`）、`chara`、`level`、`cost`、`rarity`、
@@ -311,8 +335,12 @@ export const RESULT_EVENTS = ["result", "duel_end", "quest_finish"] as const;
  *
  * 社群最痛的「拖條」議題想做的「假 OK」就是攔這個事件 —— 前端按下去不直接送，
  * 由插件判斷雙方狀態後才真的送出。可行性見 OK_BUTTON 與 WS_CLIENT 的說明。
+ *
+ * ⚠ 2026-09-23 改版前是 `I_am_ok`（參數 room, id）。改版後是
+ * `player_ready(room_id)`（2026-10-04 從跑著的客戶端讀 MainA.create）。
+ * 舊名字留著不攔的症狀是「準備功能完全沒反應、托盤卻沒報錯」。
  */
-export const OK_EVENT = "I_am_ok";
+export const OK_EVENT = "player_ready";
 
 /**
  * 伺服器控制 OK 鈕可用狀態的事件。
@@ -544,16 +572,68 @@ export const UNDO_WINDOW_SECONDS = 3;
 // ---------------------------------------------------------------------------
 
 /**
- * 這一場是哪種戰鬥。**`MainA.config.rule`**，一個小寫字串。
+ * 這一場是哪種戰鬥。**`MainA.room_config.rule`**，一個小寫字串。
  *
  * 2026-08-09 實測：打渦的時候讀到 `"raid"`，打任務讀到 `"quest"`，
  * 而且兩種情況 `MovePhaseA` 都會 active —— 也就是**光看階段分不出對手是誰**。
  * 這正是玩家回報的那個 bug：打渦、打任務時準備與約定秒數照樣生效。
  *
- * 除了 `MainA`，`BackA` / `Log` / `Raid_MatchBoot` 上也是同一份 config 物件。
- * 讀 `MainA` 那顆就好 —— 這個檔案裡跟 OK 鈕有關的東西全部以它為準。
+ * ⚠ 2026-09-23 改版前在 `MainA.config.rule`。改版後 `config` 整個沒了，
+ * 換成 `room_config`（同一顆物件也掛在 `BackA` 上）；2026-10-04 對戰中讀到
+ * `"duel"`。讀不到時一律當成不是對戰，所以舊路徑留著的症狀是「準備與秒數
+ * 安靜地整組不生效」，不會報錯。
  */
-export const BATTLE_RULE_PATH = "MainA.config.rule";
+export const BATTLE_RULE_PATH = "MainA.room_config.rule";
+
+/**
+ * 戰鬥場景上的欄位（2026-09-23 改版後，2026-10-04 對著對戰中的雙開實測）。
+ *
+ * | 用途     | 改版前          | 改版後                         |
+ * | -------- | --------------- | ------------------------------ |
+ * | 座位     | `MainA.PLAYER`  | `MainA.player_side`（"A"/"B"） |
+ * | 房號     | `MainA.room`    | `MainA.room_id`                |
+ * | 模式     | `config.rule`   | `room_config.rule`             |
+ * | 打完了   | （看場景狀態）  | `MainA.is_complete === true`   |
+ * | 倒數     | `MovePhaseA.timelimit`（秒） | 各階段的 `battle_timer.timer_left`（**毫秒**） |
+ *
+ * ⚠ 場景名一律是 A（`MainA` / `MovePhaseA`），兩個座位都一樣 —— 坐 B 位的
+ * 那一邊 `player_side` 是 "B"，但場景照樣叫 MainA。
+ */
+export const BATTLE_FIELDS = {
+  seat: "player_side",
+  room: "room_id",
+  roomConfig: "room_config",
+  complete: "is_complete",
+  timer: "battle_timer",
+  timerLeftMs: "timer_left",
+  /** 手牌陣列。元素是卡片物件或 null（打出去／毀掉後留空位，索引不重排）。 */
+  hand: "player_card",
+} as const;
+
+/** 一個階段的倒數有幾毫秒（`battle_timer` 的初始值，畫面從 30 開始）。 */
+export const PHASE_TIMER_MS = 30_000;
+
+/**
+ * 改版後的出牌／轉牌事件 → 改版前的事件名（仲裁吃的是舊名字）。
+ *
+ * 改版後伺服器不再送 `cardclickedA/B`，而是分成「我的」與「對手的」：
+ *
+ *     card_submit_player(index, onField, …)    card_submit_opponent(index, onField, …)
+ *     card_rotate_player(index, flipped, …)    card_rotate_opponent(index, flipped)
+ *
+ * `index` 是 `player_card` / `opponent_card` 陣列的索引（2026-10-04 從
+ * 客戶端的處理函式讀出來的）—— 一場裡同一張牌不變，所以能當不透明 id 用。
+ * 頁面端把它翻回 `cardclicked<座位>(index, onField)` / `cardrotate<座位>(index)`，
+ * `arbitration.ts` 一行都不用改。
+ *
+ * ⚠ 翻譯時座位要用 `player_side` 算，**不是**看事件名 —— 新事件名裡沒有座位。
+ */
+export const CARD_EVENT_MAP = {
+  card_submit_player: { kind: "cardclicked", side: "self" },
+  card_submit_opponent: { kind: "cardclicked", side: "opponent" },
+  card_rotate_player: { kind: "cardrotate", side: "self" },
+  card_rotate_opponent: { kind: "cardrotate", side: "opponent" },
+} as const;
 
 /**
  * 對手是**真人**的兩種 rule。只有這兩種底下插件才該介入。
@@ -664,11 +744,31 @@ export const ACTION_EVENTS = {
  *   frame "2" + input.enabled === false  → 灰色不可按
  * 所以要做「假鎖定」的視覺，切 frame 就夠，不必自己畫。
  *
- * 它只有 1 個 pointerdown listener，也就是送出 I_am_ok 的那個 handler。
+ * ⚠ 2026-09-23 改版後（2026-10-04 讀 MainA.create）：
+ *
+ *     this.decide_btn = this.add.image(570, 630, "decide_btn", 2)
+ *     pointerover/out/down: "2" != frame && setTexture("decide_btn", 1/0/0)
+ *     pointerup:            "2" != frame && (
+ *                             y.T(this, false),               ← 手牌全部鎖起來
+ *                             setTexture("decide_btn", 2),
+ *                             socket.emit("player_ready", this.room_id))
+ *     socket.on("decide_btn_visible", v => v ? frame 0 + setInteractive
+ *                                            : frame 2 + disableInteractive)
+ *
+ * 跟改版前的三個差別都會咬人：
+ *   1. 送出在 **pointerup**，不是 pointerdown
+ *   2. 按完**不會** disableInteractive，靠「frame 是 2 就什麼都不做」擋重複按 ——
+ *      所以壓著的時候玩家再按一次，遊戲自己的 handler 根本不會跑
+ *   3. 按下去會順手把手牌鎖起來（`player_card[i].set_insteractive(false)`，
+ *      拼字是遊戲的），取消準備時要自己解開
  */
 export const OK_BUTTON = {
   scene: "MainA",
-  textureKey: "ok",
+  /** 場景上的欄位名。改版前是 `ok`。 */
+  field: "decide_btn",
+  textureKey: "decide_btn",
+  /** 遊戲在這個指標事件上送出。改版前是 pointerdown。 */
+  pressEvent: "pointerup",
   /** Phaser 座標（canvas 760x680 座標系，不是螢幕座標） */
   position: { x: 570, y: 630 },
   disabledFrame: "2",

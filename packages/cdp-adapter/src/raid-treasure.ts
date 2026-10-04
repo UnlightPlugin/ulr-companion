@@ -71,6 +71,33 @@ export const FRAGMENT_BY_CODE: ReadonlyMap<number, RaidFragmentInfo> = new Map(
   RAID_FRAGMENTS.map((f) => [f.code, f]),
 );
 
+/**
+ * 改版後的渦：stage 看「怪＋區塊（map_index）」。每隻怪佔連續 5 個區塊，從起點依序是
+ * stage 1～5；區塊編號 1～11 繞一圈（誘引之者是 M11、M1…M4）。
+ *
+ * 2026-09-25 從 40 筆結算（raid-learned.json 的 log，全是 Lv1）讀出來的：有記到 stage 的
+ * 每一筆都合，學到的表同鍵 16/16 一致。**只有 Lv1、而且只有這五隻怪有證據**，其他一律不推。
+ */
+export const RAID_STAGE_START_MAP: Readonly<Record<number, number>> = {
+  30108: 1, // 黑死獸 M1–M5
+  30117: 11, // 誘引之者 M11、M1–M4
+  30130: 5, // 龍鯰 M5–M9
+  30120: 5, // 靈龜 M5–M9
+  30114: 6, // 屠殺者 M6–M10
+};
+
+/** 渦房地圖的區塊數（map_index 1～11）。 */
+export const RAID_MAP_COUNT = 11;
+
+/** 照區塊推 stage；沒證據的怪／等級、或區塊不在那隻怪的 5 格裡回 null。 */
+export function raidStageByMap(monsterId: number, level: number, mapIndex: number): number | null {
+  const start = RAID_STAGE_START_MAP[monsterId];
+  if (start === undefined || level !== 1 || !Number.isInteger(mapIndex)) return null;
+  if (mapIndex < 1 || mapIndex > RAID_MAP_COUNT) return null;
+  const stage = ((((mapIndex - start) % RAID_MAP_COUNT) + RAID_MAP_COUNT) % RAID_MAP_COUNT) + 1;
+  return stage <= 5 ? stage : null;
+}
+
 export const FRAGMENT_BY_KEY: ReadonlyMap<RaidFragment, RaidFragmentInfo> = new Map(
   RAID_FRAGMENTS.map((f) => [f.key, f]),
 );

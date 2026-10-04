@@ -28,7 +28,12 @@
  *   gl.viewport       畫到螢幕（framebuffer null）時 × 倍率
  *   gl.scissor        同上
  *   drawingBuffer*    回報邏輯尺寸（Phaser 拿高度翻 scissor 的 y）
+ *   BitmapMask 合成   畫到螢幕時 uResolution × 倍率（見 wrapBitmapMask）
  * ```
+ *
+ * ⚠ BitmapMask 的 shader 用 `gl_FragCoord.xy / uResolution` 取樣，前者是實際像素。
+ * 沒換算的話被遮的東西縮成 1/倍率擠到左下 —— 2026-09-26 回報：長髮（艾茵的髮型）
+ * 的頭髮跑到左下、人物變光頭（頭髮有掛遮罩，其他零件沒有）。
  *
  * 遊戲裡的座標、點擊判定、場景程式一個都沒碰。畫到 RenderTexture／濾鏡用的
  * framebuffer 時不縮放（那些有自己的尺寸）。
@@ -100,6 +105,12 @@
  * ⚠ 全螢幕要使用者手勢。從下拉選單點的那一下有；插件啟動時照配置補套時沒有
  * —— 那時等玩家在遊戲裡點第一下再進去。
  *
+ * ### 2026-09-23 起的桌面版（host "remote"）
+ *
+ * 遊戲 iframe 變成跨來源的 out-of-process iframe，上面這些外殼操作從 iframe
+ * 裡都做不到了。做法不變，改由 Node 另開一條 session 在外殼裡跑 ——
+ * 見 shell-display.ts。這支在 remote 時只列下拉清單、回報玩家選了什麼。
+ *
  * ### 網頁版（遊戲是頂層頁面）
  *
  * 2026-09-13 實機量（Chrome 152、書籤開的分頁）：
@@ -121,18 +132,23 @@
  *
  * ## ③ plugin 分頁
  *
- * Option 的分頁鈕是 `option_cate_btn` 圖集（96×16 × 3 狀態），字烤在圖上，只有
- * sound／language／profile。這三個字的字母拼得出 **plugin**，所以從圖集切字母
- * 拼一格出來，加到同一張貼圖的第二個 source 上，frame 名稱 `plugin_out/over/down`。
+ * Option 的分頁鈕是 `option_category` 圖集（96×22 × 3 狀態 `out/over/up`，`up` 是
+ * 選中），字烤在圖上，只有 volume／language／profile。這三個字的字母拼得出
+ * **plugin**，所以從圖集切字母拼一格出來，加到同一張貼圖的第二個 source 上，frame
+ * 名稱 `plugin_out/over/up`。
  *
- * 然後在場景的 `CATEGORY` 加一個 `plugin` —— 官方 `create()` 用
- * `Object.keys(this.CATEGORY)` 建分頁鈕、`option_reflesh()` 切換，所以**分頁鈕的
- * hover／點擊／切換全走官方程式碼**。我們只畫分頁內容。
+ * 2026-09-23 改版前是 `option_cate_btn` 圖集＋場景上的 `CATEGORY` 表，加一項官方
+ * 就會建鈕、切換。**改版後分頁清單是模組私有陣列**（`h.zv`，摸不到），所以鈕要
+ * 自己建（`create` 事件之後，x = 96 × 官方分頁數）。好在切換是用名字呼叫的：
  *
- * ⚠ `CATEGORY` 是場景實例上的欄位，Phaser 的場景是長命的：加了之後每次進
- * Option 都會建第四顆鈕。所以**只在 frame 真的存在時才加**，而且貼圖重新載入時
- * （`addtexture`）同步補 frame —— 否則 `create()` 會拿不存在的 frame 建鈕。
- * `init()` 每次都把 `option_category` 設回 `"sound"`，不會卡在 plugin。
+ * ```
+ *   官方鈕 pointerup：其他官方鈕設回 _out → this["destroy_" + this.category]()
+ *                     → 自己設 _up → this.category = t → this["show_" + t]()
+ * ```
+ *
+ * 所以在場景**實例**上放 `show_plugin`／`destroy_plugin`，從 plugin 切走時官方
+ * 程式碼自己會呼叫 `destroy_plugin`（我們在裡面收內容、把鈕設回 `_out`）；我們的
+ * 鈕照同一套順序切進來。`init()` 每次都把 `category` 設回第一個，不會卡在 plugin。
  *
  * 分頁內容照抄官方：高解析度那列是 profile 分頁的勾選列（字＋15×15 白框黑勾）；
  * 畫面大小是 language 分頁的下拉（`btn_gene` 按鈕＋黑字、rexUI scrollablePanel
@@ -152,7 +168,7 @@ import { embedJson } from "./embed.js";
 const FLAG = "__ulrDisplay";
 
 /** 腳本版本。**改動注入腳本裡任何一行就 +1**。 */
-export const DISPLAY_SCRIPT_VERSION = 6;
+export const DISPLAY_SCRIPT_VERSION = 12;
 
 export const DEFAULT_DISPLAY_POLL_MS = 500;
 
@@ -171,8 +187,11 @@ export const SIZE_PRESETS = ["x1", "x1.25", "x1.5", "x1.75", "x2"] as const;
 /**
  * 畫面放大倍率的上下限。自訂輸入**只**夾在這裡面 —— 不夾工作區（玩家 2026-09-13
  * 定）；桌面版塞不進工作區的部分會被 Chromium 切掉，下拉清單則只列塞得進的。
+ *
+ * 下限開到 0.5（玩家 2026-09-15 要求可以縮小）。預設清單不列小於 1 的，要打自訂。
+ * 網頁版瀏覽器視窗有最小寬度，縮太小時視窗會比畫面大、右邊留黑。
  */
-export const MIN_SIZE_ZOOM = 1;
+export const MIN_SIZE_ZOOM = 0.5;
 export const MAX_SIZE_ZOOM = 4;
 export type SizeMode = `x${number}` | "fullscreen";
 
@@ -180,7 +199,7 @@ export function isRenderMode(value: unknown): value is RenderMode {
   return (RENDER_MODES as readonly unknown[]).includes(value);
 }
 
-/** `"x1"`、`"x1.75"`、`"x2.3"`（1〜4）或 `"fullscreen"`。 */
+/** `"x1"`、`"x1.75"`、`"x0.8"`（0.5〜4）或 `"fullscreen"`。 */
 export function isSizeMode(value: unknown): value is SizeMode {
   if (value === "fullscreen") return true;
   if (typeof value !== "string" || !/^x\d+(\.\d+)?$/.test(value)) return false;
@@ -277,8 +296,13 @@ export interface DisplayStatus {
   scale: number | null;
   /** 實際的繪圖緩衝，例如 `"1140x1020"`。遊戲還沒起來是 `null`。 */
   buffer: string | null;
-  /** 桌面版（外殼頁面摸得到）還是網頁版。還沒判斷是 `null`。 */
-  host: "desktop" | "web" | null;
+  /**
+   * 桌面版（外殼頁面摸得到）還是網頁版。還沒判斷是 `null`。
+   *
+   * `remote` ＝ 2026-09-23 起的桌面版：遊戲 iframe 在自己的程序、跨來源，
+   * 摸不到外殼 —— 畫面大小／全螢幕做不了，只剩解析度。
+   */
+  host: "desktop" | "web" | "remote" | null;
   /** 現在套用的畫面縮放。 */
   zoom: number | null;
   fullscreen: boolean;
@@ -302,10 +326,10 @@ export interface DisplayPatchOptions {
 }
 
 // ---------------------------------------------------------------------------
-// 文案 —— 照官方 CATEGORY／language 分頁的五種語言
+// 文案 —— 照官方 language 分頁的五種語言
 // ---------------------------------------------------------------------------
 
-/** 分頁標題（`category_name`，官方是「音量設定」「語言設定」那一格）。 */
+/** 分頁標題（左上 (8,64)，官方是「音量設定」「簡介設定」那一行）。 */
 const TAB_TITLE: Record<string, string> = {
   ja: "プラグイン設定",
   en: "Plugin Settings",
@@ -472,9 +496,9 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
   var CFG = JSON.parse(${embedJson(config)});
   var L = CFG.layout;
   var FLAG = ${JSON.stringify(FLAG)};
-  var TAB_KEY = "option_cate_btn";
+  var TAB_KEY = "option_category";
   var TAB = "plugin";
-  var STATES = ["out", "over", "down"];
+  var STATES = ["out", "over", "up"];
   var DATA_ZOOM = "data-ulr-zoom";
 
   function report(payload) {
@@ -691,7 +715,56 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
       if (!canvas.style.width) { h.styleW = ""; canvas.style.width = h.logicalW + "px"; }
       if (!canvas.style.height) { h.styleH = ""; canvas.style.height = h.logicalH + "px"; }
     }
+    wrapBitmapMask(h, sx, sy);
     return h;
+  }
+
+  // BitmapMask 合回螢幕那一下：shader 用 gl_FragCoord.xy / uResolution 取樣，
+  // gl_FragCoord 是實際像素、uResolution 卻是邏輯 760x680 —— 放大 K 倍時被遮的
+  // 東西縮成 1/K 擠到左下（2026-09-26 回報：長髮的頭髮跑到左下、人物光頭）。
+  // 畫到螢幕（沒綁 framebuffer）時把送進去的 uResolution 乘上倍率；
+  // endMask 畫完自己設回邏輯值的那一下不動。
+  function wrapBitmapMask(h, sx, sy) {
+    var pm = h.r.pipelines;
+    var bm = null;
+    try { bm = pm && typeof pm.get === "function" ? pm.get("BitmapMaskPipeline") : null; } catch (e) { bm = null; }
+    if (!bm || typeof bm.endMask !== "function" || typeof bm.set2f !== "function") return;
+    var hadOwn = Object.prototype.hasOwnProperty.call(bm, "endMask");
+    var orig = bm.endMask;
+    bm.endMask = function (mask, gameObject, camera) {
+      var self = this;
+      var set2f = self.set2f;
+      var hadOwnSet = Object.prototype.hasOwnProperty.call(self, "set2f");
+      var first = true;
+      self.set2f = function (name, x, y) {
+        if (first && name === "uResolution" && h.cur === null) {
+          first = false;
+          var a = sx(), b = sy();
+          var args = Array.prototype.slice.call(arguments);
+          args[1] = x * a;
+          args[2] = y * b;
+          return set2f.apply(this, args);
+        }
+        return set2f.apply(this, arguments);
+      };
+      try {
+        // 沒給 camera 時官方不設 uResolution（沿用邏輯值）—— 補一個同尺寸的，讓上面換算得到
+        return orig.call(self, mask, gameObject, camera || { width: self.width, height: self.height });
+      } finally {
+        if (hadOwnSet) self.set2f = set2f; else delete self.set2f;
+      }
+    };
+    h.mask = { pipe: bm, orig: orig, hadOwn: hadOwn };
+  }
+
+  function unwrapBitmapMask(h) {
+    var m = h && h.mask;
+    if (!m) return;
+    try {
+      if (m.hadOwn) m.pipe.endMask = m.orig;
+      else delete m.pipe.endMask;
+    } catch (e) {}
+    h.mask = null;
   }
 
   function setScale(h, s) {
@@ -706,6 +779,7 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
   function unhook(h) {
     if (!h) return;
     var gl = h.gl, canvas = h.canvas;
+    unwrapBitmapMask(h);
     try { delete gl.bindFramebuffer; } catch (e) {}
     try { delete gl.viewport; } catch (e) {}
     try { delete gl.scissor; } catch (e) {}
@@ -1100,8 +1174,37 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
         var d = window.parent.document;
         if (d && d.getElementById("frame_game")) return { kind: "desktop", win: window.parent, doc: d };
       }
-    } catch (e) {}
+    } catch (e) {
+      // ⚠ 2026-09-23 起的桌面版：iframe 跨來源又在自己的程序，讀 parent.document
+      // 直接丟例外。這時**絕不能**退回 "web" —— 網頁版那條會把 iframe 裡的 body
+      // 推到左上角，而外殼把 iframe 擺在 left:-170，畫面左邊就被切掉了。
+      return { kind: "remote", win: window, doc: window.document };
+    }
     return { kind: "web", win: window, doc: window.document };
+  }
+
+  /**
+   * remote：外殼摸不到，畫面大小與全螢幕由 Node 對外殼下（shell-display.ts），
+   * 這裡不做。只把舊版（誤判成網頁版時）留在 iframe 裡的樣式清回官方原樣。
+   * 外殼放大之後 iframe 的 devicePixelRatio 跟著變，高解析度自己會跟上。
+   *
+   * ⚠ 官方 iframe 頁面是 <body style="margin: 0px;">（2026-09-24 從 HTTP 快取
+   * 讀的原始 HTML），外殼的 left:-170 就是照「沒有 margin」算的。margin 清成空字串
+   * 會露出瀏覽器預設的 8px，畫面往右下偏、右邊與底下各被切 8px（玩家回報）。
+   * 所以 margin 要釘回 0px，不是清掉 —— 也順便修好被那一版清掉的頁面。
+   */
+  function clearRemote(sh) {
+    var body = sh.doc.body, html = sh.doc.documentElement;
+    if (body && body.style) {
+      body.style.margin = "0px"; body.style.padding = "";
+      body.style.paddingLeft = ""; body.style.paddingTop = "";
+      body.style.justifyItems = ""; body.style.alignContent = "";
+    }
+    if (html && html.style) { html.style.background = ""; html.style.zoom = ""; }
+    if (html && typeof html.removeAttribute === "function") html.removeAttribute(DATA_ZOOM);
+    st.zoom = 1;
+    st.fullscreen = false;
+    st.fsPending = false;
   }
 
   function zoomOf(mode) {
@@ -1166,6 +1269,11 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
       if (!(f.w >= 0 && f.h > 0) || fullscreenElement(sh)) return 99;
     }
     return Math.min((s.aw - f.w) / b.w, (s.ah - f.h) / b.h);
+  }
+
+  function remoteMaxZoom() {
+    var s = screenSize(window), b = baseInner(null);
+    return Math.min((s.aw - 16) / b.w, (s.ah - 39) / b.h);
   }
 
   /** 兩邊都放大整頁（桌面版是外殼頁、網頁版是遊戲頁本身），理由見檔頭的表。 */
@@ -1346,6 +1454,7 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
   function applySize() {
     var sh = shell();
     st.host = sh.kind;
+    if (sh.kind === "remote") { clearRemote(sh); return; }
     watchFullscreen(sh);
     webFrame(sh, true);
     var mode = st.state.size;
@@ -1373,6 +1482,7 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
     var sh = shell();
     unwatchClick();
     unwatchFullscreen();
+    if (sh.kind === "remote") { clearRemote(sh); return; }
     if (keepWindow) return;
     if (st.fullscreen || fullscreenElement(sh)) leaveFullscreen(sh);
     setZoom(sh, 1);
@@ -1416,7 +1526,7 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
     var doc = window.document;
     var img = tex.source && tex.source[0] && tex.source[0].image;
     if (!doc || !img || !img.width) return null;
-    var base = frameRect(tex, "sound_out");
+    var base = frameRect(tex, "volume_out");
     if (!base) return null;
     var fw = base.w, fh = base.h;
 
@@ -1431,9 +1541,10 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
     out.height = fh * STATES.length;
     var ctx = out.getContext("2d");
 
-    // 2026-09-13 實測 profile 的 r 跟 o 黏在一起（切出 6 段），所以 profile
-    // 只要求至少 5 段、i 從尾端數（e、l、i 各自獨立）。
-    var words = { sound: [5, 5], language: [8, 8], profile: [5, 7] };
+    // 2026-09-25 實測 over 狀態：volume 6 段、language 8 段、profile 7 段。
+    // 舊圖集的 profile 曾經 r 跟 o 黏在一起，所以 profile 還是只要求至少 5 段、
+    // l／i 從尾端數（e、l、i 各自獨立）。
+    var words = { volume: [6, 6], language: [8, 8], profile: [5, 7] };
     var segs = {};
     var ok = true;
     Object.keys(words).forEach(function (w) {
@@ -1444,7 +1555,7 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
     });
 
     // p l u g i n（負數 = 從尾端數）
-    var need = [["profile", 0], ["language", 0], ["sound", 2], ["language", 3], ["profile", -3], ["sound", 3]];
+    var need = [["profile", 0], ["profile", -2], ["volume", 3], ["language", 3], ["profile", -3], ["language", 2]];
     function segAt(n) {
       var list = segs[n[0]];
       return list[n[1] < 0 ? list.length + n[1] : n[1]];
@@ -1461,20 +1572,23 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
       total += gap * (need.length - 1);
     }
 
-    var s0 = ok ? segs.sound[0][0] : 0;
-    var s1 = ok ? segs.sound[segs.sound.length - 1][1] : 0;
+    var s0 = ok ? segs.volume[0][0] : 0;
+    var s1 = ok ? segs.volume[segs.volume.length - 1][1] : 0;
     var center = ok ? (s0 + s1) / 2 : fw / 2;
+    // 段是從 over（沒描邊）量的；out 的字有 1px 描邊、各狀態也會差 1px，
+    // 切字母時左右各多拿一點（lighten 疊上去，多拿的底不會變暗）。
+    var pad = 1;
 
     for (var si = 0; si < STATES.length; si++) {
-      var R = frameRect(tex, "sound_" + STATES[si]);
+      var R = frameRect(tex, "volume_" + STATES[si]);
       if (!R) return null;
       var oy = si * fh;
       ctx.globalCompositeOperation = "source-over";
       ctx.drawImage(atlas, R.x, R.y, R.w, R.h, 0, oy, fw, fh);
 
-      // 用字左邊那段素面把 sound 蓋掉（上下框線那兩列不動）
-      var eraseL = ok ? s0 - 1 : 6;
-      var eraseR = ok ? s1 + 1 : fw - 6;
+      // 用字左邊那段素面把 volume 蓋掉（上下框線那兩列不動）
+      var eraseL = ok ? s0 - 3 : 6;
+      var eraseR = ok ? s1 + 3 : fw - 6;
       var stripX = 3;
       var stripW = eraseL - stripX - 1;
       if (stripW < 2) return null;
@@ -1491,7 +1605,7 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
           var seg = segAt(need[k]);
           var src = frameRect(tex, need[k][0] + "_" + STATES[si]);
           var gw = seg[1] - seg[0];
-          ctx.drawImage(atlas, src.x + seg[0], src.y + 1, gw, fh - 2, cx, oy + 1, gw, fh - 2);
+          ctx.drawImage(atlas, src.x + seg[0] - pad, src.y + 1, gw + pad * 2, fh - 2, cx - pad, oy + 1, gw + pad * 2, fh - 2);
           cx += gw + gap;
         }
         ctx.globalCompositeOperation = "source-over";
@@ -1544,45 +1658,70 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
     return (keys && keys.Option) || null;
   }
 
-  function syncCategory() {
+  /** 貼圖在就補 frame；貼圖重新載入的那一刻（addtexture，發生在 create 之前）也補。 */
+  function syncFrames() {
     var g = window.game;
-    var sc = optionScene();
-    if (!g || !g.textures || !sc || !sc.CATEGORY) return;
-
-    // 貼圖重新載入的那一刻就補 frame（同步發生在 create 之前）
+    if (!g || !g.textures) return false;
     if (st.texManager !== g.textures) {
       if (st.texManager && st.texListener) { try { st.texManager.off("addtexture", st.texListener); } catch (e) {} }
       st.texListener = function (key, tex) {
         if (key !== TAB_KEY) return;
-        try {
-          if (ensureFrames(tex)) sc.CATEGORY[TAB] = CFG.tabTitle;
-          else delete sc.CATEGORY[TAB];
-        } catch (e) {
-          fail(e);
-          try { delete sc.CATEGORY[TAB]; } catch (e2) {}
-        }
+        try { ensureFrames(tex); } catch (e) { fail(e); }
       };
       g.textures.on("addtexture", st.texListener);
       st.texManager = g.textures;
     }
-
     var tex = g.textures.exists(TAB_KEY) ? g.textures.get(TAB_KEY) : null;
-    var ready = false;
-    try { ready = tex ? ensureFrames(tex) : !!(st.tex && sc.CATEGORY[TAB]); } catch (e) { fail(e); }
-    if (ready && !sc.CATEGORY[TAB]) sc.CATEGORY[TAB] = CFG.tabTitle;
-    if (!ready && tex) delete sc.CATEGORY[TAB];
+    try { return !!tex && ensureFrames(tex); } catch (e) { fail(e); return false; }
   }
 
-  /** 插件比玩家晚接上、Option 已經建好了 → 照官方 create 的寫法補建第四顆鈕。 */
+  /**
+   * 官方的分頁名 —— 從圖集的「名_out」frame 讀（清單本身是模組私有的摸不到），
+   * 只留場景上真的有「btn_名」的，照鈕的 x 排。
+   */
+  function officialTabs(sc) {
+    var tex = st.tex;
+    if (!tex || !tex.frames) return [];
+    return Object.keys(tex.frames)
+      .filter(function (n) { return /_out$/.test(n) && n !== TAB + "_out"; })
+      .map(function (n) { return n.slice(0, -4); })
+      .filter(function (n) { return alive(sc["btn_" + n]); })
+      .sort(function (a, b) { return sc["btn_" + a].x - sc["btn_" + b].x; });
+  }
+
+  /** 照官方鈕的 pointerup：其他鈕回 _out → 收掉目前分頁 → 自己 _up → 換 category → 畫。 */
+  function switchToPlugin(sc) {
+    if (sc.category === TAB) return;
+    officialTabs(sc).forEach(function (n) {
+      sc["btn_" + n].setTexture(TAB_KEY, n + "_out").setInteractive();
+    });
+    var destroy = sc["destroy_" + sc.category];
+    if (typeof destroy === "function") destroy.call(sc);
+    sc.btn_plugin.setTexture(TAB_KEY, TAB + "_up").disableInteractive();
+    sc.category = TAB;
+    sc.show_plugin();
+  }
+
+  /** Option 建好之後補一顆鈕接在官方分頁後面，並在場景實例上放 show_plugin／destroy_plugin。 */
   function ensureButton(sc) {
-    if (!sc.CATEGORY[TAB] || alive(sc.btn_plugin)) return;
-    if (!alive(sc.btn_sound) || !alive(sc.category_name)) return;
-    var i = Object.keys(sc.CATEGORY).indexOf(TAB);
-    var btn = sc.add.image(96 * i, 31, TAB_KEY, TAB + "_out").setOrigin(0, 0).setInteractive();
+    if (alive(sc.btn_plugin)) return;
+    var tabs = officialTabs(sc);
+    if (tabs.length === 0) return;
+    var first = sc["btn_" + tabs[0]];
+    var btn = sc.add.image(first.x + 96 * tabs.length, first.y, TAB_KEY, TAB + "_out").setOrigin(0, 0).setInteractive();
     btn.on("pointerover", function () { btn.setTexture(TAB_KEY, TAB + "_over"); });
     btn.on("pointerout", function () { btn.setTexture(TAB_KEY, TAB + "_out"); });
-    btn.on("pointerup", function () { sc.option_category = TAB; sc.events.emit("option_reflesh"); });
+    btn.on("pointerdown", function () { btn.setTexture(TAB_KEY, TAB + "_out"); });
+    btn.on("pointerup", function () { try { switchToPlugin(sc); } catch (e) { fail(e); } });
     sc.btn_plugin = btn;
+    sc.show_plugin = function () {
+      try { detachPage(); mountPage(sc); } catch (e) { fail(e); }
+    };
+    // 官方鈕切走時呼叫的：收內容、鈕回 _out（官方的迴圈只重設它自己的那幾顆）
+    sc.destroy_plugin = function () {
+      try { detachPage(); } catch (e) { fail(e); }
+      try { if (alive(sc.btn_plugin)) sc.btn_plugin.setTexture(TAB_KEY, TAB + "_out").setInteractive(); } catch (e) { fail(e); }
+    };
   }
 
   // =========================================================================
@@ -1652,7 +1791,9 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
 
   /** 桌面版：塞不進工作區的倍率不列出來（清單是掛分頁時建的，不事後藏）。 */
   function sizeOptionsFor(sh) {
-    var zmax = maxZoom(sh);
+    // remote：外殼由 Node 另開 session 調（shell-display.ts），這裡只負責列清單。
+    // 螢幕 iframe 裡也讀得到；視窗框量不到，用官方 ×1 視窗的值（776×719 − 760×680）。
+    var zmax = sh.kind === "remote" ? remoteMaxZoom() : maxZoom(sh);
     return CFG.sizeOptions.filter(function (o) {
       if (o.value === "fullscreen" || o.value === CFG.customOption || o.value === "x1") return true;
       return zoomOf(o.value) <= zmax + 0.01;
@@ -1671,7 +1812,7 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
   function parseZoomInput(text) {
     var n = parseFloat(String(text).replace(/[^0-9.]/g, ""));
     if (!(n > 0)) return null;
-    // 只夾 1〜4，不夾工作區（理由見 applySize）。
+    // 只夾 minZoom〜maxZoom，不夾工作區（理由見 applySize）。
     n = Math.max(CFG.minZoom, Math.min(CFG.maxZoom, n));
     n = Math.round(n * 100) / 100;
     return "x" + String(n);
@@ -1690,7 +1831,7 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
     if (!p || !alive(p.size.btn)) return;
     var sc = p.scene;
     try {
-      var show = sc.option_category === TAB;
+      var show = sc.category === TAB;
       for (var i = 0; i < p.objects.length; i++) {
         var o = p.objects[i];
         if (o === p.size.panel || o === p.size.zone) continue;
@@ -1701,6 +1842,7 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
         o.setVisible(show);
       }
       if (!show) p.size.close();
+      p.title.setText(pick(CFG.tabTitle));
       p.renderLabel.setText(pick(CFG.renderLabel));
       p.check.setPosition(p.renderLabel.getBottomRight().x + L.checkGap, L.renderY);
       var on = st.state.render === "auto";
@@ -1733,6 +1875,11 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
 
   function mountPage(sc) {
     var light = { fontFamily: "font_light", fontSize: 15, resolution: 2 };
+
+    // 分頁標題 —— 照官方 show_language 的 language_label
+    var title = sc.add.text(8, 64, pick(CFG.tabTitle), {
+      fontFamily: "font_heavy", fontSize: 22, resolution: 2, fontStyle: "italic"
+    }).setPadding({ right: 5 }).setOrigin(0, 0);
 
     // 高解析度 ☑ —— 照 profile 分頁的勾選列
     var renderLabel = sc.add.text(L.x, L.renderY, pick(CFG.renderLabel), light).setOrigin(0.5, 0.5);
@@ -1789,16 +1936,13 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
       try { editor.open(); } catch (e) {}
     }
 
-    var objects = [renderLabel, check, sizeLabel, inputBase, inputText].concat(size.objects);
-    var onRefresh = function () { paintPage(); };
-    sc.events.on("option_reflesh", onRefresh);
-    sc.events.on("language_change", onRefresh);
+    var objects = [title, renderLabel, check, sizeLabel, inputBase, inputText].concat(size.objects);
 
     st.page = {
-      scene: sc, objects: objects, size: size, check: check,
+      scene: sc, objects: objects, size: size, check: check, title: title,
       renderLabel: renderLabel, sizeLabel: sizeLabel,
       inputBase: inputBase, inputText: inputText, editor: editor, inputX: inputX,
-      renderTip: renderTip, sizeTip: sizeTip, onRefresh: onRefresh
+      renderTip: renderTip, sizeTip: sizeTip
     };
     st.page.objects.push(renderTip, sizeTip);
     paintPage();
@@ -1807,10 +1951,6 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
   function detachPage() {
     var p = st.page;
     if (!p) return;
-    try {
-      p.scene.events.off("option_reflesh", p.onRefresh);
-      p.scene.events.off("language_change", p.onRefresh);
-    } catch (e) {}
     try { if (p.editor && p.editor.isOpened) p.editor.close(); } catch (e) {}
     st.customOpen = false;
     for (var i = 0; i < p.objects.length; i++) {
@@ -1854,16 +1994,17 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
   // =========================================================================
 
   function syncOption() {
-    syncCategory();
+    var ready = syncFrames();
     var sc = optionScene();
-    var active = !!(sc && sc.scene && sc.scene.isActive() && sc.CATEGORY && sc.CATEGORY[TAB]);
+    var active = !!(ready && sc && sc.scene && sc.scene.isActive());
     if (!active) {
       if (st.page) detachPage();
       return;
     }
     ensureButton(sc);
-    if (!alive(sc.category_name)) return;
-    if (!st.page || st.page.scene !== sc || !alive(st.page.render.btn)) {
+    // 重裝時玩家正停在 plugin 分頁（舊實例拆掉時已切回第一頁，這裡只是保險）
+    if (sc.category !== TAB) return;
+    if (!st.page || st.page.scene !== sc || !alive(st.page.check)) {
       detachPage();
       mountPage(sc);
     } else {
@@ -1887,7 +2028,7 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
     st.game = g;
     syncRender();
     syncTexts();
-    syncCategory();
+    syncFrames();
     var sc = optionScene();
     if (sc && sc.events) {
       var onCreate = function () { try { syncOption(); } catch (e) { fail(e); } };
@@ -1952,13 +2093,22 @@ export function buildDisplayPatchScript(options: DisplayPatchOptions): string {
     st.timer = null;
     detachPage();
     var sc = optionScene();
-    if (sc && sc.CATEGORY && sc.CATEGORY[TAB]) {
+    if (sc && (sc.btn_plugin || sc.show_plugin)) {
       try {
-        if (sc.option_category === TAB) sc.option_category = "sound";
+        // 停在 plugin 分頁上 → 照官方的切法切回第一頁
+        if (sc.category === TAB) {
+          var tabs = officialTabs(sc);
+          if (tabs.length > 0 && sc.scene && sc.scene.isActive()) {
+            var first = tabs[0];
+            sc["btn_" + first].setTexture(TAB_KEY, first + "_up").disableInteractive();
+            sc.category = first;
+            sc["show_" + first]();
+          }
+        }
         if (alive(sc.btn_plugin)) sc.btn_plugin.destroy();
         delete sc.btn_plugin;
-        delete sc.CATEGORY[TAB];
-        if (sc.scene && sc.scene.isActive() && alive(sc.btn_sound) && typeof sc.option_reflesh === "function") sc.option_reflesh();
+        delete sc.show_plugin;
+        delete sc.destroy_plugin;
       } catch (e) {}
     }
     try { if (st.texManager && st.texListener) st.texManager.off("addtexture", st.texListener); } catch (e) {}
@@ -2102,7 +2252,8 @@ export function parseDisplayStatus(raw: string): DisplayStatus {
         : null,
     scale: typeof o["scale"] === "number" ? o["scale"] : null,
     buffer: typeof o["buffer"] === "string" ? o["buffer"] : null,
-    host: o["host"] === "desktop" || o["host"] === "web" ? o["host"] : null,
+    host:
+      o["host"] === "desktop" || o["host"] === "web" || o["host"] === "remote" ? o["host"] : null,
     zoom: typeof o["zoom"] === "number" ? o["zoom"] : null,
     fullscreen: o["fullscreen"] === true,
     fullscreenPending: o["fullscreenPending"] === true,

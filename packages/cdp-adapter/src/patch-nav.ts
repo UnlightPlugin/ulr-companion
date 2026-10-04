@@ -17,29 +17,25 @@
  *
  * ## 跳法：按官方返回鈕，把它最後那句 `scene.start("Lobby")` 改道
  *
- * 大廳那四顆鈕做的事（2026-09-13 從跑著的客戶端 toString 出來的）：
+ * 大廳那四顆鈕做的事（2026-09-24 從跑著的客戶端讀的，2026-09-23 改版後）：
  *
  * ```js
- *   duel:  scene_end().then(() => scene.start("Match", {id}))
- *   quest: t = socket.fetch("quest_port"); scene_end().then(async () => {
- *            [host, port] = await t; scene.start("Quest", {id, host, port}) })
- *   raid:  同上，"raid_port" / "Raid"
- *   deck:  scene.start("Edit", {id, cate:"card", page_card:1, page_mons:1,
- *                               page_weapon:1, page_event:1, page_other:1})
+ *   Lobby.move_scene(t, e) { 淡出 → this.scene.start(t, e) }
+ *   duel → move_scene("Match")   quest → move_scene("Quest")
+ *   raid → move_scene("Raid")    deck  → move_scene("Edit")
  * ```
  *
- * 所以不經過大廳要湊的只有 `id`（每個場景身上都有）跟任務／渦的 host/port。
- * 後者跟大廳伺服器要：**不能拿 `K.Lobby.socket` 直接問**（離開大廳時它已經
- * disconnect 了），照它的 `url` 另開一條臨時 WSClient，問完就關。這條連線
- * 不必 register，只送 `quest_port`／`raid_port` 這種純問路的事件。
+ * 一個參數都不帶：每個場景的 `init()` 自己從 registry 拿 player_id、從
+ * `UL_CONFIG.domains` 挑伺服器。（改版前要湊 `{id, host, port}`，還得另開
+ * 臨時連線跟大廳要 quest_port／raid_port —— 那段已經拿掉。）
  *
- * 湊齊之後**不自己淡出、不自己存檔**，而是：
+ * 所以**不自己淡出、不自己存檔**，而是：
  *
  * ```
  *   1. 把這個場景 ScenePlugin 的 start 蓋成我們的（實例自有屬性）
  *   2. 對官方返回鈕 emit 它吃的那個事件（CFG.backEvent）
- *   3. 官方流程照跑：音效、淡出、Edit 的 db_editdeck、Item 的 db_avatar_update、
- *      Library 的 library_quit、Option 的 option_exit …
+ *   3. 官方流程照跑：音效、淡出、Edit 的 deck_update、Item 的 avatar_update、
+ *      Library 的 update_chara_favorite、Option 的 option_exit …
  *   4. 它最後叫 this.scene.start("Lobby", …) → 進到我們的：
  *      清掉所有非常駐場景 → game.scene.start(目標, 參數)，然後把 start 還原
  * ```
@@ -50,18 +46,17 @@
  * 抄**，遊戲改了離開流程我們也跟著對。
  *
  * 清場走 SceneManager 層的 `game.scene.start(目標)`，之前先把所有**非常駐**
- * 場景 stop 掉（常駐＝MatchBoot／ConnectionCheck／Friend／Loader／MainAAssets／
- * Bug／dev，這些在每個畫面都在，收掉就是把遊戲拆了）。理由見 `Moon/對戰.py`
- * 的 JS_直達：戰鬥畫面是一疊 launch 出來的場景，只 stop 一個會留一團疊影。
+ * 場景 stop 掉（常駐名單在 `scene-jump.ts`，含改版新增的 Session；這些在每個
+ * 畫面都在，收掉就是把遊戲拆了）。理由見 `Moon/對戰.py` 的 JS_直達：戰鬥畫面
+ * 是一疊 launch 出來的場景，只 stop 一個會留一團疊影。
  *
- * ⚠ 改道有看門狗（`armTimeoutMs`）：官方流程沒走到 start（Edit 的 Deck1 空
- * 錯誤框、伺服器不回…）就把 start 還原、按鈕亮回來。Edit 那條路另外在按之前
- * 就先看 `deck1.charaIndex[0]`，空的只按不改道，免得白等。
+ * ⚠ 改道有看門狗（`armTimeoutMs`）：官方流程沒走到 start（Edit 的 deck_update
+ * 被伺服器退回、伺服器不回…）就把 start 還原、按鈕亮回來。
  *
  * ⚠ 改道**只攔 "Lobby"**。其他的 start（Edit 進合成之類）原樣放行並解除。
  *
- * ⚠ Tutorial 的返回鈕是 `create()` 裡的局部變數，場景身上沒有 `back_btn`，
- * 得從 `children.list` 找 texture 是 `back_btn` 的那顆（`backButtonOf`）。
+ * ⚠ Tutorial 的返回鈕是 `create()` 裡的局部變數，場景身上沒有 `btn_back`，
+ * 得從 `children.list` 找 texture 是 `btn_back` 的那顆（`backButtonOf`）。
  * Compo 不放：它的返回是回 Edit，不是回大廳。
  *
  * ## 只在官方返回鈕能按的時候能按
@@ -75,8 +70,9 @@
  *
  * 大廳的貼圖離開大廳就被 `UL_LOADER.force_clean()` 卸掉了（它按場景登記，
  * 場景 unregister 後下一次載入就 `textures.remove`）。所以這支用自己的 key
- * （`__ulrNav_*`）從 `UL_CONFIG.domains.assets.urls` 抓同一批 PNG，`fetch` →
- * blob → `textures.addSpriteSheet`。不走場景的 loader：那個跟 UL_LOADER 的
+ * （`__ulrNav_*`）從 `UL_CONFIG.domains.assets.urls` 抓同一批圖（路徑從
+ * `UL_ASSETS.lobby` 查），`fetch` → blob → `textures.addSpriteSheet`／`addAtlas`。
+ * 不走場景的 loader：那個跟 UL_LOADER 的
  * `once("complete")` 共用，插隊會讓別人的 callback 提早或延後。用自己的 key
  * 也讓 UL_LOADER 完全看不到我們（它只清它登記過的）。每次頁面載一次，約
  * 10 MB 貼圖，卸載時 `textures.remove`。
@@ -100,12 +96,9 @@ const FLAG = "__ulrNav";
  * 腳本版本。**改動注入腳本裡任何一行就 +1**，修 bug 也算。
  * 跟 `patch-present` 一樣是「先拆再裝」，版本號是回報用的。
  */
-export const NAV_SCRIPT_VERSION = 3;
+export const NAV_SCRIPT_VERSION = 4;
 
 export const DEFAULT_NAV_POLL_MS = 500;
-
-/** 問路（quest_port／raid_port）最多等多久。實測 250ms 就回。 */
-export const DEFAULT_NAV_PORT_TIMEOUT_MS = 4_000;
 
 /**
  * 按下官方返回鈕之後最多等多久它走到 scene.start。官方淡出 700ms，Edit 還要
@@ -138,31 +131,33 @@ export const NAV_HOST_SCENES: readonly string[] = [
   "Shop",
   "Item",
   "Lot",
-  "Lot_Special",
   "Library",
   "Option",
   "TutorialNewMenu",
 ];
 
 /**
- * 每個畫面的返回鈕吃哪個事件（2026-09-13 從跑著的客戶端讀的）。
+ * 每個畫面的返回鈕吃哪個事件（2026-09-24 從跑著的客戶端讀的）。
  *
- * `click` 是遊戲自己的 Button 類（pointerup 才 emit "click"）；其餘是直接掛在
- * sprite 上的 handler。沒列的當 `pointerdown`。
+ * 2026-09-23 改版後全部統一成 `this.btn_back = add.image(760,0,"btn_back")`，
+ * 離開寫在 `pointerup`。只有 TutorialNewMenu 還是遊戲自己的 Button 類
+ * （局部變數，`once("click")`）。沒列的當 `pointerup`。
  */
 export const NAV_BACK_EVENT: Record<string, string> = {
-  Match: "click",
-  Shop: "click",
-  Item: "click",
-  Option: "click",
-  TutorialNewMenu: "click",
+  Match: "pointerup",
+  Shop: "pointerup",
+  Item: "pointerup",
+  Option: "pointerup",
   Quest: "pointerup",
-  Raid: "pointerdown",
-  Edit: "pointerdown",
-  Lot: "pointerdown",
-  Lot_Special: "pointerdown",
-  Library: "pointerdown",
+  Raid: "pointerup",
+  Edit: "pointerup",
+  Lot: "pointerup",
+  Library: "pointerup",
+  TutorialNewMenu: "click",
 };
+
+/** 官方返回鈕的貼圖 key，也是場景身上的欄位名（2026-09-23 前叫 `back_btn`）。 */
+export const NAV_BACK_BUTTON = "btn_back";
 
 /** 常駐場景。**一個都不能 stop。** 名單在 `scene-jump.ts`（跟渦戰投降共用）。 */
 export const NAV_PERSISTENT_SCENES: readonly string[] = JUMP_PERSISTENT_SCENES;
@@ -202,7 +197,6 @@ export interface NavStatus {
 export interface NavPatchOptions {
   bindingName: string;
   pollIntervalMs?: number;
-  portTimeoutMs?: number;
   armTimeoutMs?: number;
 }
 
@@ -211,36 +205,21 @@ export interface NavPatchOptions {
 // ---------------------------------------------------------------------------
 
 /**
- * 要載的貼圖。`url` 接在 `UL_CONFIG.domains.assets.urls[0]` 後面，
- * 是 `UL_ASSETS.lobby` 裡的原路徑（2026-09-13 讀的）。
+ * 要載的貼圖：我們的 key → 大廳的 key。路徑、種類、切格**執行期**從
+ * `UL_ASSETS.lobby.{image,spritesheet,atlas}` 查，接在
+ * `UL_CONFIG.domains.assets.urls[0]` 後面。
+ *
+ * ⚠ 不要把路徑寫死：2026-09-23 改版一口氣把 `images/assets/lobby/*.png`
+ * 換成 `images/assets/Lobby/*.avif`（連資料夾大小寫都改），`duel_btn_2` 也從
+ * spritesheet 變成 atlas —— 寫死的那版整排按鈕 404、一顆都沒出來。
  */
 const ASSETS = [
-  {
-    key: "__ulrNav_duel",
-    url: "images/assets/lobby/duel_btn.png",
-    frame: { frameWidth: 160, frameHeight: 160 },
-  },
-  {
-    key: "__ulrNav_duel2",
-    url: "images/assets/lobby/duel_btn_2.png",
-    frame: { frameWidth: 160, frameHeight: 160 },
-  },
-  {
-    key: "__ulrNav_quest",
-    url: "images/assets/lobby/quest_btn.png",
-    frame: { frameWidth: 160, frameHeight: 160 },
-  },
-  { key: "__ulrNav_raid", url: "images/assets/lobby/raid_btn_base.png", frame: null },
-  {
-    key: "__ulrNav_raidIcon",
-    url: "images/assets/lobby/raid_btn_icon.png",
-    frame: { frameWidth: 51, frameHeight: 51 },
-  },
-  {
-    key: "__ulrNav_deck",
-    url: "images/assets/lobby/deck_btn.png",
-    frame: { frameWidth: 112, frameHeight: 112 },
-  },
+  { key: "__ulrNav_duel", lobby: "duel_btn" },
+  { key: "__ulrNav_duel2", lobby: "duel_btn_2" },
+  { key: "__ulrNav_quest", lobby: "quest_btn" },
+  { key: "__ulrNav_raid", lobby: "raid_btn_base" },
+  { key: "__ulrNav_raidIcon", lobby: "raid_btn_icon" },
+  { key: "__ulrNav_deck", lobby: "deck_btn" },
 ];
 
 /** 動畫。照抄大廳 `loader()` 裡的定義（frameRate／repeat 都一樣）。 */
@@ -253,14 +232,8 @@ const ANIMS = [
     frameRate: 20,
     repeat: -1,
   },
-  {
-    key: "__ulrNav_duel_2",
-    texture: "__ulrNav_duel2",
-    start: 0,
-    end: 3,
-    frameRate: 15,
-    repeat: -1,
-  },
+  // 官方：{ frames: "duel_btn_2" } —— atlas 的全部 frame（名字是 duel_btn_2-0.png…）。
+  { key: "__ulrNav_duel_2", texture: "__ulrNav_duel2", all: true, frameRate: 15, repeat: -1 },
   {
     key: "__ulrNav_quest",
     texture: "__ulrNav_quest",
@@ -338,9 +311,9 @@ export function buildNavPatchScript(options: NavPatchOptions): string {
     version: NAV_SCRIPT_VERSION,
     bindingName: options.bindingName,
     pollIntervalMs: options.pollIntervalMs ?? DEFAULT_NAV_POLL_MS,
-    portTimeoutMs: options.portTimeoutMs ?? DEFAULT_NAV_PORT_TIMEOUT_MS,
     armTimeoutMs: options.armTimeoutMs ?? DEFAULT_NAV_ARM_TIMEOUT_MS,
     backEvent: NAV_BACK_EVENT,
+    backButton: NAV_BACK_BUTTON,
     targets: NAV_TARGETS,
     targetScene: NAV_TARGET_SCENE,
     hosts: NAV_HOST_SCENES,
@@ -412,28 +385,57 @@ export function buildNavPatchScript(options: NavPatchOptions): string {
     return null;
   }
 
-  function loadOne(G, base, a) {
-    if (G.textures.exists(a.key)) return Promise.resolve();
-    return fetch(base + a.url).then(function (r) {
-      if (!r.ok) throw new Error(a.url + " -> HTTP " + r.status);
+  /**
+   * 大廳那一項在 UL_ASSETS 裡長怎樣：{ kind, url, frame, atlasURL }。
+   * 找不到回 null —— 官方又改名的話，原因要講得出是哪一項。
+   */
+  function lobbyAsset(name) {
+    var A = window.UL_ASSETS && window.UL_ASSETS.lobby;
+    if (!A) return null;
+    var kinds = ["image", "spritesheet", "atlas"];
+    for (var k = 0; k < kinds.length; k++) {
+      var list = A[kinds[k]] || [];
+      for (var i = 0; i < list.length; i++) {
+        var e = list[i];
+        if (!e || e.key !== name) continue;
+        if (kinds[k] === "atlas") return { kind: "atlas", url: e.textureURL, atlasURL: e.atlasURL };
+        return { kind: kinds[k], url: e.url, frame: e.frameConfig || null };
+      }
+    }
+    return null;
+  }
+
+  function fetchImage(url) {
+    return fetch(url).then(function (r) {
+      if (!r.ok) throw new Error(url + " -> HTTP " + r.status);
       return r.blob();
     }).then(function (blob) {
       return new Promise(function (resolve, reject) {
         var u = URL.createObjectURL(blob);
         var img = new Image();
-        img.onload = function () {
-          try {
-            if (!G.textures.exists(a.key)) {
-              if (a.frame) G.textures.addSpriteSheet(a.key, img, a.frame);
-              else G.textures.addImage(a.key, img);
-            }
-            resolve();
-          } catch (e) { reject(e); }
-          try { URL.revokeObjectURL(u); } catch (e) {}
-        };
-        img.onerror = function () { try { URL.revokeObjectURL(u); } catch (e) {} reject(new Error(a.url + " 解不開")); };
+        img.onload = function () { try { URL.revokeObjectURL(u); } catch (e) {} resolve(img); };
+        img.onerror = function () { try { URL.revokeObjectURL(u); } catch (e) {} reject(new Error(url + " 解不開")); };
         img.src = u;
       });
+    });
+  }
+
+  function loadOne(G, base, a) {
+    if (G.textures.exists(a.key)) return Promise.resolve();
+    var src = lobbyAsset(a.lobby);
+    if (!src || !src.url) return Promise.reject(new Error("UL_ASSETS.lobby 裡沒有 " + a.lobby));
+    var json = src.kind === "atlas"
+      ? fetch(base + src.atlasURL).then(function (r) {
+          if (!r.ok) throw new Error(src.atlasURL + " -> HTTP " + r.status);
+          return r.json();
+        })
+      : Promise.resolve(null);
+    return Promise.all([fetchImage(base + src.url), json]).then(function (got) {
+      if (G.textures.exists(a.key)) return;
+      var img = got[0];
+      if (src.kind === "atlas") G.textures.addAtlas(a.key, img, got[1]);
+      else if (src.kind === "spritesheet" && src.frame) G.textures.addSpriteSheet(a.key, img, src.frame);
+      else G.textures.addImage(a.key, img);
     });
   }
 
@@ -443,7 +445,8 @@ export function buildNavPatchScript(options: NavPatchOptions): string {
       if (G.anims.exists(a.key)) continue;
       G.anims.create({
         key: a.key,
-        frames: G.anims.generateFrameNumbers(a.texture, { start: a.start, end: a.end }),
+        // all：跟官方 frames: "貼圖 key" 一樣，整張貼圖的 frame 照名字排。
+        frames: a.all ? a.texture : G.anims.generateFrameNumbers(a.texture, { start: a.start, end: a.end }),
         frameRate: a.frameRate,
         repeat: a.repeat
       });
@@ -475,15 +478,15 @@ export function buildNavPatchScript(options: NavPatchOptions): string {
   // 哪個場景、能不能按
   // -------------------------------------------------------------------------
 
-  /** 官方返回鈕。多半是 sc.back_btn；Tutorial 那顆是局部變數，只能從 children 找。 */
+  /** 官方返回鈕。多半是 sc.btn_back；Tutorial 那顆是局部變數，只能從 children 找。 */
   function backButtonOf(sc) {
-    if (alive(sc.back_btn)) return sc.back_btn;
+    if (alive(sc[CFG.backButton])) return sc[CFG.backButton];
     try {
       var list = sc.children && sc.children.list;
       if (!list) return null;
       for (var i = 0; i < list.length; i++) {
         var o = list[i];
-        if (o && o.texture && o.texture.key === "back_btn" && alive(o)) return o;
+        if (o && o.texture && o.texture.key === CFG.backButton && alive(o)) return o;
       }
     } catch (e) {}
     return null;
@@ -519,16 +522,7 @@ export function buildNavPatchScript(options: NavPatchOptions): string {
   // 跳：問路 → 改道 → 按官方返回鈕
   // -------------------------------------------------------------------------
 
-  // 問路（ulrAskPort）與清場（ulrStopContentScenes）在 scene-jump.ts，跟渦戰投降共用。
-
-  function findId(G, sc) {
-    var K = G.scene.keys;
-    var cands = [sc, K.Lobby, K.Match, K.Raid, K.Quest, K.Edit];
-    for (var i = 0; i < cands.length; i++) {
-      if (cands[i] && cands[i].id) return cands[i].id;
-    }
-    return null;
-  }
+  // 清場（ulrStopContentScenes）在 scene-jump.ts，跟渦戰投降共用。
 
   /** 把改道拆掉，ScenePlugin 還原。armed 是 st.armed。 */
   function disarm(st) {
@@ -586,45 +580,26 @@ export function buildNavPatchScript(options: NavPatchOptions): string {
     var targetScene = CFG.targetScene[target];
     if (!targetScene || targetScene === key) return;
 
-    // Edit 的 Deck1 第一格空的話官方鈕只會彈錯誤框、不走 scene.start ——
-    // 那就只按它（讓它彈），不改道、不鎖按鈕，免得白等看門狗。
-    if (key === "Edit") {
-      try {
-        if (sc.deck1 && sc.deck1.charaIndex && sc.deck1.charaIndex[0] === null) {
-          backButtonOf(sc).emit(CFG.backEvent[key] || "pointerdown");
-          return;
-        }
-      } catch (e) {}
-    }
-
+    // ⚠ 2026-09-23 改版後大廳四顆鈕都是 move_scene(目標) —— 不帶任何參數：
+    // 各場景的 init() 自己從 registry 拿 player_id、從 UL_CONFIG.domains 挑伺服器。
+    // 以前要湊的 {id, host, port}（跟大廳問 quest_port／raid_port）全都不用了。
+    //
+    // Edit 離開前會送 deck_update，伺服器不收就留在原地（input 重開）、不走
+    // scene.start —— 那條路由看門狗收尾。
+    var b = backButtonOf(sc);
+    if (b === null) return fail(st, target, "來源畫面已經不能離開了");
     st.busy = true;
     paint(st);
-
-    var id = findId(G, sc);
-    if (!id) return fail(st, target, "挖不到玩家 id");
-    var params = { id: id };
-    if (target === "deck") {
-      params.cate = "card";
-      params.page_card = 1; params.page_mons = 1; params.page_weapon = 1;
-      params.page_event = 1; params.page_other = 1;
-    }
-    var portEvent = target === "quest" ? "quest_port" : target === "raid" ? "raid_port" : null;
-    var ready = portEvent ? ulrAskPort(G, portEvent, CFG.portTimeoutMs) : Promise.resolve(null);
-
-    // ⚠ 所有「湊不齊就放棄」的檢查都在按返回鈕之前 —— 按下去就回不了頭了。
-    ready.then(function (addr) {
-      if (addr) { params.host = addr.host; params.port = addr.port; }
-      var b = backButtonOf(sc);
-      if (b === null || !canLeave(sc)) throw new Error("來源畫面已經不能離開了");
-      arm(st, sc, key, target, targetScene, params);
+    try {
+      arm(st, sc, key, target, targetScene, undefined);
       // 按官方返回鈕：音效、淡出、存檔全是它做的。哪個事件見 CFG.backEvent。
-      var ev = CFG.backEvent[key] || "pointerdown";
+      var ev = CFG.backEvent[key] || "pointerup";
       try { if (ev === "click" && "clicked" in b) b.clicked = false; } catch (e) {}
       b.emit(ev);
-    }).catch(function (e) {
+    } catch (e) {
       disarm(st);
       fail(st, target, String((e && e.message) || e));
-    });
+    }
   }
 
   function fail(st, target, why) {
@@ -689,7 +664,7 @@ export function buildNavPatchScript(options: NavPatchOptions): string {
 
       if (target === "duel") {
         var duel = sc.add.sprite(cx, cy, "__ulrNav_duel", 0).setScale(s).setDepth(L.depth);
-        var duel2 = sc.add.sprite(cx, cy, "__ulrNav_duel2", 0).setScale(s).setDepth(L.depth + 1).setVisible(false);
+        var duel2 = sc.add.sprite(cx, cy, "__ulrNav_duel2", null).setScale(s).setDepth(L.depth + 1).setVisible(false);
         btn.objs.push(duel, duel2);
         btn.hit = duel;
         btn.over = function () {

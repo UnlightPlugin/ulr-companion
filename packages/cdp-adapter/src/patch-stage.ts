@@ -1,84 +1,57 @@
 /**
  * 把隱藏地圖加進遊戲自己的開房對話框
  * =====================================
- * `match-room.ts` 是**插件替玩家開房**（我們自己送 `match_room_make`），所以
- * 想開哪張圖就填哪個代號，遊戲的選單長什麼樣一點關係都沒有。這一支是另一件
- * 事：讓玩家用**遊戲原本的「創建對戰房間」對話框**開隱藏地圖 —— 房名、規則、
- * 密碼、AP 全部走官方流程，只是「對戰地點」那個下拉多了四列。
+ * `match-room.ts` 是**插件替玩家開房**（我們自己送開房請求），所以想開哪張圖
+ * 就填哪個代號，遊戲的選單長什麼樣一點關係都沒有。這一支是另一件事：讓玩家用
+ * **遊戲原本的「創建對戰房間」對話框**開隱藏地圖 —— 房名、規則、密碼、AP 全部
+ * 走官方流程，只是「對戰地點」那個下拉多了四列。
  *
- * ## 兩個地方都要改，缺一個就會壞
+ * ## 2026-09-23 改版之後選單從哪來
  *
- * 2026-08-15 從跑著的客戶端挖出來的（chunk 403）：
+ * 從跑著的客戶端挖出來的（chunk 191，2026-09-27）：
  *
  * ```js
- *   class u extends Phaser.Scene {            // ← Match 場景
- *     static STAGES = { …, tcn: [ {name,value} × 11 ] }
- *     async room_make(cross) { … n = new T(this, cross) … }
- *   }
- *
- *   class T extends Phaser.GameObjects.Container {   // ← 開房對話框
- *     constructor(scene, cross) {
- *       scene.add.existing(this)                     // ← ①
- *       this.stage = u.STAGES[lang][0].value
- *       this.stage_dropdown = this.create_dropdown(…, this.create_stage_child())
- *       this.stage_dropdown.on("child.down", (item) => {
- *         this.stage = u.STAGES[lang].find((s) => s.name === item.name)?.value   // ← ②
- *       })
+ *   class Match extends Phaser.Scene {
+ *     preload() { … this.load.json("MatchUITexts", `…/data-${lang}/MatchUITexts.json`) }
+ *     create_panel(ch) {                              // ← 「創建對戰房間」
+ *       f = this.create_stage_option(x, y)
+ *       … R = { room_name, stage: f.value, … }
+ *       this.socket_channel.fetch("create_room", this.deck_now, ch.channel, R)
  *     }
- *     create_stage_child() {
- *       for (let i = 0; i < 11; i++) { … u.STAGES[lang][i].name … }              // ← ③
+ *     create_stage_option(x, y) {
+ *       const i = this.cache.json.get("MatchUITexts")
+ *       return this.rexUI.add.dropDownList({ options: i.room_config.stage.option, … })
  *     }
  *   }
  * ```
  *
- * - **② 只認 `STAGES`**：選了哪一列是拿**名稱**回去查代號的。沒把地圖加進
- *   `STAGES` 就選不出值，`this.stage` 會是 `undefined`，而伺服器對 `null`／
- *   `undefined` 的回應是 `fail: 20`。
- * - **③ 寫死 11**：`STAGES` 加到 15 筆，選單畫出來的仍然只有前 11 列。
+ * `room_config.stage.option` 是 `{text, value}` 的陣列，`value` 是**數字**
+ * （0〜9，「隨機」是 999），選了哪一列就直接拿那一列的 `value` 送出去 ——
+ * 不再是舊版那種「拿名稱回查代號」、也沒有寫死 11 列的迴圈。所以只要在對話框
+ * 建出來**之前**把四筆推進那個陣列就好。
  *
- * 所以兩邊都要動：`STAGES` 加四筆（給 ②），`create_stage_child` 補四列（給 ③）。
+ * ⚠ **不能只推一次。** `preload()` 每次進 Match 都會 `load.json("MatchUITexts")`：
+ * 快取裡有那個鍵時 Phaser 會跳過，但換語言、或快取被清掉時會換成一份新的
+ * 陣列，我們加的就不見了。所以這支包的是 `create_stage_option` —— 每次開
+ * 對話框前檢查一次、少了就補，**活的那一份陣列是誰都無所謂**。
  *
- * ## ⚠ 對話框那個類別在模組外面拿不到
- *
- * `T` 是模組內的區域變數，webpack 沒有把它匯出（同一個模組只匯出兩個東西，
- * 都是場景類別）。`req(id)` 拿得到 `STAGES` 那個類別，拿不到對話框。
- *
- * 解法是攔 ① ——「對話框把自己加進場景」那一刻：
- *
- * ```
- *   玩家按開房 → room_make()  ← 我們包在外面，暫時換掉 this.add.existing
- *                    │
- *                    └─ new T(scene) → scene.add.existing(this)   ← 攔到了
- *                                        │  這時 constructor 還沒跑到
- *                                        │  create_stage_child()
- *                                        └─ 從實例拿到 T.prototype，補丁裝上去
- *                              → this.create_stage_child()  ← 已經是補過的版本
- * ```
- *
- * ⚠ **`room_make` 是 async，但這樣攔是安全的**：`new T(...)` 在第一個 `await`
- * 之前就跑完了（它在 `new Promise(executor)` 的 executor 裡，那是同步執行的），
- * 所以 `orig.apply()` 一回到我們手上，對話框早就建好了 —— `finally` 裡還原
- * `add.existing` 不會太早。
- *
- * ⚠ 換掉的是**場景自己那個 factory 實例**上的欄位，不是
- * `GameObjectFactory.prototype`。攔截只在開房對話框的那幾微秒內存在，遊戲其餘
- * 每一次 `add.existing` 都完全沒有被碰過。
+ * ⚠ 改版前（2026-08-15）那一版攔的是 `Match.STAGES`／`room_make`／
+ * `create_stage_child`，改版後三個都不存在了，舊腳本會一直停在「等對戰大廳」。
  *
  * ## 這支不改變伺服器判定
  *
- * 送出去的仍然是遊戲自己送的 `match_room_make`，參數也是玩家自己在對話框上選
- * 的。伺服器本來就收這四個代號（2026-08-15 實測開房不會被拒），插件只是讓那
- * 四個選項在選單上**出得來**。§12 硬規則 4 講的是「不得改變伺服器判定」，這裡
- * 一個位元都沒有替玩家決定。
+ * 送出去的仍然是遊戲自己送的 `create_room`，參數也是玩家自己在對話框上選的。
+ * 插件只是讓那四個選項在選單上**出得來**。§12 硬規則 4 講的是「不得改變伺服器
+ * 判定」，這裡一個位元都沒有替玩家決定。
  */
 
 import { embedJson } from "./embed.js";
 
-/** 一張要加進選單的地圖。跟 `HIDDEN_STAGES` 同形狀。 */
+/** 一張要加進選單的地圖。 */
 export interface HiddenStage {
-  /** 3 位數字串代號，例如 `"010"`。 */
+  /** 3 位數字串代號，例如 `"011"`。頁面上會轉成數字（改版後選單的 `value` 是數字）。 */
   value: string;
-  /** 選單上顯示的名稱。⚠ 遊戲是**用名稱回查代號**的，不能跟官方那 11 個撞名。 */
+  /** 選單上顯示的名稱。不能跟官方那 11 個撞名（同名兩列玩家分不出來）。 */
   name: string;
 }
 
@@ -104,19 +77,15 @@ export interface HiddenStageStatus {
   installed: boolean;
   /** 頁面上那支腳本的版本。跟 {@link HIDDEN_STAGE_SCRIPT_VERSION} 對不上就是舊版。 */
   version: number | null;
-  /** 遊戲目前的語言（`STAGES` 是按語言分的）。 */
+  /** 遊戲目前的語言。 */
   lang: string | null;
-  /** 已經加進 `STAGES[lang]` 的代號。 */
+  /** 已經（或下次開對話框時會）出現在選單裡的代號，3 位數字串。 */
   added: string[];
   /**
    * 選單本身補上了沒。
    *
-   * ⚠ **`false` 不是錯誤**，是「玩家還沒開過一次『創建對戰房間』」—— 對話框
-   * 那個類別要等它第一次被 new 出來才碰得到（見檔頭）。而補丁是在同一次
-   * constructor 裡、畫選單**之前**裝上的，所以玩家第一次開對話框就看得到
-   * 那四列，不必開兩次。
-   *
-   * UI 要照實說，不要因為「反正下次就會生效」就寫成已生效。
+   * 改版後的選單每次開對話框都從快取的陣列現建，而補丁包的是建選單那一支，
+   * 所以裝上去就等於補上了 —— 跟 `installed` 同步。欄位留著是給 UI 的舊判斷用。
    */
   dropdownPatched: boolean;
   /**
@@ -134,35 +103,37 @@ export interface HiddenStageStatus {
 /**
  * 腳本版本。改動注入腳本就 +1。
  *
- * ⚠ **這支不靠版本號決定要不要重裝** —— 跟 `match-room` 那支不同，這裡每次
- * 安裝都先 `restore()` 再從原狀重來，所以「頁面上跑著舊版」這個坑在設計上就
- * 不存在。版本號純粹是回報用的：玩家回報怪狀況時，`status()` 帶回來的這個數字
- * 能一眼看出他頁面上跑的是哪一版。
+ * ⚠ **這支不靠版本號決定要不要重裝** —— 每次安裝都先 `restore()` 再從原狀重來。
+ * 版本號純粹是回報用的：玩家回報怪狀況時，`status()` 帶回來的這個數字能一眼
+ * 看出他頁面上跑的是哪一版。
+ *
+ * 2 = 2026-09-23 改版後的做法（包 `create_stage_option`、推進 `MatchUITexts`）。
  */
-export const HIDDEN_STAGE_SCRIPT_VERSION = 1;
+export const HIDDEN_STAGE_SCRIPT_VERSION = 2;
 
 const FLAG = "__ulrStages";
 
-/** 頁面端共用的那幾支函式。install 與 status 都要用，所以抽出來。 */
+/** 頁面端共用的那幾支函式。install、status、uninstall 都要用，所以抽出來。 */
 const SHARED = `
   var FLAG = ${JSON.stringify(FLAG)};
 
   /**
-   * 帶 STAGES 的那個類別（＝ Match 場景）。
+   * 有 create_stage_option 的那個場景類別（＝ Match）。
    *
    * ⚠ **不要求場景是 active 的** —— 玩家在對戰中、在牌組畫面時 Match 都不是
-   * active，但類別一直都在，補丁也一直有效。要求 active 會讓「先裝好再去大廳」
-   * 這個最自然的順序失敗。
+   * active，但類別一直都在，補丁也一直有效。
    */
-  function stageClass() {
+  function matchClass() {
     var keys = window.game && window.game.scene && window.game.scene.keys;
     if (!keys) return null;
     var direct = keys.Match;
-    if (direct && direct.constructor && direct.constructor.STAGES) return direct.constructor;
-    // 場景鍵換名字的話從全部場景裡找。找的是「有 STAGES 這個 static」的類別。
+    if (direct && direct.constructor && typeof direct.constructor.prototype.create_stage_option === "function") {
+      return direct.constructor;
+    }
     for (var k in keys) {
       var sc = keys[k];
-      if (sc && sc.constructor && sc.constructor.STAGES) return sc.constructor;
+      if (sc && sc.constructor && sc.constructor.prototype &&
+          typeof sc.constructor.prototype.create_stage_option === "function") return sc.constructor;
     }
     return null;
   }
@@ -171,15 +142,31 @@ const SHARED = `
     return typeof window.lang === "string" && window.lang.length > 0 ? window.lang : null;
   }
 
-  /** 目前語言那一份地圖清單。⚠ 是**活的陣列**，push 進去就是改到遊戲本體。 */
-  function stageList(K, lang) {
-    var t = K && K.STAGES && K.STAGES[lang];
-    return t && typeof t.length === "number" ? t : null;
+  /**
+   * 選單的來源陣列。⚠ 是**活的陣列**，push 進去就是改到遊戲本體。
+   * 還沒載進快取時是 null —— 那不是錯誤，補丁會在開對話框那一刻補。
+   */
+  function optionList() {
+    var c = window.game && window.game.cache && window.game.cache.json;
+    var t = c && typeof c.get === "function" ? c.get("MatchUITexts") : null;
+    var o = t && t.room_config && t.room_config.stage && t.room_config.stage.option;
+    return o && typeof o.length === "number" ? o : null;
   }
 
   /** 我們加進去的那幾筆（靠自己蓋的記號認，不靠位置）。 */
   function isOurs(entry) {
     return !!(entry && entry.__ulr === true);
+  }
+
+  /** 選單的數字代號 → 插件用的 3 位數字串。 */
+  function code(v) {
+    return ("00" + v).slice(-3);
+  }
+
+  function oursIn(list) {
+    var out = [];
+    if (list) for (var i = 0; i < list.length; i++) if (isOurs(list[i])) out.push(code(list[i].value));
+    return out;
   }
 `;
 
@@ -187,7 +174,7 @@ const SHARED = `
  * 產生要注入的 JS。純函式，可完整測試，不需要活著的遊戲。
  *
  * 重跑一次是安全的：一進去就先把上一次加的東西全部拆掉，再從**原始**的
- * `room_make` 重新包 —— 不會疊補丁，也不會重複加地圖。
+ * `create_stage_option` 重新包 —— 不會疊補丁，也不會重複加地圖。
  */
 export function buildHiddenStageScript(options: HiddenStagePatchOptions): string {
   assertValidStages(options.stages);
@@ -207,189 +194,94 @@ export function buildHiddenStageScript(options: HiddenStagePatchOptions): string
 
   // 先把上一次裝的拆乾淨。**重裝一律從原狀開始**，這樣「改了腳本再跑一次」
   // 跟「第一次跑」的結果完全一樣。
-  //
-  // 回傳上一次攔到的對話框 prototype —— 那個東西只有在對話框被 new 出來的時候
-  // 才拿得到，丟掉的話玩家得再開一次對話框才會恢復。重連時會重裝，所以這條路
-  // 一點都不罕見。
   function restore() {
     var st = window[FLAG];
-    if (!st) return null;
+    if (!st) return;
     // ⚠ 上一次那支等待中的 timer 一定要停掉。不停的話它會照著**舊的**設定
     // 繼續往頁面上裝，而且兩支都在跑，誰後到誰贏。
     try { if (st.timer !== null && st.timer !== undefined) clearInterval(st.timer); } catch (e) {}
     try {
-      if (st.sceneProto && st.sceneProto.__ulrOrigRoomMake) {
-        st.sceneProto.room_make = st.sceneProto.__ulrOrigRoomMake;
-        delete st.sceneProto.__ulrOrigRoomMake;
-      }
-    } catch (e) {}
-    var prevDialog = null;
-    try {
-      if (st.dialogProto && st.dialogProto.__ulrOrigStageChild) {
-        st.dialogProto.create_stage_child = st.dialogProto.__ulrOrigStageChild;
-        delete st.dialogProto.__ulrOrigStageChild;
-        prevDialog = st.dialogProto;
+      if (st.sceneProto && st.sceneProto.__ulrOrigStageOption) {
+        st.sceneProto.create_stage_option = st.sceneProto.__ulrOrigStageOption;
+        delete st.sceneProto.__ulrOrigStageOption;
       }
     } catch (e) {}
     try {
-      var K = stageClass();
-      var list = stageList(K, gameLang());
-      if (list) {
-        for (var i = list.length - 1; i >= 0; i--) if (isOurs(list[i])) list.splice(i, 1);
-      }
+      var list = optionList();
+      if (list) for (var i = list.length - 1; i >= 0; i--) if (isOurs(list[i])) list.splice(i, 1);
     } catch (e) {}
-    return prevDialog;
   }
 
   /**
-   * 照抄原版 create_stage_child() 裡那一段的樣式（2026-08-15 的 bundle）。
+   * 把四張補進選單的來源陣列。已經在的不重複加 —— 每次開對話框都會叫。
    *
-   * ⚠⚠ **底圖一定要比文字先建出來。**
-   *
-   * rexUI 的 label 不管誰畫在上面 —— 這兩個都是直接進場景的 display list
-   * （parentContainer 是 null，實測過），而 display list 是**後建的畫在上面**。
-   * 原版是寫在物件字面值裡的：background 那一行在前、text 那一行在後，
-   * 而字面值的屬性是**照原始碼順序求值**的，所以原版剛好是對的。
-   *
-   * 這裡為了量寬度得先把 text 存進變數 —— 一不小心就把順序反過來，於是
-   * **白色底圖蓋住字**。2026-08-15 實測踩過：那四列變成純白，而物件的每一個
-   * 欄位（text、color、visible、座標、尺寸）跟官方那 11 列**逐欄比對完全一樣**，
-   * 只有 display list 的索引差一位。看屬性是查不出來的。
-   *
-   * ⚠ 原版還會呼叫模組內的 fit_single() 把太長的名稱縮到 141px 寬。那支在模組
-   * 外面拿不到，所以這裡自己縮 —— 不縮的話長名稱會壓到捲軸上。
+   * 代號已經在官方清單裡 = 官方後來把它放進選單了，不必再加。
+   * 名稱跟官方的撞 = 同名兩列玩家分不出來，也不加。
    */
-  function makeLabel(scene, name) {
-    var background = scene.rexUI.add.roundRectangle({ color: 16777215 });
-    var text = scene.add.text(0, 0, name, {
-      fontFamily: "font_light", color: "black", fontSize: 13
-    }).setResolution(2);
-    // 縮到 9 為止 —— 再小就看不清楚了，寧可讓它稍微超出去。
-    var size = 13;
-    while (size > 9 && text.width > 141) { size--; text.setFontSize(size); }
-    return scene.rexUI.add.label({
-      background: background,
-      text: text,
-      space: { left: 3, right: 3, top: 5, bottom: 5 },
-      // ⚠ name 就是遊戲回查代號的鍵（child.down 拿 item.name 去 STAGES 裡 find）。
-      // 這一格填錯的症狀是「選得到但開房被拒 fail:20」。
-      name: name
-    });
-  }
-
-  /** 把我們加的那幾張補到選單的 sizer 尾巴。原版那 11 列完全沒有動到。 */
-  function appendRows(scene, sizer) {
-    var st = window[FLAG];
-    if (!st || !sizer || typeof sizer.add !== "function") return;
+  function ensure(list) {
+    var added = [];
+    if (!list) return added;
     for (var i = 0; i < CFG.stages.length; i++) {
       var s = CFG.stages[i];
-      // 只補**真的加進 STAGES** 的那幾張。加不進去的（撞名之類）補了也選不出值。
-      if (st.added.indexOf(s.value) === -1) continue;
-      sizer.add(makeLabel(scene, s.name), { expand: true });
+      var v = Number(s.value);
+      var mine = false, clash = false;
+      for (var j = 0; j < list.length; j++) {
+        var e = list[j];
+        if (!e) continue;
+        if (e.value === v || e.text === s.name) {
+          if (isOurs(e)) mine = true; else clash = true;
+          break;
+        }
+      }
+      if (clash) continue;
+      if (!mine) list.push({ text: s.name, value: v, __ulr: true });
+      added.push(s.value);
     }
+    return added;
   }
 
-  /**
-   * 從對話框實例拿到它的 prototype，把 create_stage_child 包起來。
-   *
-   * 這支是在 constructor 進行到一半時被叫的（見檔頭），所以包完之後**同一次**
-   * constructor 才會去叫 create_stage_child —— 玩家第一次開對話框就看得到。
-   */
-  function patchDialog(child) {
-    if (!child) return;
-    patchDialogProto(Object.getPrototypeOf(child));
-  }
-
-  function patchDialogProto(proto) {
-    var st = window[FLAG];
-    if (!st || !proto || typeof proto.create_stage_child !== "function") return;
-
-    var orig = proto.__ulrOrigStageChild || proto.create_stage_child;
-    proto.create_stage_child = function () {
-      var sizer = orig.apply(this, arguments);
+  /** 包住 create_stage_option：建選單之前先補一次。 */
+  function hook(K) {
+    var proto = K.prototype;
+    var orig = proto.__ulrOrigStageOption || proto.create_stage_option;
+    proto.create_stage_option = function () {
       try {
-        appendRows(this.scene, sizer);
+        var st = window[FLAG];
+        var got = ensure(optionList());
+        if (st && got.length > 0) st.added = got;
       } catch (e) {
         // 補不上就只是少那四列，官方的 11 列仍然正常 ——
         // 絕不能因為這個讓玩家的開房對話框爆掉。
       }
-      return sizer;
+      return orig.apply(this, arguments);
     };
-    proto.__ulrOrigStageChild = orig;
-    st.dialogProto = proto;
-    st.dropdownPatched = true;
+    proto.__ulrOrigStageOption = orig;
+    st.sceneProto = proto;
   }
 
   /**
-   * 包住 room_make：只在它跑的那一瞬間換掉場景的 add.existing，攔下對話框。
-   *
-   * ⚠ 換的是場景自己那個 factory **實例**上的欄位，用完就刪掉，
-   * Phaser 的 GameObjectFactory.prototype 一個字都沒改。
+   * 還沒進過 Match（快取裡沒有 MatchUITexts）時，就先照設定算出「開對話框時
+   * 會補上的那幾張」—— 撞不撞得到官方要等真的陣列在才知道，那時 hook 會更新。
    */
-  function hookRoomMake(K) {
-    var proto = K.prototype;
-    var orig = proto.__ulrOrigRoomMake || proto.room_make;
-    if (typeof orig !== "function") return false;
-
-    proto.room_make = function () {
-      var factory = this.add;
-      var hadOwn = Object.prototype.hasOwnProperty.call(factory, "existing");
-      var prev = factory.existing;
-      factory.existing = function (obj) {
-        try {
-          patchDialog(obj);
-        } catch (e) {
-          // 攔不到就是選單少四列，開房本身照舊。
-        }
-        return prev.apply(this, arguments);
-      };
-      try {
-        return orig.apply(this, arguments);
-      } finally {
-        // ⚠ 一定要還原，而且這裡還原**不會太早**：room_make 雖然是 async，
-        // new <對話框>() 在第一個 await 之前就跑完了（見檔頭）。
-        if (hadOwn) factory.existing = prev;
-        else delete factory.existing;
-      }
-    };
-    proto.__ulrOrigRoomMake = orig;
-    return true;
+  function planned() {
+    var out = [];
+    for (var i = 0; i < CFG.stages.length; i++) out.push(CFG.stages[i].value);
+    return out;
   }
 
   /** 真正做事的那一段。回 false = 這次還不行，等一下再來。 */
   function apply() {
-    var K = stageClass();
+    var K = matchClass();
     if (K === null) {
-      st.reason = "遊戲還沒載到對戰大廳那一段（找不到帶 STAGES 的場景類別）";
+      st.reason = "遊戲還沒載到對戰大廳那一段（找不到 Match 場景類別）";
       return false;
     }
-    var lang = gameLang();
-    if (lang === null) { st.reason = "讀不到遊戲語言（window.lang）"; return false; }
-    var list = stageList(K, lang);
-    if (list === null) { st.reason = "Match.STAGES 裡沒有語言 " + lang; return false; }
-
-    st.sceneProto = K.prototype;
-    st.added = [];
-    for (var i = 0; i < CFG.stages.length; i++) {
-      var s = CFG.stages[i];
-      var clash = false;
-      for (var j = 0; j < list.length; j++) {
-        // 代號重複 = 官方後來把它放進選單了，不必再加。
-        // 名稱重複 = 更嚴重：遊戲是拿名稱回查代號的，撞名會讓官方那張選不出正確的值。
-        if (list[j] && (list[j].value === s.value || list[j].name === s.name)) { clash = true; break; }
-      }
-      if (clash) continue;
-      list.push({ name: s.name, value: s.value, __ulr: true });
-      st.added.push(s.value);
-    }
-
-    // 這一輪如果是重裝，上一輪攔到的對話框 prototype 直接接回去 —— 不必等玩家
-    // 再開一次對話框。
-    if (prevDialog !== null) { patchDialogProto(prevDialog); prevDialog = null; }
-
-    var hooked = hookRoomMake(K);
+    hook(K);
+    var list = optionList();
+    st.added = list ? ensure(list) : planned();
     st.installed = true;
-    st.reason = hooked ? null : "場景上沒有 room_make —— 地圖加進去了，但選單補不上";
+    st.dropdownPatched = true;
+    st.reason = null;
     return true;
   }
 
@@ -401,13 +293,13 @@ export function buildHiddenStageScript(options: HiddenStagePatchOptions): string
     });
   }
 
-  var prevDialog = restore();
+  restore();
 
   // ⚠ 狀態物件**先建起來**，即使這次裝不上 —— 它要掛住重試的 timer，而且
   // status() 得靠它分辨「還在等」跟「根本沒裝」。
   var st = {
     version: CFG.version, installed: false, added: [], dropdownPatched: false,
-    sceneProto: null, dialogProto: null, timer: null, reason: null
+    sceneProto: null, timer: null, reason: null
   };
   window[FLAG] = st;
 
@@ -436,9 +328,8 @@ export function buildHiddenStageScript(options: HiddenStagePatchOptions): string
  * 問頁面現在的狀態。
  *
  * ⚠ **不能只看 `window.__ulrStages` 在不在。** 遊戲重載會把旗標跟補丁一起沖掉，
- * 那種情況兩邊一致；但玩家換語言時 `STAGES[lang]` 會換成另一份陣列，旗標還在、
- * 地圖卻不在選單裡了。所以這裡回報的 `added` 是**當場從 `STAGES` 數出來的**，
- * 不是把安裝當時記的數字唸一遍。
+ * 那種情況兩邊一致；但補丁本身也可能被別的東西換掉（另一份腳本、舊版插件），
+ * 所以這裡確認 `create_stage_option` 真的還是包過的那一支。
  */
 export const HIDDEN_STAGE_STATUS_EXPRESSION = `(function () {
   "use strict";
@@ -456,18 +347,16 @@ export const HIDDEN_STAGE_STATUS_EXPRESSION = `(function () {
         reason: st ? st.reason : null
       });
     }
-    // ⚠ 這裡**當場從 STAGES 數**，不是把安裝時記的數字唸一遍 —— 玩家換遊戲
-    // 語言時 STAGES[lang] 會換成另一份陣列，旗標還在、地圖卻已經不在選單裡。
-    var list = stageList(stageClass(), lang);
-    var added = [];
-    if (list) {
-      for (var i = 0; i < list.length; i++) if (isOurs(list[i])) added.push(list[i].value);
-    }
+    var K = matchClass();
+    var hooked = !!(K && K.prototype.__ulrOrigStageOption);
+    // 陣列在、裡面也有我們的 → 照實數；陣列被遊戲換掉了（換語言）→ 下次開
+    // 對話框時 hook 會補回去，報安裝時算好的那份。
+    var live = oursIn(optionList());
     return JSON.stringify({
-      installed: true, version: st.version, lang: lang, added: added,
-      dropdownPatched: st.dropdownPatched === true, waiting: false,
-      // 旗標在、地圖卻不在清單裡 —— 多半是玩家換了遊戲語言。
-      reason: added.length === 0 ? "地圖不在目前語言的清單裡（換過語言？）—— 重新啟用一次" : st.reason
+      installed: hooked, version: st.version, lang: lang,
+      added: live.length > 0 ? live : st.added,
+      dropdownPatched: hooked, waiting: false,
+      reason: hooked ? st.reason : "開房選單的補丁被換掉了（遊戲重載過？）—— 重新啟用一次"
     });
   } catch (e) {
     return JSON.stringify({
@@ -477,7 +366,7 @@ export const HIDDEN_STAGE_STATUS_EXPRESSION = `(function () {
   }
 })()`;
 
-/** 拆掉：地圖從 `STAGES` 移除、`room_make` 與選單還原。 */
+/** 拆掉：地圖從選單的來源陣列移除、`create_stage_option` 還原。 */
 export const HIDDEN_STAGE_UNINSTALL_EXPRESSION = `(function () {
   "use strict";
   ${SHARED}
@@ -487,24 +376,15 @@ export const HIDDEN_STAGE_UNINSTALL_EXPRESSION = `(function () {
     // ⚠ 還在等大廳的那支 timer 要先停。不停的話玩家關掉功能之後，等他進了大廳
     // 地圖又自己冒出來 —— 而且畫面上寫著「未啟用」。
     try { if (st.timer !== null && st.timer !== undefined) clearInterval(st.timer); } catch (e) {}
-    if (st.sceneProto && st.sceneProto.__ulrOrigRoomMake) {
-      st.sceneProto.room_make = st.sceneProto.__ulrOrigRoomMake;
-      delete st.sceneProto.__ulrOrigRoomMake;
+    if (st.sceneProto && st.sceneProto.__ulrOrigStageOption) {
+      st.sceneProto.create_stage_option = st.sceneProto.__ulrOrigStageOption;
+      delete st.sceneProto.__ulrOrigStageOption;
     }
-    if (st.dialogProto && st.dialogProto.__ulrOrigStageChild) {
-      st.dialogProto.create_stage_child = st.dialogProto.__ulrOrigStageChild;
-      delete st.dialogProto.__ulrOrigStageChild;
-    }
-    // ⚠ 每一種語言都要掃過。玩家可能在啟用之後換過語言，那樣會有兩份清單被加過。
-    var K = stageClass();
     var removed = 0;
-    if (K && K.STAGES) {
-      for (var lg in K.STAGES) {
-        var list = stageList(K, lg);
-        if (!list) continue;
-        for (var i = list.length - 1; i >= 0; i--) {
-          if (isOurs(list[i])) { list.splice(i, 1); removed++; }
-        }
+    var list = optionList();
+    if (list) {
+      for (var i = list.length - 1; i >= 0; i--) {
+        if (isOurs(list[i])) { list.splice(i, 1); removed++; }
       }
     }
     delete window[FLAG];
@@ -521,8 +401,8 @@ export class InvalidHiddenStageError extends Error {
 /**
  * 代號必須是 3 位數字、名稱不得空白。
  *
- * ⚠ 這不是防呆而已：代號是原封不動送進 `match_room_make` 的，格式錯了伺服器
- * 回的是 `fail: 20`，而那個代碼在這個專案裡被誤判成「AP 不足」很久。
+ * ⚠ 這不是防呆而已：代號會原封不動變成選單的 `value` 送進 `create_room`，
+ * 格式錯了伺服器會拒絕開房。
  */
 function assertValidStages(stages: readonly HiddenStage[]): void {
   const seen = new Set<string>();

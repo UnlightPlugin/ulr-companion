@@ -1,68 +1,114 @@
 /**
  * 商店的購買數量 —— 把「最多 20 個」放寬成檔位表
  * ==============================================
- * 玩家在商店按「購買」→ 跳出確認框 → 點數量鈕 → 下拉選 1..20 → Yes。
+ * 玩家在商店按「購買」→ 跳出確認框 → 點數量下拉 → 選 1..20 → ok。
  * 一次最多 20 個，買 500 個白色石楠要重複 25 次。
  *
- * ## ⭐ 那個 20 **只存在於客戶端**
+ * ## ⚠ 伺服器也有 20 了 —— 所以要分批送
  *
- * 2026-09-12 在跑著的客戶端上挖出來的。確認框開啟時的上限算法
- * （`755.js`，`V.Create` 呼叫點前）本來算得很完整：
+ * 2026-09-12（改版前）實測買 21 與 1001 都成功，那時 20 只存在於客戶端。
+ * **2026-09-23 改版後伺服器也 clamp 到 20，而且是安靜的**：2026-09-26 送
+ * `shop_buy(6622, 21)` 回 `{error: null, rm_process: null}`（＝成功），gem 卻只扣
+ * 20×540、持有只 +20。只看回應會以為買了 21。
+ *
+ * 所以放寬下拉之外，還要把 ok 送出的那一個 `shop_buy` **拆成每批 ≤20 依序送**
+ * （使用者 2026-09-26 同意多送請求）。做法見下面「分批」。
+ *
+ * ## 2026-09-23 改版後的形狀（v2）
+ *
+ * 改版把 Shop 場景整個重寫了：v1 盯的 `sc.panel`、`get_selected_item`、
+ * `V.Create` 全都不見了。現在（2026-09-26 從跑著的客戶端挖的）：
  *
  * ```js
- *   t = Math.trunc(this.gem / i.price.gem);          // 買得起幾個
- *   for (const s of p.hs) { … 取各種 ccoin 的最小值 … }
- *   null !== i.upper && t > i.upper && (t = i.upper); // 購買上限
- *   …item/other 的特殊上限…
- *   t > 20 && (t = 20);                              // ← 就這一刀
- *   null !== i && "rm" in i && … && (t = 10, …);     // 課金品：另一套，在那刀之後
- *   this.panel = V.Create(this, 430, 309, t);
+ *   get_max_purchase(t) {
+ *     let e = [20];                                  // ← 那刀換成陣列的第一個元素
+ *     t.price.gem > 0 && e.push(trunc(money.gem / t.price.gem));
+ *     …item_10001..item_10111 同樣各推一個…
+ *     …單件頭像零件／貼圖：已有推 0、沒有推 1…
+ *     t.upper !== null && e.push(upper - 已買數);
+ *     return Math.min(...e);
+ *   }
+ *   create_purchase_screen(t) {
+ *     const i = this.get_max_purchase(t);
+ *     for (E = 0; E < max(i, 1); E++) o[E] = { text: "" + (E+1), value: E+1 };
+ *     d = this.rexUI.add.dropDownList({ options: o, list: { onButtonClick: …
+ *           n.quantity = option.value; 更新餘額預覽 … } });
+ *     ok → this.socket.fetch("shop_buy", n.id, n.quantity)
+ *   }
  * ```
  *
- * 送出的封包是 `socket.emit("shop_buy_steam", id, cate1, cate2, index, buy_quantity)`
- * —— 數量就是一個普通數字。**實測買 21 與 1001 都成功**（gem 與持有數的差額
- * 完全對得上），伺服器沒有 clamp、沒有分批。
+ * 選項陣列 `o` 是區域變數，但 dropDownList 有 `setOptions()`，清單是點開時才
+ * 照 `options` 現建的 —— 所以**在官方建完確認框之後把選項換掉**就好。點選
+ * 走的還是官方的 `onButtonClick`，它只讀 `option.value`，數量、餘額預覽、
+ * 送出的封包全是官方自己算的。
  *
- * ## 做法：把 `sc.panel` 換成我們的
+ * ## 做法：包一層 `create_purchase_screen`
  *
- * 官方對數量面板只做三件事：建（`this.panel = V.Create(...)`）、顯
- * （數量鈕 `this.panel.setVisible(true)`）、藏（No / 關閉 `setVisible(false)`）。
- * **換掉 `sc.panel` 這個參考**，後面兩件事就自動操作我們的面板。
+ * 在 Shop 場景的實例上蓋一個同名方法（原型上那支不動），進去先照官方跑完，
+ * 再從這次新增的顯示物件裡找出那個 dropDownList 換選項。場景物件是長命的，
+ * 但保險起見輪詢檢查「現在那支還是不是我們的」，不是就重包。
  *
- * 點選檔位時**不自己改任何東西** —— 對官方那個面板 `emit("child.down", {name})`，
- * 讓官方自己的 handler 去改 `buy_quantity`、更新 gem/ccoin/cmem 的餘額預覽、
- * 發 `test_quantity_select`。官方 handler 只讀 `e.name`（實測），所以一個
- * `{name: "500"}` 就夠。官方哪天改了預覽邏輯，我們跟著對。
+ * ## 分批：包一層 `socket.fetch`
+ *
+ * ok 鈕的 handler 是區域閉包，碰不到；它做的事是
+ * `t = await this.socket.fetch("shop_buy", id, quantity)`，然後
+ * `error === null && rm_process === null` 就 `show_dialogue_success()`（重抓
+ * player / 持有數、跳成功框），否則 `shop_error(error)`。
+ *
+ * 所以在 socket 物件上蓋一支 `fetch`：只有「`shop_buy`、商品是剛才我們換過
+ * 下拉的那件、數量 > 20」才接手，其餘原樣放行。接手後依序送
+ * `shop_buy(id, ≤20)`，全部成功就回一個成功形狀給官方 handler，官方自己
+ * 重抓資料、跳成功框。
+ *
+ * - **一定要依序。** 官方的 fetch 用 `once(事件名)` 對回應，同名請求並行會搶。
+ * - **任何一批失敗就停。** 一批都沒買到 → 把那個失敗回應原樣交回（官方跳
+ *   錯誤框）；買到一部分 → 回成功形狀讓官方重抓資料（畫面上的 GEM 與持有數
+ *   才是對的），短少寫進 `reason`。
+ * - **數量超過開框時算的上限就一個都不送**，回官方的通用錯誤。
+ * - **對帳搭官方的重抓**：成功框重抓 player 之後，輪詢比對 gem 實扣與預期，
+ *   結果放在 `lastBuy`。不為了驗證多送請求。
  *
  * ## ⚠ 只放寬「有 GEM 價格」的商品
  *
- * 全店 506 件商品分四種計價（2026-09-12 掃的）：
- *
- * | 計價           | 件數 | 處理                                   |
- * | -------------- | ---- | -------------------------------------- |
- * | GEM            | 133  | 換檔位表                               |
- * | GEM + ccoin    | 9    | 換檔位表（官方已取各幣別最小值）       |
- * | 課金（`rm`）   | 157  | **完全不碰**（`t=10`、單次日幣十萬）   |
- * | 純 cmem（碎片）| 207  | **完全不碰**（`t` 從常數 20 起算）     |
- *
- * 閘門是 `price.gem > 0 && !("rm" in item)`。課金品其實有雙重保險 —— `t=10`
- * 本來就在那刀之後覆寫 —— 但**檔位表若無差別套用仍會動到它**（1..10 會變成
- * 1,2,3,5,7,10），所以閘門不能省。這是使用者直接要求的。
+ * 全店 504 件（2026-09-26 掃的）：`price.gem > 0` 的 141 件、課金
+ * `price.rm > 0` 的 158 件、碎片 `price.item_10011 > 0` 的 199 件。
+ * 閘門是 `price.gem > 0 && !(price.rm > 0) && !(price.point > 0)`。
+ * 課金品、碎片、活動點數商品一律不碰 —— 使用者直接要求的。
  *
  * ## ⚠ 對帳：算出來的上限要跟官方那份對得上
  *
- * 我們得自己重算 `t`（官方算完就砍成 20，原值不在任何地方）。重算的公式是
- * 照抄的，但官方哪天改了公式我們會靜靜地算錯 —— 所以換面板之前先對帳：
- * 官方面板裡的數字個數必須正好是 `min(t, 20)`。對不上就**不碰**，原因寫進
- * `reason`。寧可少放寬，不能放錯 —— GEM 很難賺，這是使用者的原話。
+ * 官方算完就砍成 20，原值不在任何地方，所以要自己重算。但只在**官方回 20**
+ * 的時候才需要：官方回的數字 < 20 表示那刀沒作用，真正的上限就是它。
+ * 回 20 時頭像零件／貼圖那兩條不可能在作用（它們只推 0 或 1），剩下的
+ * 就是「各幣別買得起幾個」與「upper − 已買」，照抄重算。
+ *
+ * 重算出來 < 20 表示官方公式變了 —— **不碰**，原因寫進 `reason`。官方下拉的
+ * 選項數也必須正好是 `max(官方上限, 1)`。寧可少放寬，不能放錯 —— GEM 很難賺，
+ * 這是使用者的原話。
  *
  * ## 檔位表：`1 2 3 5 7 10 15 20 30 50 100 200 300 500`
  *
- * 只顯示 ≤ `t` 的檔位 —— 跟官方一樣，不夠買 20 個就看不到 20。
+ * 只顯示 ≤ 上限的檔位 —— 跟官方一樣，不夠買 20 個就看不到 20。
  *
  * **沒有「最大」鈕**，會誤選。**沒有輸入框** —— 這遊戲全程只用滑鼠，沒有
- * 打字的習慣。兩個都是使用者否決的。清單最多 14 項，比官方的 20 項短，
- * 面板高度規則照抄（≥10 項就 220px 加捲軸），只會比現在更不需要捲。
+ * 打字的習慣。兩個都是使用者否決的。
+ *
+ * ## 專武：「使用場所」那格填角色名
+ *
+ * 詳細面板左欄的「使用場所」是 `create` 裡建一次的 `this.item_place`（"-"），
+ * 官方之後**從來不更新它** —— 武器永遠顯示「-」。2026-10-02 使用者選了把專武
+ * 的角色名填在這格（版面、字型、對齊全用官方那個 Text，零改動）。
+ *
+ * 資料是客戶端自己的：`cache.json.get("WeaponCards")[].chara`（如毒鐵線 →
+ * `"cc022"`），對 `cache.json.get("Characters")["cc022"].name_<lang>` 就是
+ * 「薩爾卡多」。不送請求。2026-10-02 掃的 238 把：207 把對得到角色、26 把
+ * `null`（妖魔短劍那類通用）、5 把 `"cc000"`（魔之刀身那類素材），後兩種照舊「-」。
+ *
+ * 做法跟購買框一樣：在場景實例上包 `show_detail`（點格子、買完重抓都走它），
+ * 官方跑完再補寫 `item_place`。判斷商品是武器照抄官方 `get_item_info`：
+ * `item[0].type === TG_SLOT_CARD(2)` 且 `slot === WEAPON_CARD(0)`。常數是從
+ * ShopData 反推的，保險起見再對一次**官方顯示出來的名字就是那把武器的名字**，
+ * 對不上就留「-」—— 寧可不標，不能標錯。
  *
  * ⚠⚠ **注入腳本裡的註解不能有反引號。** 整段腳本住在一個 template literal
  * 裡，一個沒跳脫的反引號會讓字串提早結束。詳細的東西寫在這個檔頭。
@@ -76,17 +122,27 @@ const FLAG = "__ulrShop";
 /**
  * 腳本版本。**改動注入腳本裡任何一行就 +1**，修 bug 也算。
  * 跟 `patch-present` 一樣是「先拆再裝」，版本號是回報用的。
+ *
+ * 2：2026-09-23 改版後重寫，改包 `create_purchase_screen`。
+ * 3：伺服器也截在 20，改成分批送（包 `socket.fetch`）。
+ * 4：專武 —— 包 `show_detail`，「使用場所」填角色名。
  */
-export const SHOP_SCRIPT_VERSION = 1;
+export const SHOP_SCRIPT_VERSION = 4;
 
 /**
- * 盯著 `sc.panel` 換人沒有的間隔。
- *
- * 比其他補丁的 500ms 短：確認框一開，玩家的下一個動作就是點數量鈕，中間
- * 只有幾百毫秒。就算沒趕上（官方面板先亮了），下一輪會連同「正在顯示」
- * 一起換過去，玩家看到的是清單當場變了一下，不會壞。
+ * 商品 `item[0]` 是武器卡的 type / slot（官方 `p.Nt.TG_SLOT_CARD` 與
+ * `p.x$[slot] === "WEAPON_CARD"`）。模組常數碰不到，2026-10-02 從 ShopData
+ * 反推：type 2 slot 0 的 15 件全是武器、type 2 slot 2 的 36 件全是事件卡。
  */
-export const DEFAULT_SHOP_POLL_MS = 200;
+export const SHOP_WEAPON_ITEM = { type: 2, slot: 0 } as const;
+
+/**
+ * 檢查「Shop 場景上那支 `create_purchase_screen` 還是不是我們包的」的間隔。
+ *
+ * 包裝是裝在方法上的，玩家按購買時一定走得到，不用搶時間。這個輪詢只是
+ * 應付場景還沒建（剛接上遊戲時可能還在登入畫面）或被換掉的情況。
+ */
+export const DEFAULT_SHOP_POLL_MS = 500;
 
 /**
  * 檔位表。使用者 2026-09-12 給的，不要自己增減。
@@ -97,17 +153,11 @@ export const QUANTITY_TIERS: readonly number[] = [
   1, 2, 3, 5, 7, 10, 15, 20, 30, 50, 100, 200, 300, 500,
 ];
 
-/** 官方那刀的值。對帳用：官方面板裡的數字個數應該正好是 `min(t, 這個)`。 */
-export const OFFICIAL_QUANTITY_CAP = 20;
-
 /**
- * 官方數量面板的座標（`V.Create(this, 430, 309, t)`）。
- *
- * ⚠ 這只是**後路**。正常路徑是讀官方那個面板的 `x` / `y` —— 官方挪了位置
- * 我們跟著挪。
+ * 官方那刀的值，也是伺服器一次肯給的上限。對帳用（官方上限應該正好是
+ * `min(我們算的, 這個)`），也是分批時每批的大小。
  */
-const PANEL_X = 430;
-const PANEL_Y = 309;
+export const OFFICIAL_QUANTITY_CAP = 20;
 
 export interface ShopPatchOptions {
   pollIntervalMs?: number;
@@ -118,13 +168,30 @@ export interface ShopPatchOptions {
 export interface ShopStatus {
   installed: boolean;
   version: number | null;
-  /** 我們的面板現在掛在 `sc.panel` 上（＝確認框開著而且是 GEM 商品）。 */
+  /** 我們換過選項的那個數量下拉還活著（＝確認框開著而且是 GEM 商品）。 */
   active: boolean;
   /** 最近一次提供的檔位。`[]` = 還沒換過。 */
   tiers: number[];
   /** 最近一次算出的上限（買得起 ∩ 購買上限）。`null` = 還沒算過。 */
   max: number | null;
+  /** 最近一次分批購買。`null` = 還沒分批買過。 */
+  lastBuy: ShopBatchResult | null;
   reason: string | null;
+}
+
+export interface ShopBatchResult {
+  /** 玩家選的數量。 */
+  requested: number;
+  /** 伺服器回成功的批次加起來的數量。 */
+  bought: number;
+  /** 送了幾批。 */
+  batches: number;
+  /** 照 `bought` 算的預期 gem 變化（負數）。 */
+  expectedGemDelta: number;
+  /** 官方重抓 player 之後看到的實際 gem 變化。`null` = 還沒重抓到。 */
+  gemDelta: number | null;
+  /** `gemDelta === expectedGemDelta`。`null` = 還沒重抓到。 */
+  verified: boolean | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -143,6 +210,54 @@ const SHARED = `
   function alive(o) {
     return !!(o && o.scene);
   }
+
+  /** 物件自己身上的 key 是我們蓋的包裝，就還原（原本沒有自己的就刪掉）。 */
+  function unhook(obj, key, ownOrig) {
+    if (obj && Object.prototype.hasOwnProperty.call(obj, key) &&
+        obj[key] && obj[key].__ulrShopWrap) {
+      if (ownOrig) obj[key] = ownOrig;
+      else delete obj[key];
+    }
+  }
+
+  /**
+   * 把我們蓋的 create_purchase_screen、show_detail 與 socket.fetch 拿掉，露出原型
+   * 上那支。使用場所那格還原成官方的「-」。
+   */
+  function unwrap(st) {
+    try { unhook(st.scene, "create_purchase_screen", st.ownOrig); } catch (e) {}
+    try { unhook(st.scene, "show_detail", st.detailOwnOrig); } catch (e) {}
+    try {
+      var place = st.scene && st.scene.item_place;
+      if (alive(place) && place.text !== "-") place.setText("-");
+    } catch (e) {}
+    try { unhook(st.socket, "fetch", st.socketOwnOrig); } catch (e) {}
+    st.scene = null;
+    st.ownOrig = null;
+    st.detailOwnOrig = null;
+    st.socket = null;
+    st.socketOwnOrig = null;
+    st.pending = null;
+  }
+
+  function statusOf(st) {
+    return JSON.stringify({
+      installed: true,
+      version: st.version,
+      active: alive(st.dd),
+      tiers: st.tiers || [],
+      max: st.max,
+      lastBuy: st.lastBuy ? {
+        requested: st.lastBuy.requested,
+        bought: st.lastBuy.bought,
+        batches: st.lastBuy.batches,
+        expectedGemDelta: st.lastBuy.expectedGemDelta,
+        gemDelta: st.lastBuy.gemDelta,
+        verified: st.lastBuy.verified
+      } : null,
+      reason: st.reason
+    });
+  }
 `;
 
 /**
@@ -159,8 +274,7 @@ export function buildShopPatchScript(options: ShopPatchOptions = {}): string {
     pollIntervalMs: options.pollIntervalMs ?? DEFAULT_SHOP_POLL_MS,
     tiers,
     officialCap: OFFICIAL_QUANTITY_CAP,
-    x: PANEL_X,
-    y: PANEL_Y,
+    weaponItem: SHOP_WEAPON_ITEM,
   };
 
   return `(function () {
@@ -168,171 +282,298 @@ export function buildShopPatchScript(options: ShopPatchOptions = {}): string {
   var CFG = JSON.parse(${embedJson(config)});
   ${SHARED}
 
-  /** 把上一次掛的東西拆乾淨。**重裝一律從原狀開始。** */
+  /** 把上一次掛的東西拆乾淨。**重裝一律從原狀開始。** v1 留下的也拆得掉。 */
   function restore() {
     var st = window[FLAG];
     if (!st) return;
     try { if (st.timer !== null && st.timer !== undefined) clearInterval(st.timer); } catch (e) {}
-    putBack(st);
+    unwrap(st);
     delete window[FLAG];
-  }
-
-  /** 把 sc.panel 還給官方那份，我們的銷毀。 */
-  function putBack(st) {
-    try {
-      var sc = sceneOf("Shop");
-      if (sc && st.mine && sc.panel === st.mine && st.orig) sc.panel = st.orig;
-    } catch (e) {}
-    try { if (st.mine && st.mine.destroy) st.mine.destroy(); } catch (e) {}
-    st.mine = null;
-    st.orig = null;
   }
 
   // -------------------------------------------------------------------------
   // 閘門與上限
   // -------------------------------------------------------------------------
 
-  function selectedItem(sc) {
-    try { return sc.get_selected_item(); } catch (e) { return null; }
+  /** 只放寬「有 GEM 價格」的商品。課金、碎片、活動點數一律不碰。 */
+  function eligible(item) {
+    var p = item && item.price;
+    if (!p) return false;
+    if (p.rm > 0) return false;
+    if (p.point > 0) return false;
+    return p.gem > 0;
   }
 
   /**
-   * 只放寬「有 GEM 價格」的商品。
-   *
-   * ⚠ 課金品（rm）、碎片（純 cmem）、活動商店（cate1 === "event"）一律不碰。
-   * 課金品的 t=10 其實在官方那刀之後才覆寫，但檔位表若無差別套用仍會把
-   * 1..10 變成 1,2,3,5,7,10 —— 閘門不能省。
+   * 官方回 20 時的真正上限：各幣別買得起幾個、upper 減已買，取最小。
+   * 算不出來（缺餘額欄位）回 null。
    */
-  function eligible(sc, item) {
-    if (!item || !item.price) return false;
-    if (sc.select && sc.select.cate1 === "event") return false;
-    if (("rm" in item) && item.rm !== undefined && item.rm !== null) return false;
-    return item.price.gem > 0;
-  }
-
-  /**
-   * 官方的上限算法（GEM 分支），照抄，只少了最後那刀 t>20。
-   *
-   * ccoin 那段跟官方一樣不檢查價格是否為 0：除以 0 得 Infinity，
-   * Infinity < t 永遠 false，等於沒限制。
-   */
-  function officialMax(sc, item) {
-    var t = Math.trunc(sc.gem / item.price.gem);
-    var coins = sc.data_ccoin || {};
-    var ks = Object.keys(coins);
+  function realMax(sc, item) {
+    var money = sc.get_money();
+    var t = Infinity;
+    var ks = Object.keys(item.price);
     for (var i = 0; i < ks.length; i++) {
-      var e = Math.trunc(coins[ks[i]] / item.price["ccoin" + ks[i]]);
-      if (e < t) t = e;
+      var k = ks[i];
+      if (k === "rm" || k === "point") continue;
+      var price = item.price[k];
+      if (!(price > 0)) continue;
+      if (typeof money[k] !== "number") return null;
+      var n = Math.trunc(money[k] / price);
+      if (n < t) t = n;
     }
-    if (item.upper !== null && item.upper !== undefined && t > item.upper) t = item.upper;
-    try {
-      var sel = sc.select;
-      if (sel && sel.cate1 === "item" && sel.cate2 === "other" &&
-          sc.shop.item.other[sel.index].upper !== null) {
-        var u = sc.item_other[sel.index].upper;
-        if (t > u) t = u;
+    if (item.upper !== null && item.upper !== undefined) {
+      var u = item.upper;
+      var cfg = sc.shop_config || [];
+      for (var j = 0; j < cfg.length; j++) {
+        if (cfg[j] && cfg[j].shop_id === item.id) { u -= cfg[j].quantity; break; }
       }
-    } catch (e) {}
-    return t;
+      if (u < t) t = u;
+    }
+    return t === Infinity ? null : t;
+  }
+
+  /** 這次新增的顯示物件裡找數量下拉：有 setOptions、有 options 陣列的那個。 */
+  function findDropDown(sc, before) {
+    var list = (sc.children && sc.children.list) || [];
+    var found = [];
+    for (var i = 0; i < list.length; i++) {
+      var o = list[i];
+      if (before.indexOf(o) !== -1) continue;
+      if (o && typeof o.setOptions === "function" && Array.isArray(o.options)) found.push(o);
+    }
+    return found;
+  }
+
+  // -------------------------------------------------------------------------
+  // 包裝
+  // -------------------------------------------------------------------------
+
+  /**
+   * 官方先跑完，再把數量下拉的選項換成檔位。任何一步對不上就維持官方原樣。
+   * 點選走的是官方的 onButtonClick，它只讀 option.value。
+   */
+  function wrap(orig) {
+    var w = function (item) {
+      var st = window[FLAG];
+      var sc = this;
+      if (st) st.pending = null;
+      if (!st || !eligible(item)) return orig.apply(sc, arguments);
+
+      var official, real = null;
+      try {
+        official = sc.get_max_purchase(item);
+        if (official === CFG.officialCap) real = realMax(sc, item);
+        else real = official;
+      } catch (e) {
+        st.reason = "算上限時丟例外：" + String((e && e.message) || e);
+        return orig.apply(sc, arguments);
+      }
+
+      var before = ((sc.children && sc.children.list) || []).slice();
+      var ret = orig.apply(sc, arguments);
+
+      try {
+        if (typeof real !== "number" || Math.min(real, CFG.officialCap) !== official) {
+          // 對不上就不碰 —— 寧可少放寬，不能放錯。
+          st.reason = "上限對帳不符：官方 " + official + "，我們算 " + real;
+          return ret;
+        }
+        var dds = findDropDown(sc, before);
+        if (dds.length !== 1) {
+          st.reason = "找數量下拉：這次新增了 " + dds.length + " 個";
+          return ret;
+        }
+        var dd = dds[0];
+        if (dd.options.length !== Math.max(official, 1)) {
+          st.reason = "官方下拉有 " + dd.options.length + " 個選項，預期 " + Math.max(official, 1);
+          return ret;
+        }
+        var tiers = [];
+        for (var i = 0; i < CFG.tiers.length; i++) {
+          if (CFG.tiers[i] <= real) tiers.push(CFG.tiers[i]);
+        }
+        if (tiers.length === 0) { st.reason = null; return ret; }
+        dd.setOptions(tiers.map(function (n) { return { text: String(n), value: n }; }));
+        // 這個確認框按 ok 送出的 shop_buy 由分批接手
+        st.pending = { id: item.id, max: real, gem: item.price.gem };
+        st.dd = dd;
+        st.tiers = tiers;
+        st.max = real;
+        st.reason = null;
+      } catch (e) {
+        st.reason = String((e && e.message) || e);
+      }
+      return ret;
+    };
+    w.__ulrShopWrap = CFG.version;
+    return w;
+  }
+
+  /** 官方 ok 的通用失敗：shop_error 找不到這個鍵就顯示 DEFAULT 訊息。 */
+  function refusal() {
+    return { error: "DEFAULT", rm_process: null };
   }
 
   /**
-   * 官方面板裡有幾個數字。官方用 getByName(name, true) 找子項，我們照用。
-   * 名字是 "1".."n" 連號，數到第一個找不到的為止。
+   * 包 socket.fetch：只接手「剛換過下拉的那件商品、數量 > 20」的 shop_buy，
+   * 拆成每批 ≤20 依序送。其餘原樣放行。
    */
-  function officialRows(panel) {
-    var n = 0;
-    try {
-      for (var i = 1; i <= CFG.officialCap + 5; i++) {
-        if (!panel.getByName(String(i), true)) break;
-        n = i;
+  function wrapFetch(orig) {
+    var w = function (name, id, qty) {
+      var st = window[FLAG];
+      var p = st && st.pending;
+      if (!p || name !== "shop_buy" || id !== p.id || !(qty > CFG.officialCap)) {
+        return orig.apply(this, arguments);
       }
-    } catch (e) { return -1; }
-    return n;
-  }
-
-  // -------------------------------------------------------------------------
-  // 我們的面板 —— 外觀照抄官方的 V.Create / T.Create
-  // -------------------------------------------------------------------------
-
-  function build(sc, tiers, orig) {
-    var count = tiers.length;
-    // 官方：s<10 ? 22*s : 220（超過就加捲軸）
-    var h = count < 10 ? 22 * count : 220;
-    var scroll = count >= 10;
-
-    var list = sc.rexUI.add.sizer({ width: 20, orientation: "y", space: { item: 0 } });
-    for (var i = 0; i < count; i++) {
-      var name = String(tiers[i]);
-      var label = sc.rexUI.add.label({
-        background: sc.rexUI.add.roundRectangle({ color: 16777215 }),
-        text: sc.add.text(0, 0, name, { fontStyle: "font_light", color: "black", fontSize: 13 })
-          .setResolution(2),
-        space: { left: 5, right: 5, top: 5, bottom: 5 },
-        name: name
-      });
-      list.add(label, { expand: true });
-    }
-
-    var x = orig && typeof orig.x === "number" ? orig.x : CFG.x;
-    var y = orig && typeof orig.y === "number" ? orig.y : CFG.y;
-
-    var panel = sc.rexUI.add.scrollablePanel({
-      x: x, y: y, height: h, scrollMode: 0,
-      background: sc.rexUI.add.roundRectangle({ strokeColor: 12040892, strokeWidth: 2 }),
-      panel: { child: list },
-      slider: {
-        track: sc.rexUI.add.roundRectangle({ width: 13, height: 20, radius: 5, color: 7895676 }),
-        thumb: sc.add.sprite(400, 300, "scrollbar").setVisible(scroll)
-      },
-      space: { panel: 0 },
-      mouseWheelScroller: { focus: false, speed: 0.5 }
-    }).setOrigin(0.5, 0).setDepth(2001).layout();
-
-    try { panel.scrollToChild(panel.getByName(String(tiers[0]), true)); } catch (e) {}
-    panel.setChildrenInteractive({});
-    panel.on("child.over", function (c) {
-      try { var bg = c.getElement("background"); bg.setStrokeStyle(1, 16711680); bg.fillColor = 16744319; } catch (e) {}
-    });
-    panel.on("child.out", function (c) {
-      try { var bg = c.getElement("background"); bg.setStrokeStyle(); bg.fillColor = 16777215; } catch (e) {}
-    });
-    panel.on("child.down", function (c) {
-      pick(sc, panel, c && c.name);
-    });
-    return panel;
-  }
-
-  /**
-   * 玩家點了一個檔位。
-   *
-   * 交給官方那個面板的 handler：它會改 buy_quantity、更新餘額預覽、
-   * 發 test_quantity_select，還會把它自己藏起來（本來就藏著，無妨）。
-   * 我們只負責把自己收起來。
-   */
-  function pick(sc, mine, name) {
-    var st = window[FLAG];
-    if (!st || name === undefined || name === null) return;
-    var handed = false;
-    try {
-      if (st.orig && typeof st.orig.emit === "function") {
-        st.orig.emit("child.down", { name: String(name) });
-        handed = true;
+      st.pending = null; // 一個確認框只接手一次
+      if (Math.floor(qty) !== qty || qty > p.max) {
+        st.reason = "數量 " + qty + " 超過開框時算的上限 " + p.max + "，一個都沒送";
+        return Promise.resolve(refusal());
       }
-    } catch (e) {
-      st.reason = "官方的數量 handler 丟例外：" + String((e && e.message) || e);
+      return batch(this, orig, st, p, qty);
+    };
+    w.__ulrShopWrap = CFG.version;
+    return w;
+  }
+
+  async function batch(sock, orig, st, p, total) {
+    var sc = st.scene;
+    var player = sc && sc.player;
+    var rec = {
+      requested: total,
+      bought: 0,
+      batches: 0,
+      expectedGemDelta: 0,
+      gemDelta: null,
+      verified: null,
+      gemBefore: player ? player.gem : null,
+      playerRef: player || null
+    };
+    st.lastBuy = rec;
+    st.reason = null;
+    var fail = null, thrown = null;
+    while (rec.bought < total) {
+      var n = Math.min(CFG.officialCap, total - rec.bought);
+      var res;
+      try {
+        res = await orig.call(sock, "shop_buy", p.id, n);
+      } catch (e) {
+        thrown = e;
+        break;
+      }
+      rec.batches++;
+      if (!res || res.error !== null || res.rm_process !== null) { fail = res; break; }
+      rec.bought += n;
+      rec.expectedGemDelta = -p.gem * rec.bought;
     }
-    if (!handed) {
-      // 後路：官方面板不在了。只改最低限度的兩樣，預覽不動。
-      try { sc.buy_quantity = Number(name); } catch (e) {}
-      try { if (sc.btn_panel_text) sc.btn_panel_text.setText(String(name)); } catch (e) {}
+    if (rec.bought === total) return { error: null, rm_process: null };
+    if (rec.bought === 0) {
+      st.lastBuy = null;
+      if (thrown) throw thrown;
+      return fail || refusal();
     }
-    try { mine.setVisible(false); } catch (e) {}
+    // 買到一部分：回成功形狀，讓官方重抓 GEM 與持有數，畫面才是對的
+    var why = thrown ? String((thrown && thrown.message) || thrown) : JSON.stringify(fail);
+    st.reason = "分批只買到 " + rec.bought + " / " + total + " 個就停了：" + why;
+    return { error: null, rm_process: null };
+  }
+
+  /** 官方成功框重抓 player 之後，比對 gem 實扣與預期。不多送請求。 */
+  function verify(st, sc) {
+    var rec = st.lastBuy;
+    if (!rec || rec.verified !== null || rec.gemBefore === null) return;
+    var player = sc.player;
+    if (!player || typeof player.gem !== "number") return;
+    if (player === rec.playerRef && player.gem === rec.gemBefore) return; // 還沒重抓
+    rec.gemDelta = player.gem - rec.gemBefore;
+    rec.verified = rec.gemDelta === rec.expectedGemDelta;
+    if (!rec.verified) {
+      st.reason = "分批對帳不符：gem 實際 " + rec.gemDelta + "，預期 " + rec.expectedGemDelta;
+    }
   }
 
   // -------------------------------------------------------------------------
-  // 主迴圈
+  // 專武：使用場所那格填角色名
   // -------------------------------------------------------------------------
+
+  /** 商品是一把武器就回那把的 WeaponCards 資料，否則 null。照抄官方 get_item_info 的判斷。 */
+  function weaponOf(sc, item) {
+    var it = item && item.item && item.item[0];
+    if (!it || it.type !== CFG.weaponItem.type || it.slot !== CFG.weaponItem.slot) return null;
+    var cards = sc.cache.json.get("WeaponCards") || [];
+    for (var i = 0; i < cards.length; i++) {
+      if (cards[i] && cards[i].id === it.id) return cards[i];
+    }
+    return null;
+  }
+
+  /** 使用場所該顯示的字：專武是角色名，其餘一律官方的「-」。 */
+  function placeText(sc, item) {
+    var w = weaponOf(sc, item);
+    if (!w || !w.chara) return "-";
+    var key = "name_" + window.lang;
+    var chara = (sc.cache.json.get("Characters") || {})[w.chara];
+    var name = chara && chara[key];
+    if (typeof name !== "string" || name === "") return "-";
+    // 常數是反推的：官方顯示的名字必須就是這把武器（數量大於 1 會接 " xN"）
+    var shown = sc.get_item_info(item).item_name;
+    if (typeof w[key] !== "string" || w[key] === "" || String(shown).indexOf(w[key]) !== 0) return "-";
+    return name;
+  }
+
+  function applyPlace(sc) {
+    var place = sc.item_place;
+    if (!alive(place)) return;
+    var shop = window.game.registry && window.game.registry.get("ShopData");
+    var item = null;
+    for (var i = 0; shop && i < shop.length; i++) {
+      if (shop[i] && shop[i].id === sc.shop_select) { item = shop[i]; break; }
+    }
+    var s = item ? placeText(sc, item) : "-";
+    if (place.text !== s) place.setText(s);
+  }
+
+  /** 官方先跑完，再補寫使用場所。我們這段出錯不影響官方。 */
+  function wrapDetail(orig) {
+    var w = function () {
+      var ret = orig.apply(this, arguments);
+      try {
+        applyPlace(this);
+      } catch (e) {
+        var st = window[FLAG];
+        if (st) st.reason = "專武：" + String((e && e.message) || e);
+      }
+      return ret;
+    };
+    w.__ulrShopWrap = CFG.version;
+    return w;
+  }
+
+  function hookDetail(st, sc) {
+    var f = sc.show_detail;
+    if (typeof f !== "function" || f.__ulrShopWrap) return;
+    st.detailOwnOrig = Object.prototype.hasOwnProperty.call(sc, "show_detail") ? f : null;
+    sc.show_detail = wrapDetail(f);
+    // 裝上時面板可能已經停在某把武器上（重裝會先被拆成「-」）
+    if (sc.shop_select !== null && sc.shop_select !== undefined) applyPlace(sc);
+  }
+
+  // -------------------------------------------------------------------------
+  // 主迴圈：確保 Shop 場景上那幾支是我們包的
+  // -------------------------------------------------------------------------
+
+  function hookSocket(st, sc) {
+    var s = sc.socket;
+    if (!s || typeof s.fetch !== "function") return;
+    if (st.socket === s && s.fetch.__ulrShopWrap) return;
+    if (s.fetch.__ulrShopWrap) return; // 舊的我們包的，restore 應該已經拆了；不疊第二層
+    if (st.socket && st.socket !== s) {
+      try { unhook(st.socket, "fetch", st.socketOwnOrig); } catch (e) {}
+    }
+    st.socketOwnOrig = Object.prototype.hasOwnProperty.call(s, "fetch") ? s.fetch : null;
+    st.socket = s;
+    s.fetch = wrapFetch(s.fetch);
+  }
 
   function tick() {
     var st = window[FLAG];
@@ -340,48 +581,22 @@ export function buildShopPatchScript(options: ShopPatchOptions = {}): string {
     try {
       var sc = sceneOf("Shop");
       if (!sc) return;
-      var p = sc.panel;
-      if (!p || p === st.mine || p === st.seen) return;
-      if (!alive(p)) return;
-      st.seen = p;
-
-      // 官方剛建了一個新的（＝玩家剛按了購買）。我們上一份收掉。
-      if (st.mine) {
-        try { st.mine.destroy(); } catch (e) {}
-        st.mine = null;
-        st.orig = null;
+      verify(st, sc);
+      var f = sc.create_purchase_screen;
+      if (!(f && f.__ulrShopWrap && st.scene === sc)) {
+        if (typeof f !== "function" || typeof sc.get_max_purchase !== "function" ||
+            typeof sc.get_money !== "function") {
+          st.reason = "Shop 場景的形狀變了：找不到 create_purchase_screen / get_max_purchase / get_money";
+          return;
+        }
+        if (f.__ulrShopWrap) return; // 別人（舊的我們）包的，restore 應該已經拆了；不疊第二層
+        if (st.scene && st.scene !== sc) unwrap(st);
+        st.ownOrig = Object.prototype.hasOwnProperty.call(sc, "create_purchase_screen") ? f : null;
+        st.scene = sc;
+        sc.create_purchase_screen = wrap(f);
       }
-
-      var item = selectedItem(sc);
-      if (!eligible(sc, item)) {
-        st.reason = null;
-        return;
-      }
-
-      var t = officialMax(sc, item);
-      var rows = officialRows(p);
-      var expect = Math.min(t, CFG.officialCap);
-      if (rows !== expect) {
-        // 對不上就不碰 —— 寧可少放寬，不能放錯。
-        st.reason = "上限對帳不符：官方面板 " + rows + " 個，我們算 " + t + "（預期 " + expect + "）";
-        return;
-      }
-
-      var tiers = [];
-      for (var i = 0; i < CFG.tiers.length; i++) {
-        if (CFG.tiers[i] <= t) tiers.push(CFG.tiers[i]);
-      }
-      if (tiers.length === 0) return;
-
-      var mine = build(sc, tiers, p);
-      mine.setVisible(!!p.visible);
-      p.setVisible(false);
-      sc.panel = mine;
-      st.mine = mine;
-      st.orig = p;
-      st.tiers = tiers;
-      st.max = t;
-      st.reason = null;
+      hookSocket(st, sc);
+      hookDetail(st, sc);
     } catch (e) {
       st.reason = String((e && e.message) || e);
     }
@@ -391,11 +606,16 @@ export function buildShopPatchScript(options: ShopPatchOptions = {}): string {
 
   var st = {
     version: CFG.version,
-    mine: null,
-    orig: null,
-    seen: null,
+    scene: null,
+    ownOrig: null,
+    detailOwnOrig: null,
+    socket: null,
+    socketOwnOrig: null,
+    pending: null,
+    dd: null,
     tiers: [],
     max: null,
+    lastBuy: null,
     timer: null,
     reason: null
   };
@@ -404,14 +624,7 @@ export function buildShopPatchScript(options: ShopPatchOptions = {}): string {
   st.timer = setInterval(tick, CFG.pollIntervalMs);
   tick();
 
-  return JSON.stringify({
-    installed: true,
-    version: st.version,
-    active: alive(st.mine),
-    tiers: st.tiers,
-    max: st.max,
-    reason: st.reason
-  });
+  return statusOf(st);
 })()`;
 }
 
@@ -422,20 +635,14 @@ export const SHOP_STATUS_EXPRESSION = `(function () {
     var st = window[FLAG];
     if (!st) {
       return JSON.stringify({
-        installed: false, version: null, active: false, tiers: [], max: null, reason: null
+        installed: false, version: null, active: false, tiers: [], max: null, lastBuy: null,
+        reason: null
       });
     }
-    return JSON.stringify({
-      installed: true,
-      version: st.version,
-      active: alive(st.mine),
-      tiers: st.tiers || [],
-      max: st.max,
-      reason: st.reason
-    });
+    return statusOf(st);
   } catch (e) {
     return JSON.stringify({
-      installed: false, version: null, active: false, tiers: [], max: null,
+      installed: false, version: null, active: false, tiers: [], max: null, lastBuy: null,
       reason: String((e && e.message) || e)
     });
   }
@@ -448,11 +655,7 @@ export const SHOP_UNINSTALL_EXPRESSION = `(function () {
     var st = window[FLAG];
     if (!st) return "not-installed";
     try { if (st.timer !== null && st.timer !== undefined) clearInterval(st.timer); } catch (e) {}
-    try {
-      var sc = sceneOf("Shop");
-      if (sc && st.mine && sc.panel === st.mine && st.orig) sc.panel = st.orig;
-    } catch (e) {}
-    try { if (st.mine && st.mine.destroy) st.mine.destroy(); } catch (e) {}
+    unwrap(st);
     delete window[FLAG];
     return "ok";
   } catch (e) {
@@ -476,6 +679,7 @@ export function parseShopStatus(raw: string): ShopStatus {
       active: false,
       tiers: [],
       max: null,
+      lastBuy: null,
       reason: `頁面回了讀不懂的東西：${raw.slice(0, 120)}`,
     };
   }
@@ -489,6 +693,24 @@ export function parseShopStatus(raw: string): ShopStatus {
     active: o.active === true,
     tiers,
     max: typeof o.max === "number" ? o.max : null,
+    lastBuy: parseBatch(o.lastBuy),
     reason: typeof o.reason === "string" ? o.reason : null,
+  };
+}
+
+function parseBatch(value: unknown): ShopBatchResult | null {
+  if (value === null || typeof value !== "object") return null;
+  const b = value as Record<string, unknown>;
+  const num = (v: unknown): number | null => (typeof v === "number" ? v : null);
+  const requested = num(b.requested);
+  const bought = num(b.bought);
+  if (requested === null || bought === null) return null;
+  return {
+    requested,
+    bought,
+    batches: num(b.batches) ?? 0,
+    expectedGemDelta: num(b.expectedGemDelta) ?? 0,
+    gemDelta: num(b.gemDelta),
+    verified: typeof b.verified === "boolean" ? b.verified : null,
   };
 }

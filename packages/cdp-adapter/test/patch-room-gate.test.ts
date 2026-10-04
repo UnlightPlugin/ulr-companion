@@ -1,11 +1,11 @@
 /**
- * 進了哪一房、開戰前先套牌組
+ * 進了哪一房、開戰前先套牌組（2026-09-24 改版後的客戶端）
  *
- * 跟 `patch-lobby.test.ts` 同一種寫法：搭一個假的遊戲，把
- * `buildRoomGateScript()` 產出來的**那一串字**原封不動 `new Function` 起來跑。
+ * 搭一個假的遊戲，把 `buildRoomGateScript()` 產出來的**那一串字**原封不動
+ * `new Function` 起來跑。
  *
- * ⚠ 這支補丁的風險集中在一個地方：**它會吞掉遊戲真正的開戰請求**。所以測試
- * 的重點不是「有沒有攔到」，而是**每一條路徑最後都有沒有把那一下送出去** ——
+ * ⚠ 這支補丁的風險集中在一個地方：**它會吞掉遊戲真正的開戰請求**。所以測試的
+ * 重點不是「有沒有攔到」，而是**每一條路徑最後都有沒有把那一下送出去** ——
  * 少送一次，玩家就卡死在一個「已開始」而且點不動的畫面上。
  */
 
@@ -13,198 +13,144 @@ import { describe, expect, it } from "vitest";
 import {
   buildRoomGateDecksExpression,
   buildRoomGatePendingExpression,
+  buildRoomGateReleaseExpression,
   buildRoomGateScript,
+  GATED_EVENTS,
   parseRoomGateStatus,
   ROOM_GATE_RELEASE_EXPRESSION,
   ROOM_GATE_STATUS_EXPRESSION,
   ROOM_GATE_UNINSTALL_EXPRESSION,
 } from "@ulr/cdp-adapter";
+import type { RoomDeckPreload, RoomGateDecks } from "@ulr/cdp-adapter";
 
 // ---------------------------------------------------------------------------
 // 假的遊戲
 // ---------------------------------------------------------------------------
 
-interface Emitted {
+interface Fetched {
   ev: string;
   args: unknown[];
 }
 
+/** 改版後的 WSClient：開戰全部是 fetch，回 Promise。 */
 class FakeSocket {
-  emitted: Emitted[] = [];
-  emit(ev: string, ...args: unknown[]): string {
-    this.emitted.push({ ev, args });
-    return "sent";
+  fetched: Fetched[] = [];
+  fetch(ev: string, ...args: unknown[]): Promise<string> {
+    this.fetched.push({ ev, args });
+    return Promise.resolve(`ok:${ev}`);
   }
 }
 
-/** 遊戲的 GameObject —— 只做這支補丁碰得到的那幾件事。 */
-class FakeArrow {
-  handlers: Record<string, (() => void)[]> = {};
-  on(ev: string, fn: () => void): void {
-    (this.handlers[ev] ??= []).push(fn);
-  }
-  removeAllListeners(ev: string): void {
-    delete this.handlers[ev];
-  }
-  fire(ev: string): void {
-    for (const fn of this.handlers[ev] ?? []) fn();
-  }
-  count(ev: string): number {
-    return (this.handlers[ev] ?? []).length;
-  }
+interface Deck {
+  deck_id: number;
+  main: number;
+  chara_card_id: (number | null)[];
+  weapon_card_id: (number | null)[];
+  event_card_id: (number | null)[];
+  card_effect: unknown[];
+  cost: number;
 }
 
-/** Match.channel_list —— Phaser 容器，emit 在 prototype 上。 */
-class FakeChannelList {
-  handlers: ((...args: unknown[]) => void)[] = [];
-  on(_ev: string, fn: (...args: unknown[]) => void): void {
-    this.handlers.push(fn);
-  }
-  emit(ev: string, ...args: unknown[]): boolean {
-    if (ev !== "channel") return false;
-    for (const fn of this.handlers) fn(...args);
-    return true;
-  }
+function deckOf(id: number, first: number | null): Deck {
+  return {
+    deck_id: id,
+    main: id === 1 ? 1 : 0,
+    chara_card_id: [first, null, null],
+    weapon_card_id: [null, null, null],
+    event_card_id: new Array<number | null>(18).fill(null),
+    card_effect: [],
+    cost: 0,
+  };
 }
 
 class FakeScene {
-  socket: FakeSocket;
+  socket = new FakeSocket();
+  socket_channel?: FakeSocket;
   active = false;
-  /** `Match` 才有的東西。 */
-  channel?: number;
-  channels?: Record<string, { type: string }>;
-  channels_cross?: Record<string, { type: string }>;
   scene: { isActive: () => boolean };
+  deck_now = 1;
+  deck: Deck[];
+  /** Match 才有：頻道物件本身（改版後 channel_login 直接 this.channel = t）。 */
+  channel: Record<string, unknown> | null = null;
+  deck_name = { text: "Deck1", setText: (t: string) => (this.deck_name.text = t) };
+  deck_card: unknown[] = [];
+  created = 0;
+  /** create 那一刻畫出來的是哪一副（驗「第一幀就是對的牌」）。 */
+  drawn: (number | null)[] | null = null;
+  redraws = 0;
+  logins = 0;
 
-  /** 左下角那組切牌組的 ◀▶。 */
-  deck_pre?: FakeArrow;
-  deck_next?: FakeArrow;
-  deck_now?: number;
-  deck1?: { charaIndex: (number | null)[]; cost?: number };
-  deck_name?: { text: string; setText: (t: string) => void };
-  redrawn = 0;
-
-  /** `Match` 才有的：選頻道的清單（EventEmitter）與它自己的重畫。 */
-  channel_list?: FakeChannelList;
-  channel_panel?: { seenCost: number | undefined };
-  deckCard?: unknown[];
-  costText = "";
-
-  constructor(socket: FakeSocket) {
-    this.socket = socket;
+  constructor(deck: Deck[]) {
+    this.deck = deck;
     this.scene = { isActive: () => this.active };
   }
 
-  /** 進了幾次、進去那一次畫出來的是哪一副（用來驗「第一幀就是對的牌」）。 */
-  created = 0;
-  drawn: (number | null)[] | null = null;
-
-  /**
-   * 遊戲自己的 `create()`。
-   *
-   * 照抄實機讀到的重點：**create 裡才第一次讀 `this.deck1`**（Raid 是
-   * `this.deck_card(this.deck1)`、Quest 是 inline 讀 `this.deck1.chara[i]`），
-   * 而且那行字是寫死的「Deck1 」。
-   */
+  /** 遊戲自己的 create()：show_deck 在這裡第一次畫。 */
   create(): void {
     this.created++;
-    this.drawn = this.deck1 ? [...this.deck1.charaIndex] : null;
-    const name = { text: "Deck1 ", setText: (t: string) => (name.text = t) };
-    this.deck_name = name;
+    this.show_deck();
+    this.drawn = [...(this.deck.find((d) => d.deck_id === this.deck_now)?.chara_card_id ?? [])];
   }
 
-  /** 任務／渦的重畫。 */
-  deck_card(): void {
-    this.redrawn++;
+  /** 改版後房間的重畫：那行字寫回 DeckN。 */
+  show_deck(): void {
+    this.redraws++;
+    this.deck_name.setText(`Deck${this.deck_now}`);
   }
 
-  /** Match 的重畫 —— 照抄實機：名字寫回「DeckN 」、cost:NN 讀 deck1.cost。 */
-  change_deck(delta: number): void {
-    this.redrawn++;
-    this.deck_now = (this.deck_now ?? 1) + delta;
-    this.deck_name?.setText(`Deck${this.deck_now} `);
-    this.costText = `cost:${this.deck1?.cost}`;
-  }
-
-  /**
-   * 把 Match 的選頻道清單裝上去。遊戲自己的處理器也照實機掛：先記 channel、
-   * 再建面板，而面板一建出來就讀 deck1.cost（篩房間列表用）。
-   */
-  withChannelList(): this {
-    this.channel_list = new FakeChannelList();
-    this.deck_now = 1;
-    this.deck1 = { charaIndex: [684, 674, 665], cost: 77 };
-    this.deckCard = [];
-    const name = { text: "Deck1 ", setText: (t: string) => (name.text = t) };
-    this.deck_name = name;
-    this.channel_list.on("channel", (id: unknown) => {
-      this.channel = id as number;
-      this.channel_panel = { seenCost: this.deck1?.cost };
-    });
-    return this;
-  }
-
-  /** 把箭頭裝上去（遊戲自己的處理器也一起掛，測我們有沒有把它拆掉）。 */
-  withArrows(): this {
-    this.deck_pre = new FakeArrow();
-    this.deck_next = new FakeArrow();
-    this.deck_now = 1;
-    this.deck1 = { charaIndex: [684, 674, 665] };
-    const name = { text: "Deck1 ", setText: (t: string) => (name.text = t) };
-    this.deck_name = name;
-    // 遊戲原本的：pointerup 把 deck_now 往前繞
-    this.deck_next.on("pointerup", () => {
-      this.deck_now = (this.deck_now ?? 1) + 1;
-      if (this.deck_now > 3) this.deck_now = 1;
-    });
-    this.deck_pre.on("pointerup", () => {
-      this.deck_now = (this.deck_now ?? 1) - 1;
-      if (this.deck_now < 1) this.deck_now = 3;
-    });
-    // hover 換圖 —— **這個不能被拆掉**
-    this.deck_next.on("pointerover", () => undefined);
-    this.deck_pre.on("pointerover", () => undefined);
-    return this;
+  /** Match：選頻道。 */
+  async channel_login(t: Record<string, unknown>): Promise<void> {
+    this.logins++;
+    this.channel = t;
+    this.socket_channel = new FakeSocket();
   }
 }
 
 interface FakeWindow {
-  game: { scene: { keys: Record<string, FakeScene> } };
+  game: {
+    scene: { keys: Record<string, FakeScene> };
+    registry: { get: (k: string) => unknown };
+  };
   __ulrCompanionReport?: (raw: string) => void;
   __ulrRoomGate?: Record<string, unknown>;
+  __ulrDeckMirror?: { server: Deck[] | null };
+  __ulrDeckEdit?: { costFor: (content: unknown, custom: boolean) => number | null };
 }
 
 interface Harness {
   window: FakeWindow;
   scenes: Record<"Quest" | "Raid" | "Match", FakeScene>;
-  socket: FakeSocket;
+  registry: { deck: Deck[] };
   reports: Record<string, unknown>[];
+  /** 看門狗（setTimeout）。 */
   timers: (() => void)[];
+  /** 輪詢（setInterval），最後一個是現役的那支。 */
+  intervals: (() => void)[];
 }
 
 function makeGame(): Harness {
-  const socket = new FakeSocket();
+  const registry = { deck: [deckOf(1, 685), deckOf(2, 10), deckOf(3, 20)] };
+  // 每個場景 init() 都是 this.deck = registry.get("deck") —— 同一個參照
   const scenes = {
-    Quest: new FakeScene(socket),
-    Raid: new FakeScene(socket),
-    Match: new FakeScene(socket),
+    Quest: new FakeScene(registry.deck),
+    Raid: new FakeScene(registry.deck),
+    Match: new FakeScene(registry.deck),
   };
   const reports: Record<string, unknown>[] = [];
   const window: FakeWindow = {
-    game: { scene: { keys: scenes } },
+    game: {
+      scene: { keys: scenes },
+      registry: { get: (k: string) => (registry as Record<string, unknown>)[k] },
+    },
     __ulrCompanionReport: (raw: string) => {
       reports.push(JSON.parse(raw) as Record<string, unknown>);
     },
+    // 伺服器那份一開始跟客戶端一樣（官方剛拉過）
+    __ulrDeckMirror: { server: JSON.parse(JSON.stringify(registry.deck)) as Deck[] },
   };
-  return { window, scenes, socket, reports, timers: [] };
+  return { window, scenes, registry, reports, timers: [], intervals: [] };
 }
 
-/**
- * 把腳本丟進去跑。
- *
- * ⚠ 用 `new Function` 而不是 `eval`：跳脫錯了的話這裡會直接丟 SyntaxError，
- * 而腳本整支住在 template literal 裡，那正是最容易出事的地方。
- */
 function run(h: Harness, expression: string): string {
   // eslint-disable-next-line no-new-func
   const fn = new Function(
@@ -223,783 +169,418 @@ function run(h: Harness, expression: string): string {
   ) => string;
   return fn(
     h.window,
-    (fn) => {
-      h.timers.push(fn);
-      return h.timers.length;
-    },
+    (f) => (h.intervals.push(f), h.intervals.length),
     () => undefined,
-    // 看門狗的 setTimeout：預設**不自己跑**，要測的那一題自己叫。
-    (fn) => {
-      h.timers.push(fn);
-      return h.timers.length;
-    },
+    // 看門狗的 setTimeout：預設不自己跑，要測的那一題自己叫。
+    (f) => (h.timers.push(f), h.timers.length),
     () => undefined,
   );
 }
 
-function install(h: Harness): string {
-  return run(h, buildRoomGateScript({ bindingName: "__ulrCompanionReport" }));
-}
-
+const install = (h: Harness): string =>
+  run(h, buildRoomGateScript({ bindingName: "__ulrCompanionReport" }));
 /** 模擬那支 500ms 的輪詢跑了一輪。 */
-function tick(h: Harness): void {
-  install(h);
+const tick = (h: Harness): void => h.intervals[h.intervals.length - 1]!();
+const status = (h: Harness) => parseRoomGateStatus(run(h, ROOM_GATE_STATUS_EXPRESSION));
+const setPending = (h: Harness, v: boolean): string => run(h, buildRoomGatePendingExpression(v));
+const setDecks = (h: Harness, payload: RoomGateDecks): string =>
+  run(h, buildRoomGateDecksExpression(payload));
+
+/** 插件模式：那一房只換第 1 格、deck_now 釘 1。 */
+function pluginPreload(first: number, name = "渦用"): RoomDeckPreload {
+  return {
+    slots: [
+      {
+        deckId: 1,
+        chara_card_id: [first, null, null],
+        weapon_card_id: [null, null, null],
+        event_card_id: new Array<number | null>(18).fill(null),
+      },
+    ],
+    pin: 1,
+    names: { "1": name },
+  };
 }
 
-function status(h: Harness): ReturnType<typeof parseRoomGateStatus> {
-  return parseRoomGateStatus(run(h, ROOM_GATE_STATUS_EXPRESSION));
+/** 官方三牌組模式：三格一起換、deck_now 不動。 */
+function officialPreload(firsts: [number, number, number]): RoomDeckPreload {
+  return {
+    slots: firsts.map((f, i) => ({
+      deckId: i + 1,
+      chara_card_id: [f, null, null],
+      weapon_card_id: [null, null, null],
+      event_card_id: new Array<number | null>(18).fill(null),
+    })),
+    pin: null,
+    names: { "1": "甲", "2": "乙", "3": "丙" },
+  };
 }
 
-function setPending(h: Harness, value: boolean): string {
-  return run(h, buildRoomGatePendingExpression(value));
-}
+const flush = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
 // ---------------------------------------------------------------------------
 
 describe("房間偵測", () => {
-  it("Quest 場景 active → quest", () => {
+  it("任務／渦 → quest／raid；什麼都沒開 → null", () => {
     const h = makeGame();
+    install(h);
+    expect(status(h).room).toBeNull();
     h.scenes.Quest.active = true;
-    install(h);
     expect(status(h).room).toBe("quest");
-    expect(h.reports).toContainEqual({ type: "room-changed", room: "quest", preloaded: false });
-  });
-
-  it("Raid 場景 active → raid", () => {
-    const h = makeGame();
+    h.scenes.Quest.active = false;
     h.scenes.Raid.active = true;
-    install(h);
     expect(status(h).room).toBe("raid");
   });
 
-  it("Match + duel 頻道 → 迪特赫姆", () => {
+  it("Match：頻道物件有 type 就看 type（duel = 迪城）", () => {
     const h = makeGame();
-    h.scenes.Match.active = true;
-    h.scenes.Match.channel = 2;
-    h.scenes.Match.channels = { "1": { type: "ranked" }, "2": { type: "duel" } };
     install(h);
+    h.scenes.Match.active = true;
+    expect(status(h).room).toBeNull(); // 還在選頻道
+    h.scenes.Match.channel = { channel: 2, type: "duel" };
     expect(status(h).room).toBe("dietherm");
-  });
-
-  it("Match + ranked 頻道 → 亞歷山卓城", () => {
-    const h = makeGame();
-    h.scenes.Match.active = true;
-    h.scenes.Match.channel = 1;
-    h.scenes.Match.channels = { "1": { type: "ranked" }, "2": { type: "duel" } };
-    install(h);
+    h.scenes.Match.channel = { channel: 1, type: "ranked" };
     expect(status(h).room).toBe("alexandria");
   });
 
-  it("⚠ 看的是 type 不是編號 —— 官方多開一組 duel 頻道也認得", () => {
-    // 寫死 2/4 的版本會把新頻道判成「不是任何一房」，然後那裡永遠不會自動
-    // 套牌組。跟 `patch-lobby.ts` 的 `duelChannel()` 同一條規矩。
+  it("Match：沒有 type 時看 quick —— 亞城有快速比賽，迪城只能開房", () => {
     const h = makeGame();
-    h.scenes.Match.active = true;
-    h.scenes.Match.channel = 7;
-    h.scenes.Match.channels = { "7": { type: "duel" } };
     install(h);
+    h.scenes.Match.active = true;
+    h.scenes.Match.channel = { channel: 1, quick: true };
+    expect(status(h).room).toBe("alexandria");
+    h.scenes.Match.channel = { channel: 2, quick: false };
     expect(status(h).room).toBe("dietherm");
   });
 
-  it("跨平台頻道查得到 channels_cross", () => {
-    const h = makeGame();
-    h.scenes.Match.active = true;
-    h.scenes.Match.channel = 4;
-    h.scenes.Match.channels = {};
-    h.scenes.Match.channels_cross = { "4": { type: "duel" } };
-    install(h);
-    expect(status(h).room).toBe("dietherm");
-  });
-
-  it("還在選頻道（channel 還沒有）→ 不算在任何一房", () => {
-    // 這時候套牌組是錯的：玩家可能正要去另一個頻道，而換牌組會連帶換掉他
-    // 看到的房間列表。
-    const h = makeGame();
-    h.scenes.Match.active = true;
-    install(h);
-    expect(status(h).room).toBeNull();
-  });
-
-  it("都不在 → null，而且只在變動時回報一次", () => {
+  it("換房就回報 room-changed，同一房不重報", () => {
     const h = makeGame();
     install(h);
-    expect(status(h).room).toBeNull();
-    const before = h.reports.length;
+    h.scenes.Raid.active = true;
     tick(h);
     tick(h);
-    // 重裝會重報一次初始值，但同一輪輪詢裡不重複回報。
-    expect(h.reports.filter((r) => r.type === "room-changed").length).toBeLessThanOrEqual(
-      before + 2,
-    );
+    expect(h.reports.filter((r) => r["type"] === "room-changed")).toEqual([
+      { type: "room-changed", room: "raid", preloaded: false },
+    ]);
   });
 });
 
 describe("開戰閘門", () => {
-  const START = "quest_start";
-
-  it("沒有待套用的東西 → 原樣直通，一下都不攔", () => {
+  /** 渦房、插件模式、這一房有指派牌組，而且客戶端那份跟伺服器那份不一樣。 */
+  function armed(): Harness {
     const h = makeGame();
-    h.scenes.Quest.active = true;
     install(h);
-    const out = h.socket.emit(START, "id", 1, 2, 3, 1);
-    expect(out).toBe("sent");
-    expect(h.socket.emitted).toHaveLength(1);
-    expect(status(h).holding).toBe(false);
-  });
+    setDecks(h, { mode: "plugin", decks: { raid: pluginPreload(685) } });
+    h.scenes.Raid.active = true;
+    tick(h);
+    h.registry.deck[0]!.chara_card_id = [999, null, null]; // 客戶端換了，伺服器還沒
+    return h;
+  }
 
-  it("有待套用的東西 → 攔下來、回報，先不送出去", () => {
-    const h = makeGame();
-    h.scenes.Quest.active = true;
-    install(h);
-    setPending(h, true);
-
-    h.socket.emit(START, "id", 1, 2, 3, 1);
-    expect(h.socket.emitted).toHaveLength(0);
+  it("客戶端 ≠ 伺服器 → 攔下來、回報，先不送出去", () => {
+    const h = armed();
+    void h.scenes.Raid.socket.fetch("raid_start", 7, 1, 1);
+    expect(h.scenes.Raid.socket.fetched).toEqual([]);
+    expect(h.reports).toContainEqual({ type: "room-gate-hold", event: "raid_start", room: "raid" });
     expect(status(h).holding).toBe(true);
-    expect(status(h).heldEvent).toBe(START);
-    expect(h.reports).toContainEqual({ type: "room-gate-hold", event: START, room: "quest" });
   });
 
-  it("放行時用**原本的參數**把那一下補送出去", () => {
-    const h = makeGame();
-    h.scenes.Quest.active = true;
-    install(h);
-    setPending(h, true);
-    h.socket.emit(START, "id", 5, 6, 7, 1);
-
+  it("放行時用**原本的參數**送出去，結果原樣交回給遊戲", async () => {
+    const h = armed();
+    const p = h.scenes.Raid.socket.fetch("raid_start", 7, 1, 1);
     expect(run(h, ROOM_GATE_RELEASE_EXPRESSION)).toBe("released");
-    expect(h.socket.emitted).toEqual([{ ev: START, args: ["id", 5, 6, 7, 1] }]);
-    expect(status(h).holding).toBe(false);
+    await expect(p).resolves.toBe("ok:raid_start");
+    expect(h.scenes.Raid.socket.fetched).toEqual([{ ev: "raid_start", args: [7, 1, 1] }]);
   });
 
-  it("⚠ 補送的那一下不會再被攔一次（不然是無窮迴圈）", () => {
+  it("⚠⚠ 看門狗：Node 沒回來也一定要把那一下送出去", async () => {
+    const h = armed();
+    const p = h.scenes.Raid.socket.fetch("raid_start", 7, 1, 1);
+    for (const t of [...h.timers]) t(); // 時間到（也順便跑到輪詢，無妨）
+    await expect(p).resolves.toBe("ok:raid_start");
+    expect(h.reports).toContainEqual({ type: "room-gate-timeout", event: "raid_start" });
+  });
+
+  it("客戶端跟伺服器一樣 → 原樣直通，一趟都不多", async () => {
     const h = makeGame();
-    h.scenes.Quest.active = true;
     install(h);
-    setPending(h, true);
-    h.socket.emit(START, "id");
-    // pending 還是 true —— Node 寫失敗時就是這個狀態。
-    run(h, ROOM_GATE_RELEASE_EXPRESSION);
-    expect(h.socket.emitted).toHaveLength(1);
-    expect(status(h).holding).toBe(false);
+    setDecks(h, { mode: "plugin", decks: { raid: pluginPreload(685) } });
+    h.scenes.Raid.active = true;
+    tick(h);
+    await h.scenes.Raid.socket.fetch("raid_start", 7, 1, 1);
+    expect(h.scenes.Raid.socket.fetched).toHaveLength(1);
+    expect(h.reports.some((r) => r["type"] === "room-gate-hold")).toBe(false);
   });
 
-  it("⚠⚠ 看門狗：Node 沒回來也一定要把那一下送出去", () => {
-    // 被攔的那一刻遊戲已經走過 `input.enabled = false` 與
-    // `quest_start_clicked()` —— 不送的話玩家卡死在那個畫面，只能重開遊戲。
+  it("伺服器那份還沒記過 → 攔（Node 會去讀一次）", () => {
     const h = makeGame();
-    h.scenes.Quest.active = true;
+    delete h.window.__ulrDeckMirror;
     install(h);
-    setPending(h, true);
-    h.socket.emit(START, "id", 9);
-    expect(h.socket.emitted).toHaveLength(0);
-
-    // 看門狗的 setTimeout 是最後排進去的那一個。
-    const watchdog = h.timers[h.timers.length - 1];
-    watchdog?.();
-
-    expect(h.socket.emitted).toEqual([{ ev: START, args: ["id", 9] }]);
-    expect(h.reports).toContainEqual({ type: "room-gate-timeout", event: START });
-    expect(status(h).timeouts).toBe(1);
+    setDecks(h, { mode: "plugin", decks: { raid: pluginPreload(685) } });
+    h.scenes.Raid.active = true;
+    tick(h);
+    void h.scenes.Raid.socket.fetch("raid_start", 7, 1, 1);
+    expect(status(h).holding).toBe(true);
   });
 
-  it("看門狗跑過之後 Node 才回來 → 不會送出第二次", () => {
-    const h = makeGame();
-    h.scenes.Quest.active = true;
-    install(h);
-    setPending(h, true);
-    h.socket.emit(START, "id");
-    h.timers[h.timers.length - 1]?.();
-    expect(run(h, ROOM_GATE_RELEASE_EXPRESSION)).toBe("no-hold");
-    expect(h.socket.emitted).toHaveLength(1);
-  });
-
-  it("同一時間只攔一下，第二下直通", () => {
-    // 攔著的時候再攔一下會讓第一下永遠沒人放行。
-    const h = makeGame();
-    h.scenes.Quest.active = true;
-    install(h);
-    setPending(h, true);
-    h.socket.emit(START, "first");
-    h.socket.emit(START, "second");
-    expect(h.socket.emitted).toEqual([{ ev: START, args: ["second"] }]);
-  });
-
-  it("不是開戰的事件一律不攔", () => {
-    const h = makeGame();
-    h.scenes.Quest.active = true;
-    install(h);
-    setPending(h, true);
-    h.socket.emit("db_player", "id");
-    expect(h.socket.emitted).toEqual([{ ev: "db_player", args: ["id"] }]);
-  });
-
-  it.each(["quest_start", "raid_turn", "quick_wait", "room_event", "room_in", "match_room_make"])(
-    "%s 會被攔",
-    (ev) => {
+  it("關閉模式、或這一房沒有指派牌組 → 不攔", async () => {
+    for (const payload of [
+      { mode: "off", decks: { raid: pluginPreload(685) } },
+      { mode: "plugin", decks: {} },
+    ] as RoomGateDecks[]) {
       const h = makeGame();
-      h.scenes.Quest.active = true;
       install(h);
-      setPending(h, true);
-      h.socket.emit(ev, "id");
-      expect(h.socket.emitted).toHaveLength(0);
-      expect(status(h).heldEvent).toBe(ev);
-    },
-  );
+      setDecks(h, payload);
+      h.scenes.Raid.active = true;
+      tick(h);
+      h.registry.deck[0]!.chara_card_id = [999, null, null];
+      await h.scenes.Raid.socket.fetch("raid_start", 7, 1, 1);
+      expect(h.scenes.Raid.socket.fetched).toHaveLength(1);
+    }
+  });
 
-  it("閘門自己出事時放行，不能因為我們的東西讓玩家開不了戰", () => {
+  it("Node 說有東西排著隊 → 就算兩份一樣也攔", () => {
     const h = makeGame();
-    h.scenes.Quest.active = true;
     install(h);
+    setDecks(h, { mode: "plugin", decks: { raid: pluginPreload(685) } });
+    h.scenes.Raid.active = true;
+    tick(h);
     setPending(h, true);
-    // 回報函式炸掉（Node 那邊的 binding 不見了）
-    h.window.__ulrCompanionReport = () => {
-      throw new Error("binding 不見了");
-    };
-    h.socket.emit(START, "id");
-    // report() 自己吞掉例外，所以還是照攔 —— 但至少沒有把例外丟回遊戲。
-    expect(() => h.socket.emit("db_player", "x")).not.toThrow();
+    void h.scenes.Raid.socket.fetch("raid_start", 7, 1, 1);
+    expect(status(h).holding).toBe(true);
+  });
+
+  it("同一時間只攔一下，第二下直通", async () => {
+    const h = armed();
+    void h.scenes.Raid.socket.fetch("raid_start", 7, 1, 1);
+    await h.scenes.Raid.socket.fetch("raid_start", 8, 1, 1);
+    expect(h.scenes.Raid.socket.fetched).toEqual([{ ev: "raid_start", args: [8, 1, 1] }]);
+  });
+
+  it("⚠ Node 說寫不進去（ok=false）→ 這一房換房之前不再攔", async () => {
+    const h = armed();
+    void h.scenes.Raid.socket.fetch("raid_start", 7, 1, 1);
+    run(h, buildRoomGateReleaseExpression(false));
+    await h.scenes.Raid.socket.fetch("raid_start", 8, 1, 1);
+    expect(h.scenes.Raid.socket.fetched).toHaveLength(2);
+    // 換房再回來就重新開始攔
+    h.scenes.Raid.active = false;
+    h.scenes.Quest.active = true;
+    tick(h);
+    h.scenes.Quest.active = false;
+    h.scenes.Raid.active = true;
+    tick(h);
+    void h.scenes.Raid.socket.fetch("raid_start", 9, 1, 1);
+    expect(status(h).holding).toBe(true);
+  });
+
+  it("五個開戰入口都攔得到，其他請求照常", async () => {
+    expect([...GATED_EVENTS].sort()).toEqual(
+      ["create_room", "enter_room", "quest_start", "quick_room", "raid_start"].sort(),
+    );
+    const h = armed();
+    await h.scenes.Raid.socket.fetch("db_raid", 1);
+    expect(h.scenes.Raid.socket.fetched).toHaveLength(1);
+  });
+
+  it("Match 攔的是頻道那條連線（socket_channel）", async () => {
+    const h = makeGame();
+    install(h);
+    setDecks(h, { mode: "plugin", decks: { dietherm: pluginPreload(685, "迪城用") } });
+    h.scenes.Match.active = true;
+    await h.scenes.Match.channel_login({ channel: 2, type: "duel" });
+    tick(h);
+    h.registry.deck[0]!.chara_card_id = [999, null, null];
+    void h.scenes.Match.socket_channel!.fetch("create_room", 1, 2, {});
+    expect(h.scenes.Match.socket_channel!.fetched).toEqual([]);
+    expect(status(h).holding).toBe(true);
+  });
+});
+
+describe("進房前就把牌換好", () => {
+  it("⚠⚠ create 跑之前就換掉那一格 —— 遊戲畫出來的就是我們那一副", () => {
+    const h = makeGame();
+    install(h);
+    setDecks(h, { mode: "plugin", decks: { raid: pluginPreload(777) } });
+    h.scenes.Raid.active = true;
+    h.scenes.Raid.create();
+    expect(h.scenes.Raid.drawn).toEqual([777, null, null]);
+    // 就地改：registry 那個陣列還是同一個，其他場景看得到
+    expect(h.registry.deck[0]!.chara_card_id).toEqual([777, null, null]);
+    expect(h.scenes.Quest.deck).toBe(h.registry.deck);
+  });
+
+  it("⚠⚠ 換房回報要帶 preloaded —— 少了它伺服器永遠不會被寫", () => {
+    const h = makeGame();
+    install(h);
+    setDecks(h, { mode: "plugin", decks: { raid: pluginPreload(777) } });
+    h.scenes.Raid.active = true;
+    h.scenes.Raid.create();
+    expect(h.reports).toContainEqual({ type: "room-changed", room: "raid", preloaded: true });
+  });
+
+  it("插件模式：deck_now 釘 1、左下那行字換成牌組名", () => {
+    const h = makeGame();
+    install(h);
+    setDecks(h, { mode: "plugin", decks: { quest: pluginPreload(777, "任務用") } });
+    h.scenes.Quest.deck_now = 3;
+    h.scenes.Quest.active = true;
+    h.scenes.Quest.create();
+    expect(h.scenes.Quest.deck_now).toBe(1);
+    expect(h.scenes.Quest.deck_name.text).toBe("任務用");
+  });
+
+  it("官方三牌組模式：三格一起換，deck_now 不動", () => {
+    const h = makeGame();
+    install(h);
+    setDecks(h, { mode: "official", decks: { quest: officialPreload([101, 102, 103]) } });
+    h.scenes.Quest.deck_now = 2;
+    h.scenes.Quest.active = true;
+    h.scenes.Quest.create();
+    expect(h.registry.deck.map((d) => d.chara_card_id[0])).toEqual([101, 102, 103]);
+    expect(h.scenes.Quest.deck_now).toBe(2);
+    expect(h.scenes.Quest.deck_name.text).toBe("乙");
+  });
+
+  it("那一房沒有推牌 → 不碰牌組，但房型照樣回報（preloaded=false）", () => {
+    const h = makeGame();
+    install(h);
+    h.scenes.Quest.active = true;
+    h.scenes.Quest.create();
+    expect(h.registry.deck[0]!.chara_card_id).toEqual([685, null, null]);
+    expect(h.reports).toContainEqual({ type: "room-changed", room: "quest", preloaded: false });
+  });
+
+  it("COST 用牌盒那支算的價補進去（迪城自訂、其餘官方）", async () => {
+    const h = makeGame();
+    const calls: boolean[] = [];
+    h.window.__ulrDeckEdit = { costFor: (_c, custom) => (calls.push(custom), custom ? 92 : 91) };
+    install(h);
+    setDecks(h, {
+      mode: "plugin",
+      decks: { dietherm: pluginPreload(777), alexandria: pluginPreload(778) },
+    });
+    h.scenes.Match.active = true;
+    await h.scenes.Match.channel_login({ channel: 2, type: "duel" });
+    expect(h.registry.deck[0]!.cost).toBe(92);
+    await h.scenes.Match.channel_login({ channel: 1, type: "ranked" });
+    expect(h.registry.deck[0]!.cost).toBe(91);
+    expect(h.registry.deck[0]!.chara_card_id[0]).toBe(778);
+  });
+
+  it("亞城／迪城：選頻道那一下換牌、重畫、就地回報", async () => {
+    const h = makeGame();
+    install(h);
+    setDecks(h, { mode: "plugin", decks: { dietherm: pluginPreload(777, "迪城用") } });
+    h.scenes.Match.active = true;
+    await h.scenes.Match.channel_login({ channel: 2, type: "duel" });
+    expect(h.scenes.Match.logins).toBe(1); // 原版照樣跑
+    expect(h.registry.deck[0]!.chara_card_id[0]).toBe(777);
+    expect(h.scenes.Match.deck_name.text).toBe("迪城用");
+    expect(h.reports).toContainEqual({ type: "room-changed", room: "dietherm", preloaded: true });
+  });
+
+  it("重裝不會包兩層", () => {
+    const h = makeGame();
+    install(h);
+    install(h);
+    setDecks(h, { mode: "plugin", decks: { raid: pluginPreload(777) } });
+    h.scenes.Raid.active = true;
+    h.scenes.Raid.create();
+    expect(h.scenes.Raid.created).toBe(1);
+  });
+});
+
+describe("deck_now 釘住（最後一道保險）", () => {
+  it("插件模式、這一房有指派 → 玩家切到 2 會被釘回 1 並重畫", () => {
+    const h = makeGame();
+    install(h);
+    setDecks(h, { mode: "plugin", decks: { raid: pluginPreload(685, "渦用") } });
+    h.scenes.Raid.active = true;
+    h.scenes.Raid.deck_now = 2;
+    tick(h);
+    expect(h.scenes.Raid.deck_now).toBe(1);
+    expect(h.scenes.Raid.deck_name.text).toBe("渦用");
+  });
+
+  it("⚠ 官方三牌組模式、或這一房沒有指派 → 不釘（不然打渦只能用牌組一）", () => {
+    for (const payload of [
+      { mode: "official", decks: { raid: officialPreload([1, 2, 3]) } },
+      { mode: "plugin", decks: {} },
+    ] as RoomGateDecks[]) {
+      const h = makeGame();
+      install(h);
+      setDecks(h, payload);
+      h.scenes.Raid.active = true;
+      h.scenes.Raid.deck_now = 2;
+      tick(h);
+      expect(h.scenes.Raid.deck_now).toBe(2);
+    }
   });
 });
 
 describe("裝、拆、重裝", () => {
-  it("重裝是安全的：不會把 emit 疊兩層", () => {
+  it("⚠ 拆掉之前要先放行 —— 攔著的時候拆掉，那一下就永遠不會送出去", async () => {
     const h = makeGame();
-    h.scenes.Quest.active = true;
     install(h);
-    install(h);
-    install(h);
-    setPending(h, true);
-    h.socket.emit("quest_start", "id");
-    run(h, ROOM_GATE_RELEASE_EXPRESSION);
-    expect(h.socket.emitted).toHaveLength(1);
-  });
-
-  it("⚠ 拆掉之前要先放行 —— 攔著的時候拆掉，那一下就永遠不會送出去", () => {
-    const h = makeGame();
-    h.scenes.Quest.active = true;
-    install(h);
-    setPending(h, true);
-    h.socket.emit("quest_start", "id", 3);
-    expect(h.socket.emitted).toHaveLength(0);
-
+    setDecks(h, { mode: "plugin", decks: { raid: pluginPreload(685) } });
+    h.scenes.Raid.active = true;
+    tick(h);
+    h.registry.deck[0]!.chara_card_id = [999, null, null];
+    const p = h.scenes.Raid.socket.fetch("raid_start", 7, 1, 1);
     expect(run(h, ROOM_GATE_UNINSTALL_EXPRESSION)).toBe("ok");
-    expect(h.socket.emitted).toEqual([{ ev: "quest_start", args: ["id", 3] }]);
+    await expect(p).resolves.toBe("ok:raid_start");
   });
 
-  it("拆完 emit 回到原狀", () => {
+  it("拆掉之後 fetch／create／channel_login 都回到原版", async () => {
     const h = makeGame();
-    h.scenes.Quest.active = true;
     install(h);
+    const hasOwn = (o: object, k: string) => Object.prototype.hasOwnProperty.call(o, k);
+    expect(hasOwn(h.scenes.Raid, "create")).toBe(true);
+    expect(hasOwn(h.scenes.Raid.socket, "fetch")).toBe(true);
     run(h, ROOM_GATE_UNINSTALL_EXPRESSION);
-    expect(Object.prototype.hasOwnProperty.call(h.socket, "emit")).toBe(false);
+    expect(hasOwn(h.scenes.Raid, "create")).toBe(false);
+    expect(hasOwn(h.scenes.Raid.socket, "fetch")).toBe(false);
+    expect(hasOwn(h.scenes.Match, "channel_login")).toBe(false);
     expect(h.window.__ulrRoomGate).toBeUndefined();
   });
 
-  it("沒裝的時候問狀態不會炸", () => {
+  it("沒裝時推東西回 not-installed，不丟例外", () => {
     const h = makeGame();
-    expect(status(h).installed).toBe(false);
-    expect(run(h, ROOM_GATE_RELEASE_EXPRESSION)).toBe("not-installed");
     expect(setPending(h, true)).toBe("not-installed");
-    expect(run(h, ROOM_GATE_UNINSTALL_EXPRESSION)).toBe("not-installed");
-  });
-
-  it("遊戲還沒起來（沒有 window.game）時裝得上，不會炸", () => {
-    // 玩家的正常開機順序是先開插件再開遊戲。
-    const h = makeGame();
-    (h.window as { game?: unknown }).game = undefined;
-    expect(() => install(h)).not.toThrow();
-    expect(status(h).room).toBeNull();
-  });
-});
-
-describe("deck_now 釘回 1（最後一道保險）", () => {
-  // ⚠ 這一組測的是 2026-09-09 實機上撞到的那個 bug：Deck2/Deck3 被插件清空
-  // 之後，遊戲原本的箭頭會把玩家帶到一副空牌，而 deck_now 正是開戰 emit 帶出去
-  // 的那個參數 —— 停在 Deck2 按 START 就是拿空牌打，而**開戰閘門救不了**
-  // （閘門寫的是 Deck1，emit 帶出去的是 2）。
-  //
-  // ⚠ 箭頭本身由 patch-deck-edit 接管（見那支的 mount()）。這裡只保底。
-
-  it("玩家已經按到 Deck2 → 釘回 1、標籤改回來、重畫", () => {
-    const h = makeGame();
-    h.scenes.Quest.active = true;
-    h.scenes.Quest.withArrows();
-    h.scenes.Quest.deck_now = 2; // 實機上量到的狀態
-    install(h);
-    expect(h.scenes.Quest.deck_now).toBe(1);
-    expect(h.scenes.Quest.redrawn).toBeGreaterThan(0);
-    // 只釘數字不改標籤的話，畫面上會留一個「Deck2」指著其實是 Deck1 的內容
-    expect(h.scenes.Quest.deck_name?.text).toBe("Deck1 ");
-  });
-
-  it("本來就是 1 就不動它 —— 每 500ms 重畫一次會把卡片一直拆掉重建", () => {
-    const h = makeGame();
-    h.scenes.Quest.active = true;
-    h.scenes.Quest.withArrows();
-    install(h);
-    tick(h);
-    tick(h);
-    expect(h.scenes.Quest.redrawn).toBe(0);
-  });
-
-  it("⚠ 不去碰箭頭 —— 那是 patch-deck-edit 的事，兩邊搶會互相拆掉對方", () => {
-    const h = makeGame();
-    h.scenes.Quest.active = true;
-    h.scenes.Quest.withArrows();
-    const before = h.scenes.Quest.deck_next?.count("pointerup");
-    install(h);
-    expect(h.scenes.Quest.deck_next?.count("pointerup")).toBe(before);
-    expect(h.scenes.Quest.deck_next?.count("pointerover")).toBe(1);
-  });
-
-  it("場景沒有那組東西時不會炸（還在載入）", () => {
-    const h = makeGame();
-    h.scenes.Quest.active = true;
-    expect(() => install(h)).not.toThrow();
+    expect(setDecks(h, { mode: "plugin", decks: {} })).toBe("not-installed");
+    expect(run(h, ROOM_GATE_RELEASE_EXPRESSION)).toBe("not-installed");
   });
 });
 
 describe("parseRoomGateStatus", () => {
-  it("壞掉的字串回一份安全的預設", () => {
-    const s = parseRoomGateStatus("這不是 JSON");
-    expect(s.installed).toBe(false);
-    expect(s.room).toBeNull();
-    expect(s.holding).toBe(false);
-  });
-
-  it("認不得的房型鍵當成 null", () => {
-    expect(parseRoomGateStatus(JSON.stringify({ room: "月球" })).room).toBeNull();
+  it("讀得出模式與攔截狀態；壞掉的回傳當成沒裝", () => {
+    const h = makeGame();
+    install(h);
+    setDecks(h, { mode: "official", decks: {} });
+    expect(status(h).mode).toBe("official");
+    expect(parseRoomGateStatus("壞掉")).toMatchObject({
+      installed: false,
+      mode: "off",
+      holding: false,
+    });
   });
 });
 
 describe("腳本本身", () => {
-  it("產出來的是一段跑得起來的運算式（跳脫沒有少一層）", () => {
-    const script = buildRoomGateScript({ bindingName: "__x" });
-    // eslint-disable-next-line no-new-func
-    expect(() => new Function(`return ${script};`)).not.toThrow();
+  it("是合法的 JS", () => {
+    const compile = (): unknown =>
+      // eslint-disable-next-line no-new-func
+      new Function(`return ${buildRoomGateScript({ bindingName: "x" })};`);
+    expect(compile).not.toThrow();
   });
 
-  it("binding 名字有被帶進去", () => {
-    expect(buildRoomGateScript({ bindingName: "__ulrCompanionReport" })).toContain(
-      "__ulrCompanionReport",
-    );
-  });
-
-  it("等候與輪詢的間隔可以覆寫", () => {
-    const script = buildRoomGateScript({
-      bindingName: "__x",
-      pollIntervalMs: 123,
-      holdTimeoutMs: 4567,
-    });
-    expect(script).toContain("123");
-    expect(script).toContain("4567");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 進房前就把牌換好（2026-09-10 加）
-//
-// 起因：進房之後會先看到**上一房的牌**約半秒，因為原本的流程是「頁面每 500ms
-// 發現換房 → 回報 Node → Node 寫回客戶端記憶體」。房間場景是在 create() 裡就
-// 把三張卡畫出來的，所以要一幀都不閃，只能在 create() **跑之前**就把 deck1
-// 換掉。
-// ---------------------------------------------------------------------------
-
-const PRELOAD_RAID = {
-  raid: {
-    deck: {
-      chara: ["cc043", "cc011", "cc033"],
-      charaIndex: [426, 109, 329],
-      eventIndex: Array<number | null>(18).fill(null),
-      weapon: [null, null, null],
-      cost: 0,
-    },
-    name: "渦專用",
-  },
-};
-
-function setRoomDecks(h: Harness, decks: unknown): string {
-  return run(h, buildRoomGateDecksExpression(decks as never));
-}
-
-describe("進房前就把牌換好", () => {
-  it("create 被包起來了，而且包的是實例不是 prototype", () => {
-    const h = makeGame();
-    install(h);
-    const raid = h.scenes.Raid;
-    expect(Object.prototype.hasOwnProperty.call(raid, "create")).toBe(true);
-    expect(Object.prototype.hasOwnProperty.call(Object.getPrototypeOf(raid), "create")).toBe(true);
-  });
-
-  it("⚠⚠ create 跑之前就換掉 deck1 —— 遊戲畫出來的就是我們那一副", () => {
-    const h = makeGame();
-    install(h);
-    setRoomDecks(h, PRELOAD_RAID);
-
-    const raid = h.scenes.Raid;
-    raid.deck1 = { charaIndex: [1, 2, 3] }; // 上一房留下來的
-    raid.create();
-
-    // 遊戲自己在 create 裡讀到的就已經是新的那一副
-    expect(raid.drawn).toEqual([426, 109, 329]);
-    expect(raid.deck1?.charaIndex).toEqual([426, 109, 329]);
-    // 左下那行字也不是寫死的 Deck1 了
-    expect(raid.deck_name?.text).toBe("渦專用 ");
-    expect(raid.deck_now).toBe(1);
-  });
-
-  it("沒有推那一房的牌時完全不插手", () => {
-    const h = makeGame();
-    install(h);
-    const quest = h.scenes.Quest;
-    quest.deck1 = { charaIndex: [7, 8, 9] };
-    quest.create();
-    expect(quest.drawn).toEqual([7, 8, 9]);
-    expect(quest.deck_name?.text).toBe("Deck1 ");
-  });
-
-  it("⚠ Match 不能被插手 —— 它是哪一房要看玩家選哪個頻道，create 時還不知道", () => {
-    const h = makeGame();
-    install(h);
-    expect(Object.prototype.hasOwnProperty.call(h.scenes.Match, "create")).toBe(false);
-  });
-
-  it("整份換掉，不合併 —— 刪掉的那一房要真的消失", () => {
-    const h = makeGame();
-    install(h);
-    setRoomDecks(h, PRELOAD_RAID);
-    setRoomDecks(h, {});
-
-    const raid = h.scenes.Raid;
-    raid.deck1 = { charaIndex: [1, 2, 3] };
-    raid.create();
-    expect(raid.drawn).toEqual([1, 2, 3]);
-  });
-
-  it("⚠⚠ 換房的回報要帶 preloaded —— 少了它伺服器永遠不會被寫", () => {
-    const h = makeGame();
-    install(h);
-    // ⚠ 這裡不能用 tick()（那是重裝，會把推過去的牌組清光，見下一題），
-    // 要跑安裝時註冊的那支 500ms 輪詢。
-    const poll = h.timers[h.timers.length - 1];
-    expect(poll).toBeDefined();
-    setRoomDecks(h, PRELOAD_RAID);
-
-    h.scenes.Raid.active = true;
-    poll?.();
-    expect(h.reports.filter((r) => r.type === "room-changed").at(-1)).toMatchObject({
-      room: "raid",
-      preloaded: true,
-    });
-
-    // 沒有推那一房的牌時是 false（Node 就照原本那條路判斷）
-    h.scenes.Raid.active = false;
-    h.scenes.Quest.active = true;
-    poll?.();
-    expect(h.reports.filter((r) => r.type === "room-changed").at(-1)).toMatchObject({
-      room: "quest",
-      preloaded: false,
-    });
-  });
-
-  it("⚠⚠ 重裝會把推過去的牌組清光 —— 呼叫端裝完一定要重推", () => {
-    // 這不是缺陷，是「重裝一律從原狀開始」的必然結果。但它有牙齒：遊戲重載
-    // 之後 engine 會重裝閘門，那時候如果沒有把牌組補推回去，進房就又會閃一下
-    // 上一房的牌 —— 而且完全不報錯。engine 的 #syncRoomGate() 負責補推。
-    const h = makeGame();
-    install(h);
-    setRoomDecks(h, PRELOAD_RAID);
-    install(h); // 遊戲重載 → 重裝
-
-    const raid = h.scenes.Raid;
-    raid.deck1 = { charaIndex: [1, 2, 3] };
-    raid.create();
-    expect(raid.drawn).toEqual([1, 2, 3]);
-  });
-
-  it("拆掉之後 create 要還回去，不能繼續塞牌", () => {
-    const h = makeGame();
-    install(h);
-    setRoomDecks(h, PRELOAD_RAID);
-    expect(run(h, ROOM_GATE_UNINSTALL_EXPRESSION)).toBe("ok");
-
-    const raid = h.scenes.Raid;
-    expect(Object.prototype.hasOwnProperty.call(raid, "create")).toBe(false);
-    raid.deck1 = { charaIndex: [1, 2, 3] };
-    raid.create();
-    expect(raid.drawn).toEqual([1, 2, 3]);
-    expect(raid.deck_name?.text).toBe("Deck1 ");
-  });
-
-  it("重裝不會包兩層", () => {
+  it("重跑一次不會留下兩份輪詢或兩層包裝", async () => {
     const h = makeGame();
     install(h);
     install(h);
-    install(h);
-    setRoomDecks(h, PRELOAD_RAID);
-
-    const raid = h.scenes.Raid;
-    raid.deck1 = { charaIndex: [1, 2, 3] };
-    raid.create();
-    expect(raid.created).toBe(1); // 原版只跑了一次
-    expect(raid.drawn).toEqual([426, 109, 329]);
-  });
-
-  it("沒安裝時推牌組回 not-installed，不丟例外", () => {
-    const h = makeGame();
-    expect(setRoomDecks(h, PRELOAD_RAID)).toBe("not-installed");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 亞城／迪城：選頻道那一下就把牌換好（2026-09-12 加）
-//
-// Match 不能在 create() 預載（那時候還不知道是哪一房），所以包的是選頻道那個
-// 事件：先換牌、先回報，再把事件交給遊戲。
-// ---------------------------------------------------------------------------
-
-const PRELOAD_MATCH = {
-  alexandria: {
-    deck: {
-      chara: ["cc001", "cc002", "cc003"],
-      charaIndex: [11, 12, 13],
-      eventIndex: Array<number | null>(18).fill(null),
-      weapon: [null, null, null],
-      cost: 0,
-    },
-    name: "亞城用",
-  },
-  dietherm: {
-    deck: {
-      chara: ["cc004", "cc005", "cc006"],
-      charaIndex: [21, 22, 23],
-      eventIndex: Array<number | null>(18).fill(null),
-      weapon: [null, null, null],
-      cost: 0,
-    },
-    name: "迪城用",
-  },
-};
-
-/** 進了 Match、還在選頻道：channel_list 已經建好，輪詢跑過一輪把它包起來。 */
-function enterMatch(h: Harness): FakeScene {
-  const m = h.scenes.Match.withChannelList();
-  m.active = true;
-  m.channels = { 1: { type: "ranked" }, 2: { type: "duel" } };
-  const poll = h.timers[h.timers.length - 1];
-  poll?.();
-  return m;
-}
-
-describe("亞城／迪城：選頻道那一下就把牌換好", () => {
-  it("包的是 channel_list 實例上的 emit，不是 prototype", () => {
-    const h = makeGame();
-    install(h);
-    const m = enterMatch(h);
-    expect(Object.prototype.hasOwnProperty.call(m.channel_list, "emit")).toBe(true);
-    expect(
-      Object.prototype.hasOwnProperty.call(Object.getPrototypeOf(m.channel_list), "emit"),
-    ).toBe(true);
-  });
-
-  it("⚠⚠ 遊戲的處理器跑到之前 deck1 就已經是那一房的 —— 面板篩房間用的就是新的 cost", () => {
-    const h = makeGame();
-    install(h);
-    setRoomDecks(h, PRELOAD_MATCH);
-    const m = enterMatch(h);
-
-    m.channel_list?.emit("channel", 2, { type: "duel" }, 0);
-
-    expect(m.deck1?.charaIndex).toEqual([21, 22, 23]);
-    expect(m.channel).toBe(2); // 遊戲自己的處理器照常跑了
-    expect(m.channel_panel?.seenCost).toBe(m.deck1?.cost); // 而且它看到的是換過之後的
-    expect(m.redrawn).toBe(1);
-    expect(m.deck_now).toBe(1);
-    // 名字是在重畫之後設的（change_deck 會把它寫回 Deck1）
-    expect(m.deck_name?.text).toBe("迪城用 ");
-  });
-
-  it("換房就地回報，帶 preloaded=true；輪詢隨後看到同一房不再重報", () => {
-    const h = makeGame();
-    install(h);
-    setRoomDecks(h, PRELOAD_MATCH);
-    const m = enterMatch(h);
-    const before = h.reports.length;
-
-    m.channel_list?.emit("channel", 1, { type: "ranked" }, 0);
-    expect(h.reports.slice(before)).toEqual([
-      { type: "room-changed", room: "alexandria", preloaded: true },
-    ]);
-
-    const poll = h.timers[h.timers.length - 1];
-    poll?.();
-    poll?.();
-    expect(h.reports.length).toBe(before + 1);
-  });
-
-  it("亞城 ↔ 迪城來回切，每一下都換到對的那一副", () => {
-    const h = makeGame();
-    install(h);
-    setRoomDecks(h, PRELOAD_MATCH);
-    const m = enterMatch(h);
-
-    m.channel_list?.emit("channel", 1, { type: "ranked" }, 0);
-    expect(m.deck1?.charaIndex).toEqual([11, 12, 13]);
-    expect(m.deck_name?.text).toBe("亞城用 ");
-    m.channel_list?.emit("channel", 2, { type: "duel" }, 0);
-    expect(m.deck1?.charaIndex).toEqual([21, 22, 23]);
-    expect(m.deck_name?.text).toBe("迪城用 ");
-    m.channel_list?.emit("channel", 1, { type: "ranked" }, 0);
-    expect(m.deck1?.charaIndex).toEqual([11, 12, 13]);
-
-    const rooms = h.reports.filter((r) => r.type === "room-changed").map((r) => r.room);
-    expect(rooms.slice(-3)).toEqual(["alexandria", "dietherm", "alexandria"]);
-  });
-
-  it("⚠ 看的是 type 不是編號 —— 跨平台的 duel 頻道也是迪城；沒帶 info 就查 channels", () => {
-    const h = makeGame();
-    install(h);
-    setRoomDecks(h, PRELOAD_MATCH);
-    const m = enterMatch(h);
-    m.channels_cross = { 4: { type: "duel" } };
-
-    m.channel_list?.emit("channel", 4, { type: "duel" }, 0);
-    expect(m.deck1?.charaIndex).toEqual([21, 22, 23]);
-
-    m.channel_list?.emit("channel", 1, undefined, 0);
-    expect(m.deck1?.charaIndex).toEqual([11, 12, 13]);
-  });
-
-  it("沒有推那一房的牌時不碰 deck1，但房型照樣回報（preloaded=false）", () => {
-    const h = makeGame();
-    install(h);
-    setRoomDecks(h, { alexandria: PRELOAD_MATCH.alexandria });
-    const m = enterMatch(h);
-    const before = h.reports.length;
-
-    m.channel_list?.emit("channel", 2, { type: "duel" }, 0);
-    expect(m.deck1?.charaIndex).toEqual([684, 674, 665]);
-    expect(m.redrawn).toBe(0);
-    expect(m.deck_name?.text).toBe("Deck1 ");
-    expect(h.reports.slice(before)).toEqual([
-      { type: "room-changed", room: "dietherm", preloaded: false },
-    ]);
-  });
-
-  it("⚠ 換牌那段自己出事也要把事件交給遊戲 —— 不能因為我們的東西讓玩家進不了頻道", () => {
-    const h = makeGame();
-    install(h);
-    setRoomDecks(h, PRELOAD_MATCH);
-    const m = enterMatch(h);
-    m.change_deck = () => {
-      throw new Error("boom");
-    };
-
-    expect(() => m.channel_list?.emit("channel", 2, { type: "duel" }, 0)).not.toThrow();
-    expect(m.channel).toBe(2);
-  });
-
-  it("COST 用牌組編輯那支算的官方價補進去 —— 不然進頻道那一幀是 cost:0", () => {
-    const h = makeGame();
-    install(h);
-    setRoomDecks(h, PRELOAD_MATCH);
-    const m = enterMatch(h);
-    (h.window as unknown as Record<string, unknown>)["__ulrDeckEdit"] = {
-      costFor: (_content: unknown, custom: boolean) => (custom ? 999 : 64),
-    };
-
-    m.channel_list?.emit("channel", 1, { type: "ranked" }, 0);
-    expect(m.deck1?.cost).toBe(64);
-    expect(m.costText).toBe("cost:64");
-  });
-
-  it("⚠ 哪一種價看房型，跟牌盒同一張表：迪城自訂、亞城官方（2026-09-12 兩則回報）", () => {
-    const h = makeGame();
-    install(h);
-    setRoomDecks(h, PRELOAD_MATCH);
-    const m = enterMatch(h);
-    const w = h.window as unknown as Record<string, unknown>;
-    w["__ulrDeckEdit"] = { costFor: (_c: unknown, custom: boolean) => (custom ? 92 : 91) };
-    // 罰則補丁的 costOf 不能搶在牌盒前面 —— 它在亞城會給自訂價
-    w["__ulrPenaltyPatch"] = { installed: true, costOf: () => 80 };
-
-    m.channel_list?.emit("channel", 2, { type: "duel" }, 0);
-    expect(m.costText).toBe("cost:92");
-    m.channel_list?.emit("channel", 1, { type: "ranked" }, 0);
-    expect(m.costText).toBe("cost:91");
-  });
-
-  it("牌盒還沒掛上時：迪城退回罰則補丁的 costOf，亞城寧可不動也不拿自訂價", () => {
-    const h = makeGame();
-    install(h);
-    setRoomDecks(h, PRELOAD_MATCH);
-    const m = enterMatch(h);
-    const w = h.window as unknown as Record<string, unknown>;
-    w["__ulrPenaltyPatch"] = { installed: true, costOf: () => 92 };
-
-    m.channel_list?.emit("channel", 2, { type: "duel" }, 0);
-    expect(m.deck1?.cost).toBe(92);
-    m.channel_list?.emit("channel", 1, { type: "ranked" }, 0);
-    expect(m.deck1?.cost).toBe(0); // Node 帶來的 0，沒有被自訂價蓋掉
-  });
-
-  it("每次進 Match 都是新的一顆 channel_list —— 新的要包上，舊的不留", () => {
-    const h = makeGame();
-    install(h);
-    setRoomDecks(h, PRELOAD_MATCH);
-    const m = enterMatch(h);
-    const old = m.channel_list;
-
-    // 離開再進來：遊戲 create() 又 new 了一顆
-    m.withChannelList();
-    const poll = h.timers[h.timers.length - 1];
-    poll?.();
-    expect(m.channel_list).not.toBe(old);
-    expect(Object.prototype.hasOwnProperty.call(m.channel_list, "emit")).toBe(true);
-    const st = h.window.__ulrRoomGate as { channelHooks: unknown[] };
-    expect(st.channelHooks).toHaveLength(1);
-
-    m.channel_list?.emit("channel", 2, { type: "duel" }, 0);
-    expect(m.deck1?.charaIndex).toEqual([21, 22, 23]);
-  });
-
-  it("重裝不會包兩層", () => {
-    const h = makeGame();
-    install(h);
-    const m = enterMatch(h);
-    install(h);
-    const poll = h.timers[h.timers.length - 1];
-    poll?.();
-    setRoomDecks(h, PRELOAD_MATCH);
-
-    let fired = 0;
-    m.channel_list?.on("channel", () => fired++);
-    m.channel_list?.emit("channel", 1, { type: "ranked" }, 0);
-    expect(fired).toBe(1);
-  });
-
-  it("拆掉之後 emit 還回去，選頻道不再換牌", () => {
-    const h = makeGame();
-    install(h);
-    setRoomDecks(h, PRELOAD_MATCH);
-    const m = enterMatch(h);
-    expect(run(h, ROOM_GATE_UNINSTALL_EXPRESSION)).toBe("ok");
-
-    expect(Object.prototype.hasOwnProperty.call(m.channel_list, "emit")).toBe(false);
-    m.channel_list?.emit("channel", 2, { type: "duel" }, 0);
-    expect(m.deck1?.charaIndex).toEqual([684, 674, 665]);
-    expect(m.channel).toBe(2);
-  });
-});
-
-describe("回報型別", () => {
-  it("認得自己的三種回報", async () => {
-    const { isRoomGateReport } = await import("@ulr/cdp-adapter");
-    expect(isRoomGateReport({ type: "room-changed", room: "quest" })).toBe(true);
-    expect(isRoomGateReport({ type: "room-gate-hold", event: "quest_start" })).toBe(true);
-    expect(isRoomGateReport({ type: "room-gate-timeout", event: "quest_start" })).toBe(true);
-    expect(isRoomGateReport({ type: "lobby-quick" })).toBe(false);
-    expect(isRoomGateReport(null)).toBe(false);
+    await flush();
+    await h.scenes.Quest.socket.fetch("db_quest");
+    expect(h.scenes.Quest.socket.fetched).toHaveLength(1);
   });
 });

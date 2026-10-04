@@ -23,7 +23,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { BROWSER_DEBUG_PORT, EDGE_DEBUG_PORT, ENV_KEYS_TO_STRIP } from "./constants.js";
 import { probePortState, resolveDebugPort } from "./debug-port.js";
 import { discoverDebuggerUrl } from "./transport.js";
@@ -202,6 +202,11 @@ export interface BrowserArgsOptions {
   profileDir: string;
   /** 玩家自己的偏好，例如 `--force-device-scale-factor=1.5`。原樣接在後面。 */
   extraArgs?: readonly string[];
+  /**
+   * 開哪一頁。預設 `about:blank`（理由見 {@link buildBrowserArgs}）；`null` = 不帶網址，
+   * 開瀏覽器自己的新分頁 —— 玩家要從書籤列點遊戲時用這個。
+   */
+  startUrl?: string | null;
 }
 
 /**
@@ -225,8 +230,79 @@ export function buildBrowserArgs(options: BrowserArgsOptions): string[] {
     "--no-default-browser-check",
     "--hide-crash-restore-bubble",
     ...(options.extraArgs ?? []),
-    "about:blank",
+    ...(options.startUrl === null ? [] : [options.startUrl ?? "about:blank"]),
   ];
+}
+
+/**
+ * 給玩家存成捷徑用的 `.cmd`：用插件專用的 profile 開這一族的瀏覽器，帶
+ * `--remote-debugging-port=0`。開出來的是新分頁，遊戲從玩家自己的書籤開。
+ *
+ * ⚠ **只能用 ASCII。** cmd.exe 用系統碼頁（繁中是 CP950）讀檔，中文註解會被拆碎，
+ * `rem` 後面的半個字會被當成指令執行。
+ *
+ * 路徑寫成 `%USERPROFILE%` / `%ProgramFiles%` 而不是這台機器的絕對路徑：
+ * 這個檔可能被傳給別人用，而跟 {@link findBrowser} 用同一份候選清單，
+ * 托盤按鈕開到的與 .cmd 開到的才會是同一個瀏覽器。
+ */
+export function buildBrowserLaunchCmd(family: BrowserFamily): string {
+  // profile 一律在家目錄底下（見 DEFAULT_BROWSER_PROFILE_DIR），只取資料夾名 ——
+  // 用 path 去切的話 CI（Linux）上會切出 `/`。
+  const profile = `%USERPROFILE%\\${basename(browserProfileDir(family))}`;
+  const exes = BROWSER_CANDIDATES.filter((c) => c.family === family).map(
+    (c) => `%${c.env}%\\${c.rel}`,
+  );
+  const flags = buildBrowserArgs({ port: 0, profileDir: "%PROFILE%", startUrl: null })
+    .map((a) => `"${a}"`)
+    .join(" ");
+  const name = family === "edge" ? "Edge" : "Chrome";
+  return [
+    "@echo off",
+    `rem Open ${name} with a CDP debug port for ULR Companion.`,
+    "rem Port 0 = the browser picks a free port and writes it to",
+    "rem <profile>\\DevToolsActivePort, where the companion reads it.",
+    `set "PROFILE=${profile}"`,
+    'set "EXE="',
+    ...exes.map((e) => `if not defined EXE if exist "${e}" set "EXE=${e}"`),
+    `if not defined EXE echo ${name} not found.& pause & exit /b 1`,
+    `start "" "%EXE%" ${flags}`,
+    "",
+  ].join("\r\n");
+}
+
+/**
+ * 每次啟動都臨時掛上一個未封裝擴充（ULR Boot）。
+ *
+ * Chromium 137+ 預設忽略 `--load-extension`，要這個 kill-switch 才吃 ——
+ * Edge 152 實測有效（2026-09-08，ulr-boot-dist 的小號 .cmd）。品牌版 Chrome
+ * 連 kill-switch 都不理，Chrome 那邊只能靠「載入未封裝項目」裝進設定檔。
+ */
+export function loadExtensionArgs(extensionDir: string): string[] {
+  return [
+    "--disable-features=DisableLoadExtensionCommandLineSwitch",
+    `--load-extension=${extensionDir}`,
+  ];
+}
+
+/**
+ * 桌面捷徑（.lnk）的「引數」那一段，也是教學頁給玩家自己貼的那一行的後半。
+ * 跟托盤按鈕同一組旗標、同一個 profile，捷徑開到的與按鈕開到的是同一個瀏覽器。
+ *
+ * 含空白的參數整個包引號：使用者名稱有空白時 `--user-data-dir=` 會斷成兩段，
+ * 瀏覽器就用預設設定檔開 —— 而預設設定檔不開除錯埠（Chrome 136+），什麼錯都不報。
+ */
+export function buildBrowserShortcutArgs(
+  profileDir: string,
+  extensionDir: string | null = null,
+): string {
+  return buildBrowserArgs({
+    port: 0,
+    profileDir,
+    startUrl: null,
+    ...(extensionDir === null ? {} : { extraArgs: loadExtensionArgs(extensionDir) }),
+  })
+    .map((a) => (/\s/.test(a) ? `"${a}"` : a))
+    .join(" ");
 }
 
 /** debug port 現在有沒有人在聽。 */
@@ -257,6 +333,14 @@ export interface LaunchBrowserOptions {
   pollIntervalMs?: number;
   /** 首選埠綁不上時要不要退回 `--remote-debugging-port=0`。預設 true。 */
   autoPortFallback?: boolean;
+  /**
+   * 不試首選埠，**一律**用 `--remote-debugging-port=0`。托盤的「開啟」按鈕用這個：
+   * 跟 Steam 啟動選項、存出去的 .cmd 是同一種開法，埠一律從 `DevToolsActivePort` 讀。
+   * `port` 仍然要給 —— 它是連線那一側的首選值與實例身分，不是命令列上的數字。
+   */
+  alwaysAutoPort?: boolean;
+  /** 見 {@link BrowserArgsOptions.startUrl}。 */
+  startUrl?: string | null;
   /** 退回自動挑埠時講一句 —— 這件事會改變之後所有指令要接的埠。 */
   onNotice?: (message: string) => void;
 }
@@ -317,9 +401,13 @@ export async function ensureBrowser(
   // 綁得上就用首選埠（結果可預期，CLI 的 --port 也才對得起來）；綁不上才讓
   // Chromium 自己挑。`in-use` 不算綁不上 —— 那多半是別的東西在聽，硬換埠反而
   // 會讓玩家的設定與實際永遠對不起來，留給下面的逾時去報。
-  const blocked = (await probePortState(requestedPort)) === "blocked";
-  const launchPort = blocked && options.autoPortFallback !== false ? 0 : requestedPort;
-  if (launchPort === 0) {
+  const blocked =
+    options.alwaysAutoPort !== true && (await probePortState(requestedPort)) === "blocked";
+  const launchPort =
+    options.alwaysAutoPort === true || (blocked && options.autoPortFallback !== false)
+      ? 0
+      : requestedPort;
+  if (blocked && launchPort === 0) {
     notice(
       `:${requestedPort} 綁不上（Windows 保留範圍），改用 --remote-debugging-port=0 ` +
         "讓瀏覽器自己挑一個，接上之後會回報實際的埠。",
@@ -336,6 +424,7 @@ export async function ensureBrowser(
     port: launchPort,
     profileDir,
     ...(options.extraArgs !== undefined ? { extraArgs: options.extraArgs } : {}),
+    ...(options.startUrl !== undefined ? { startUrl: options.startUrl } : {}),
   });
 
   // detached + unref：companion 結束時不要把玩家的遊戲一起帶走。

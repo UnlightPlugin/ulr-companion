@@ -28,6 +28,10 @@ const SENSITIVE_QUERY_KEYS = new Set([
   "password",
   "steamid",
   "cdp_id",
+  // 2026-09-23 改版後的名字：steamid → platform_id、token → access_token。
+  // 名字一換，上面那兩條就全部漏掉 —— 桌面版 iframe 的網址整串進記錄。
+  "platform_id",
+  "access_token",
 ]);
 
 export const REDACTED = "***";

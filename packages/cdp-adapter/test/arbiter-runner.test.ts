@@ -289,6 +289,30 @@ describe("ArbiterRunner", () => {
     expect(bridge.ran("cancel")).toHaveLength(1);
   });
 
+  it("⚠ 階段一開始就按：先換階段再算這一按，不可以被晚到的 tick 清掉", async () => {
+    // 2026-10-04 雙開實測：移動階段開始 0.2 秒內按 OK，tick 還停在上一個階段。
+    // 舊順序是「這一按 → 準備」，下一個 tick 才「換階段 → 清掉準備」——
+    // 第一下不算數，再按一次反而變成準備（玩家的意思剛好相反）。
+    const bridge = new FakeBridge();
+    bridge.phaseId = 1;
+    const runner = new ArbiterRunner(bridge, { ...OPTIONS, tickIntervalMs: 5 });
+    await runner.start();
+    await new Promise((r) => setTimeout(r, 20)); // tick 已經看過階段 1
+
+    // 頁面進到階段 2，玩家立刻按 —— 回報先到，tick 還沒問。
+    bridge.phaseId = 2;
+    await bridge.emit({ type: "ok-intercepted", at: 0, phaseId: 2 });
+    expect(runner.state.ready).toBe(true);
+
+    await new Promise((r) => setTimeout(r, 30)); // 好幾個 tick 看到階段 2
+    expect(runner.state.ready).toBe(true);
+
+    await bridge.emit({ type: "ok-pressed-again", at: 1, phaseId: 2 });
+    runner.stop();
+    expect(runner.state.ready).toBe(false);
+    expect(bridge.ran("cancel")).toHaveLength(1);
+  });
+
   it("對手動作取消準備", async () => {
     const bridge = new FakeBridge();
     const runner = new ArbiterRunner(bridge, OPTIONS); // 我方是 A
@@ -465,6 +489,29 @@ describe("ArbiterRunner：約定秒數（WP-15）", () => {
     // tick 跑了很多輪，setDisplayCap 只該送一次。
     expect(bridge.ran("setDisplayCap")).toHaveLength(1);
     expect(bridge.ran("setDisplayCap")[0]).toContain("15");
+  });
+
+  it("⚠ 頁面上的 patch 換了一份，顯示秒數要重推 —— 不然重載後倒數就不再縮", async () => {
+    // 2026-10-04 實測：重裝之後頁面那邊是 null，runner 還記著 15、值沒變就不推。
+    const bridge = new FakeBridge();
+    bridge.phaseId = 5;
+    const runner = new ArbiterRunner(bridge, {
+      ...OPTIONS,
+      capSecondsFor: () => 15,
+      tickIntervalMs: 5,
+    });
+    await runner.start();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(bridge.ran("setDisplayCap")).toHaveLength(1);
+
+    // 重載：先有幾個 tick 看不到 patch，裝回來的那份序號從 0 開始。
+    bridge.installed = false;
+    await new Promise((r) => setTimeout(r, 15));
+    bridge.installed = true;
+    bridge.phaseId = 0;
+    await new Promise((r) => setTimeout(r, 20));
+    runner.stop();
+    expect(bridge.ran("setDisplayCap")).toHaveLength(2);
   });
 
   it("換階段就重置，而且告訴側通道我方不再是就緒狀態", async () => {

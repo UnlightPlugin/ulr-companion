@@ -1,48 +1,75 @@
 /**
  * 在迪特赫姆重現亞歷山卓城的快速比賽
  * ====================================
- * 迪城（duel 頻道）只有「創建對戰室」，亞城（ranked 頻道）有「快速比賽」與
+ * 迪城（duel 頻道）只有「創建對戰房間」，亞城（ranked 頻道）有「快速比賽」與
  * 「COST54:N 位玩家等待中」。差別不是介面偷懶，是**伺服器那邊只有 ranked 頻道
- * 有佇列**（`quick_wait` 只在 ranked 有，而且用原版 COST 分檔）——
+ * 有佇列**（`quick_room` 只在有快速比賽的頻道有，而且用原版 COST 分檔）——
  * 見 docs/match-making.md §1。
  *
  * 這支把那兩樣東西補回迪城，資料來源換成插件自己的中間人：
  *
  * ```
- *   亞城（官方）                        迪城（這支）
- *   ────────────────────────────        ──────────────────────────────
- *   quick_btn  → emit quick_wait        我們畫的按鈕 → 插件的自動配對
- *   channel_players 推播 → 4 行人數     中間人的佇列人數 → 同樣的 4 行
- *   match_room_error fail:7 → 對話框    同一個對話框、同一句話
+ *   亞城（官方）                            迪城（這支）
+ *   ──────────────────────────────          ──────────────────────────────
+ *   match_quick 鈕 → quick_room             同一張圖的按鈕 → 插件的自動配對
+ *   quick_length 推播 → 4 行人數            中間人的佇列人數 → 同一個模板
+ *   create_match_wait() 等待視窗            同一支（取消鈕改成通知插件）
+ *   match_error(代碼) 錯誤框                同一支、同一份字串表
  * ```
  *
- * ## 三個「照抄」，一個都不能自己發明
+ * ## 2026-09-23 改版之後的大廳（2026-09-27 從跑著的客戶端讀的）
  *
- * 1. **按鈕用遊戲自己的類別與貼圖。** `match_quick_btn` 在迪城的客戶端也載得到
- *    （2026-08-18 實測，frames 有 `tcn_1`/`tcn_2`），所以按鈕跟亞城那顆長得
- *    一模一樣 —— 自己畫一顆會馬上被看出是外掛的東西。類別是從
- *    `channel_panel.room_btn` 的 prototype 取的（模組外面拿不到那個 class）。
- * 2. **人數那幾行用遊戲自己的模板**（`PLAYER_COUNT[lang][1]`）。它長這樣：
- *    `COST__COST1__:__LENGTH1__位玩家等待中。\n…`，我們只把數字填進去。
- *    自己組字串的話換語言就會露出繁中。
- * 3. **牌組不合規則那句話是 `room_error[lang][7]`**（「這個牌組不符合遊戲規則」），
- *    對話框是遊戲自己的那個類別。整段流程照抄 `Match.room_quick()` 的失敗分支：
- *    白色半透明遮罩 + zone 擋點擊 + 對話框 depth 500 + `ulse01` 音效。
+ * 改版前頻道畫面是一個面板物件（`channel_panel`），改版後東西全部直接掛在 Match
+ * 場景上，`channel_login(頻道物件)` 建、`channel_logout()` 拆：
+ *
+ * ```
+ *   channel_match      右下那顆鈕：亞城 "match_quick"、迪城 "match_create"
+ *                      image(352, 434) origin(1, 0.5)
+ *   channel_room_prev  翻頁 ◀ image(143, 400) origin(1, 0)
+ *   channel_room_next  翻頁 ▶ image(223, 400) origin(0, 0)
+ *   channel_length     「名字:迪特赫姆登入 [參加人數:N]」text(8, 472) font_light 14
+ *   channel            頻道物件 { channel, quick, event, cost, required_ap, domain }
+ * ```
+ *
+ * ## 照抄，一個都不能自己發明
+ *
+ * 1. **按鈕是遊戲自己的 `match_quick` 那張圖**（迪城也載得到，frames 0/1），擺法照
+ *    官方那顆（hover 換 frame 1），位置跟「創建對戰房間」沿翻頁鍵的中線左右對稱。
+ * 2. **人數那幾行用遊戲自己的模板**（`MatchUITexts.channel_length.quick`，亞城那幾行
+ *    就是它填出來的）。自己組字串的話換語言就會露出繁中。
+ * 3. **等待視窗就是官方的 `create_match_wait()`**，只把 Cancel 鈕的 pointerup 換成
+ *    「通知插件」—— 這時候還沒有房，官方那支會送一個沒有對象的 cancel_room。
+ * 4. **錯誤框就是官方的 `match_error(代碼)`**，字串表是 `MatchUITexts.error`。
  *
  * ## ⚠ 這支不會替玩家操作遊戲
  *
  * 它只是**畫一顆按鈕**並把「玩家按了」回報給 Node。真正會開房、消耗 AP 的是
  * `match-room.ts`，而那條路徑的前提沒有變：**玩家親手按下去**。
- * 一顆畫在遊戲裡的按鈕跟托盤上那顆在這件事上是同一種東西。
  *
- * ## ⚠ 面板是**每次進頻道重新 new 的**
+ * ## ⚠ 按鈕跟著頻道畫面生滅
  *
- * `Match.create()` 裡 `this.channel_panel = new k(this)` —— 玩家每換一次頻道
- * 就是一個新物件，我們掛上去的東西會跟著舊物件一起被 destroy。所以這支用
- * 輪詢盯著 `sc.channel_panel` 換人沒有（500ms），換了就重掛一次。
+ * 換頻道／退出頻道時 `channel_match` 會被 destroy、重建。所以這支用輪詢盯著
+ * 「那顆鈕還是不是同一顆」（500ms），換了就重掛一次。
  *
- * ⚠ **不能只在安裝時掛一次**：那樣玩家第一次進頻道（安裝時他多半還在選頻道
- * 的畫面）就看不到按鈕，而症狀是「這功能對我沒作用」。
+ * ## 順路修的兩件事（亞城、迪城都做，2026-10-01 讀原始碼）
+ *
+ * **1. 等待中可以點房間看牌組。** 官方 `create_match_wait()` 蓋一層全畫面的
+ * `wait_zone`（depth 50），排隊時整個大廳都點不動。我們把它的 hitAreaCallback
+ * 換掉：**只放行房間列與翻頁鍵**，其餘照擋（快速比賽鈕、換牌組、返回都不能按）。
+ * 房間詳情裡的「進入」鈕不用管：官方 `room_wait` 為真時根本不畫它，而且詳情
+ * 面板不在放行範圍裡。
+ *
+ * ⚠ 點房間會把 `room_select` 換成那一間（官方的點擊處理就是這樣寫的），而官方
+ * Cancel 送的是 `cancel_room(this.room_select)` —— 不處理的話取消會送錯房號。
+ * 所以開等待的那一刻把真正的 id 記在 `sc.__ulrWaitRoom`，Cancel 前先換回來；
+ * 插件的 `match-room.ts` 收房也讀這一格。
+ *
+ * **2. 頁碼疊字（官方 bug）。** `channel_login()` 每次都新建 ◀▶ 與三個頁碼字，
+ * `channel_logout()` 卻沒拆 —— 進出頻道幾次就疊幾組「1 / 2」。包 `channel_logout`
+ * 一起拆；已經漏掉的那幾組由輪詢照官方座標清掉。
+ *
+ * 兩支方法都是**包在場景實例上**，拆的時候照 `st.wraps` 還原（Match 場景物件
+ * 跟遊戲一樣長命，忘了還原就會一層一層疊上去）。
  */
 
 import { embedJson } from "./embed.js";
@@ -56,12 +83,11 @@ export interface LobbyTierCount {
   /**
    * 這是**自訂檔**嗎 —— 牌組算出來落在官方三檔之外，插件自己開的那一檔。
    *
-   * ⚠ 官方那幾行是遊戲自己的模板（`PLAYER_COUNT`）填出來的，而自訂檔在那份
-   * 模板裡**沒有位置**。所以它自己一行，前面加 `★` 標出來：畫面上一定要
-   * 分得出「這是官方的檔位」跟「這是插件照你的牌組算的檔位」。
+   * ⚠ 官方那幾行是遊戲自己的模板填出來的，而自訂檔在那份模板裡**沒有位置**。
+   * 所以它自己一行，前面加 `★` 標出來：畫面上一定要分得出「這是官方的檔位」
+   * 跟「這是插件照你的牌組算的檔位」。
    *
-   * ⚠ **沒有人在等就不要送過來**（送 `waiting: 0` 也一樣會畫）。一行永遠寫著
-   * 0 的字對玩家沒有用，而這一行的全部價值就是「現在有人在你這一檔等」。
+   * ⚠ **沒有人在等就不要送過來**（送 `waiting: 0` 也一樣會畫）。
    */
   custom?: boolean;
 }
@@ -76,24 +102,15 @@ export interface LobbyState {
    */
   counts: LobbyTierCount[] | null;
   /**
-   * 正在配對嗎。`true` = 跳出**遊戲自己的等待視窗**（面板 + 逐字波浪 +
-   * MM:SS + cancel 鈕），`false` = 收掉它。
-   *
-   * ⚠ **配對狀態不寫成 INFO 區的一行字。** 亞城按下快速比賽之後跳的就是那個
-   * 視窗，而這整個功能的目的就是讓迪城跟那邊一樣 —— 一行小字跟一個會計時的
-   * 視窗，在「我到底在不在排隊」這件事上完全不是同一個東西。
+   * 正在配對嗎。`true` = 跳出**遊戲自己的等待視窗**（`create_match_wait()`），
+   * `false` = 收掉它。
    */
   matching: boolean;
   /**
    * 等待視窗上要多寫的那一行（`★ COST 48 · 夾擠式罰C`）。`null`／沒給 = 不加。
    *
-   * ⚠ **這是「這個框不是官方的」那個標記。** 我們照抄了亞城的等待視窗，抄到
-   * 一模一樣 —— 那對「看起來像遊戲自己的東西」是對的，對「我到底在排哪一檔」
-   * 就不是了：自訂檔在左下那幾行裡沒有數字（見 {@link LobbyTierCount.custom}），
+   * ⚠ **這是「這個框不是官方的」那個標記。** 自訂檔在左下那幾行裡沒有數字，
    * 玩家除了這一行之外沒有別的地方看得到自己排的是什麼。
-   *
-   * ⚠ 只在 `showWaiting()` 的當下讀一次。排隊途中檔位不會變（配對鍵是按下去
-   * 那一刻算的），所以不必跟著推播更新。
    */
   badge?: string | null;
 }
@@ -101,7 +118,7 @@ export interface LobbyState {
 export interface LobbyPatchOptions {
   /** 頁面呼叫這個名字把「玩家按了按鈕」送回 Node。 */
   bindingName: string;
-  /** 盯著 `channel_panel` 換人沒有的間隔。 */
+  /** 盯著頻道畫面換人沒有的間隔。 */
   pollIntervalMs?: number;
 }
 
@@ -112,29 +129,61 @@ export const DEFAULT_LOBBY_POLL_MS = 500;
  *
  * ⚠ 這支跟 `patch-stage` 一樣是「先拆再裝」，所以不靠版本號決定要不要重裝；
  * 版本號是回報用的 —— 玩家回報怪狀況時一眼看得出他頁面上跑的是哪一版。
+ *
+ * 6 = 2026-09-23 改版後的大廳（Match 場景上的 channel_match／channel_length）。
+ * 7 = 等待中可以點房間看牌組；退頻道時拆掉翻頁鍵與頁碼字（官方漏拆）。
  */
-export const LOBBY_SCRIPT_VERSION = 5;
+export const LOBBY_SCRIPT_VERSION = 7;
 
 const FLAG = "__ulrLobby";
 
+/** 翻頁鍵讀不到時的中線（實測 ◀ 右緣 143、▶ 左緣 223）。 */
+const FALLBACK_MID_X = 183;
+
 /**
- * 面板中線讀不到時，退回「貼在創建對戰室左邊」的舊算法要留幾 px。
+ * 等待視窗的新位置：大廳右下那塊空白，上左下三邊離鄰居各 8px。
  *
- * ⚠ 這是**後路**，不是正常位置。正常位置見 `panelMidX()`。
+ * 鄰居（2026-10-01 在遊戲的 canvas 上逐像素量的（2 倍緩衝），都是官方寫死的位置）：
+ *
+ * ```
+ *   左  房間列面板右緣（含深色描邊）  x 368    ← 烤在背景圖裡，沒有物件可讀
+ *   上  房間詳情框 room_detail_frame  y 312    ← (384, 32) 起 352 × 280
+ *   下  BattlePoint 那兩行的黑色描邊  y 471.5  ← text(376, 466)，字框上緣有留白
+ * ```
+ *
+ * ⚠ 量要量 canvas 本身（postrender 時 toDataURL），玩家的視窗截圖有縮放與邊框，
+ * 差 3px 左右。panel_gene 的黑色外框剛好畫在 bounds 上，所以間距就是 bounds 之差。
+ *
+ * 間距 16 —— 照左面板與房間詳情框之間那條縫（368 → 384，使用者指定的），所以框的
+ * 左緣剛好跟詳情框左緣對成一直線。上下也各 16，框高只剩 127.5（官方 156；緩衝是
+ * 2 倍，半像素畫得出來）。
+ *
+ * 框裡：上面 31.5 是淺色標題帶（九宮格的上切片，壓不掉），底邊 4.5，中間約 91.5 放
+ * 三樣東西。照**字形實際高度**（波浪字約 11.5、計時數字約 11、Cancel 25）讓四段間距
+ * （標題帶→字→計時→Cancel→底邊）都約 11。偏移量從框的上緣算；Cancel 跟官方一樣
+ * origin(0.5, 1)，cancelBottom 是它的下緣離框底多少。
  */
-const BUTTON_GAP = 10;
+export const WAIT_LAYOUT = {
+  left: 384,
+  top: 328,
+  height: 127.5,
+  textY: 49.5,
+  timerY: 72,
+  cancelBottom: 15.5,
+  /** 插件標記那一行（迪城）。官方框裡的位置是上緣 +30。 */
+  badgeY: 30,
+} as const;
 
 export interface LobbyStatus {
   installed: boolean;
   version: number | null;
-  /** 目前掛在哪個頻道的面板上。`null` = 沒掛（不在頻道裡，或那是 ranked 面板）。 */
+  /** 目前掛在哪個頻道。`null` = 沒掛（不在頻道裡，或那是有官方快速比賽的頻道）。 */
   channel: number | null;
   /**
    * 開口檔（`COST90+`）的下限，**從遊戲自己的模板讀出來的**。
    *
-   * ⚠ Node 端要拿它當第四條佇列的鍵，所以**不要在插件裡寫死 90** ——
-   * 官方改了那個數字而我們沒跟上時，症狀是兩邊排在不同的佇列上，
-   * 而兩個畫面都寫著「排隊中」。`null` = 還沒掛上面板，讀不到。
+   * ⚠ Node 端要拿它當第四條佇列的鍵，所以**不要在插件裡寫死 90**。
+   * `null` = 讀不到模板。
    */
   openTier: number | null;
   /** 按鈕真的畫出來了沒。 */
@@ -186,23 +235,27 @@ const SHARED = `
     return (keys && keys.Match) || null;
   }
 
-  function gameLang() {
-    return typeof window.lang === "string" && window.lang.length > 0 ? window.lang : "en";
+  function activeMatch() {
+    var sc = matchScene();
+    return sc && sc.scene && sc.scene.isActive() ? sc : null;
+  }
+
+  function texts() {
+    try {
+      var t = window.game.cache.json.get("MatchUITexts");
+      return t && typeof t === "object" ? t : null;
+    } catch (e) { return null; }
   }
 
   /**
-   * 這個頻道是不是 duel（迪特赫姆／布萊德克洛伊茲）。
+   * 這是要畫按鈕的頻道嗎：沒有官方快速比賽、也不是活動頻道（＝迪城、布萊德）。
    *
-   * ⚠ **要看 type，不要寫死頻道編號。** 官方哪天多開一組頻道，寫死 2/4 的版本
-   * 會把按鈕畫到一個 ranked 面板上（那裡已經有官方的快速比賽了）。
+   * ⚠ 看頻道物件的 quick／event，不要寫死頻道編號 —— 官方哪天多開一組頻道，
+   * 寫死 2/4 的版本會把按鈕畫到一個已經有官方快速比賽的頻道上。
    */
   function duelChannel(sc) {
-    if (sc === null || sc.channel === undefined || sc.channel === null) return false;
-    var key = String(sc.channel);
-    var a = sc.channels && sc.channels[key];
-    var b = sc.channels_cross && sc.channels_cross[key];
-    var info = a || b;
-    return !!(info && info.type === "duel");
+    var c = sc && sc.channel;
+    return !!(c && typeof c.channel === "number" && c.quick !== true && c.event !== true);
   }
 `;
 
@@ -216,7 +269,8 @@ export function buildLobbyPatchScript(options: LobbyPatchOptions): string {
     bindingName: options.bindingName,
     version: LOBBY_SCRIPT_VERSION,
     pollIntervalMs: options.pollIntervalMs ?? DEFAULT_LOBBY_POLL_MS,
-    buttonGap: BUTTON_GAP,
+    fallbackMidX: FALLBACK_MID_X,
+    waitLayout: WAIT_LAYOUT,
   };
 
   return `(function () {
@@ -239,19 +293,201 @@ export function buildLobbyPatchScript(options: LobbyPatchOptions): string {
     if (!st) return;
     try { if (st.timer !== null && st.timer !== undefined) clearInterval(st.timer); } catch (e) {}
     detach(st);
+    try { hideWaiting(st); } catch (e) {}
+    try { if (typeof st.unpatch === "function") st.unpatch(); } catch (e) {}
     delete window[FLAG];
   }
 
+  // ---- 等待中點房間看牌組、頁碼疊字（亞城迪城都做，見檔頭）----
+
+  var PAGER = ["channel_room_prev", "channel_room_next",
+               "channel_page_text_now", "channel_page_text_slash", "channel_page_text_max"];
+
+  /** 包場景實例上的一支方法，原本那支跑完再跑 after。拆的時候照 st.wraps 還原。 */
+  function wrapMethod(st, sc, name, after) {
+    var orig = sc[name];
+    if (typeof orig !== "function" || orig.__ulrLobby === true) return;
+    var rec = { sc: sc, name: name, orig: orig, fn: null, dead: false,
+                own: Object.prototype.hasOwnProperty.call(sc, name) };
+    rec.fn = function () {
+      var r = orig.apply(this, arguments);
+      if (!rec.dead) { try { after(this); } catch (e) {} }
+      return r;
+    };
+    rec.fn.__ulrLobby = true;
+    sc[name] = rec.fn;
+    st.wraps.push(rec);
+  }
+
+  function unwrapAll(st) {
+    var list = st.wraps || [];
+    for (var i = 0; i < list.length; i++) {
+      var w = list[i];
+      // 別人又包在我們外面的話拿不下來，至少讓它變成直通。
+      w.dead = true;
+      try {
+        if (w.sc[w.name] === w.fn) {
+          if (w.own) w.sc[w.name] = w.orig;
+          else delete w.sc[w.name];
+        }
+      } catch (e) {}
+    }
+    st.wraps = [];
+  }
+
+  /** 拆掉翻頁鍵與頁碼字。官方 channel_logout 漏拆的就是這五個。 */
+  function dropPager(sc) {
+    for (var i = 0; i < PAGER.length; i++) {
+      try { if (sc[PAGER[i]] && sc[PAGER[i]].destroy) sc[PAGER[i]].destroy(); } catch (e) {}
+      sc[PAGER[i]] = null;
+    }
+  }
+
+  /** 官方 channel_login 畫翻頁鍵與頁碼字的座標（不是現役那一組的就是漏掉的）。 */
+  function isPagerPiece(o) {
+    if (!o) return false;
+    if (o.type === "Image" && o.texture && o.texture.key === "btn_arrow") {
+      return o.y === 400 && (o.x === 143 || o.x === 223);
+    }
+    if (o.type === "Text") return o.y === 407 && (o.x === 175 || o.x === 183 || o.x === 191);
+    return false;
+  }
+
+  /** 清掉之前漏下來的那幾組（這一版裝上之前進出過頻道的話會有）。 */
+  function sweepPager(sc) {
+    if (!sc.channel) {
+      for (var k = 0; k < PAGER.length; k++) {
+        if (sc[PAGER[k]]) { dropPager(sc); break; }
+      }
+    }
+    var list = sc.children && sc.children.list;
+    if (!list || typeof list.length !== "number") return;
+    var keep = [];
+    for (var j = 0; j < PAGER.length; j++) keep.push(sc[PAGER[j]]);
+    var dead = [];
+    for (var i = 0; i < list.length; i++) {
+      if (keep.indexOf(list[i]) === -1 && isPagerPiece(list[i])) dead.push(list[i]);
+    }
+    for (var d = 0; d < dead.length; d++) {
+      try { dead[d].destroy(); } catch (e) {}
+    }
+  }
+
+  /** 等待中放行的地方：房間列與翻頁鍵，但被等待面板蓋住的那一塊照擋。 */
+  function letThrough(sc, x, y) {
+    function hit(o) {
+      try { return !!(o && o.scene && o.getBounds().contains(x, y)); } catch (e) { return false; }
+    }
+    if (hit(sc.wait_panel)) return false;
+    var rooms = sc.channel_room_images || [];
+    for (var i = 0; i < rooms.length; i++) if (hit(rooms[i])) return true;
+    return hit(sc.channel_room_prev) || hit(sc.channel_room_next);
+  }
+
+  /** 把全畫面的 wait_zone 挖洞。hitArea 是區域座標，換回世界座標再比。 */
+  function openZone(sc) {
+    var z = sc.wait_zone;
+    if (!z || !z.input || typeof z.input.hitAreaCallback !== "function") return;
+    if (z.input.__ulrInside) return;
+    var inside = z.input.hitAreaCallback;
+    z.input.__ulrInside = inside;
+    z.input.hitAreaCallback = function (area, x, y, obj) {
+      if (!inside(area, x, y, obj)) return false;
+      var wx = x - (obj.displayOriginX || 0) + obj.x;
+      var wy = y - (obj.displayOriginY || 0) + obj.y;
+      return !letThrough(sc, wx, wy);
+    };
+  }
+
+  function closeZone(sc) {
+    var z = sc && sc.wait_zone;
+    if (!z || !z.input || !z.input.__ulrInside) return;
+    z.input.hitAreaCallback = z.input.__ulrInside;
+    delete z.input.__ulrInside;
+  }
+
+  /**
+   * 官方 Cancel 送 cancel_room(this.room_select)，而等待中點過房間的話 room_select
+   * 已經換成那一間。在官方那支前面插一支把它換回真正的 id。
+   */
+  function keepCancelRoom(sc) {
+    var btn = sc.btn_cancel;
+    if (!btn || btn.__ulrKeep || typeof btn.listeners !== "function") return;
+    var official = btn.listeners("pointerup").slice();
+    btn.off("pointerup");
+    btn.on("pointerup", function () {
+      if (typeof sc.__ulrWaitRoom === "string") sc.room_select = sc.__ulrWaitRoom;
+    });
+    for (var i = 0; i < official.length; i++) btn.on("pointerup", official[i]);
+    btn.__ulrKeep = true;
+  }
+
+  /**
+   * 等待視窗剛開。room_wait 為真（官方快速比賽、官方或插件開房）時 room_select 就是
+   * 那一間；迪城插件排隊時還沒有房，記 null（插件開好房時 match-room 會補上）。
+   */
+  function onWaitOpened(sc) {
+    sc.__ulrWaitRoom = sc.room_wait === true && typeof sc.room_select === "string"
+      ? sc.room_select : null;
+    try { placeWait(sc); } catch (e) {}
+    openZone(sc);
+    if (sc.__ulrWaitRoom !== null) keepCancelRoom(sc);
+  }
+
+  /**
+   * 等待視窗搬到右下那塊空白（數字見 WAIT_LAYOUT）。框的左緣釘住，寬度照官方算的
+   * （字寬 + 32），所以框變寬時往右長。
+   *
+   * 第一次搬：連高度與裡面的 y 一起排。之後（標記那一行把框撐寬）只跟著修 x ——
+   * 逐字波浪的 tween 在動 y，開始跑之後就不要再碰它的 y。
+   */
+  function placeWait(sc) {
+    var L = CFG.waitLayout;
+    var p = sc.wait_panel;
+    if (!p || !p.scene) return;
+    var first = p.__ulrPlaced !== true;
+    if (first) {
+      if (typeof p.setSize === "function") p.setSize(p.width, L.height);
+      else p.height = L.height;
+    }
+    var cx = L.left + p.width / 2;
+    var dx = cx - p.x;
+    p.setPosition(cx, L.top + L.height / 2);
+    var letters = sc.wait_text || [];
+    for (var i = 0; i < letters.length; i++) {
+      letters[i].x += dx;
+      if (first) letters[i].y = L.top + L.textY;
+    }
+    var t = sc.wait_time_text;
+    if (t) t.setPosition(t.x + dx, first ? L.top + L.timerY : t.y);
+    var b = sc.btn_cancel;
+    if (b) b.setPosition(b.x + dx, first ? L.top + L.height - L.cancelBottom : b.y);
+    var bt = sc.btn_cancel_text;
+    if (bt) bt.setPosition(bt.x + dx, first && b ? b.getCenter().y : bt.y);
+    p.__ulrPlaced = true;
+  }
+
+  /** 每一輪：包好兩支方法、補挖已經開著的等待視窗、清漏掉的頁碼。 */
+  function lobbyFixes(st) {
+    var sc = matchScene();
+    if (sc === null) return;
+    wrapMethod(st, sc, "create_match_wait", onWaitOpened);
+    wrapMethod(st, sc, "remove_match_wait", function (s) { s.__ulrWaitRoom = null; });
+    wrapMethod(st, sc, "channel_logout", dropPager);
+    if (sc.wait_zone) {
+      // 這一版裝上之前就開著的視窗：那時點不到房間，room_select 一定還是對的。
+      if (sc.__ulrWaitRoom === undefined) onWaitOpened(sc);
+      else {
+        try { placeWait(sc); } catch (e) {}
+        openZone(sc);
+      }
+    }
+    sweepPager(sc);
+  }
+
   function detach(st) {
-    // ⚠ 等待視窗也要收。它掛在**場景**上而不是面板上（原版也是這樣），所以
-    // 換頻道時面板被 destroy 不會把它帶走 —— 留著的話玩家會看到一個關不掉的框。
-    try { hideWaiting(); } catch (e) {}
-    // ⚠⚠ **拆的是 st.mine（我們加過的每一個東西），不是幾個具名欄位。**
-    //
-    // 這支是「先拆再裝」的，而拆的時候手上那個 st 可能是**上一版腳本**留下的
-    // —— 它的欄位跟這一版不一樣。2026-08-18 實測踩到：舊版有一個 statusText，
-    // 新版沒有那一格，於是那行字永遠留在面板上，看起來像功能壞掉。
-    // 具名欄位仍然照拆（舊版沒有 mine 這一格）。
+    // ⚠ 拆的是 st.mine（我們加過的每一個東西），不是幾個具名欄位 —— 拆的時候手上
+    // 那個 st 可能是**上一版腳本**留下的，欄位跟這一版不一樣。具名欄位仍然照拆。
     var items = (st.mine || []).concat([st.button, st.countsText, st.statusText]);
     for (var i = 0; i < items.length; i++) {
       try { if (items[i] && items[i].destroy) items[i].destroy(); } catch (e) {}
@@ -259,271 +495,98 @@ export function buildLobbyPatchScript(options: LobbyPatchOptions): string {
     st.mine = [];
     st.button = null;
     st.countsText = null;
-    st.panel = null;
+    st.anchor = null;
     st.channel = null;
-    st.openTier = null;
   }
 
   /**
-   * 遊戲自己的「確認」對話框類別。
+   * 遊戲自己的等待視窗（create_match_wait）。取消鈕改成通知插件。
    *
-   * 它是模組內的區域變數（Match.room_quick() 裡的 new o.Cw(...)），從場景上
-   * 拿不到 —— 只能從 webpack 的模組登錄表撈。找法是「extends Container 而且
-   * 原始碼裡有 ok_button 與 panel_gene」，比記住模組 id 耐改版得多。
-   *
-   * ⚠ 這段註解裡**不能出現反引號** —— 整支腳本住在一個 template literal 裡，
-   * 一個沒跳脫的反引號會讓字串提早結束（match-room.ts 也記過同一件事）。
-   *
-   * ⚠ 找到就快取起來。掃 650 個模組要幾十毫秒，而這支可能在玩家按下去的
-   * 那一刻被叫到。
+   * ⚠ 三種情況不開：已經有視窗（插件開好房之後沿用同一個）、對戰已經開始
+   * （player_side 有值，Match 正要 sleep）、玩家自己開著一間房（room_wait，那是
+   * 官方的視窗，取消鈕要留給官方）。
    */
-  function uiKit() {
-    var st = window[FLAG];
-    if (st && st.kit) return st.kit;
-
-    var chunkKey = null;
-    var keys = Object.keys(window);
-    for (var i = 0; i < keys.length; i++) {
-      if (/webpack/i.test(keys[i]) && Array.isArray(window[keys[i]])) { chunkKey = keys[i]; break; }
-    }
-    if (chunkKey === null) return null;
-
-    // ⚠ **每次都要用不一樣的 chunk id。** webpack 5 的 jsonp callback 只在
-    // 「這些 id 至少有一個沒安裝過」時才會叫 runtime 回呼 —— 推第二次同一個 id
-    // 會安靜地什麼都拿不到（patch-penalty 的檔頭記過這個坑）。
-    window.__ulrChunkSeq = (window.__ulrChunkSeq || 0) + 1;
-    var req = null;
-    try {
-      window[chunkKey].push([["__ulr_lobby_" + window.__ulrChunkSeq], {}, function (r) { req = r; }]);
-    } catch (e) { return null; }
-    if (typeof req !== "function" || !req.m) return null;
-
-    var ids = Object.keys(req.m);
-    for (var j = 0; j < ids.length; j++) {
-      var mod;
-      try { mod = req(ids[j]); } catch (e) { continue; }
-      if (!mod) continue;
-
-      var kit = { dialog: null, button: null, labels: null };
-      for (var k in mod) {
-        var v;
-        try { v = mod[k]; } catch (e) { continue; }
-        if (v === null || v === undefined) continue;
-
-        // 常數表：認 CANCEL_BUTTON 這個鍵（那是物件的屬性名，不會被壓縮）。
-        if (typeof v === "object" && v.CANCEL_BUTTON && v.OK_BUTTON) { kit.labels = v; continue; }
-        if (typeof v !== "function") continue;
-
-        var src;
-        try { src = String(v.toString()); } catch (e) { continue; }
-        if (src.length > 3000) continue;
-        // 確認對話框：有 ok_button 又有 panel_gene 的那個。
-        if (src.indexOf("ok_button") !== -1 && src.indexOf("panel_gene") !== -1) kit.dialog = v;
-        // 文字按鈕（ok / cancel 用的那個）：底圖是 btn_gene，全遊戲只有它。
-        else if (src.indexOf("btn_gene") !== -1 && src.indexOf("setText") !== -1) kit.button = v;
-      }
-      if (kit.dialog !== null) {
-        if (st) st.kit = kit;
-        return kit;
-      }
-    }
-    return null;
-  }
-
-  /**
-   * 照抄 room_quick() 失敗時那一段：半透明白幕 + 擋點擊的 zone + 對話框。
-   *
-   * ⚠ 三個東西的 depth 要對：遮罩與 zone 是 499、對話框 500。差一層的話玩家
-   * 點得到底下的房間列表，而對話框還開著。
-   */
-  function showDialog(message) {
-    var sc = matchScene();
-    if (sc === null) return "no-scene";
-    var kit = uiKit();
-    if (kit === null || kit.dialog === null) return "no-dialog-class";
-
-    var w = sc.scale.width;
-    var h = sc.scale.height;
-    var zone = sc.add.zone(0, 0, w, h).setOrigin(0).setDepth(499).setInteractive();
-    var veil = sc.add.rectangle(0, 0, w, h, 16777215, 0.6).setOrigin(0).setDepth(499);
-    var dialog = new kit.dialog(sc, w / 2, h / 2, gameLang(), message).setDepth(500);
-    dialog.ok_button.on("click", function () {
-      // ⚠ 對話框自己會 destroy（它的 ok_button 綁著），但遮罩與 zone 是我們加的。
-      try { zone.destroy(); } catch (e) {}
-      try { veil.destroy(); } catch (e) {}
-    });
-    try { if (sc.ulse01) sc.ulse01.play(); } catch (e) {}
-    return "ok";
-  }
-
-  /**
-   * 等待對手的視窗 —— **照抄遊戲自己那個**（Match 模組裡的 class S，
-   * 亞城按下快速比賽之後跳的就是它）。
-   *
-   * 逐項對齊，因為玩家會把兩邊擺在一起看：
-   *
-   *   panel        nineslice("panel_gene", 0, 250, 150, 71, 40, 63, 32) 置中
-   *   waiting_text WAIT_TEXT[lang] **一個字一個 text**，波浪式淡入（原版的做法）
-   *   waiting_timer MM:SS，每秒 +1
-   *   cancel       遊戲自己的文字按鈕，字是 ES.CANCEL_BUTTON[lang]
-   *
-   * ⚠ **那個類別在模組外面拿不到**（它跟 Match 場景同一個模組但沒被匯出），
-   * 所以這裡是照它的原始碼重建，用的每一個素材與字串仍然是遊戲自己的。
-   *
-   * ⚠ 一個字一個 text 不是為了好看才抄的：原版的波浪動畫就是這樣做的，
-   * 用一整串字去 tween 出來的效果完全不一樣。
-   */
-  function showWaiting() {
-    var st = window[FLAG];
-    if (st === undefined || st === null || st.wait !== null) return;
-    var sc = matchScene();
+  function showWaiting(st) {
+    var sc = activeMatch();
     if (sc === null) return;
-    var kit = uiKit();
-    if (kit === null || kit.button === null) return;
-
-    var lang = gameLang();
-    var label = kit.labels && kit.labels.CANCEL_BUTTON ? kit.labels.CANCEL_BUTTON[lang] : "cancel";
-    var message = waitText(sc, lang);
-    var w = sc.scale.width;
-    var h = sc.scale.height;
-    var cx = w / 2;
-    var cy = h / 2;
-    var STYLE = { fontFamily: "font_light", fontSize: 15, resolution: 2 };
-
-    // 擋點擊的 zone（原版的 room_quick 也是先鋪這個，depth 499）。
-    var zone = sc.add.zone(0, 0, w, h).setOrigin(0).setDepth(499).setInteractive();
-    var panel = sc.add.nineslice(cx, cy, "panel_gene", 0, 250, 150, 71, 40, 63, 32);
-
-    // 一個字一個 text，先全部透明；下面那個 timer 會逐字 tween 進來。
-    var letters = [];
-    var total = 0;
-    var i;
-    for (i = 0; i < message.length; i++) {
-      var t = sc.add.text(0, cy - 28, message.charAt(i), STYLE).setOrigin(0.5, 0.5).setAlpha(0);
-      letters.push(t);
-      total += t.width;
+    if (sc.player_side !== null && sc.player_side !== undefined) return;
+    if (!sc.wait_zone) {
+      if (sc.room_wait === true) return;
+      if (typeof sc.create_match_wait !== "function") return;
+      sc.create_match_wait();
+      st.ownsWait = true;
+      rebindCancel(st, sc);
     }
-    // ⚠ 原版是「先靠左排好再整排往右推到置中」（那個迴圈每次 +0.1）。這裡直接
-    // 算出置中的位置 —— 畫面結果一樣，但不依賴那個寫死的 760。
-    var x = cx - total / 2;
-    for (i = 0; i < letters.length; i++) {
-      letters[i].x = x + letters[i].width / 2;
-      x += letters[i].width;
-    }
-
-    var timerText = sc.add.text(cx, cy + 10, "00:00", STYLE).setOrigin(0.5, 0.5);
-    var cancel = new kit.button(sc, cx, cy + 40, label);
-
-    // ⚠ **這一行是「這不是官方的快速比賽」那個標記。** 整個視窗是照抄的，
-    // 抄到一模一樣 —— 少了這一行，玩家分不出自己排的是官方檔位還是插件照
-    // 牌組算出來的自訂檔，而自訂檔在左下那幾行裡沒有數字。
-    //
-    // 位置在面板上緣（cy − 52）：波浪那幾個字會往下跳 8px（cy − 28 起跳），
-    // 疊在一起的話兩行都看不清楚。
-    var badge = null;
-    if (st.state && typeof st.state.badge === "string" && st.state.badge.length > 0) {
-      badge = sc.add
-        .text(cx, cy - 52, st.state.badge, {
-          fontFamily: "font_light", fontSize: 12, resolution: 2
-        })
-        .setOrigin(0.5, 0.5);
-    }
-
-    var box = sc.add.container(0, 0);
-    box.add([panel].concat(letters).concat([timerText, cancel]));
-    if (badge !== null) box.add(badge);
-    box.setDepth(500);
-
-    var seconds = 0;
-    var counter = sc.time.addEvent({
-      delay: 1000,
-      repeat: -1,
-      callback: function () {
-        seconds++;
-        var mm = String(Math.trunc(seconds / 60));
-        var ss = String(seconds % 60);
-        while (mm.length < 2) mm = "0" + mm;
-        while (ss.length < 2) ss = "0" + ss;
-        timerText.setText(mm + ":" + ss);
-      }
-    });
-    // 波浪：每個字晚 100ms 起跳，跑完一輪停一下再來（原版的參數照抄）。
-    var wave = sc.time.addEvent({
-      delay: 1000,
-      callback: function () {
-        for (var n = 0; n < letters.length; n++) {
-          sc.add.tween({
-            targets: letters[n], y: "+=8", alpha: 1, duration: 300, yoyo: true,
-            repeat: -1, delay: 100 * n, hold: 100 * letters.length + 1000,
-            repeatDelay: 100 * letters.length - 500
-          });
-        }
-      }
-    });
-
-    cancel.on("click", function () {
-      // ⚠ 走跟按鈕同一條回報：Node 那邊「已經在配對中就是停止」，兩個入口
-      // 因此永遠不會有兩套邏輯。
-      report({ type: "lobby-quick", channel: sc.channel === undefined ? null : sc.channel,
-               matching: true });
-    });
-
-    st.wait = { box: box, zone: zone, letters: letters, counter: counter, wave: wave };
+    ensureBadge(st, sc);
   }
 
-  function hideWaiting() {
-    var st = window[FLAG];
-    if (st === undefined || st === null || st.wait === null) return;
+  /** 官方的 Cancel 會送 cancel_room(room_select)，排隊時還沒有房 —— 換成通知插件。 */
+  function rebindCancel(st, sc) {
+    var btn = sc.btn_cancel;
+    if (!btn || typeof btn.off !== "function") return;
+    btn.off("pointerup");
+    btn.on("pointerup", function () {
+      try { if (sc.ulse01) sc.ulse01.play(); } catch (e) {}
+      btn.setTexture("btn_gene", 1);
+      report({ type: "lobby-quick", channel: sc.channel ? sc.channel.channel : null, matching: true });
+    });
+  }
+
+  /**
+   * 等待視窗上那一行（★ COST 48 · 規則名）。
+   *
+   * 位置在面板上半部（上緣 + badgeY）：逐字波浪、計時、Cancel 都在下半部，
+   * 上緣到波浪之間那一段是空的。框被搬過（placeWait），所以位置跟著框算。
+   */
+  function ensureBadge(st, sc) {
+    var text = st.state && typeof st.state.badge === "string" && st.state.badge.length > 0
+      ? st.state.badge : null;
+    var p = sc.wait_panel;
+    if (text === null || !p) { dropBadge(st); return; }
+    if (st.badge && st.badge.scene && st.badge.text === text) return;
+    dropBadge(st);
+    st.badge = sc.add.text(p.x, 0, text, { fontFamily: "font_light", fontSize: 12, resolution: 2 })
+      .setOrigin(0.5, 0.5).setDepth(51);
+    try {
+      var need = st.badge.width + 32;
+      if (p.width < need) { p.width = need; placeWait(sc); }
+    } catch (e) {}
+    st.badge.setPosition(p.x, p.y - p.height / 2 + CFG.waitLayout.badgeY);
+  }
+
+  function dropBadge(st) {
+    try { if (st.badge && st.badge.destroy) st.badge.destroy(); } catch (e) {}
+    st.badge = null;
+  }
+
+  function hideWaiting(st) {
+    dropBadge(st);
+    if (!st.ownsWait) return;
+    st.ownsWait = false;
     var sc = matchScene();
-    var wait = st.wait;
-    st.wait = null;
-    // ⚠ 兩個 timer 一定要收 —— 原版的 destroy() 做的就是這件事。不收的話
-    // 視窗關了計時器還在跑，而它抓著已經 destroy 的 text。
-    try { wait.counter.remove(); } catch (e) {}
-    try { wait.wave.remove(); } catch (e) {}
-    try {
-      if (sc !== null) {
-        for (var i = 0; i < wait.letters.length; i++) sc.tweens.killTweensOf(wait.letters[i]);
-      }
-    } catch (e) {}
-    try { wait.box.destroy(); } catch (e) {}
-    try { wait.zone.destroy(); } catch (e) {}
+    // ⚠ 只收還在的那個。對手進房時官方的 on_match_start() 已經收過了。
+    try { if (sc && sc.wait_zone) sc.remove_match_wait(); } catch (e) {}
   }
 
-  /** 「正在等待對手加入…」—— 遊戲自己那句（Match.WAIT_TEXT）。 */
-  function waitText(sc, lang) {
-    try {
-      var table = sc.constructor && sc.constructor.WAIT_TEXT;
-      var text = table && table[lang];
-      if (typeof text === "string" && text.length > 0) return text;
-    } catch (e) {}
-    return "...";
-  }
-
-  /** 亞城那幾行的模板 —— PLAYER_COUNT[lang][1]。拿不到就回 null。 */
-  function countsTemplate(panel) {
-    try {
-      var base = Object.getPrototypeOf(panel.constructor);
-      var t = base && base.PLAYER_COUNT && base.PLAYER_COUNT[gameLang()];
-      return t && t.length > 1 ? t[1] : null;
-    } catch (e) {
-      return null;
-    }
+  /** 亞城那幾行的模板（MatchUITexts.channel_length.quick）。拿不到就回 null。 */
+  function countsTemplate() {
+    var t = texts();
+    var q = t && t.channel_length && t.channel_length.quick;
+    return typeof q === "string" && q.length > 0 ? q : null;
   }
 
   /**
    * 把人數填進遊戲自己的模板。
    *
-   * ⚠ 模板寫死 3 個有上限的檔（__COST1~3__）加一個開口檔 —— 那一行的
-   * COST90+ 是寫死的字，只有數字是變數（__LENGTH4__）。我們照著填：
-   * 前三個是從客戶端現讀的檔位，第四個是開口檔。
+   * ⚠ 模板寫死 3 個有上限的檔（__COST1~3__）加一個開口檔 —— 那一行的 COST90+
+   * 是寫死的字，只有數字是變數（__LENGTH4__）。
    *
    * ⚠ **沒有開口檔的資料時整行拿掉，不要填 0** —— 一條不存在的佇列永遠是
    * 0 個人，而玩家會把它讀成「那一檔沒人排」。
    */
-  function renderCounts(panel, counts) {
+  function renderCounts(counts) {
     if (counts === null || counts.length === 0) return "";
-    var tpl = countsTemplate(panel);
+    var tpl = countsTemplate();
     var open = null;
     var band = [];
     var custom = [];
@@ -540,13 +603,11 @@ export function buildLobbyPatchScript(options: LobbyPatchOptions): string {
         out = out.replace("__COST" + (i + 1) + "__", String(band[i].tier));
         out = out.replace("__LENGTH" + (i + 1) + "__", String(band[i].waiting));
       }
-      // ⚠ 吃掉的是「換行 + 那一整行」。留著沒填的 __LENGTH4__ 會讓玩家在畫面上
-      // 看到一串佔位符。
       out = open !== null
         ? out.replace("__LENGTH4__", String(open.waiting))
         : out.replace(/\\n?COST[0-9]+\\+:__LENGTH4__[^\\n]*/, "");
     } else {
-      // 模板拿不到（改版了？）→ 自己組，格式照抄那一行。
+      // 模板拿不到（改版了？）或官方檔位讀不到 → 自己組，格式照抄那一行。
       var lines = [];
       for (var j = 0; j < band.length; j++) {
         lines.push("COST" + band[j].tier + ":" + band[j].waiting + "位玩家等待中。");
@@ -555,9 +616,6 @@ export function buildLobbyPatchScript(options: LobbyPatchOptions): string {
       out = lines.join("\\n");
     }
 
-    // ⚠ **自訂檔接在最後，而且是照那幾行的句型組的**（把第一行的檔位與人數
-    // 換掉）—— 自己寫一句「N 位玩家等待中」會在換語言時露出繁中，而整支腳本
-    // 的原則就是「畫面上的字一律用遊戲自己的」（見檔頭的三個照抄）。
     for (var c = 0; c < custom.length; c++) {
       var line = customLine(tpl, custom[c]);
       if (line !== null) out = out === "" ? line : out + "\\n" + line;
@@ -566,16 +624,9 @@ export function buildLobbyPatchScript(options: LobbyPatchOptions): string {
   }
 
   /**
-   * 自訂檔那一行 —— ★COST48:1位玩家等待中。
+   * 自訂檔那一行 —— ★COST48:1位玩家等待中。句型從模板的**第一行**借。
    *
-   * 句型從模板的**第一行**借（COST__COST1__:__LENGTH1__位玩家等待中。），
-   * 只把檔位與人數換掉。模板拿不到就退回自己組的那個格式。
-   *
-   * ⚠ 那顆 ★ 是**我們加的**，而且一定要加：這一檔不是遊戲的檔位，是插件照
-   * 牌組算出來的。少了它，畫面上會出現一個看起來像官方階層、實際上只有裝了
-   * 插件的人排得到的數字。
-   *
-   * ⚠ 這段註解裡不能出現反引號（整支腳本住在一個 template literal 裡）。
+   * ⚠ 那顆 ★ 是**我們加的**，而且一定要加：這一檔不是遊戲的檔位。
    */
   function customLine(tpl, count) {
     var body = null;
@@ -594,174 +645,103 @@ export function buildLobbyPatchScript(options: LobbyPatchOptions): string {
   /**
    * 開口檔的下限 —— 從遊戲自己的模板裡那個 COST90+ 讀出來。
    *
-   * ⚠ **不要在插件裡寫死 90。** 那個數字跟三個檔位一樣是遊戲說了算的，寫死的
-   * 症狀是官方改了之後兩邊算出不同的配對鍵：一邊排 90+、一邊排 100+，
+   * ⚠ **不要在插件裡寫死 90。** 寫死的症狀是官方改了之後兩邊算出不同的配對鍵，
    * 而兩個畫面都寫著「排隊中」。
    */
-  function openTierOf(panel) {
-    var tpl = countsTemplate(panel);
+  function openTierOf() {
+    var tpl = countsTemplate();
     if (tpl === null) return null;
     var m = /COST([0-9]+)\\+/.exec(tpl);
     return m === null ? null : Number(m[1]);
   }
 
-  /**
-   * 那幾行字要接在哪一條線上 —— **每次重算，不要沿用掛上去那一刻的值。**
-   *
-   * ⚠⚠ 官方那一版（refresh_ranked_players）就是每次 setPosition 重算的，
-   * 我們原本只在 attach() 算一次然後一直用。2026-08-20 實測到後果：一台的
-   * 快取值卡在 506，而 player_count 的底部是 488 —— 於是 COST54 上面
-   * **永遠空一行**，而且怎麼換頻道都不會好（換頻道會重掛，但重掛那一刻
-   * 量到的可能又是另一個瞬間值）。
-   *
-   * 讀不到就退回掛上去時記的那個值 —— 那至少是曾經對過的數字。
-   *
-   * ⚠ 這段註解裡不能出現反引號（整支腳本住在一個 template literal 裡）。
-   */
-  function countsY(st) {
-    var counter = st.panel && st.panel.player_count;
-    if (counter && typeof counter.y === "number" && typeof counter.height === "number") {
-      return counter.y + counter.height;
-    }
-    return st.baseY;
+  /** 人數那幾行接在「參加人數」那一行底下 —— **每次重算**，那一行的高度會變。 */
+  function countsY(sc) {
+    var l = sc.channel_length;
+    if (l && typeof l.y === "number" && typeof l.height === "number") return l.y + l.height;
+    return 489;
   }
 
-  /**
-   * 把狀態畫上去。
-   *
-   * ⚠ **配對中的狀態不寫在 INFO 那一區**，走的是遊戲自己的等待視窗
-   * （showWaiting）—— 亞城按下快速比賽之後跳的就是那個框，而這整個功能
-   * 的目的就是讓迪城跟那邊一樣。INFO 這裡只放人數。
-   */
-  function paint(st) {
-    if (st.countsText !== null) {
-      st.countsText.setText(renderCounts(st.panel, st.state.counts)).setPosition(10, countsY(st));
-    }
-    if (st.state.matching) showWaiting();
-    else hideWaiting();
-  }
-
-  /**
-   * 面板的水平中線。**兩顆按鈕左右對稱就靠它。**
-   *
-   * 官方的面板每一種都只有一顆按鈕，而且三種都放在同一格（實測 296.5, 434：
-   * ranked 的 quick_btn、duel 的 room_btn、活動頻道的 room_btn 全都是）。
-   * 所以「對稱的另一格」＝把那一格沿中線鏡射過去，而不是自己挑一個左邊距。
-   *
-   * 中線取 room_page_text（「1 / 1」那一格）—— 那是遊戲自己擺在正中央的
-   * 東西（實測 x=185，而面板內容是 0…370），拿它當基準比寫死座標耐改版。
-   * 它不在就退回翻頁鍵的兩端（page_first 靠左、page_last 靠右）。
-   *
-   * ⚠ **兩個都拿不到時回 null**，讓呼叫端走舊的相對位置 —— 猜一個中線
-   * 會把按鈕放到面板外面去，而那看起來就是「按鈕不見了」。
-   *
-   * ⚠ 這段註解裡不能出現反引號（整支腳本住在一個 template literal 裡）。
-   */
-  function panelMidX(panel) {
-    var t = panel.room_page_text;
-    if (t && typeof t.x === "number") return t.x;
-    var a = panel.page_first;
-    var b = panel.page_last;
+  /** 翻頁鍵的中線。兩顆按鈕左右對稱就靠它。 */
+  function midX(sc) {
+    var a = sc.channel_room_prev;
+    var b = sc.channel_room_next;
     if (a && b && typeof a.x === "number" && typeof b.x === "number") return (a.x + b.x) / 2;
-    return null;
+    return CFG.fallbackMidX;
+  }
+
+  function paint(st) {
+    var sc = activeMatch();
+    if (st.countsText !== null && sc !== null) {
+      st.countsText.setText(renderCounts(st.state.counts)).setPosition(8, countsY(sc));
+    }
+    if (st.state.matching) showWaiting(st);
+    else hideWaiting(st);
   }
 
   /**
-   * 把按鈕與那兩行字掛到目前的面板上。
+   * 把按鈕與那幾行字掛到目前的頻道畫面上。
    *
-   * ⚠ 按鈕位置是**算出來的**，不是寫死的座標。官方哪天把那顆按鈕移到別的
-   * 地方，我們這顆會跟著移 —— 寫死的話會疊在一起。
+   * ⚠ 按鈕位置是**算出來的**：官方那顆的右緣沿翻頁鍵的中線鏡射過來當我們的左緣。
+   * 官方哪天把那顆鈕移走，我們這顆會跟著移。
    */
-  function attach(st, sc, panel) {
-    var roomBtn = panel.room_btn;
-    var counter = panel.player_count;
-    if (!roomBtn || !counter) return "面板上沒有 room_btn／player_count";
+  function attach(st, sc) {
+    var anchor = sc.channel_match;
+    if (!sc.textures.exists("match_quick")) return "客戶端沒有 match_quick 這張圖";
 
-    var ButtonClass = Object.getPrototypeOf(roomBtn).constructor;
-    var lang = gameLang();
-    if (!sc.textures.exists("match_quick_btn")) return "客戶端沒有 match_quick_btn 這張圖";
-
-    // 靠左，而且跟創建對戰室左右對稱（見 panelMidX）。讀不到中線才退回
-    // 「貼在它左邊」—— 那個版本會擠在畫面中間，是後路不是目標。
-    var mid = panelMidX(panel);
-    var x = mid === null ? roomBtn.x - roomBtn.width - CFG.buttonGap : 2 * mid - roomBtn.x;
-    var btn = new ButtonClass(sc, x, roomBtn.y, "match_quick_btn", {
-      frames: { default: lang + "_1", over: lang + "_2" }
-    });
-    btn.on("click", function () {
-      report({ type: "lobby-quick", channel: sc.channel === undefined ? null : sc.channel,
+    var right = anchor.x + (1 - anchor.originX) * anchor.width;
+    var x = 2 * midX(sc) - right;
+    var btn = sc.add.image(x, anchor.y, "match_quick", 0).setOrigin(0, 0.5).setInteractive();
+    btn.on("pointerover", function () { btn.setTexture("match_quick", 1); });
+    btn.on("pointerout", function () { btn.setTexture("match_quick", 0); });
+    btn.on("pointerdown", function () { btn.setTexture("match_quick", 0); });
+    btn.on("pointerup", function () {
+      try { if (sc.ulse01) sc.ulse01.play(); } catch (e) {}
+      btn.setTexture("match_quick", 1);
+      report({ type: "lobby-quick", channel: sc.channel ? sc.channel.channel : null,
                matching: window[FLAG] ? !!window[FLAG].state.matching : false });
     });
 
-    // ⚠ 樣式逐欄照抄亞城的 ranked_players（font_light / 15 / resolution 2 /
-    // wordWrap 360）。差一格的話兩個頻道的同一段字看起來會不一樣。
-    var style = { fontFamily: "font_light", fontSize: 15, resolution: 2,
-                  wordWrap: { width: 360, useAdvancedWrap: true } };
-    var countsText = sc.add.text(10, 0, "", style).setOrigin(0, 0);
+    // ⚠ 樣式逐欄照抄 channel_length（font_light / 14 / resolution 2 / wordWrap 352）。
+    var countsText = sc.add.text(8, countsY(sc), "", {
+      fontFamily: "font_light", fontSize: 14, resolution: 2,
+      wordWrap: { width: 352, useAdvancedWrap: true }
+    }).setOrigin(0, 0);
 
-    panel.add([btn, countsText]);
-
-    st.panel = panel;
-    st.channel = sc.channel === undefined ? null : sc.channel;
-    // ⚠ 掛上面板的當下就讀一次。玩家換語言會換掉整份模板，而重掛是唯一
-    // 會再讀一次的時機 —— 換語言必然伴隨畫面重建，所以這裡夠。
-    st.openTier = openTierOf(panel);
+    st.anchor = anchor;
+    st.channel = sc.channel.channel;
     st.button = btn;
     st.countsText = countsText;
-    // 拆的時候照這張清單走（見 detach）。
     st.mine = [btn, countsText];
-    // 亞城的那幾行就是接在 player_count 底下。
-    st.baseY = counter.y + counter.height;
     paint(st);
     return null;
   }
 
   /** 一輪檢查：該掛就掛、該拆就拆。**回 true = 現在掛著**。 */
-  /**
-   * ⚠ 官方 bug 的墊片：Match 的物品欄鈕按下去會炸。
-   *
-   * 2026-09-13 從跑著的客戶端讀的 Match.create()：
-   *
-   *   btn_item.on("pointerdown", () => { friend_btn.disableInteractive();
-   *     btn_item.disableInteractive(); this.rule_btn.disableInteractive(); tweens.add(…) })
-   *
-   * 而 rule_btn 只在欄位宣告裡出現，35 支 bundle 沒有任何地方指定它 —— 永遠是
-   * undefined。所以第三句一定丟 TypeError：兩顆鈕已經 disable 了、視窗的 tween
-   * 沒加上，好友與物品欄從此都按不動（玩家回報「對戰房內右下方好友、物品欄打
-   * 不開」）。任務房／渦房沒這一行，只有 Match 有。
-   *
-   * 給它一個什麼都不做的假鈕就好。關窗那邊還會對 create 時抓的
-   * [friend_btn, btn_item, undefined] 逐一 setInteractive()，前兩顆先恢復、第三
-   * 個 undefined 才丟 —— 那個閉包碰不到，留一句 console 錯誤，鈕已經能按了。
-   */
-  function shimRuleButton(sc) {
-    if (sc.rule_btn !== undefined) return;
-    var stub = { __ulrStub: true };
-    stub.disableInteractive = function () { return stub; };
-    stub.setInteractive = function () { return stub; };
-    sc.rule_btn = stub;
-  }
-
   function sync(st) {
-    var sc = matchScene();
-    if (sc === null) { st.reason = "還沒載到對戰大廳"; return false; }
-    try { shimRuleButton(sc); } catch (e) {}
-
-    var panel = sc.channel_panel;
-    var ok = !!panel && panel.scene !== undefined && duelChannel(sc);
-    // ⚠ ranked 面板有官方自己的快速比賽（quick_btn），不要疊上去。
-    if (ok && panel.quick_btn) { ok = false; st.reason = "這是官方有快速比賽的頻道"; }
-
-    if (!ok) {
-      if (st.panel !== null) detach(st);
-      if (st.reason === null) st.reason = "還沒進迪特赫姆";
+    var sc = activeMatch();
+    if (sc === null) {
+      if (st.button !== null) detach(st);
+      st.reason = "還沒在對戰大廳";
       return false;
     }
-    // 同一個面板而且東西還在 → 什麼都不用做。
-    if (st.panel === panel && st.button !== null && st.button.scene !== undefined) return true;
+    var anchor = sc.channel_match;
+    var ok = duelChannel(sc) && !!anchor && anchor.scene !== undefined && anchor.scene !== null;
+    if (!ok) {
+      if (st.button !== null) detach(st);
+      st.reason = sc.channel && sc.channel.quick === true ? "這是官方有快速比賽的頻道" : "還沒進迪特赫姆";
+      return false;
+    }
+    // 排隊中而官方的視窗被別的東西收掉了（例如插件收房之後繼續排）→ 補回來。
+    if (st.state.matching) showWaiting(st);
+    // 同一顆錨、東西都還在 → 什麼都不用做。
+    if (st.anchor === anchor && st.button !== null && st.button.scene) {
+      st.countsText.setPosition(8, countsY(sc));
+      return true;
+    }
 
     detach(st);
-    var failure = attach(st, sc, panel);
+    var failure = attach(st, sc);
     if (failure !== null) {
       st.reason = failure;
       report({ type: "lobby-error", reason: failure });
@@ -776,23 +756,28 @@ export function buildLobbyPatchScript(options: LobbyPatchOptions): string {
   var st = {
     version: CFG.version,
     installed: true,
-    panel: null,
+    anchor: null,
     channel: null,
-    openTier: null,
     button: null,
     countsText: null,
-    /** 我們加到面板上的每一個東西。**拆的時候照這張清單走**（見 detach）。 */
+    /** 我們加到畫面上的每一個東西。**拆的時候照這張清單走**（見 detach）。 */
     mine: [],
-    baseY: 0,
-    /** 遊戲自己那幾個 UI 類別（對話框、文字按鈕、字串表）。第一次用到才去找。 */
-    kit: null,
-    /** 等待對手的視窗（配對中才有）。⚠ 它掛在場景上，不在面板裡。 */
-    wait: null,
+    /** 官方的等待視窗是我們開的嗎（是的話收也由我們收）。 */
+    ownsWait: false,
+    badge: null,
     timer: null,
     reason: null,
+    /** 包在 Match 場景實例上的方法（見 wrapMethod）。 */
+    wraps: [],
     state: { counts: null, matching: false, badge: null }
   };
   window[FLAG] = st;
+
+  /** 拆掉包過的方法、還原挖過洞的等待視窗。uninstall 與下一次重裝都走這裡。 */
+  st.unpatch = function () {
+    unwrapAll(st);
+    try { closeZone(matchScene()); } catch (e) {}
+  };
 
   /** Node 推狀態進來。**畫面上的每一個字都從這裡來。** */
   st.setState = function (json) {
@@ -801,7 +786,6 @@ export function buildLobbyPatchScript(options: LobbyPatchOptions): string {
       st.state = {
         counts: next && next.counts ? next.counts : null,
         matching: !!(next && next.matching),
-        // ⚠ 舊的 Node 端不會送這一格 —— 沒有就是「不加那一行」，不是錯誤。
         badge: next && typeof next.badge === "string" ? next.badge : null
       };
       paint(st);
@@ -812,47 +796,52 @@ export function buildLobbyPatchScript(options: LobbyPatchOptions): string {
   };
 
   /**
-   * 跳「這個牌組不符合遊戲規則」。
+   * 跳遊戲自己的錯誤框（match_error）。
    *
-   * ⚠ 訊息**優先從遊戲自己那份拿**（\`room_error[lang][code]\`）—— 玩家的
-   * 客戶端是什麼語言就是什麼語言，而且跟他按官方快速比賽時看到的一模一樣。
-   * Node 只送代碼，送字串是後備（規則檔特有的錯，遊戲沒有對應的句子）。
+   * ⚠ 訊息**優先用遊戲自己的字串表**（MatchUITexts.error[代碼]）—— 玩家的客戶端
+   * 是什麼語言就是什麼語言。Node 送來的字串是後備（規則檔特有的錯，遊戲沒有對應
+   * 的句子）：暫時塞一格進字串表再叫 match_error，它在第一個 await 之前就讀完了，
+   * 叫完立刻拿掉。
    */
   st.showError = function (json) {
     try {
       var p = JSON.parse(json);
-      var sc = matchScene();
-      var text = null;
-      if (sc !== null && typeof p.code === "number") {
-        var table = sc.room_error && sc.room_error[gameLang()];
-        if (table && typeof table[p.code] === "string") text = table[p.code];
+      var sc = activeMatch();
+      if (sc === null) return "no-scene";
+      if (typeof sc.match_error !== "function") return "no-dialog";
+      var t = texts();
+      if (!t || !t.error) return "no-texts";
+      if (typeof p.code === "string" && typeof t.error[p.code] === "string") {
+        sc.match_error(p.code);
+        return "ok";
       }
-      if (text === null) text = typeof p.message === "string" ? p.message : "";
-      if (text === "") return "no-message";
-      return showDialog(text);
+      var msg = typeof p.message === "string" ? p.message : "";
+      if (msg === "") return "no-message";
+      var KEY = "__ulr_message";
+      t.error[KEY] = msg;
+      try { sc.match_error(KEY); } finally { delete t.error[KEY]; }
+      return "ok";
     } catch (e) {
       return "error: " + String((e && e.message) || e);
     }
   };
 
-  if (!sync(st)) {
-    // ⚠ 玩家多半是「先開插件，再開遊戲，登入，進頻道」—— 等他進去是常態，
-    // 不是錯誤。所以這支**沒有上限**地盯著（間隔 500ms，只讀兩個欄位）。
-    st.timer = setInterval(function () {
-      if (window[FLAG] !== st) { clearInterval(st.timer); return; }
-      try { sync(st); } catch (e) { st.reason = String((e && e.message) || e); }
-    }, CFG.pollIntervalMs);
-  } else {
-    // 掛上了也要繼續盯 —— 玩家換頻道時面板會換人。
-    st.timer = setInterval(function () {
-      if (window[FLAG] !== st) { clearInterval(st.timer); return; }
-      try { sync(st); } catch (e) { st.reason = String((e && e.message) || e); }
-    }, CFG.pollIntervalMs);
-  }
+  st.openTier = openTierOf;
+
+  // ⚠ 玩家多半是「先開插件，再開遊戲，登入，進頻道」—— 等他進去是常態，
+  // 不是錯誤。所以這支**沒有上限**地盯著（間隔 500ms，只讀幾個欄位）；掛上了
+  // 也要繼續盯，換頻道時那顆錨會換人。
+  try { lobbyFixes(st); } catch (e) {}
+  try { sync(st); } catch (e) { st.reason = String((e && e.message) || e); }
+  st.timer = setInterval(function () {
+    if (window[FLAG] !== st) { clearInterval(st.timer); return; }
+    try { lobbyFixes(st); } catch (e) {}
+    try { sync(st); } catch (e) { st.reason = String((e && e.message) || e); }
+  }, CFG.pollIntervalMs);
 
   return JSON.stringify({
     installed: true, version: st.version, channel: st.channel,
-    openTier: st.panel === null ? null : openTierOf(st.panel),
+    openTier: openTierOf(),
     buttonReady: st.button !== null, waiting: st.button === null, reason: st.reason
   });
 })()`;
@@ -866,27 +855,26 @@ export function buildLobbyStateExpression(state: LobbyState): string {
 /**
  * 跳出遊戲自己的錯誤對話框。
  *
- * `code` 是 `Match.room_error[lang]` 的索引 —— **7 = 「這個牌組不符合遊戲規則」**
- * （2026-08-18 從跑著的客戶端讀的）。
+ * `code` 是 `MatchUITexts.error` 的鍵（見 {@link ROOM_ERROR_AP_SHORT}）；認不得或
+ * 是 `null` 時顯示 `message`。
  */
-export function buildLobbyErrorExpression(code: number | null, message?: string): string {
+export function buildLobbyErrorExpression(code: string | null, message?: string): string {
   return `window.${FLAG} ? window.${FLAG}.showError(${embedJson({
     code,
     ...(message === undefined ? {} : { message }),
   })}) : "not-installed"`;
 }
 
-/** 「這個牌組不符合遊戲規則」在 `room_error` 裡的位置。 */
-export const ROOM_ERROR_DECK_INVALID = 7;
+/** 「這個牌組不符合遊戲規則。」（`MatchUITexts.error.INVALID_DECK_ENTER`）。 */
+export const ROOM_ERROR_DECK_INVALID = "INVALID_DECK_ENTER";
 
 /**
- * 「AP不足」在 `room_error` 裡的位置（2026-08-19 從跑著的客戶端讀的）。
+ * 「AP不足。」（`MatchUITexts.error.NOT_ENOUGH_AP`）。
  *
- * 伺服器擋下來時回的也是這個代碼（`fail: 4`），所以玩家看到的那句話跟他自己
- * 手動開房 AP 不夠時**一模一樣** —— 那正是我們要的：這顆按鈕的每一句話都要
- * 是遊戲自己的話。
+ * 伺服器擋下來時推的也是這個代碼，所以玩家看到的那句話跟他自己手動開房 AP 不夠時
+ * **一模一樣** —— 這顆按鈕的每一句話都要是遊戲自己的話。
  */
-export const ROOM_ERROR_AP_SHORT = 4;
+export const ROOM_ERROR_AP_SHORT = "NOT_ENOUGH_AP";
 
 export const LOBBY_STATUS_EXPRESSION = `(function () {
   "use strict";
@@ -900,13 +888,11 @@ export const LOBBY_STATUS_EXPRESSION = `(function () {
     return JSON.stringify({
       installed: st.installed === true,
       version: st.version,
-      channel: st.channel,
-      // ⚠ 每次都當場從模板重讀。玩家換遊戲語言時模板會換成另一份，而那一份的
-      // COST90+ 完全可能是另一個數字。
-      openTier: st.openTier === undefined ? null : st.openTier,
-      // ⚠ **當場看物件還在不在**，不要把安裝時記的值唸一遍：玩家換頻道之後
-      // 面板連同按鈕會被 destroy，而旗標還在。
-      buttonReady: !!(st.button && st.button.scene !== undefined),
+      channel: st.channel === undefined ? null : st.channel,
+      // ⚠ 每次都當場從模板重讀。玩家換遊戲語言時模板會換成另一份。
+      openTier: typeof st.openTier === "function" ? st.openTier() : null,
+      // ⚠ **當場看物件還在不在**：玩家換頻道之後按鈕會被拆掉，而旗標還在。
+      buttonReady: !!(st.button && st.button.scene),
       waiting: st.timer !== null && st.timer !== undefined && !st.button,
       reason: st.reason
     });
@@ -921,18 +907,16 @@ export const LOBBY_UNINSTALL_EXPRESSION = `(function () {
     var st = window.${FLAG};
     if (!st) return "not-installed";
     try { if (st.timer !== null && st.timer !== undefined) clearInterval(st.timer); } catch (e) {}
-    var items = [st.button, st.countsText,
-                 st.wait ? st.wait.box : null, st.wait ? st.wait.zone : null];
+    try { if (typeof st.unpatch === "function") st.unpatch(); } catch (e) {}
+    var items = (st.mine || []).concat([st.button, st.countsText, st.badge]);
     for (var i = 0; i < items.length; i++) {
       try { if (items[i] && items[i].destroy) items[i].destroy(); } catch (e) {}
     }
-    // ⚠ 等待視窗的兩個計時器要收 —— 它們抓著剛剛被 destroy 的 text 物件。
-    try { if (st.wait) { st.wait.counter.remove(); st.wait.wave.remove(); } } catch (e) {}
-    // 官方 rule_btn 那個墊片是我們放的才拿掉（見 shimRuleButton）。
+    // 我們開的等待視窗一起收（它的取消鈕已經被換成通知插件，留著會變成關不掉的框）。
     try {
       var keys = window.game && window.game.scene && window.game.scene.keys;
       var sc = keys && keys.Match;
-      if (sc && sc.rule_btn && sc.rule_btn.__ulrStub === true) sc.rule_btn = undefined;
+      if (st.ownsWait && sc && sc.wait_zone) sc.remove_match_wait();
     } catch (e) {}
     delete window.${FLAG};
     return "uninstalled";

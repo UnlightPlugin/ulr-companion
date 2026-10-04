@@ -26,7 +26,7 @@ const WEB_ASAR_MAX_BYTES = 10 * 1024 * 1024;
 export type ClientMode = "web" | "desktop";
 
 export interface GameInstall {
-  /** `…\UNLIGHTRevive\win-unpacked\resources` */
+  /** `…\UNLIGHTRevive\resources`（2026-09-23 前是 `…\UNLIGHTRevive\win-unpacked\resources`） */
   resourcesDir: string;
   mode: ClientMode;
   activeAsarBytes: number;
@@ -68,25 +68,25 @@ function steamLibraryRoots(): string[] {
  */
 export function detectGameInstall(): GameInstall | null {
   for (const root of steamLibraryRoots()) {
-    const resourcesDir = join(
-      root,
-      "steamapps",
-      "common",
-      "UNLIGHTRevive",
-      "win-unpacked",
-      "resources",
-    );
-    const asar = join(resourcesDir, "app.asar");
-    if (!existsSync(asar)) continue;
-    try {
-      const bytes = statSync(asar).size;
-      return {
-        resourcesDir,
-        mode: bytes <= WEB_ASAR_MAX_BYTES ? "web" : "desktop",
-        activeAsarBytes: bytes,
-      };
-    } catch {
-      continue;
+    const gameDir = join(root, "steamapps", "common", "UNLIGHTRevive");
+    // 2026-09-23 更新把 exe 與 resources 搬到遊戲根目錄；win-unpacked 還留著
+    // 舊版的東西（裡面已經沒有 app.asar），所以新位置先看。
+    for (const resourcesDir of [
+      join(gameDir, "resources"),
+      join(gameDir, "win-unpacked", "resources"),
+    ]) {
+      const asar = join(resourcesDir, "app.asar");
+      if (!existsSync(asar)) continue;
+      try {
+        const bytes = statSync(asar).size;
+        return {
+          resourcesDir,
+          mode: bytes <= WEB_ASAR_MAX_BYTES ? "web" : "desktop",
+          activeAsarBytes: bytes,
+        };
+      } catch {
+        continue;
+      }
     }
   }
   return null;

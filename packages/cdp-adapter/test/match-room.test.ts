@@ -4,188 +4,660 @@
  * 重點在**注入的腳本真的跑一次**，不是只比對字串。2026-08-15 那次
  * 「rooms_snapshot 看得到、join 說找不到」就是純字串測試抓不到的：
  * 產生出來的表達式看起來完全正常，錯在頁面端少 parse 一次。
+ *
+ * 假遊戲照 2026-09-23 改版後的 Match 場景搭（2026-09-27 從跑著的客戶端讀的）：
+ * 每個頻道一條 `socket_channel`、一律 `fetch`、房間清單是 `channel_room`、
+ * 等待視窗是 `create_match_wait()`／`remove_match_wait()`。
  */
 import { describe, expect, it, vi } from "vitest";
 import { equipmentKey, eventCardKey } from "@ulr/rule-schema";
 import {
+  ARCADIA_STAGES,
   COST_RANGES,
   HIDDEN_STAGES,
   isStageCode,
-  MATCH_ROOM_INSTALL_EXPRESSION,
+  MATCH_ROOM_SCRIPT_VERSION,
+  MATCH_ROOM_UNINSTALL_EXPRESSION,
+  RANDOM_STAGE_CODE,
   SELECTABLE_STAGES,
   STAGE_CODES,
   STAGES,
   buildCreateRoomExpression,
   buildJoinRoomExpression,
+  buildMatchRoomScript,
   canAffordDuel,
   costTiersFor,
   duelApCost,
   findOwnRoom,
+  stageValue,
   type ChannelInfo,
+  type MatchContext,
   type RoomEntry,
 } from "../src/index.js";
 
 // ---------------------------------------------------------------------------
 // 假頁面：只做注入腳本真的會碰到的那些東西。
+// ---------------------------------------------------------------------------
 
-type Handler = (value: unknown) => void;
+type Handler = (...args: unknown[]) => void;
+type Responder = (...args: unknown[]) => unknown;
 
-interface FakeSocket {
+interface FakeSocketLike {
+  sent: { ev: string; args: unknown[] }[];
+  respond: Record<string, Responder>;
   on(ev: string, fn: Handler): void;
   once(ev: string, fn: Handler): void;
-  emit(ev: string, ...args: unknown[]): void;
-  fire(ev: string, v?: unknown): void;
-  emitted: { ev: string; args: unknown[] }[];
-  __ulrListened?: Record<string, unknown>;
+  /** 模擬伺服器推一則事件。 */
+  push(ev: string, ...args: unknown[]): void;
+  fetch(ev: string, ...args: unknown[]): Promise<unknown>;
 }
 
-function makeSocket(): FakeSocket {
-  const handlers = new Map<string, Handler[]>();
-  const onces = new Map<string, Handler[]>();
-  return {
-    emitted: [],
-    on(ev, fn) {
-      handlers.set(ev, [...(handlers.get(ev) ?? []), fn]);
-    },
-    once(ev, fn) {
-      onces.set(ev, [...(onces.get(ev) ?? []), fn]);
-    },
-    emit(ev, ...args) {
-      this.emitted.push({ ev, args });
-    },
-    fire(ev, v) {
-      for (const fn of handlers.get(ev) ?? []) fn(v);
-      const os = onces.get(ev) ?? [];
-      onces.set(ev, []);
-      for (const fn of os) fn(v);
-    },
+/**
+ * 每個假遊戲一個新的 socket 類別 —— 腳本會包它的 prototype（記頻道清單），
+ * 共用一個類別的話測試之間會互相漏。
+ */
+function socketClass(): new () => FakeSocketLike {
+  return class FakeSocket implements FakeSocketLike {
+    sent: { ev: string; args: unknown[] }[] = [];
+    respond: Record<string, Responder> = {};
+    #handlers = new Map<string, { fn: Handler; once: boolean }[]>();
+    on(ev: string, fn: Handler): void {
+      this.#handlers.set(ev, [...(this.#handlers.get(ev) ?? []), { fn, once: false }]);
+    }
+    once(ev: string, fn: Handler): void {
+      this.#handlers.set(ev, [...(this.#handlers.get(ev) ?? []), { fn, once: true }]);
+    }
+    push(ev: string, ...args: unknown[]): void {
+      const list = this.#handlers.get(ev) ?? [];
+      this.#handlers.set(
+        ev,
+        list.filter((h) => !h.once),
+      );
+      for (const h of list) h.fn(...args);
+    }
+    fetch(ev: string, ...args: unknown[]): Promise<unknown> {
+      this.sent.push({ ev, args });
+      const r = this.respond[ev];
+      return Promise.resolve(r === undefined ? null : r(...args));
+    }
   };
 }
 
-function rawRoom(over: Record<string, unknown> = {}) {
+const DUEL = {
+  channel: 2,
+  quick: false,
+  event: false,
+  cost: null,
+  required_ap: { normal: { single: 2, multi: 5 }, friend: { single: 1, multi: 3 } },
+  domain: "https://example.invalid:11014",
+};
+const RANKED = {
+  channel: 1,
+  quick: true,
+  event: false,
+  cost: [57, 66, 78],
+  required_ap: { normal: { single: 2, multi: 5 }, friend: { single: 1, multi: 3 } },
+  domain: "https://example.invalid:11011",
+};
+
+/** 房間清單的一筆，形狀照抄 channel_room（2026-09-27）。 */
+function rawRoom(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    room_id: "ROOM-ID-1",
-    name: "ULR3",
-    playerA: { name: "燈皇" },
-    playerB: null,
-    deckA: { chara: ["cc069"], charaIndex: [3], cost: 49 },
-    deckB: null,
-    pass: 1,
-    stage: "000",
+    channel: 2,
+    cost: null,
+    create_at: "2026-09-27T10:10:25.000Z",
+    friend: false,
+    password: true,
+    pending: 0,
+    playerA_deck: {
+      deck_id: -1,
+      main: 0,
+      chara_card_id: [429, 330, 606],
+      weapon_card_id: [153, 123, 21],
+      event_card_id: [],
+      card_effect: [],
+      cost: 106,
+    },
+    playerA_info: {
+      player_name: "燈皇",
+      win: 1,
+      lose: 0,
+      draw: 0,
+      bp: 1500,
+      level: 92,
+      avatar: [],
+    },
+    playerB_deck: null,
+    playerB_info: null,
+    room_id: "bN8kekEQrEwqdxlJdUTbCqORtz1vdYGW0E9U",
+    room_name: "COST57 夾擠式",
+    rule: "duel",
+    multi: true,
+    stage: 0,
     ...over,
   };
 }
 
-/**
- * @param channel 2 = 迪特赫姆（一般，走 socket）／4 = 布萊德克洛伊茲（跨平台，走 socket_cross）
- */
-function makePage(channel = 2) {
-  const socket = makeSocket();
-  const socketCross = makeSocket();
-  const scene = {
-    id: "player-id",
-    channel,
-    channels: { "1": { type: "ranked", cost: [57, 66, 78] }, "2": { type: "duel" } },
-    channels_cross: { "3": { type: "ranked", cost: [56, 69, 71] }, "4": { type: "duel" } },
+/** 新 id → 舊索引（測試用的小表，真的那份由引擎從 rule-schema 反查）。 */
+const TABLES = {
+  weaponIndexById: { "6": 1, "11": 2 },
+  eventIndexById: { "34": 91 },
+};
+
+const CHARA_CARDS = [
+  { id: 1, filename: "cc001_01" },
+  { id: 429, filename: "cc078_04" },
+  { id: 700, filename: "mc001_01" },
+];
+
+interface FakeMatch {
+  scene: { isActive: () => boolean; launch: ReturnType<typeof vi.fn> };
+  socket: FakeSocketLike;
+  socket_channel: FakeSocketLike | null;
+  channel: typeof DUEL | null;
+  channel_room: Record<string, unknown>[];
+  deck_now: number;
+  deck: Record<string, unknown>[];
+  player: { player_name: string; duel_free: number };
+  player_ap: { ap: number; ap_max: number };
+  player_id: string;
+  room_wait: boolean;
+  room_select: string | null;
+  room_detail: null;
+  player_side: string | null;
+  wait_zone: object | null;
+  waitsCreated: number;
+  loading: number;
+  input: { enabled: boolean };
+  create_match_wait(): void;
+  remove_match_wait(): void;
+  create_match_loading(): void;
+}
+
+interface FakeGame {
+  window: Record<string, unknown> & { game: { scene: { keys: Record<string, unknown> } } };
+  sc: FakeMatch;
+  Socket: new () => FakeSocketLike;
+  /** 開機時就在的另一個場景的 socket（腳本靠它包 prototype）。 */
+  boot: FakeSocketLike;
+  setActive(on: boolean): void;
+}
+
+function makeGame(over: Partial<FakeMatch> = {}): FakeGame {
+  const Socket = socketClass();
+  let active = true;
+  const sc: FakeMatch = {
+    scene: { isActive: () => active, launch: vi.fn() },
+    socket: new Socket(),
+    socket_channel: new Socket(),
+    channel: DUEL,
+    channel_room: [],
     deck_now: 1,
-    deck1: { cost: 49 },
-    player: { name: "燈皇" },
-    socket,
-    socket_cross: socketCross,
-    // ⚠ 預設不給 match_room_data，這樣既有的測試仍走推播快取那條路 ——
-    // 兩條路都要有測試。要測即時清單的自己塞進去。
-    channel_panel: {
-      room_select: null as unknown,
-      is_matching: false,
-      match_room_data: undefined as unknown[] | undefined,
+    deck: [
+      {
+        deck_id: 1,
+        chara_card_id: [429, null, 999],
+        weapon_card_id: [6, null, 12345],
+        event_card_id: [34, null],
+        cost: 49,
+      },
+    ],
+    player: { player_name: "燈皇", duel_free: 0 },
+    player_ap: { ap: 30, ap_max: 30 },
+    player_id: "登入憑證不能外流",
+    room_wait: false,
+    room_select: null,
+    room_detail: null,
+    player_side: null,
+    wait_zone: null,
+    waitsCreated: 0,
+    loading: 0,
+    input: { enabled: true },
+    create_match_wait() {
+      this.wait_zone = {};
+      this.waitsCreated++;
     },
-    password: undefined as unknown,
-    room_in: vi.fn(),
-    scene: { isActive: () => true },
+    remove_match_wait() {
+      this.wait_zone = null;
+    },
+    create_match_loading() {
+      this.loading++;
+    },
+    ...over,
   };
-  // 這個假 window 刻意不上型別：注入的腳本是**字串裡的 JS**，它在上面掛什麼
-  // 屬性、什麼時候掛，TypeScript 一概不知道。硬要描述型別只會描述成我們**以為**
-  // 的樣子，而這組測試存在的理由正是「不要相信我們以為的」。
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const window: any = { game: { scene: { keys: { Match: scene } } } };
-  return { window, scene, socket, socketCross };
+  const boot = new Socket();
+  const window = {
+    game: {
+      scene: { keys: { Boot: { socket: boot }, Match: sc } as Record<string, unknown> },
+      cache: { json: { get: (k: string) => (k === "CharaCards" ? CHARA_CARDS : null) } },
+      registry: { get: () => null },
+    },
+  };
+  return {
+    window,
+    sc,
+    Socket,
+    boot,
+    setActive: (on) => {
+      active = on;
+    },
+  };
 }
 
-/**
- * 在假 window 上跑一段注入腳本，回傳它的結果。
- *
- * ⚠ 這裡的 `new Function` 是**這組測試的重點**，不是偷懶：要驗的就是那段
- * 字串在頁面上真的執行起來會怎樣。純比對字串的測試抓不到 2026-08-15 那個
- * 「產生的表達式跟頁面端函式簽章對不上」的 bug。
- */
-// eslint-disable-next-line no-new-func
-const compile = (expression: string) => new Function("window", `return (${expression});`);
-
-function run<T>(window: unknown, expression: string): T {
-  return compile(expression)(window) as T;
+function run<T>(game: FakeGame, expression: string): T {
+  // eslint-disable-next-line no-new-func
+  const fn = new Function("window", `return ${expression};`) as (w: unknown) => T;
+  return fn(game.window);
 }
 
-/** 某個頻道那一格的原始房間清單。清單是**按頻道分開存**的。 */
-function rawOf(
-  window: { __ulrMatch?: { byChannel?: Record<string, { raw: unknown[] }> } },
-  channel: number,
-): unknown[] {
-  return window.__ulrMatch?.byChannel?.[String(channel)]?.raw ?? [];
+function install(game: FakeGame): string {
+  return run<string>(game, buildMatchRoomScript(TABLES));
 }
 
-function install(window: unknown): string {
-  return run<string>(window, MATCH_ROOM_INSTALL_EXPRESSION);
+function context(game: FakeGame): MatchContext {
+  return JSON.parse(run<string>(game, "window.__ulrMatch.context()")) as MatchContext;
 }
+
+interface Snapshot {
+  seq: number;
+  live: boolean;
+  started: boolean;
+  rooms: RoomEntry[];
+}
+
+function snapshot(game: FakeGame): Snapshot {
+  return JSON.parse(run<string>(game, "window.__ulrMatch.rooms_snapshot()")) as Snapshot;
+}
+
+const ROOM_OPTS = {
+  name: "COST57 夾擠式",
+  stage: "011",
+  friend: false,
+  pass: "AB12CD34",
+  cost: null,
+};
+
+// ---------------------------------------------------------------------------
 
 describe("注入腳本：安裝", () => {
-  it("第一次是 installed，再裝一次是 reinstalled", () => {
-    const { window } = makePage();
-    expect(install(window)).toBe("installed");
-    expect(install(window)).toBe("reinstalled");
+  it("回報版本，重裝也安全", () => {
+    const game = makeGame();
+    expect(install(game)).toBe(`installed:${MATCH_ROOM_SCRIPT_VERSION}`);
+    expect(install(game)).toBe(`installed:${MATCH_ROOM_SCRIPT_VERSION}`);
   });
 
-  it("重裝沿用同一個 state 物件，舊 listener 寫進去的資料不會不見", () => {
-    const { window, socket } = makePage();
-    install(window);
-    run(window, "window.__ulrMatch.context()"); // 觸發 listen()
-    const before = window.__ulrMatch;
-    socket.fire("channel2_room", [rawRoom()]);
-    expect(rawOf(window, 2)).toHaveLength(1);
+  it("⚠ 搭遊戲自己送的 get_matching_channel 記下頻道清單 —— 不另外發請求", async () => {
+    const game = makeGame();
+    install(game);
+    // 玩家回到頻道選單：遊戲自己（Match 的 lobby socket）問一次頻道清單。
+    game.sc.socket.respond["get_matching_channel"] = () => [RANKED, DUEL];
+    await game.sc.socket.fetch("get_matching_channel");
+    await Promise.resolve();
 
-    // ⚠ 這裡是真正的回歸點：換成新 state 物件的話，還掛在 socket 上的
-    // 舊 listener 會繼續往舊物件寫，rawOf(window, 2) 就永遠是空的。
-    install(window);
-    expect(window.__ulrMatch).toBe(before);
-    expect(rawOf(window, 2)).toHaveLength(1);
+    const c = context(game);
+    expect(c.channels?.["1"]).toEqual({ type: "ranked", cost: [57, 66, 78], crossplay: false });
+    expect(c.channels?.["2"]).toEqual({ type: "duel", cost: null, crossplay: false });
+    // 插件自己一個請求都沒送 —— 只有遊戲那一次。
+    expect(game.sc.socket.sent.map((s) => s.ev)).toEqual(["get_matching_channel"]);
+    expect(game.sc.socket_channel?.sent).toEqual([]);
   });
 
-  it("listener 只掛一支，重裝不會愈積愈多", () => {
-    const { window, socket } = makePage();
-    install(window);
-    run(window, "window.__ulrMatch.context()");
-    install(window);
-    run(window, "window.__ulrMatch.context()");
-    socket.fire("channel2_room", [rawRoom()]);
-    // 掛兩支的話 seq 會一次跳 2
-    expect(JSON.parse(run<string>(window, "window.__ulrMatch.rooms_snapshot()")).seq).toBe(1);
+  it("包 socket 的那一層只包一次，重裝不會疊上去", async () => {
+    const game = makeGame();
+    install(game);
+    const once = game.Socket.prototype.fetch;
+    install(game);
+    install(game);
+    expect(game.Socket.prototype.fetch).toBe(once);
   });
 
-  it("卸載後重裝，還活著的 listener 會寫進新的 state", () => {
-    const { window, socket } = makePage();
-    install(window);
-    run(window, "window.__ulrMatch.context()");
-    delete window.__ulrMatch;
-    install(window);
-    socket.fire("channel2_room", [rawRoom()]);
-    expect(rawOf(window, 2)).toHaveLength(1);
+  it("拆掉之後 socket 的 fetch 還原成遊戲原本那支", () => {
+    const game = makeGame();
+    const orig = game.Socket.prototype.fetch;
+    install(game);
+    expect(game.Socket.prototype.fetch).not.toBe(orig);
+    expect(run<string>(game, MATCH_ROOM_UNINSTALL_EXPRESSION)).toBe("ok");
+    expect(game.Socket.prototype.fetch).toBe(orig);
+    expect(game.window["__ulrMatch"]).toBeUndefined();
+  });
+});
+
+describe("注入腳本：context", () => {
+  it("頻道、AP、星星、名字都從遊戲自己的欄位讀", () => {
+    const game = makeGame();
+    install(game);
+    const c = context(game);
+    expect(c).toMatchObject({
+      hasId: true,
+      channel: 2,
+      crossplay: false,
+      requiredAp: { single: 2, multi: 5 },
+      deckNow: 1,
+      deckCost: 49,
+      playerName: "燈皇",
+      isMatching: false,
+      inMatch: true,
+      ap: 30,
+      apMax: 30,
+      duelFree: 0,
+    });
+  });
+
+  it("⚠ 玩家 id 是登入憑證，只回有沒有，值不出頁面", () => {
+    const game = makeGame();
+    install(game);
+    const raw = run<string>(game, "window.__ulrMatch.context()");
+    expect(raw).not.toContain("登入憑證不能外流");
+  });
+
+  it("玩家自己開著一間房（room_wait）就是 isMatching", () => {
+    const game = makeGame({ room_wait: true });
+    install(game);
+    expect(context(game).isMatching).toBe(true);
+  });
+
+  it("玩家現在所在的頻道一定在表裡，即使沒經過頻道選單", () => {
+    const game = makeGame();
+    install(game);
+    expect(context(game).channels?.["2"]).toEqual({ type: "duel", cost: null, crossplay: false });
+  });
+
+  it("跨平台頻道（3 / 4）標出 crossplay", () => {
+    const game = makeGame({ channel: { ...DUEL, channel: 4 } });
+    install(game);
+    const c = context(game);
+    expect(c.crossplay).toBe(true);
+    expect(c.channels?.["4"]?.crossplay).toBe(true);
+  });
+
+  it("不在大廳（對戰中 Match 是 sleep）→ inMatch false，其餘全是 null", () => {
+    const game = makeGame();
+    install(game);
+    game.setActive(false);
+    expect(context(game)).toMatchObject({
+      inMatch: false,
+      channel: null,
+      deckKeys: null,
+      ap: null,
+    });
+  });
+
+  it("沒進頻道 → channel 是 null", () => {
+    const game = makeGame({ channel: null });
+    install(game);
+    expect(context(game).channel).toBeNull();
+  });
+});
+
+describe("注入腳本：自己牌組的規則鍵（deckKeys）", () => {
+  it("角色是 CharaCards 的 filename；武器／事件卡從新 id 換回舊索引組鍵", () => {
+    const game = makeGame();
+    install(game);
+    expect(context(game).deckKeys).toEqual({
+      characters: ["cc078_04", null, null],
+      equipment: [equipmentKey(1), null, null],
+      eventCards: [eventCardKey(91), null],
+    });
+  });
+
+  it("⚠ 補零邏輯跟 rule-schema 那份一致 —— 兩份漂開會被判成規則不相容", () => {
+    const game = makeGame();
+    install(game);
+    const keys = context(game).deckKeys;
+    expect(keys?.equipment[0]).toBe("wp001");
+    expect(keys?.eventCards[0]).toBe("ev091");
+  });
+
+  it("⚠ 空格與認不得的 id 都是 null，不是空字串 —— 呼叫端要分得出少算了一張", () => {
+    const game = makeGame();
+    install(game);
+    const keys = context(game).deckKeys;
+    // [429, null, 999]：999 不在 CharaCards 裡
+    expect(keys?.characters).toEqual(["cc078_04", null, null]);
+    // [6, null, 12345]：12345 不在對照表裡
+    expect(keys?.equipment).toEqual(["wp001", null, null]);
+  });
+
+  it("怪物卡也是 CharaCards 的 filename", () => {
+    const game = makeGame({
+      deck: [{ deck_id: 1, chara_card_id: [700], weapon_card_id: [], event_card_id: [], cost: 3 }],
+    });
+    install(game);
+    expect(context(game).deckKeys?.characters).toEqual(["mc001_01"]);
+  });
+
+  it("⚠ 遊戲還沒載完 CharaCards 時整個是 null，而且 context() 仍然回得來", () => {
+    const game = makeGame();
+    (game.window.game as unknown as { cache: { json: { get: () => null } } }).cache.json.get = () =>
+      null;
+    install(game);
+    const c = context(game);
+    expect(c.deckKeys).toBeNull();
+    expect(c.inMatch).toBe(true);
+  });
+});
+
+describe("注入腳本：房間清單", () => {
+  it("讀遊戲手上那份 channel_room，只挑用得到的欄位", () => {
+    const game = makeGame({ channel_room: [rawRoom()] });
+    install(game);
+    const s = snapshot(game);
+    expect(s.live).toBe(true);
+    expect(s.started).toBe(false);
+    expect(s.rooms).toEqual([
+      {
+        roomId: "bN8kekEQrEwqdxlJdUTbCqORtz1vdYGW0E9U",
+        name: "COST57 夾擠式",
+        playerAName: "燈皇",
+        playerBName: null,
+        pass: true,
+        deckA: { charaCardId: [429, 330, 606], cost: 106 },
+        deckB: null,
+      },
+    ]);
+  });
+
+  it("沒進頻道 → live false（＝還不知道，不是沒有房）", () => {
+    const game = makeGame({ channel: null });
+    install(game);
+    expect(snapshot(game)).toMatchObject({ live: false, rooms: [] });
+  });
+
+  it("⚠ 對戰開始之後大廳 sleep —— live false，但 started 讀得到", () => {
+    const game = makeGame({ channel_room: [rawRoom()] });
+    install(game);
+    game.sc.player_side = "A";
+    game.setActive(false);
+    expect(snapshot(game)).toMatchObject({ live: false, started: true, rooms: [] });
+  });
+});
+
+describe("注入腳本：開房", () => {
+  it("照官方的參數順序送 create_room，stage 送數字", async () => {
+    const game = makeGame();
+    install(game);
+    game.sc.socket_channel!.respond["create_room"] = () => "new-room-id";
+    const r = JSON.parse(
+      await run<Promise<string>>(game, buildCreateRoomExpression(ROOM_OPTS)),
+    ) as unknown;
+    expect(r).toEqual({ ok: true, roomId: "new-room-id" });
+    expect(game.sc.socket_channel!.sent).toEqual([
+      {
+        ev: "create_room",
+        args: [
+          1,
+          2,
+          {
+            room_name: "COST57 夾擠式",
+            stage: 11,
+            friend: false,
+            cost: null,
+            password: "AB12CD34",
+            deck_id: 1,
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("⚠ 成功後照官方那樣進入等待狀態 —— 否則對手進來時 on_match_start 會炸", async () => {
+    const game = makeGame();
+    install(game);
+    game.sc.socket_channel!.respond["create_room"] = () => "new-room-id";
+    await run<Promise<string>>(game, buildCreateRoomExpression(ROOM_OPTS));
+    expect(game.sc.room_wait).toBe(true);
+    expect(game.sc.room_select).toBe("new-room-id");
+    expect(game.sc.wait_zone).not.toBeNull();
+    expect(game.sc.waitsCreated).toBe(1);
+  });
+
+  it("大廳補丁排隊時已經開了等待視窗 → 沿用，不開第二個", async () => {
+    const game = makeGame({ wait_zone: {} });
+    install(game);
+    game.sc.socket_channel!.respond["create_room"] = () => "new-room-id";
+    await run<Promise<string>>(game, buildCreateRoomExpression(ROOM_OPTS));
+    expect(game.sc.waitsCreated).toBe(0);
+  });
+
+  it("伺服器拒絕（回 null）就把 match_error 的代碼帶回來", async () => {
+    const game = makeGame();
+    install(game);
+    const so = game.sc.socket_channel!;
+    so.respond["create_room"] = () => {
+      so.push("match_error", "NOT_ENOUGH_AP");
+      return null;
+    };
+    const r = JSON.parse(await run<Promise<string>>(game, buildCreateRoomExpression(ROOM_OPTS)));
+    expect(r).toEqual({ ok: false, reason: "伺服器拒絕開房", fail: "NOT_ENOUGH_AP" });
+    expect(game.sc.room_wait).toBe(false);
+  });
+
+  it("已經開著一間房就不送", async () => {
+    const game = makeGame({ room_wait: true });
+    install(game);
+    const r = JSON.parse(await run<Promise<string>>(game, buildCreateRoomExpression(ROOM_OPTS)));
+    expect(r.ok).toBe(false);
+    expect(game.sc.socket_channel!.sent).toEqual([]);
+  });
+
+  it("沒進頻道就不送", async () => {
+    const game = makeGame({ channel: null, socket_channel: null });
+    install(game);
+    const r = JSON.parse(await run<Promise<string>>(game, buildCreateRoomExpression(ROOM_OPTS)));
+    expect(r).toEqual({ ok: false, reason: "還沒進頻道" });
+  });
+
+  it("認不得的地點代號在 Node 這邊就擋掉，不會送進頁面", () => {
+    expect(() => buildCreateRoomExpression({ ...ROOM_OPTS, stage: "11" })).toThrow();
+  });
+});
+
+describe("注入腳本：進房", () => {
+  it("照官方的進房鈕：送 enter_room，拿到設定就 launch MatchBoot", async () => {
+    const room = rawRoom({ room_id: "abc123" });
+    const game = makeGame({ channel_room: [room], wait_zone: {} });
+    install(game);
+    const config = { player_side: "B", domain: "https://duel.invalid", port: 12345 };
+    game.sc.socket_channel!.respond["enter_room"] = () => config;
+
+    const r = JSON.parse(
+      await run<Promise<string>>(game, buildJoinRoomExpression("abc123", "AB12CD34")),
+    );
+    expect(r).toEqual({ ok: true });
+    expect(game.sc.socket_channel!.sent).toEqual([
+      { ev: "enter_room", args: ["abc123", 1, "AB12CD34"] },
+    ]);
+    expect(game.sc.player_side).toBe("B");
+    // 大廳補丁的排隊視窗要收掉（官方進房那條路沒有它）
+    expect(game.sc.wait_zone).toBeNull();
+    expect(game.sc.loading).toBe(1);
+    expect(game.sc.scene.launch).toHaveBeenCalledWith("MatchBoot", {
+      is_tutorial: false,
+      host: "https://duel.invalid",
+      port: 12345,
+      room_config: config,
+      player_side: "B",
+    });
+  });
+
+  it("密碼原封不動送出去，不會多一對引號", async () => {
+    const game = makeGame({ channel_room: [rawRoom({ room_id: "abc123" })] });
+    install(game);
+    game.sc.socket_channel!.respond["enter_room"] = () => ({ player_side: "B" });
+    await run<Promise<string>>(game, buildJoinRoomExpression("abc123", "AB12CD34"));
+    expect(game.sc.socket_channel!.sent[0]?.args[2]).toBe("AB12CD34");
+  });
+
+  it("沒鎖的房照官方送 null 當密碼", async () => {
+    const game = makeGame({ channel_room: [rawRoom({ room_id: "abc123", password: false })] });
+    install(game);
+    game.sc.socket_channel!.respond["enter_room"] = () => ({ player_side: "B" });
+    await run<Promise<string>>(game, buildJoinRoomExpression("abc123", "AB12CD34"));
+    expect(game.sc.socket_channel!.sent[0]?.args[2]).toBeNull();
+  });
+
+  it("被拒就把代碼帶回來，而且解開 room_wait 與輸入", async () => {
+    const game = makeGame({ channel_room: [rawRoom({ room_id: "abc123" })] });
+    install(game);
+    const so = game.sc.socket_channel!;
+    so.respond["enter_room"] = () => {
+      so.push("match_error", "INVALID_PASSWORD");
+      return null;
+    };
+    const r = JSON.parse(
+      await run<Promise<string>>(game, buildJoinRoomExpression("abc123", "WRONG")),
+    );
+    expect(r).toEqual({ ok: false, reason: "進房被拒", fail: "INVALID_PASSWORD" });
+    expect(game.sc.room_wait).toBe(false);
+    expect(game.sc.input.enabled).toBe(true);
+    expect(game.sc.scene.launch).not.toHaveBeenCalled();
+  });
+
+  it("清單裡沒有那個 room_id 就不進房", async () => {
+    const game = makeGame({ channel_room: [rawRoom({ room_id: "別間" })] });
+    install(game);
+    const r = JSON.parse(
+      await run<Promise<string>>(game, buildJoinRoomExpression("abc123", "AB12CD34")),
+    );
+    expect(r).toEqual({ ok: false, reason: "房間清單裡沒有這個 room_id" });
+    expect(game.sc.socket_channel!.sent).toEqual([]);
+  });
+});
+
+describe("注入腳本：收房", () => {
+  it("⚠ 收的是自己那一間（cancel_room 吃 room_id），收完照官方清掉等待狀態", async () => {
+    const game = makeGame({ room_wait: true, room_select: "mine", wait_zone: {} });
+    install(game);
+    game.sc.socket_channel!.respond["cancel_room"] = () => true;
+    expect(await run<Promise<string>>(game, "window.__ulrMatch.cancel()")).toBe("ok");
+    expect(game.sc.socket_channel!.sent).toEqual([{ ev: "cancel_room", args: ["mine"] }]);
+    expect(game.sc.room_wait).toBe(false);
+    expect(game.sc.room_select).toBeNull();
+    expect(game.sc.wait_zone).toBeNull();
+  });
+
+  it("⚠ 等待中點過別的房間（room_select 被改掉）→ 收的還是自己那一間", async () => {
+    const game = makeGame({ room_wait: true, room_select: "R9", wait_zone: {} });
+    (game.sc as unknown as Record<string, unknown>)["__ulrWaitRoom"] = "mine";
+    install(game);
+    game.sc.socket_channel!.respond["cancel_room"] = () => true;
+    expect(await run<Promise<string>>(game, "window.__ulrMatch.cancel()")).toBe("ok");
+    expect(game.sc.socket_channel!.sent).toEqual([{ ev: "cancel_room", args: ["mine"] }]);
+    expect((game.sc as unknown as Record<string, unknown>)["__ulrWaitRoom"]).toBeNull();
+  });
+
+  it("沒有開著的房就不送", async () => {
+    const game = makeGame();
+    install(game);
+    expect(await run<Promise<string>>(game, "window.__ulrMatch.cancel()")).toBe("沒有開著的房");
+    expect(game.sc.socket_channel!.sent).toEqual([]);
   });
 });
 
 describe("COST 階層：duel 頻道借用同組 ranked 的", () => {
   /**
-   * 2026-08-16 從兩個跑著的客戶端（59222 迪特、9334 亞城）**照抄**下來的。
-   * ⚠ 這些數字**每週二會變**，所以它們只是這組測試的固定輸入，不是可以拿去
-   * 用的常數 —— 真正的值一律從玩家自己的客戶端讀。
+   * 2026-08-16 從兩個跑著的客戶端照抄下來的。
+   * ⚠ 這些數字**每週二會變**，所以它們只是這組測試的固定輸入。
    */
   const CHANNELS: Record<string, ChannelInfo> = {
     "1": { type: "ranked", cost: [57, 66, 78], crossplay: false },
@@ -204,19 +676,16 @@ describe("COST 階層：duel 頻道借用同組 ranked 的", () => {
   });
 
   it("⚠ 布萊德克洛伊茲（4）借峰亥盧遺跡（3）的，**不是**借頻道 1 的", () => {
-    // 兩組的數字真的不一樣 —— 借錯不會報錯，只會讓兩個人約定到不同的上限
     expect(costTiersFor(CHANNELS, 4)).toEqual([56, 69, 71]);
     expect(costTiersFor(CHANNELS, 4)).not.toEqual(costTiersFor(CHANNELS, 2));
   });
 
-  it("借的依據是「同一條 socket」而不是寫死的編號", () => {
-    // 官方哪天多開一組頻道（5 ranked / 6 duel）也要對
-    const more: Record<string, ChannelInfo> = {
-      ...CHANNELS,
-      "5": { type: "ranked", cost: [40, 50], crossplay: false },
+  it("⚠ 那個 ranked 頻道沒看過（玩家還沒經過頻道選單）→ null，不是別組的", () => {
+    const onlyDuel: Record<string, ChannelInfo> = {
+      "2": { type: "duel", cost: null, crossplay: false },
+      "3": { type: "ranked", cost: [56, 69, 71], crossplay: true },
     };
-    // 同一組裡先找到誰就用誰 —— 至少不會拿到另一組（crossplay 不同）的
-    expect(costTiersFor(more, 4)).toEqual([56, 69, 71]);
+    expect(costTiersFor(onlyDuel, 2)).toBeNull();
   });
 
   it("沒進頻道、讀不到頻道表、或那個頻道不存在 → null", () => {
@@ -225,460 +694,22 @@ describe("COST 階層：duel 頻道借用同組 ranked 的", () => {
     expect(costTiersFor(CHANNELS, 99)).toBeNull();
   });
 
-  it("⚠ 整組都沒有 cost 的話回 null，不要湊一個空陣列出來", () => {
-    const noRanked: Record<string, ChannelInfo> = {
-      "2": { type: "duel", cost: null, crossplay: false },
-    };
-    expect(costTiersFor(noRanked, 2)).toBeNull();
-    // 有鍵但全是 null 也一樣（伺服器回了一組空的）
+  it("⚠ 有鍵但全是 null 也回 null，不要湊一個空陣列出來", () => {
     expect(
       costTiersFor({ "1": { type: "ranked", cost: [null, null], crossplay: false } }, 1),
     ).toBeNull();
   });
 });
 
-describe("注入腳本：自己牌組的規則鍵（deckKeys）", () => {
-  /** 塞假的 cc_asset / mc_asset。`filename` 就是規則的正規鍵。 */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  function withAsset(window: any, cc: unknown[], mc: unknown[] = []): void {
-    const tables: Record<string, unknown> = { cc_asset: { frames: cc }, mc_asset: { frames: mc } };
-    window.game.cache = { json: { get: (k: string) => tables[k] ?? null } };
-  }
-
-  const keysOf = (
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    window: any,
-  ): { characters: unknown; equipment: string[]; eventCards: string[] } | null =>
-    JSON.parse(run<string>(window, "window.__ulrMatch.context()")).deckKeys;
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const charactersOf = (window: any): unknown => keysOf(window)?.characters;
-
-  it("charaIndex 直接當 cc_asset.frames 的索引 —— 不需要任何對照表", () => {
-    const { window, scene } = makePage();
-    withAsset(window, [
-      { filename: "cc001_01", cost: 8 },
-      { filename: "cc078_04", cost: 19 },
-      { filename: "cc078_r04", cost: 21 },
-    ]);
-    scene.deck1 = { cost: 49, chara: ["cc078", "cc001"], charaIndex: [2, 0] } as never;
-    install(window);
-    expect(charactersOf(window)).toEqual(["cc078_r04", "cc001_01"]);
-  });
-
-  it("⚠⚠ 怪物要查 mc_asset —— 拿去查 cc_asset 會撈到一張不相干的角色卡", () => {
-    // 這是實際發生過的 bug：怪物與角色共用同樣三個槽位，charaIndex 卻索引
-    // 不同的資產。查錯不會報錯，只會安靜地換成另一張存在的卡。
-    const { window, scene } = makePage();
-    withAsset(
-      window,
-      [
-        { filename: "cc001_01", cost: 8 },
-        { filename: "cc002_01", cost: 9 },
-      ],
-      [
-        { filename: "mc001_01", cost: 9 },
-        { filename: "mc001_02", cost: 10 },
-      ],
-    );
-    scene.deck1 = {
-      cost: 27,
-      chara: ["cc001", "mc001_02", "mc001_01"],
-      charaIndex: [0, 1, 0],
-    } as never;
-    install(window);
-    expect(charactersOf(window)).toEqual(["cc001_01", "mc001_02", "mc001_01"]);
-  });
-
-  it("⚠ 空格是 null，不是空字串 —— 呼叫端要分得出「這格沒卡」", () => {
-    const { window, scene } = makePage();
-    withAsset(window, [{ filename: "cc001_01", cost: 8 }]);
-    scene.deck1 = { cost: 8, chara: ["cc001", null], charaIndex: [0, null] } as never;
-    install(window);
-    expect(charactersOf(window)).toEqual(["cc001_01", null]);
-  });
-
-  it("⚠ 索引超出範圍也是 null，不會拿到 undefined 或炸掉", () => {
-    const { window, scene } = makePage();
-    withAsset(window, [{ filename: "cc001_01", cost: 8 }]);
-    scene.deck1 = { cost: 8, chara: ["cc001"], charaIndex: [999] } as never;
-    install(window);
-    expect(charactersOf(window)).toEqual([null]);
-  });
-
-  it("裝備與事件卡的鍵直接由索引補零組出來", () => {
-    const { window, scene } = makePage();
-    withAsset(window, [{ filename: "cc001_01", cost: 8 }]);
-    scene.deck1 = {
-      cost: 8,
-      chara: ["cc001"],
-      charaIndex: [0],
-      weapon: [1, null, 237],
-      eventIndex: [91, null, 3],
-    } as never;
-    install(window);
-    expect(keysOf(window)).toEqual({
-      characters: ["cc001_01"],
-      equipment: ["wp001", null, "wp237"],
-      eventCards: ["ev091", null, "ev003"],
-    });
-  });
-
-  it("⚠ 遊戲還沒載完 cc_asset 時整個是 null，而且 context() 仍然回得來", () => {
-    const { window, scene } = makePage();
-    scene.deck1 = { cost: 49, chara: ["cc001", "cc002"], charaIndex: [0, 1] } as never;
-    install(window);
-    const ctx = JSON.parse(run<string>(window, "window.__ulrMatch.context()"));
-    expect(ctx.deckKeys).toBeNull();
-    expect(ctx.inMatch).toBe(true);
-  });
-
-  it("⚠ 讀的是 filename 不是 cost —— 套過自訂 COST 的客戶端上也讀得對", () => {
-    const { window, scene } = makePage();
-    // 自訂 COST 的注入就地改寫的是 cost 欄位，filename 沒被動過
-    withAsset(window, [{ filename: "cc001_01", cost: 999 }]);
-    scene.deck1 = { cost: 999, chara: ["cc001"], charaIndex: [0] } as never;
-    install(window);
-    expect(charactersOf(window)).toEqual(["cc001_01"]);
-  });
-
-  /**
-   * ⚠⚠ 注入腳本裡的 `padIndex()` 是 `@ulr/rule-schema` 那份補零邏輯的**第二份
-   * 拷貝** —— 頁面端沒辦法 import，只能各寫一次。
-   *
-   * 兩份漂開的症狀極難認：規則明明一樣，卻因為配對送出的鍵不同而被判成
-   * 「規則不相容」，錯誤訊息會指向規則，玩家永遠找不到真正的原因。
-   * 所以這裡拿真正的 `equipmentKey()` / `eventCardKey()` 當對照組。
-   * （`patch-penalty.test.ts` 對罰則算法用的是同一招。）
-   */
-  it("⚠ 補零邏輯跟 rule-schema 那份一致 —— 兩份漂開會被判成規則不相容", () => {
-    const { window, scene } = makePage();
-    withAsset(window, [{ filename: "cc001_01", cost: 8 }]);
-    const indexes = [0, 1, 9, 10, 99, 100, 109, 237];
-    scene.deck1 = {
-      cost: 8,
-      chara: ["cc001"],
-      charaIndex: [0],
-      weapon: indexes,
-      eventIndex: indexes,
-    } as never;
-    install(window);
-
-    const keys = keysOf(window);
-    expect(keys?.equipment).toEqual(indexes.map(equipmentKey));
-    expect(keys?.eventCards).toEqual(indexes.map(eventCardKey));
-  });
-});
-
-describe("注入腳本：rooms_snapshot 與 join 讀同一份資料", () => {
-  it("snapshot 看得到的房，join 就找得到", async () => {
-    vi.useFakeTimers();
-    try {
-      const { window, scene, socket } = makePage();
-      install(window);
-      run(window, "window.__ulrMatch.context()");
-      socket.fire("channel2_room", [rawRoom({ room_id: "abc123" })]);
-
-      const snap = JSON.parse(run<string>(window, "window.__ulrMatch.rooms_snapshot()"));
-      expect(snap.rooms.map((r: RoomEntry) => r.roomId)).toContain("abc123");
-
-      // ⚠ 一定要走 buildJoinRoomExpression 產生的**那一句**，不要自己組。
-      // 那次的 bug 就在產生的表達式與頁面端函式簽章對不上。
-      const p = run<Promise<string>>(window, buildJoinRoomExpression("abc123", "AB12CD34"));
-      socket.fire("duel_standby");
-      expect(JSON.parse(await p)).toEqual({ ok: true });
-
-      expect(scene.room_in).toHaveBeenCalledOnce();
-      expect(scene.channel_panel.room_select).toMatchObject({ room_id: "abc123" });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("密碼原封不動送到頁面，不會多一對引號", async () => {
-    vi.useFakeTimers();
-    try {
-      const { window, scene, socket } = makePage();
-      install(window);
-      run(window, "window.__ulrMatch.context()");
-      socket.fire("channel2_room", [rawRoom({ room_id: "abc123" })]);
-
-      const p = run<Promise<string>>(window, buildJoinRoomExpression("abc123", "AB12CD34"));
-      // 遊戲問密碼的時候，腳本要回傳 token 本身。
-      await expect((scene.password as () => Promise<string>)()).resolves.toBe("AB12CD34");
-      socket.fire("duel_standby");
-      await p;
-      // 叫完要還原，不能把遊戲的密碼輸入框吃掉。
-      expect(scene.password).toBeUndefined();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("清單裡沒有那個 room_id 就不進房", async () => {
-    vi.useFakeTimers();
-    try {
-      const { window, scene, socket } = makePage();
-      install(window);
-      run(window, "window.__ulrMatch.context()");
-      socket.fire("channel2_room", [rawRoom({ room_id: "abc123" })]);
-
-      const out = JSON.parse(
-        await run<Promise<string>>(window, buildJoinRoomExpression("別間", "AB12CD34")),
-      );
-      expect(out.ok).toBe(false);
-      expect(scene.room_in).not.toHaveBeenCalled();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-});
-
-describe("注入腳本：開房", () => {
-  it("參數照 match_room_make 的順序送出，stage 原樣帶過去", async () => {
-    vi.useFakeTimers();
-    try {
-      const { window, socket } = makePage();
-      install(window);
-
-      const p = run<Promise<string>>(
-        window,
-        buildCreateRoomExpression({
-          name: "ULR3",
-          stage: "000",
-          multi: true,
-          friend: false,
-          pass: "AB12CD34",
-          cost: null,
-        }),
-      );
-      socket.fire("match_waiting");
-      expect(JSON.parse(await p)).toEqual({ ok: true, roomId: null });
-
-      const call = socket.emitted.find((e) => e.ev === "match_room_make");
-      expect(call?.args).toEqual(["player-id", 2, "ULR3", "000", true, false, "AB12CD34", null, 1]);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("伺服器拒絕就把 fail 代碼帶回來", async () => {
-    vi.useFakeTimers();
-    try {
-      const { window, socket } = makePage();
-      install(window);
-      const p = run<Promise<string>>(
-        window,
-        buildCreateRoomExpression({
-          name: "ULR3",
-          stage: "000",
-          multi: true,
-          friend: false,
-          pass: "AB12CD34",
-          cost: null,
-        }),
-      );
-      socket.fire("match_room_error", { fail: 20 });
-      expect(JSON.parse(await p)).toMatchObject({ ok: false, fail: 20 });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-});
-
-describe("跨平台頻道（3 / 4）走的是另一條 socket", () => {
-  // ⚠ 用錯 socket 不會拋錯，只會**安靜地什麼都收不到**。這一組測的就是
-  // 「有沒有掛/送到對的那條線上」，不是「有沒有報錯」。
-
-  it("context 標出 crossplay，而且併出四個頻道", () => {
-    const { window } = makePage(4);
-    install(window);
-    const ctx = JSON.parse(run<string>(window, "window.__ulrMatch.context()"));
-    expect(ctx.crossplay).toBe(true);
-    expect(Object.keys(ctx.channels).sort()).toEqual(["1", "2", "3", "4"]);
-    expect(ctx.channels["4"]).toEqual({ type: "duel", cost: null, crossplay: true });
-    expect(ctx.channels["1"]).toEqual({ type: "ranked", cost: [57, 66, 78], crossplay: false });
-    expect(ctx.deckCost).toBe(49);
-  });
-
-  it("一般頻道不算 crossplay", () => {
-    const { window } = makePage(2);
-    install(window);
-    expect(JSON.parse(run<string>(window, "window.__ulrMatch.context()")).crossplay).toBe(false);
-  });
-
-  it("頻道 4 的房間清單掛在 socket_cross 上，一般 socket 收不到", () => {
-    const { window, socket, socketCross } = makePage(4);
-    install(window);
-    run(window, "window.__ulrMatch.context()");
-
-    socket.fire("channel4_room", [rawRoom()]); // 掛錯線的話會是這條在餵
-    expect(rawOf(window, 4)).toHaveLength(0);
-
-    socketCross.fire("channel4_room", [rawRoom()]);
-    expect(rawOf(window, 4)).toHaveLength(1);
-  });
-
-  it("頻道 4 的開房送到 socket_cross", async () => {
-    vi.useFakeTimers();
-    try {
-      const { window, socket, socketCross } = makePage(4);
-      install(window);
-      const p = run<Promise<string>>(
-        window,
-        buildCreateRoomExpression({
-          name: "ULR3",
-          stage: "000",
-          multi: true,
-          friend: false,
-          pass: "AB12CD34",
-          cost: 5,
-        }),
-      );
-      socketCross.fire("match_waiting");
-      expect(JSON.parse(await p)).toEqual({ ok: true, roomId: null });
-
-      expect(socket.emitted).toHaveLength(0);
-      const call = socketCross.emitted.find((e) => e.ev === "match_room_make");
-      // 第 9 個參數是「牌組 Cost 限制」＝ ±N，不是絕對上限。
-      expect(call?.args).toEqual(["player-id", 4, "ULR3", "000", true, false, "AB12CD34", 5, 1]);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("頻道 4 的進房把 crossplay=true 交給 room_in", async () => {
-    vi.useFakeTimers();
-    try {
-      const { window, scene, socketCross } = makePage(4);
-      install(window);
-      run(window, "window.__ulrMatch.context()");
-      socketCross.fire("channel4_room", [rawRoom({ room_id: "abc123" })]);
-
-      const p = run<Promise<string>>(window, buildJoinRoomExpression("abc123", "AB12CD34"));
-      socketCross.fire("duel_standby");
-      expect(JSON.parse(await p)).toEqual({ ok: true });
-      expect(scene.room_in).toHaveBeenCalledWith(
-        true,
-        expect.objectContaining({ room_id: "abc123" }),
-      );
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("頻道 2 的進房是 crossplay=false", async () => {
-    vi.useFakeTimers();
-    try {
-      const { window, scene, socket } = makePage(2);
-      install(window);
-      run(window, "window.__ulrMatch.context()");
-      socket.fire("channel2_room", [rawRoom({ room_id: "abc123" })]);
-      const p = run<Promise<string>>(window, buildJoinRoomExpression("abc123", "AB12CD34"));
-      socket.fire("duel_standby");
-      await p;
-      expect(scene.room_in).toHaveBeenCalledWith(false, expect.anything());
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("⚠ 換頻道之後，舊頻道的推播不能蓋掉新頻道的清單", () => {
-    // 2026-08-15 實測踩到：人在頻道 4，raw 裡卻是頻道 2 的房。舊頻道的
-    // listener 拆不掉、伺服器也還在推，共用一份清單就會互相蓋。
-    // 後果是 findOwnRoom 從別的頻道挑房，把錯的 room_id 交給對手。
-    const { window, scene, socket, socketCross } = makePage(2);
-    install(window);
-    run(window, "window.__ulrMatch.context()");
-    socket.fire("channel2_room", [rawRoom({ room_id: "頻道2的房", name: "舊的" })]);
-
-    // 玩家換到頻道 4
-    scene.channel = 4;
-    run(window, "window.__ulrMatch.context()");
-    socketCross.fire("channel4_room", [rawRoom({ room_id: "頻道4的房", name: "新的" })]);
-
-    // 舊頻道又推了一次 —— 不能污染目前頻道看到的東西
-    socket.fire("channel2_room", [rawRoom({ room_id: "頻道2的房", name: "舊的" })]);
-
-    const snap = JSON.parse(run<string>(window, "window.__ulrMatch.rooms_snapshot()"));
-    expect(snap.rooms.map((r: RoomEntry) => r.roomId)).toEqual(["頻道4的房"]);
-  });
-
-  it("剛換到沒收過推播的頻道，seq 是 0（＝還不知道，不是沒有房）", () => {
-    const { window, scene, socket } = makePage(2);
-    install(window);
-    run(window, "window.__ulrMatch.context()");
-    socket.fire("channel2_room", [rawRoom()]);
-
-    scene.channel = 3;
-    const snap = JSON.parse(run<string>(window, "window.__ulrMatch.rooms_snapshot()"));
-    // ⚠ seq 0 讓 preflight 分得出「這個頻道沒有房」跟「還不知道」。分不出來
-    // 就會在空清單上判定「玩家沒有自己的房」，然後踩到 delete_room 那個坑。
-    expect(snap).toEqual({ seq: 0, live: false, rooms: [] });
-  });
-
-  it("取消配對也要送到對的那條 socket", () => {
-    const { window, socket, socketCross } = makePage(4);
-    install(window);
-    expect(run<string>(window, "window.__ulrMatch.cancel()")).toBe("ok");
-    expect(socket.emitted).toHaveLength(0);
-    expect(socketCross.emitted[0]).toMatchObject({ ev: "delete_room", args: [4] });
-  });
-});
-
-describe("清單以遊戲手上那份為準，不靠推播", () => {
-  // ⚠ 房間清單是「有變動才推」不是定時推 —— 2026-08-15 實測，頻道裡沒人開關房
-  // 時等 45 秒一次推播都收不到。只靠推播快取的話，剛進頻道的玩家會看到空清單，
-  // 而空清單會被誤判成「我沒有自己的房」，直接踩到 delete_room 是頻道層級的坑。
-
-  it("一次推播都沒收到，也讀得到遊戲正在畫的那份", () => {
-    const { window, scene } = makePage(4);
-    scene.channel_panel.match_room_data = [rawRoom({ room_id: "遊戲手上的", name: "現在就有" })];
-    install(window);
-
-    const snap = JSON.parse(run<string>(window, "window.__ulrMatch.rooms_snapshot()"));
-    expect(snap.live).toBe(true);
-    expect(snap.seq).toBe(0); // 真的一次推播都沒收到
-    expect(snap.rooms.map((r: RoomEntry) => r.roomId)).toEqual(["遊戲手上的"]);
-  });
-
-  it("遊戲那份贏過推播快取", () => {
-    const { window, scene, socketCross } = makePage(4);
-    install(window);
-    run(window, "window.__ulrMatch.context()");
-    socketCross.fire("channel4_room", [rawRoom({ room_id: "推播來的" })]);
-
-    scene.channel_panel.match_room_data = [rawRoom({ room_id: "遊戲手上的" })];
-    const snap = JSON.parse(run<string>(window, "window.__ulrMatch.rooms_snapshot()"));
-    expect(snap.rooms.map((r: RoomEntry) => r.roomId)).toEqual(["遊戲手上的"]);
-  });
-
-  it("join 也要用遊戲那份找房", async () => {
-    vi.useFakeTimers();
-    try {
-      const { window, scene, socketCross } = makePage(4);
-      scene.channel_panel.match_room_data = [rawRoom({ room_id: "只在遊戲那份裡" })];
-      install(window);
-
-      const p = run<Promise<string>>(window, buildJoinRoomExpression("只在遊戲那份裡", "AB12CD34"));
-      socketCross.fire("duel_standby");
-      expect(JSON.parse(await p)).toEqual({ ok: true });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-});
-
-describe("官方常數（照抄客戶端 bundle，不是自己編的）", () => {
-  it("⚠ 隨機是 014，000 是雷德貝魯格城 —— 這兩個很容易搞反", () => {
-    // 官方對話框預設選清單第一項（000），不是隨機，所以大廳一堆房是
-    // stage:"000"，看起來很像「沒選 = 隨機」。搞反的話玩家以為選了隨機，
-    // 實際上每一場都在同一張地圖。
-    expect(STAGES.find((s) => s.value === "014")?.name).toBe("隨機");
+describe("官方常數（照抄客戶端，不是自己編的）", () => {
+  it("⚠ 隨機是 999，000 是雷德貝魯格城 —— 改版前隨機是 014，現在 014 是一張地圖", () => {
+    expect(RANDOM_STAGE_CODE).toBe("999");
+    expect(STAGES.find((s) => s.value === "999")?.name).toBe("隨機");
     expect(STAGES.find((s) => s.value === "000")?.name).toBe("雷德貝魯格城");
+    expect(HIDDEN_STAGES.find((s) => s.value === "014")?.name).toBe("聖域的凱旋門");
   });
 
-  it("官方清單是 000~009 加 014", () => {
+  it("官方清單是 000~009 加 999", () => {
     expect(STAGES.map((s) => s.value)).toEqual([
       "000",
       "001",
@@ -690,18 +721,15 @@ describe("官方常數（照抄客戶端 bundle，不是自己編的）", () => 
       "007",
       "008",
       "009",
-      "014",
+      "999",
     ]);
   });
 
-  it("隱藏地圖是 010~013", () => {
-    expect(HIDDEN_STAGES.map((s) => s.value)).toEqual(["010", "011", "012", "013"]);
+  it("隱藏地圖是 011~014（010 只是雷德貝魯格城的別名）", () => {
+    expect(HIDDEN_STAGES.map((s) => s.value)).toEqual(["011", "012", "013", "014"]);
   });
 
   it("隱藏地圖不能跟官方的重疊 —— 代號與名稱都是", () => {
-    // ⚠ 名稱也要查：遊戲的下拉選單是拿**名稱**回查代號的
-    // （`STAGES[lang].find((s) => s.name === item.name)`），撞名會讓官方那張
-    // 選出錯的代號。
     const values = new Set(STAGES.map((s) => s.value));
     const names = new Set(STAGES.map((s) => s.name));
     for (const s of HIDDEN_STAGES) {
@@ -710,23 +738,28 @@ describe("官方常數（照抄客戶端 bundle，不是自己編的）", () => 
     }
   });
 
+  it("亞城池是官方那 10 張加 011", () => {
+    expect(ARCADIA_STAGES).toEqual([
+      ...STAGES.filter((s) => s.value !== RANDOM_STAGE_CODE).map((s) => s.value),
+      "011",
+    ]);
+  });
+
   it("Cost 限制只有 0~5", () => {
     expect(COST_RANGES).toEqual([0, 1, 2, 3, 4, 5]);
   });
 
-  it("stage 一律是 3 位數字串", () => {
+  it("地點一律寫成 3 位數字串，送出去才轉數字", () => {
     for (const v of [...STAGES, ...HIDDEN_STAGES].map((s) => s.value)) {
       expect(v).toMatch(/^\d{3}$/);
     }
+    expect(stageValue("000")).toBe(0);
+    expect(stageValue("011")).toBe(11);
+    expect(stageValue("999")).toBe(999);
+    expect(() => stageValue("abc")).toThrow();
   });
 
-  /**
-   * 配對頁那個下拉選單的地圖那一段（WP-18）。
-   *
-   * ⚠ **不含 `014`**：那不是地圖，是「叫伺服器自己抽」。它在選單裡是另一個
-   * 選項（「官方隨機」），混進這一串的話玩家會在同一個選單裡看到兩個隨機。
-   */
-  it("選得到的地圖是 000~013，不含 014", () => {
+  it("選得到的地圖是 000~009 與 011~014，不含隨機", () => {
     expect(STAGE_CODES).toEqual([
       "000",
       "001",
@@ -738,15 +771,14 @@ describe("官方常數（照抄客戶端 bundle，不是自己編的）", () => 
       "007",
       "008",
       "009",
-      "010",
       "011",
       "012",
       "013",
+      "014",
     ]);
-    expect(STAGE_CODES as readonly string[]).not.toContain("014");
+    expect(STAGE_CODES as readonly string[]).not.toContain("999");
   });
 
-  /** ⚠ 名字是**查出來的**，兩處各抄一份的話改了譯名另一邊會安靜地留著舊的。 */
   it("每一張選得到的地圖都查得到名字，而且跟官方／隱藏那兩張表一致", () => {
     const byValue = new Map([...STAGES, ...HIDDEN_STAGES].map((s) => [s.value, s.name]));
     expect(SELECTABLE_STAGES.map((s) => s.value)).toEqual([...STAGE_CODES]);
@@ -755,12 +787,11 @@ describe("官方常數（照抄客戶端 bundle，不是自己編的）", () => 
     }
   });
 
-  /** ⚠ 這個值會被送進開房封包，所以認不得的一律要擋。 */
   it("isStageCode 只認那十四個", () => {
     expect(isStageCode("000")).toBe(true);
-    expect(isStageCode("013")).toBe(true);
-    expect(isStageCode("014")).toBe(false);
-    expect(isStageCode("099")).toBe(false);
+    expect(isStageCode("014")).toBe(true);
+    expect(isStageCode("010")).toBe(false);
+    expect(isStageCode("999")).toBe(false);
     expect(isStageCode("arcadia")).toBe(false);
     expect(isStageCode(13)).toBe(false);
     expect(isStageCode(null)).toBe(false);
@@ -798,7 +829,6 @@ describe("findOwnRoom", () => {
   });
 
   it("指定了房名卻找不到就回 null，不退回別間", () => {
-    // ⚠ 退回「隨便挑一間」會把上一場的 room_id 交給對手 → 伺服器回 fail:9。
     expect(findOwnRoom([room({ name: "請多關照" })], "燈皇", "ULR3")).toBeNull();
   });
 
@@ -818,7 +848,7 @@ describe("findOwnRoom", () => {
  * ⚠ 這一組釘的是玩家 2026-08-19 回報的那件事：AP 剩 2 卻排得下去，一路排到
  * 配對成功、開房時才跳「AP不足」—— 而那時對手已經在等一間永遠不會開的房。
  */
-describe("開一場要多少 AP", () => {
+describe("開一場要多少 AP（讀不到頻道物件時的退路）", () => {
   it("一般頻道：3vs3 要 5、1vs1 要 2", () => {
     expect(duelApCost({ multi: true, crossplay: false })).toBe(5);
     expect(duelApCost({ multi: false, crossplay: false })).toBe(2);
@@ -857,8 +887,6 @@ describe("排不排得下去", () => {
   });
 
   it("⚠⚠ 讀不到就當排得下去 ——「不知道」不是「不夠」", () => {
-    // 玩家還沒進大廳、db_player 還沒回來、遊戲改版換了欄位都會走到這裡。
-    // 擋錯的代價是完全排不了隊而且看不出原因；放行只是退回原本的行為。
     expect(canAffordDuel({ ap: null, duelFree: null, cost: 5 })).toMatchObject({ ok: true });
     expect(canAffordDuel({ ap: null, duelFree: 0, cost: 5 })).toMatchObject({ ok: true });
   });

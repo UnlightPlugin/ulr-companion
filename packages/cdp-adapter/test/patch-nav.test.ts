@@ -4,33 +4,32 @@
  * 跟 `patch-present` 同一套：搭一個夠像的假遊戲，把 `buildNavPatchScript()`
  * 產出來的**那一串字**原封不動 `new Function` 起來跑。
  *
- * 假環境照 2026-09-13 從跑著的客戶端讀的形狀寫，**每個畫面的返回鈕流程都
- * 照抄**（這支就是靠按它、改道它最後那句 scene.start("Lobby") 來跳的）：
+ * 假環境照 2026-09-24 從跑著的客戶端讀的形狀寫（2026-09-23 改版後），**每個
+ * 畫面的返回鈕流程都照抄**（這支就是靠按它、改道它最後那句
+ * scene.start("Lobby") 來跳的）：
  *
  * ```js
- *   Match/Shop/Item/Option/Tutorial：Button 類，pointerup → emit("click")
- *     Match:  click → scene_end() → this.scene.start("Lobby", {id})
- *     Item:   click → scene_end() → await fetch("db_avatar_update") → start("Lobby")
- *   Quest:    pointerup   → 淡出 → start("Lobby")
- *   Raid/Lot/Library: pointerdown → …
- *     Library: emit("library_quit", …) → on("library_quit") → start("Lobby")
- *   Edit:     pointerdown → Deck1 空？錯誤框 : 淡出 → emit("db_editdeck")
- *                          → on("db_editdeck") 看 scene_next → start("Lobby")
- *   Tutorial: 返回鈕是 create() 的局部變數，場景身上沒有 back_btn
- *   大廳 QUEST 鈕：socket.fetch("quest_port") → [host, port]
- *   離開大廳後 Lobby.socket 已 disconnect，但 url 讀得到
+ *   全部：this.btn_back = add.image(760,0,"btn_back").setOrigin(1,0)，離開寫在 pointerup
+ *     Match/Quest/Raid/Shop/Lot: 淡出 → start("Lobby")
+ *     Edit:    try_scene_end("Lobby") → fetch("deck_update", deck)
+ *              → 回 true（伺服器不收）就留在原地；否則看 scene_next → start("Lobby"/"Compo")
+ *     Item:    try_scene_end() → fetch("avatar_update", avatar.raw()) → start("Lobby")
+ *     Library: fetch("update_chara_favorite") / fetch("update_stamp_favorite") → start("Lobby")
+ *     Option:  option_exit() → start("Lobby")
+ *   Tutorial: 返回鈕是 create() 的局部變數（Button 類，once("click")）
+ *   大廳四顆：move_scene(目標) —— 一個參數都不帶
+ *   素材：UL_ASSETS.lobby.{image,spritesheet,atlas}；duel_btn_2 是 atlas
  * ```
  *
  * 這支要抓的坑：
  *
- * 1. 貼圖是自己抓的 —— 抓好之前不畫、抓好之後才掛
+ * 1. 貼圖是自己抓的、路徑照 UL_ASSETS 查 —— 抓好之前不畫、抓好之後才掛
  * 2. 位置相對於返回鈕；四顆順序 DUEL RAID QUEST DECK；所在那一房那顆變暗
  * 3. 官方返回鈕不能按 → 整排不能按
- * 4. 任務／渦要先問路（臨時連線、問完就關）；問不到就**不動**、按鈕彈回來
- * 5. 改道只攔 "Lobby"，而且用完就還原；官方流程沒走到 start 看門狗要拆
- * 6. Edit 的存檔、Item 的頭像、Library 的 library_quit 全由官方流程做
- * 7. 清場只收非常駐場景；目標用 SceneManager 的 start
- * 8. 場景重建後重掛；拆掉時貼圖與動畫一起卸、改道還原
+ * 4. 改道只攔 "Lobby"，而且用完就還原；官方流程沒走到 start 看門狗要拆
+ * 5. Edit 的存檔、Item 的頭像、Library 的最愛全由官方流程做
+ * 6. 清場只收非常駐場景（含 Session）；目標用 SceneManager 的 start、不帶參數
+ * 7. 場景重建後重掛；拆掉時貼圖與動畫一起卸、改道還原
  */
 
 import { describe, expect, it } from "vitest";
@@ -215,35 +214,26 @@ class FakeText extends FakeObject {
   }
 }
 
+/**
+ * 場景的 WSClient。`fetch` 記下來、**不自動回** —— 測試用 `answer()` 決定伺服器
+ * 什麼時候回、回什麼（Edit 要測「伺服器還沒回」與「伺服器退回」）。
+ */
 class FakeSocket extends FakeEmitter {
-  static made: FakeSocket[] = [];
-  disconnected = false;
-  emitted: unknown[][] = [];
-  /** `fetch(event)` 的回應表。沒有的事件永遠不回。 */
-  static answers: Record<string, unknown> = {};
-  constructor(
-    public url: string,
-    public protocols?: unknown,
-  ) {
-    super();
-    FakeSocket.made.push(this);
+  fetched: unknown[][] = [];
+  pending: { event: string; resolve: (v: unknown) => void }[] = [];
+  /** 設了就立刻回這個值（Item／Library 不測等待）。 */
+  autoAnswer: Record<string, unknown> = {};
+  fetch(event: string, ...args: unknown[]): Promise<unknown> {
+    this.fetched.push([event, ...args]);
+    if (event in this.autoAnswer) return Promise.resolve(this.autoAnswer[event]);
+    return new Promise((resolve) => this.pending.push({ event, resolve }));
   }
-  fetch(event: string, ..._args: unknown[]): Promise<unknown> {
-    const a = FakeSocket.answers[event];
-    if (a === undefined) return new Promise(() => {});
-    if (a instanceof Error) return Promise.reject(a);
-    return Promise.resolve(a);
-  }
-  /** 送給伺服器。⚠ 不會觸發本地的 on()/once() —— 那是收到回應才會的事。 */
-  override emit(name: string, ...args: unknown[]): void {
-    this.emitted.push([name, ...args]);
-  }
-  /** 伺服器回話。 */
-  receive(name: string, ...args: unknown[]): void {
-    super.emit(name, ...args);
-  }
-  disconnect(): void {
-    this.disconnected = true;
+  /** 伺服器回 `event`。 */
+  answer(event: string, value: unknown): void {
+    const i = this.pending.findIndex((p) => p.event === event);
+    if (i < 0) throw new Error(`沒有在等 ${event}`);
+    const [p] = this.pending.splice(i, 1);
+    p!.resolve(value);
   }
 }
 
@@ -269,16 +259,14 @@ class FakeScene {
   fadeCalls = 0;
   bgm = { key: "bgm", stopped: false, stop: () => void (this.bgm.stopped = true) };
   ulse01 = { plays: 0, play: () => void this.ulse01.plays++ };
-  id = "player-id-36chars";
-  back_btn: FakeObject | null = null;
-  socket = new FakeSocket("wss://scene");
+  btn_back: FakeObject | null = null;
+  socket = new FakeSocket();
+  input = { enabled: true };
   sys: { settings: { key: string; status: number } };
   scene: FakeScenePlugin;
   game: FakeGame;
   /** 官方流程叫的 this.scene.start（沒被改道的）。 */
   officialStarts: { key: string; data?: unknown }[] = [];
-  /** Edit 的錯誤框彈了幾次。 */
-  dialogs = 0;
   add: {
     sprite: (x: number, y: number, key: string, frame?: number) => FakeObject;
     image: (x: number, y: number, key: string) => FakeObject;
@@ -356,101 +344,92 @@ class FakeScene {
   }
 
   /**
-   * 官方 create()：每次進來物件全部新的，返回鈕流程照抄各畫面。
-   *
-   * Match/Shop/Item/Option/Tutorial 的返回鈕是 Button 類：pointerup 才 emit
-   * "click"；其他直接掛 handler。
+   * 官方 create()：每次進來物件全部新的，返回鈕流程照抄各畫面（2026-09-24 讀的）。
+   * 返回鈕 add.image(760,0,"btn_back").setOrigin(1,0)，48×32 → 左緣 712、中心 y 16。
    */
   enter(): void {
     const key = this.sys.settings.key;
     this.sys.settings.status = 5;
     this.officialStarts = [];
-    const b = this.add.sprite(736, 16, "back_btn", 0);
+    this.input.enabled = true;
+    const b = this.add.image(760, 0, "btn_back").setOrigin(1, 0);
     b.width = 48;
     b.height = 32;
     b.setInteractive();
-    const toLobby = (): void => void this.scene.start("Lobby", { id: this.id });
+    const fadeToLobby = (data?: unknown): void => {
+      this.cameras.main.fadeOut(700).on("camerafadeoutcomplete", () => {
+        this.scene.start("Lobby", data);
+      });
+    };
+    const leaving = (): void => {
+      this.input.enabled = false;
+      b.disableInteractive();
+      this.ulse01.play();
+    };
     switch (key) {
-      case "Match":
-      case "Shop":
-      case "Option":
-        b.on("click", () => void this.scene_end().then(toLobby));
+      case "TutorialNewMenu":
+        // 局部變數（Button 類），不掛在 this.btn_back 上。
+        b.once("click", () => void this.scene_end().then(() => this.scene.start("Lobby", {})));
+        return;
+      case "Edit":
+        b.on("pointerup", () => void this.try_scene_end("Lobby"));
         break;
       case "Item":
-        b.on("click", () => {
-          void this.scene_end().then(async () => {
-            const avatar = this.avatar as { raw: () => unknown };
-            await this.socket.fetch("db_avatar_update", this.id, avatar.raw());
-            toLobby();
-          });
-        });
-        break;
-      case "TutorialNewMenu":
-        // 局部變數，不掛在 this.back_btn 上。
-        b.setOrigin(1, 0).setPosition(760, 0);
-        b.once("click", () => void this.scene_end().then(toLobby));
-        return;
-      case "Quest":
         b.on("pointerup", () => {
-          this.close = true;
-          this.ulse01.play();
-          b.setTexture("back_btn", 0).disableInteractive();
-          this.cameras.main.fadeOut(700).on("camerafadeoutcomplete", toLobby);
+          b.disableInteractive();
+          void (async () => {
+            const avatar = this.avatar as { raw: () => unknown };
+            await this.socket.fetch("avatar_update", avatar.raw());
+            this.ulse01.play();
+            fadeToLobby({ is_news: false, is_tutorial: false });
+          })();
         });
         break;
       case "Library":
-        b.on("pointerdown", () => {
-          this.ulse01.play();
-          b.disableInteractive();
-          this.socket.emit("library_quit", this.id, this.favorite, this.stamp_favorite);
-        });
-        this.socket.on("library_quit", () => {
-          this.socket.disconnect();
-          this.cameras.main.fadeOut(700).on("camerafadeoutcomplete", toLobby);
-        });
-        break;
-      case "Edit":
-        b.on("pointerdown", () => {
-          this.ulse01.play();
-          const deck1 = this.deck1 as { charaIndex: (number | null)[] };
-          if (deck1.charaIndex[0] === null) {
-            this.dialogs++;
-            return;
-          }
-          b.disableInteractive();
-          this.scene_next = "Lobby_Boot";
-          void this.scene_end().then(() => {
-            const checked = (this.info_check as { checked: boolean }[])[1]!.checked;
-            this.socket.emit("db_editdeck", this.id, this.deck1, this.deck2, this.deck3, checked);
-          });
-        });
-        this.socket.on("db_editdeck", () => {
-          switch (this.scene_next) {
-            case "Lobby_Boot":
-              toLobby();
-              break;
-            case "Compo":
-              this.scene.start("Compo", { id: this.id });
-              break;
-          }
+        b.on("pointerup", () => {
+          this.input.enabled = false;
+          void (async () => {
+            await this.socket.fetch("update_chara_favorite", this.chara_favorite);
+            await this.socket.fetch("update_stamp_favorite", this.stamp_favorite);
+            b.disableInteractive();
+            this.ulse01.play();
+            fadeToLobby();
+          })();
         });
         break;
       default:
-        // Raid / Lot
-        b.on("pointerdown", () => {
-          this.ulse01.play();
-          b.disableInteractive();
-          this.cameras.main.fadeOut(700).on("camerafadeoutcomplete", toLobby);
+        // Match / Quest / Raid / Shop / Lot / Option
+        b.on("pointerup", () => {
+          leaving();
+          fadeToLobby();
         });
     }
-    this.back_btn = b;
+    this.btn_back = b;
+  }
+
+  /** 官方 Edit.try_scene_end：先存牌組，伺服器退回（true）就留在原地。 */
+  async try_scene_end(next: string): Promise<void> {
+    this.input.enabled = false;
+    this.scene_next = next;
+    this.ulse01.play();
+    const refused = await this.socket.fetch("deck_update", this.deck);
+    if (refused === true) {
+      this.input.enabled = true;
+      return;
+    }
+    await new Promise<void>((r) =>
+      this.cameras.main.fadeOut(700).on("camerafadeoutcomplete", () => r()),
+    );
+    if (this.scene_next === "Lobby")
+      this.scene.start("Lobby", { is_news: false, is_tutorial: false });
+    else if (this.scene_next === "Compo") this.scene.start("Compo", { compo_data: null });
   }
 
   /** 官方返回鈕（含 Tutorial 那顆局部的）。 */
   back(): FakeObject {
     const b =
-      this.back_btn ??
-      this.children.list.find((c) => c.scene !== null && c.texture.key === "back_btn");
+      this.btn_back ??
+      this.children.list.find((c) => c.scene !== null && c.texture.key === "btn_back");
     if (!b) throw new Error("沒有返回鈕");
     return b;
   }
@@ -459,7 +438,7 @@ class FakeScene {
     this.sys.settings.status = 8;
     for (const c of this.children.list) c.destroy();
     this.children = { list: [] };
-    this.back_btn = null;
+    this.btn_back = null;
   }
 
   /** 我們畫上去的（活著的）東西。 */
@@ -484,21 +463,25 @@ class FakeGame {
   };
   textures: {
     keys: Set<string>;
+    /** 我們的 key → 怎麼加進來的（spritesheet 的切格、atlas 的 json）。 */
+    added: Map<string, { kind: string; data: unknown }>;
     exists: (k: string) => boolean;
-    addSpriteSheet: (k: string) => void;
+    addSpriteSheet: (k: string, img: unknown, frame: unknown) => void;
     addImage: (k: string) => void;
+    addAtlas: (k: string, img: unknown, json: unknown) => void;
     remove: (k: string) => void;
   };
   anims: {
     keys: Set<string>;
+    made: Map<string, unknown>;
     exists: (k: string) => boolean;
-    create: (cfg: { key: string }) => void;
+    create: (cfg: { key: string; frames: unknown }) => void;
     generateFrameNumbers: (k: string, cfg: { start: number; end: number }) => number[];
     remove: (k: string) => void;
   };
   scale = { width: 760, height: 680 };
   stopped: string[] = [];
-  started: { key: string; data: Record<string, unknown> }[] = [];
+  started: { key: string; data: unknown }[] = [];
 
   at(key: string): FakeScene {
     const sc = this.scene.keys[key];
@@ -521,22 +504,17 @@ class FakeGame {
       "TutorialNewMenu",
       "MainA",
       "BackA",
+      "Session",
       "Friend",
       "Loader",
-      "ConnectionCheck",
       "MainAAssets",
       "Bug",
-      "MatchBoot",
     ]) {
       keys[k] = new FakeScene(this, k);
     }
-    for (const k of ["Friend", "Loader", "ConnectionCheck", "MainAAssets", "Bug", "MatchBoot"]) {
+    for (const k of ["Session", "Friend", "Loader", "MainAAssets", "Bug"]) {
       keys[k]!.sys.settings.status = 5;
     }
-    // 離開大廳後 Lobby.socket 是 disconnect 的，但 url 讀得到。
-    const lobby = keys.Lobby!;
-    lobby.socket = new FakeSocket("https://www.playunlight.online:11009");
-    lobby.socket.disconnected = true;
     this.scene = {
       keys,
       scenes: Object.values(keys),
@@ -544,21 +522,38 @@ class FakeGame {
         this.stopped.push(k);
         keys[k]?.leave();
       },
-      start: (k, data) => this.started.push({ key: k, data: data as Record<string, unknown> }),
+      start: (k, data) => this.started.push({ key: k, data }),
     };
     const tk = new Set<string>();
+    const added = new Map<string, { kind: string; data: unknown }>();
     this.textures = {
       keys: tk,
+      added,
       exists: (k) => tk.has(k),
-      addSpriteSheet: (k) => void tk.add(k),
-      addImage: (k) => void tk.add(k),
+      addSpriteSheet: (k, _img, frame) => {
+        tk.add(k);
+        added.set(k, { kind: "spritesheet", data: frame });
+      },
+      addImage: (k) => {
+        tk.add(k);
+        added.set(k, { kind: "image", data: null });
+      },
+      addAtlas: (k, _img, json) => {
+        tk.add(k);
+        added.set(k, { kind: "atlas", data: json });
+      },
       remove: (k) => void tk.delete(k),
     };
     const ak = new Set<string>();
+    const made = new Map<string, unknown>();
     this.anims = {
       keys: ak,
+      made,
       exists: (k) => ak.has(k),
-      create: (cfg) => void ak.add(cfg.key),
+      create: (cfg) => {
+        ak.add(cfg.key);
+        made.set(cfg.key, cfg.frames);
+      },
       generateFrameNumbers: (_k, cfg) => {
         const out: number[] = [];
         for (let i = cfg.start; i <= cfg.end; i++) out.push(i);
@@ -573,10 +568,52 @@ interface FakeWindow {
   game: FakeGame;
   lang: string;
   UL_CONFIG: { domains: { assets: { urls: string[] } } };
+  UL_ASSETS: { lobby: Record<string, unknown[]> };
   Phaser: unknown;
   fetched: string[];
   [key: string]: unknown;
 }
+
+/** 2026-09-24 讀的 UL_ASSETS.lobby（只留這支用得到的，加一個不相干的）。 */
+const LOBBY_ASSETS = {
+  image: [
+    { key: "lobby_bg", url: "images/assets/Lobby/lobby_bg.avif" },
+    { key: "raid_btn_base", url: "images/assets/Lobby/raid_btn_base.avif" },
+  ],
+  spritesheet: [
+    {
+      key: "deck_btn",
+      url: "images/assets/Lobby/deck_btn.avif",
+      frameConfig: { frameWidth: 112, frameHeight: 112 },
+    },
+    {
+      key: "duel_btn",
+      url: "images/assets/Lobby/duel_btn.avif",
+      frameConfig: { frameWidth: 160, frameHeight: 160 },
+    },
+    {
+      key: "quest_btn",
+      url: "images/assets/Lobby/quest_btn.avif",
+      frameConfig: { frameWidth: 160, frameHeight: 160 },
+    },
+    {
+      key: "raid_btn_icon",
+      url: "images/assets/Lobby/raid_btn_icon.avif",
+      frameConfig: { frameWidth: 51, frameHeight: 51 },
+    },
+  ],
+  atlas: [
+    {
+      key: "duel_btn_2",
+      textureURL: "images/assets/Lobby/duel_btn_2.avif",
+      atlasURL: "images/assets/Lobby/duel_btn_2.json",
+    },
+  ],
+};
+
+const DUEL2_JSON = {
+  textures: [{ image: "duel_btn_2.png", frames: [{ filename: "duel_btn_2-0.png" }] }],
+};
 
 function makeWindow(options: { fetchFails?: boolean } = {}): {
   window: FakeWindow;
@@ -588,6 +625,7 @@ function makeWindow(options: { fetchFails?: boolean } = {}): {
     game,
     lang: "tcn",
     UL_CONFIG: { domains: { assets: { urls: ["https://assets.example"] } } },
+    UL_ASSETS: { lobby: LOBBY_ASSETS },
     Phaser: {
       Geom: {
         Circle: class {
@@ -608,7 +646,11 @@ function makeWindow(options: { fetchFails?: boolean } = {}): {
   window.fetch = (url: string) => {
     window.fetched.push(url);
     if (options.fetchFails) return Promise.resolve({ ok: false, status: 404 });
-    return Promise.resolve({ ok: true, blob: () => Promise.resolve({}) });
+    return Promise.resolve({
+      ok: true,
+      blob: () => Promise.resolve({}),
+      json: () => Promise.resolve(DUEL2_JSON),
+    });
   };
   return { window, reports };
 }
@@ -663,11 +705,6 @@ async function settle(): Promise<void> {
 async function install(window: FakeWindow): Promise<string> {
   poll = null;
   timers = [];
-  FakeSocket.made = [];
-  FakeSocket.answers = {
-    quest_port: ["https://www.playunlight.online", 13004],
-    raid_port: ["https://www.playunlight.online", 13104],
-  };
   const raw = run(window, buildNavPatchScript({ bindingName: BINDING }));
   await settle();
   return raw;
@@ -710,9 +747,20 @@ describe("buildNavPatchScript", () => {
     expect(sc.mine()).toHaveLength(0);
 
     await settle();
-    expect(window.fetched).toHaveLength(6);
-    expect(window.fetched[0]).toBe("https://assets.example/images/assets/lobby/duel_btn.png");
+    // 六張圖 + duel_btn_2 的 atlas json；路徑照 UL_ASSETS.lobby 查，不是寫死的。
+    expect(window.fetched).toHaveLength(7);
+    expect(window.fetched).toContain("https://assets.example/images/assets/Lobby/duel_btn.avif");
+    expect(window.fetched).toContain("https://assets.example/images/assets/Lobby/duel_btn_2.json");
+    const added = window.game.textures.added;
+    expect(added.get("__ulrNav_duel")).toEqual({
+      kind: "spritesheet",
+      data: { frameWidth: 160, frameHeight: 160 },
+    });
+    expect(added.get("__ulrNav_duel2")).toEqual({ kind: "atlas", data: DUEL2_JSON });
+    expect(added.get("__ulrNav_raid")?.kind).toBe("image");
     expect(window.game.anims.keys.has("__ulrNav_duel_1")).toBe(true);
+    // atlas 的動畫照官方用「整張貼圖」—— frames 是貼圖 key，不是數字。
+    expect(window.game.anims.made.get("__ulrNav_duel_2")).toBe("__ulrNav_duel2");
 
     const c = centers(sc);
     // 返回鈕左緣 712，往左 gap 6，半徑 14 → 最右 692，每顆間距 34。
@@ -757,7 +805,7 @@ describe("buildNavPatchScript", () => {
     expect(sc.sprite("__ulrNav_duel").alpha).toBe(1);
   });
 
-  it("從對戰大廳點 QUEST：問路 → 按官方返回鈕 → 它的 scene.start(Lobby) 被改道成清場 + start Quest", async () => {
+  it("從對戰大廳點 QUEST：按官方返回鈕 → 它的 scene.start(Lobby) 被改道成清場 + start Quest（不帶參數）", async () => {
     const { window, reports } = makeWindow();
     const G = window.game;
     const sc = G.at("Match");
@@ -765,34 +813,24 @@ describe("buildNavPatchScript", () => {
     await install(window);
 
     sc.sprite("__ulrNav_quest").emit("pointerdown");
-    // 問路中：整排先鎖住，官方返回鈕還沒被按。
-    expect(sc.sprite("__ulrNav_raid").input?.enabled).toBe(false);
-    expect(sc.fadeCalls).toBe(0);
     await settle();
 
-    // 臨時連線：照大廳的 url 開、問完就關。
-    const temp = FakeSocket.made.find((s) => s.url === "https://www.playunlight.online:11009");
-    expect(temp).toBeDefined();
-    expect(temp!.disconnected).toBe(true);
-
-    // 官方流程跑了（淡出是它做的），最後那句 start("Lobby") 沒有真的到大廳。
+    // 官方流程跑了（音效、淡出是它做的），最後那句 start("Lobby") 沒有真的到大廳。
+    expect(sc.ulse01.plays).toBe(1);
     expect(sc.fadeCalls).toBe(1);
     expect(sc.officialStarts).toEqual([]);
-    // 只收非常駐場景。
+    // 只收非常駐場景（Session 那些不動）。
     expect(G.stopped).toEqual(["Match"]);
-    expect(G.started).toEqual([
-      {
-        key: "Quest",
-        data: { id: "player-id-36chars", host: "https://www.playunlight.online", port: 13004 },
-      },
-    ]);
+    expect(G.at("Session").sys.settings.status).toBe(5);
+    // 改版後場景的 init() 不收參數。
+    expect(G.started).toEqual([{ key: "Quest", data: undefined }]);
     // 改道用完就還原：ScenePlugin 身上沒有自有的 start 了。
     expect(Object.prototype.hasOwnProperty.call(sc.scene, "start")).toBe(false);
     const r = reports.find(isNavReport);
     expect(r).toMatchObject({ type: "nav", from: "Match", to: "quest", ok: true });
   });
 
-  it("從任務房點 DUEL：不必問路、按的是 pointerup；點 DECK：帶 Edit 的分頁參數", async () => {
+  it("從任務房點 DUEL／DECK：按的是 pointerup，目的地不帶參數", async () => {
     const { window } = makeWindow();
     const G = window.game;
     const sc = G.at("Quest");
@@ -801,11 +839,8 @@ describe("buildNavPatchScript", () => {
 
     sc.sprite("__ulrNav_duel").emit("pointerdown");
     await settle();
-    expect(FakeSocket.made.filter((s) => s.url.indexOf("11009") >= 0)).toHaveLength(0);
-    // Quest 的返回鈕流程：ulse01、close=true、鏡頭淡出 —— 全是官方做的。
     expect(sc.ulse01.plays).toBe(1);
-    expect(sc.close).toBe(true);
-    expect(G.started).toEqual([{ key: "Match", data: { id: "player-id-36chars" } }]);
+    expect(G.started).toEqual([{ key: "Match", data: undefined }]);
 
     G.started = [];
     G.stopped = [];
@@ -813,148 +848,106 @@ describe("buildNavPatchScript", () => {
     tick();
     sc.sprite("__ulrNav_deck").emit("pointerdown");
     await settle();
-    expect(G.started).toEqual([
-      {
-        key: "Edit",
-        data: {
-          id: "player-id-36chars",
-          cate: "card",
-          page_card: 1,
-          page_mons: 1,
-          page_weapon: 1,
-          page_event: 1,
-          page_other: 1,
-        },
-      },
-    ]);
+    expect(G.started).toEqual([{ key: "Edit", data: undefined }]);
   });
 
-  it("問不到路就不動：不按返回鈕、按鈕彈回亮的、回報 ok:false", async () => {
-    const { window, reports } = makeWindow();
-    const G = window.game;
-    const sc = G.at("Match");
-    sc.enter();
-    await install(window);
-    FakeSocket.answers = { raid_port: new Error("伺服器不理") };
-
-    sc.sprite("__ulrNav_raid").emit("pointerdown");
-    await settle();
-    expect(sc.fadeCalls).toBe(0);
-    expect(G.stopped).toEqual([]);
-    expect(G.started).toEqual([]);
-    expect(Object.prototype.hasOwnProperty.call(sc.scene, "start")).toBe(false);
-    expect(sc.sprite("__ulrNav_raid").input?.enabled).toBe(true);
-    expect(reports.find(isNavReport)).toMatchObject({
-      ok: false,
-      to: "raid",
-      reason: "伺服器不理",
-    });
-  });
-
-  it("從牌組編輯離開：官方流程先存牌組、等回應才到 start —— 那一刻才改道", async () => {
+  it("從牌組編輯離開：官方流程先存牌組（deck_update）、等回應才到 start —— 那一刻才改道", async () => {
     const { window } = makeWindow();
     const G = window.game;
     const sc = G.at("Edit");
     sc.enter();
-    sc.deck1 = { charaIndex: [3, null, null] };
-    sc.deck2 = { charaIndex: [null, null, null] };
-    sc.deck3 = { charaIndex: [null, null, null] };
-    sc.info_check = [{ checked: false }, { checked: true }];
+    sc.deck = [{ deck_id: 1 }];
     await install(window);
 
     sc.sprite("__ulrNav_quest").emit("pointerdown");
     await settle();
     // 官方的存檔送出去了、還在等回應 → 還沒跳。
-    expect(sc.socket.emitted).toEqual([
-      ["db_editdeck", "player-id-36chars", sc.deck1, sc.deck2, sc.deck3, true],
-    ]);
+    expect(sc.socket.fetched).toEqual([["deck_update", sc.deck]]);
     expect(G.started).toEqual([]);
     expect(sc.sprite("__ulrNav_deck").input?.enabled).toBe(false);
 
-    sc.socket.receive("db_editdeck");
+    sc.socket.answer("deck_update", false);
     await settle();
     expect(sc.officialStarts).toEqual([]);
     expect(G.stopped).toEqual(["Edit"]);
-    expect(G.started[0]?.key).toBe("Quest");
+    expect(G.started).toEqual([{ key: "Quest", data: undefined }]);
   });
 
-  it("牌組編輯 Deck1 第一格空：只按官方鈕讓它彈錯誤框，不改道、不鎖按鈕", async () => {
+  it("牌組編輯：伺服器退回存檔就留在原地 —— 看門狗把改道拆掉、按鈕亮回來", async () => {
     const { window } = makeWindow();
     const G = window.game;
     const sc = G.at("Edit");
     sc.enter();
-    sc.deck1 = { charaIndex: [null, null, null] };
     await install(window);
 
     sc.sprite("__ulrNav_duel").emit("pointerdown");
     await settle();
-    expect(sc.dialogs).toBe(1);
-    expect(sc.socket.emitted).toEqual([]);
+    sc.socket.answer("deck_update", true);
+    await settle();
     expect(G.started).toEqual([]);
+    expect(sc.input.enabled).toBe(true);
+    expect(Object.prototype.hasOwnProperty.call(sc.scene, "start")).toBe(true);
+
+    for (const t of timers.splice(0)) t();
     expect(Object.prototype.hasOwnProperty.call(sc.scene, "start")).toBe(false);
+    tick();
     expect(sc.sprite("__ulrNav_duel").input?.enabled).toBe(true);
   });
 
-  it("道具畫面：官方流程送完 db_avatar_update 才跳", async () => {
+  it("道具畫面：官方流程送完 avatar_update 才跳", async () => {
     const { window } = makeWindow();
     const G = window.game;
     const sc = G.at("Item");
     sc.enter();
-    const fetched: unknown[][] = [];
     sc.avatar = { raw: () => ({ hair: 3 }) };
-    sc.socket.fetch = (...args: unknown[]) => {
-      fetched.push(args);
-      return Promise.resolve({});
-    };
+    sc.socket.autoAnswer = { avatar_update: true };
     await install(window);
 
     sc.sprite("__ulrNav_duel").emit("pointerdown");
     await settle();
-    expect(fetched).toEqual([["db_avatar_update", "player-id-36chars", { hair: 3 }]]);
-    expect(G.started[0]?.key).toBe("Match");
+    expect(sc.socket.fetched).toEqual([["avatar_update", { hair: 3 }]]);
+    expect(G.started).toEqual([{ key: "Match", data: undefined }]);
   });
 
-  it("圖書館：官方送 library_quit、等伺服器回話才跳", async () => {
+  it("圖書館：官方先存最愛、伺服器回話才跳", async () => {
     const { window } = makeWindow();
     const G = window.game;
     const sc = G.at("Library");
     sc.enter();
-    sc.favorite = "cc001";
+    sc.chara_favorite = "cc001";
     sc.stamp_favorite = [1, 2];
     await install(window);
 
     sc.sprite("__ulrNav_raid").emit("pointerdown");
     await settle();
-    expect(sc.socket.emitted).toEqual([["library_quit", "player-id-36chars", "cc001", [1, 2]]]);
+    expect(sc.socket.fetched).toEqual([["update_chara_favorite", "cc001"]]);
     expect(G.started).toEqual([]);
 
-    sc.socket.receive("library_quit");
+    sc.socket.answer("update_chara_favorite", "cc001");
     await settle();
-    expect(sc.socket.disconnected).toBe(true);
+    sc.socket.answer("update_stamp_favorite", [1, 2]);
+    await settle();
     expect(G.stopped).toEqual(["Library"]);
-    expect(G.started[0]).toEqual({
-      key: "Raid",
-      data: { id: "player-id-36chars", host: "https://www.playunlight.online", port: 13104 },
-    });
+    expect(G.started).toEqual([{ key: "Raid", data: undefined }]);
   });
 
-  it("教學選單：返回鈕不在 this.back_btn 上，從 children 找；位置照它的 origin 算", async () => {
+  it("教學選單：返回鈕不在 this.btn_back 上，從 children 找；位置照它的 origin 算", async () => {
     const { window } = makeWindow();
     const G = window.game;
     const sc = G.at("TutorialNewMenu");
     sc.enter();
-    expect(sc.back_btn).toBeNull();
+    expect(sc.btn_back).toBeNull();
     await install(window);
-    // 返回鈕 origin(1,0) 放在 (760,0)：左緣一樣是 712、中心 y 一樣是 16。
+    // 返回鈕 origin(1,0) 放在 (760,0)：左緣 712、中心 y 16。
     expect(sc.sprite("__ulrNav_deck").x).toBe(692);
     expect(sc.sprite("__ulrNav_deck").y).toBe(16);
 
     sc.sprite("__ulrNav_duel").emit("pointerdown");
     await settle();
-    expect(G.started).toEqual([{ key: "Match", data: { id: "player-id-36chars" } }]);
+    expect(G.started).toEqual([{ key: "Match", data: undefined }]);
   });
 
-  it("設定畫面也掛，返回鈕是 click", async () => {
+  it("設定畫面也掛", async () => {
     const { window } = makeWindow();
     const G = window.game;
     const sc = G.at("Option");
@@ -971,19 +964,15 @@ describe("buildNavPatchScript", () => {
     const G = window.game;
     const sc = G.at("Edit");
     sc.enter();
-    sc.deck1 = { charaIndex: [3, null, null] };
-    sc.deck2 = { charaIndex: [null, null, null] };
-    sc.deck3 = { charaIndex: [null, null, null] };
-    sc.info_check = [{ checked: false }, { checked: false }];
     await install(window);
 
     sc.sprite("__ulrNav_duel").emit("pointerdown");
     await settle();
     // 假設玩家（或遊戲）在存檔回來之前把去向改成合成。
     sc.scene_next = "Compo";
-    sc.socket.receive("db_editdeck");
+    sc.socket.answer("deck_update", false);
     await settle();
-    expect(sc.officialStarts).toEqual([{ key: "Compo", data: { id: "player-id-36chars" } }]);
+    expect(sc.officialStarts).toEqual([{ key: "Compo", data: { compo_data: null } }]);
     expect(G.started).toEqual([]);
     expect(Object.prototype.hasOwnProperty.call(sc.scene, "start")).toBe(false);
   });
@@ -991,27 +980,27 @@ describe("buildNavPatchScript", () => {
   it("看門狗：官方流程一直沒走到 start，時間到把改道拆掉、按鈕亮回來", async () => {
     const { window } = makeWindow();
     const G = window.game;
-    const sc = G.at("Edit");
+    const sc = G.at("Quest");
     sc.enter();
-    sc.deck1 = { charaIndex: [3, null, null] };
-    sc.deck2 = { charaIndex: [null, null, null] };
-    sc.deck3 = { charaIndex: [null, null, null] };
-    sc.info_check = [{ checked: false }, { checked: false }];
     await install(window);
+    // 官方的淡出永遠不完成（例如場景卡住）。
+    sc.cameras.main.fadeOut = () => {
+      sc.fadeCalls++;
+      return new FakeEmitter();
+    };
 
     sc.sprite("__ulrNav_duel").emit("pointerdown");
     await settle();
     expect(Object.prototype.hasOwnProperty.call(sc.scene, "start")).toBe(true);
-    expect(sc.sprite("__ulrNav_quest").input?.enabled).toBe(false);
+    expect(sc.sprite("__ulrNav_raid").input?.enabled).toBe(false);
 
-    // 伺服器沒回 db_editdeck。把所有排程中的計時器跑掉（含看門狗）。
     for (const t of timers.splice(0)) t();
     expect(Object.prototype.hasOwnProperty.call(sc.scene, "start")).toBe(false);
-    // 官方把返回鈕 disable 了（它在等存檔），所以整排仍照官方狀態變暗；
-    // 但 busy 已經放掉 —— 返回鈕一恢復就能按。
+    // 官方把返回鈕 disable 了，所以整排仍照官方狀態變暗；但 busy 已經放掉 ——
+    // 返回鈕一恢復就能按。
     sc.back().setInteractive();
     tick();
-    expect(sc.sprite("__ulrNav_quest").input?.enabled).toBe(true);
+    expect(sc.sprite("__ulrNav_raid").input?.enabled).toBe(true);
     expect(G.started).toEqual([]);
   });
 
@@ -1084,8 +1073,6 @@ describe("buildNavPatchScript", () => {
     const edit = G.at("Edit");
     sc.leave();
     edit.enter();
-    edit.deck1 = { charaIndex: [3, null, null] };
-    edit.info_check = [{ checked: false }, { checked: false }];
     tick();
     edit.sprite("__ulrNav_quest").emit("pointerdown");
     await settle();

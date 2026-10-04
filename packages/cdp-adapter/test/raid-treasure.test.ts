@@ -15,6 +15,7 @@ import {
   lookupRaidTreasure,
   parseRaidStatusCode,
   RAID_TREASURE_TABLE,
+  raidStageByMap,
   raidTierOf,
 } from "@ulr/cdp-adapter";
 
@@ -122,6 +123,50 @@ describe("獎勵表", () => {
     expect(raidTierOf("mc1005_01", 1)).toBe(1);
     expect(raidTierOf(null, 1)).toBeNull();
     expect(classifyRaid({ profound_mons: "mc1006_03", rarity: 1, stage: 2 }).tier).toBe(4);
+  });
+});
+
+describe("改版後：照怪＋區塊推 stage", () => {
+  // 2026-09-25 raid-learned.json 的 log 裡有 stage 的每一筆（去掉記錯的靈龜 06:05 那筆）
+  const SEEN: [monsterId: number, mapIndex: number, stage: number][] = [
+    [30108, 1, 1],
+    [30108, 2, 2],
+    [30108, 3, 3],
+    [30108, 4, 4],
+    [30108, 5, 5],
+    [30117, 11, 1],
+    [30117, 2, 3],
+    [30117, 3, 4],
+    [30117, 4, 5],
+    [30130, 5, 1],
+    [30130, 6, 2],
+    [30130, 7, 3],
+    [30120, 5, 1],
+    [30120, 6, 2],
+    [30120, 7, 3],
+    [30120, 9, 5],
+    [30114, 6, 1],
+    [30114, 7, 2],
+    [30114, 8, 3],
+    [30114, 10, 5],
+  ];
+
+  it("實測到的每一筆都對得上", () => {
+    for (const [m, map, stage] of SEEN)
+      expect(raidStageByMap(m, 1, map), `${m} M${map}`).toBe(stage);
+  });
+
+  it("區塊繞一圈：誘引之者 M11 之後是 M1", () => {
+    expect(raidStageByMap(30117, 1, 1)).toBe(2);
+  });
+
+  it("不在那隻怪的 5 格裡、沒證據的怪、Lv2 以上、區塊超出範圍：不推", () => {
+    expect(raidStageByMap(30130, 1, 1)).toBeNull();
+    expect(raidStageByMap(30130, 1, 10)).toBeNull();
+    expect(raidStageByMap(99999, 1, 5)).toBeNull();
+    expect(raidStageByMap(30130, 2, 5)).toBeNull();
+    expect(raidStageByMap(30130, 1, 0)).toBeNull();
+    expect(raidStageByMap(30130, 1, 12)).toBeNull();
   });
 });
 

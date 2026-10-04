@@ -48,23 +48,35 @@
  */
 
 /**
- * 定義兩支：
+ * 定義三支：
  *
+ * - `ulrRoomOfChannel(info)`：Match 的頻道物件 → `dietherm`／`alexandria`。
  * - `ulrRoomOfScene(name, sc)`：場景 → 房型鍵（`quest`／`raid`／`alexandria`／
- *   `dietherm`），Match 還沒選頻道或不是房間場景回 `null`。頻道看 `type` 不看
- *   編號，跟 `patch-room-gate` 的 `currentRoom()` 同一條規矩。
+ *   `dietherm`），Match 還沒選頻道或不是房間場景回 `null`。
  * - `ulrRoomCostOf(deck, room)`：算不出來回 `null`，呼叫端自己決定退路。
+ *
+ * ## 頻道 → 房型（2026-09-23 改版後）
+ *
+ * 改版後 `Match.channel` 就是頻道物件本身（`channel_login(t)` 直接 `this.channel = t`，
+ * 來自 `get_matching_channel` 的 `{ channel, cost, quick, domain, … }`），舊的
+ * `channels[編號]` 表沒了。有 `type` 就照舊看 `type`（`duel` = 迪城）；沒有的話看
+ * `quick`：亞城（ranked）有快速比賽，迪城（duel）只能開房。
+ *
+ * ⚠ 還沒在改版後的 Match 裡實機看過頻道物件有沒有 `type`（2026-09-24 寫這段時
+ * 玩家在渦房）。`quick` 那條是退路；活動頻道（沒有快速比賽）會被算成迪城。
  */
 export const ROOM_COST_SNIPPET = `
+  function ulrRoomOfChannel(info) {
+    if (!info || typeof info !== "object") return null;
+    if (typeof info.type === "string") return info.type === "duel" ? "dietherm" : "alexandria";
+    return info.quick === true ? "alexandria" : "dietherm";
+  }
+
   function ulrRoomOfScene(name, sc) {
     if (name === "Quest") return "quest";
     if (name === "Raid") return "raid";
     if (name !== "Match" || !sc) return null;
-    if (sc.channel === undefined || sc.channel === null) return null;
-    var key = String(sc.channel);
-    var info = (sc.channels && sc.channels[key]) || (sc.channels_cross && sc.channels_cross[key]);
-    if (!info) return null;
-    return info.type === "duel" ? "dietherm" : "alexandria";
+    return ulrRoomOfChannel(sc.channel);
   }
 
   function ulrRoomCostOf(deck, room) {

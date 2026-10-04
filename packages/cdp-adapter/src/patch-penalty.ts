@@ -83,8 +83,10 @@ import { embedJson } from "./embed.js";
  * 輪詢到 60 秒逾時為止。這種「第二次才壞」的行為在手動測試裡幾乎抓不到。
  *
  * 用頁面上的計數器而不是 `Math.random()`，這樣同一頁的行為是可預期的。
+ *
+ * patch-item-panel 也用這一段（找物品欄面板類別）。
  */
-const WEBPACK_REQUIRE_SNIPPET = `function ulrWebpackRequire() {
+export const WEBPACK_REQUIRE_SNIPPET = `function ulrWebpackRequire() {
     var chunkKey = null;
     var keys = Object.keys(window);
     for (var i = 0; i < keys.length; i++) {

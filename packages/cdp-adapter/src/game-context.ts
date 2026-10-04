@@ -182,6 +182,8 @@ async function probeForGame(
 export interface FindGameContextOptions {
   sessionId?: string;
   timeoutMs?: number;
+  /** 中止就丟 `signal.reason`。每輪探測之間檢查一次（最多晚 250ms）。 */
+  signal?: AbortSignal;
   /** 測試用：注入假的等待，避免真的睡。 */
   now?: () => number;
 }
@@ -203,6 +205,7 @@ export async function findGameContext(
   const topFrameId = await getTopFrameId(client, options.sessionId);
 
   for (;;) {
+    options.signal?.throwIfAborted();
     // 非頂層 frame 優先 —— 桌面版的遊戲一定在 iframe。但頂層也要試，
     // 網頁版就是直接載在頂層。
     const candidates = tracker.contexts

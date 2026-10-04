@@ -1,18 +1,13 @@
 /**
- * 不經過大廳直接換場景 —— 問路與清場
- * ====================================
+ * 不經過大廳直接換場景 —— 清場
+ * ==============================
  * 兩支補丁都要「跳過大廳、直接把玩家帶到某一房」：`patch-nav`（返回鈕左邊
- * 的直連捷徑）與 `patch-raid-surrender`（渦戰裡的投降）。跳法一樣，所以問路
- * 與清場這兩段住在這裡，兩邊共用 —— 兩份會漂移，而漂移的那一份就是下次的 bug。
+ * 的直連捷徑）與 `patch-raid-surrender`（渦戰裡的投降）。跳法一樣，所以清場
+ * 這段住在這裡，兩邊共用 —— 兩份會漂移，而漂移的那一份就是下次的 bug。
  *
- * ## 問路：`ulrAskPort(G, event, timeoutMs)`
- *
- * 任務房／渦房的場景要 `{id, host, port}` 才開得起來（大廳那兩顆鈕做的就是
- * `socket.fetch("quest_port" / "raid_port")` → `[host, port]`）。**不能拿
- * `K.Lobby.socket` 直接問** —— 離開大廳時它已經 disconnect 了，但 `url` 還讀
- * 得到，照它的 url 另開一條臨時 WSClient，問完就關。這條連線不必 register，
- * 只送 `quest_port`／`raid_port` 這種純問路的事件（`Moon/對戰.py` 的 JS_直達
- * 同一條路，2026-08-30 起實跑至今）。
+ * ⚠ 2026-09-23 改版前還有一段「問路」（跟大廳要 quest_port／raid_port 湊
+ * `{id, host, port}`）。改版後每個場景的 `init()` 都不收參數、自己從
+ * `UL_CONFIG.domains` 挑伺服器，那段已經拿掉 —— `scene.start(目標)` 就夠了。
  *
  * ## 清場：`ulrStopContentScenes(G, persistent, keep)`
  *
@@ -39,8 +34,15 @@
  * ⚠⚠ 這段住在 template literal 裡，**不能出現反引號**。
  */
 
-/** 常駐場景。**一個都不能 stop。** 跟 `Moon/對戰.py` 同一份名單。 */
+/**
+ * 常駐場景。**一個都不能 stop。** 跟 `Moon/對戰.py` 同一份名單。
+ *
+ * ⚠ `Session` 是 2026-09-23 改版新增的：它管所有 socket 的斷線重連
+ * （register_socket／on_session_drop…），每個畫面都 active。收掉它之後斷線
+ * 就再也不會重連。
+ */
 export const JUMP_PERSISTENT_SCENES: readonly string[] = [
+  "Session",
   "MatchBoot",
   "ConnectionCheck",
   "Friend",
@@ -51,30 +53,6 @@ export const JUMP_PERSISTENT_SCENES: readonly string[] = [
 ];
 
 export const SCENE_JUMP_SNIPPET = `
-  function ulrAskPort(G, event, timeoutMs) {
-    return new Promise(function (resolve, reject) {
-      var lobby = G.scene.keys.Lobby && G.scene.keys.Lobby.socket;
-      if (!lobby || !lobby.url) return reject(new Error("讀不到大廳伺服器的位址"));
-      var s;
-      try { s = new (lobby.constructor)(lobby.url, lobby.protocols); }
-      catch (e) { return reject(new Error("開不了臨時連線：" + String(e && e.message))); }
-      var done = false;
-      function finish(err, val) {
-        if (done) return;
-        done = true;
-        try { s.disconnect(); } catch (e) {}
-        if (err) reject(err); else resolve(val);
-      }
-      setTimeout(function () { finish(new Error("等 " + event + " 超過 " + timeoutMs + "ms")); }, timeoutMs);
-      var p;
-      try { p = s.fetch(event); } catch (e) { return finish(e); }
-      p.then(function (r) {
-        if (!Array.isArray(r) || r.length < 2) return finish(new Error(event + " 回的不是 [host, port]"));
-        finish(null, { host: r[0], port: r[1] });
-      }, function (e) { finish(e || new Error(event + " 失敗")); });
-    });
-  }
-
   function ulrStopContentScenes(G, persistent, keep) {
     var K = G.scene.keys;
     var skip = {};

@@ -156,11 +156,36 @@ function makeTextClass() {
 }
 type FakeText = InstanceType<ReturnType<typeof makeTextClass>>;
 
+/**
+ * Phaser 3.87 的 BitmapMaskPipeline：endMask 先把 uResolution 設成 camera 的寬高、
+ * 畫全螢幕三角形（shader 用 gl_FragCoord / uResolution 取樣）、再設回自己的寬高。
+ * `drawn` 記的是「畫的那一下」uResolution 是多少。
+ */
+class FakeBitmapMaskPipeline {
+  width = 760;
+  height = 680;
+  res: number[] = [760, 680];
+  drawn: number[][] = [];
+  set2f(name: string, x: number, y: number): this {
+    if (name === "uResolution") this.res = [x, y];
+    return this;
+  }
+  endMask(_mask: unknown, _obj: unknown, camera?: { width: number; height: number }): void {
+    if (camera) this.set2f("uResolution", camera.width, camera.height);
+    this.drawn.push([...this.res]);
+    if (camera) this.set2f("uResolution", this.width, this.height);
+  }
+}
+
 class FakeRenderer {
   width = 760;
   height = 680;
   gl: FakeGLProto;
   resized = 0;
+  maskPipe = new FakeBitmapMaskPipeline();
+  pipelines = {
+    get: (name: string) => (name === "BitmapMaskPipeline" ? this.maskPipe : null),
+  };
   constructor(gl: FakeGLProto) {
     this.gl = gl;
   }
@@ -172,12 +197,121 @@ class FakeRenderer {
   }
 }
 
+/** Option 的分頁鈕（`add.image`）：記目前的 frame、能不能點、掛了哪些事件。 */
+class FakeTabButton extends Emitter {
+  scene = {};
+  frame: string;
+  interactive = true;
+  constructor(
+    public x: number,
+    public y: number,
+    frame: string,
+  ) {
+    super();
+    this.frame = frame;
+  }
+  setOrigin(): this {
+    return this;
+  }
+  setTexture(_key: string, frame: string): this {
+    this.frame = frame;
+    return this;
+  }
+  setInteractive(): this {
+    this.interactive = true;
+    return this;
+  }
+  disableInteractive(): this {
+    this.interactive = false;
+    return this;
+  }
+  destroy(): void {
+    this.scene = undefined as unknown as object;
+  }
+}
+
+/**
+ * 2026-09-23 改版後的 Option：分頁清單是模組私有的，鈕是 `btn_<名>`，
+ * 切換用名字呼叫 `destroy_<目前>`／`show_<新>`（見 patch-display 檔頭③）。
+ */
 class FakeOption {
-  CATEGORY: Record<string, unknown> = { sound: {}, language: {}, profile: {} };
   events = new Emitter();
   active = false;
   scene = { isActive: () => this.active, key: "Option" };
   children = { list: [] as unknown[] };
+  category = "volume";
+  calls: string[] = [];
+  [key: string]: unknown;
+  add = {
+    image: (x: number, y: number, _key: string, frame: string) => new FakeTabButton(x, y, frame),
+  };
+  static readonly TABS = ["volume", "language", "profile"];
+  /** 照官方 create：建三顆鈕、選中第一顆、show。 */
+  create(): void {
+    FakeOption.TABS.forEach((t, i) => {
+      const btn = new FakeTabButton(96 * i, 32, `${t}_out`);
+      btn.on("pointerup", () => this.officialClick(t));
+      this[`btn_${t}`] = btn;
+      this[`show_${t}`] = () => this.calls.push(`show_${t}`);
+      this[`destroy_${t}`] = () => this.calls.push(`destroy_${t}`);
+    });
+    this.tab("volume").setTexture("", "volume_up").disableInteractive();
+    this.category = "volume";
+    this.active = true;
+    this.events.emit("create");
+  }
+  tab(name: string): FakeTabButton {
+    return this[`btn_${name}`] as FakeTabButton;
+  }
+  /** 照官方 pointerup 的順序（見 patch-display 檔頭③）。 */
+  private officialClick(t: string): void {
+    if (this.category === t) return;
+    for (const e of FakeOption.TABS) this.tab(e).setTexture("", `${e}_out`).setInteractive();
+    (this[`destroy_${this.category}`] as () => void)();
+    this.tab(t).setTexture("", `${t}_up`).disableInteractive();
+    this.category = t;
+    (this[`show_${t}`] as () => void)();
+  }
+}
+
+/** 改版後的 option_category 圖集（288×66，一欄一個分頁、一列一個狀態）。 */
+function makeOptionCategoryTexture() {
+  const frames: Record<
+    string,
+    { cutX: number; cutY: number; cutWidth: number; cutHeight: number }
+  > = {};
+  FakeOption.TABS.forEach((t, i) => {
+    ["out", "over", "up"].forEach((s, j) => {
+      frames[`${t}_${s}`] = { cutX: 96 * i, cutY: 22 * j, cutWidth: 96, cutHeight: 22 };
+    });
+  });
+  const source: unknown[] = [{ image: { width: 288, height: 66 } }];
+  return {
+    key: "option_category",
+    frames,
+    source,
+    has: (n: string) => n in frames,
+    get: (n: string) => frames[n],
+    add: (n: string, _src: number, x: number, y: number, w: number, hh: number) => {
+      frames[n] = { cutX: x, cutY: y, cutWidth: w, cutHeight: hh };
+    },
+  };
+}
+
+/** 讓 compose 跑得動的 2d context：什麼都不畫，像素全黑（→ 切不出字母，退回畫字）。 */
+function stubCanvas() {
+  const ctx = new Proxy(
+    {
+      getImageData: (_x: number, _y: number, w: number, hh: number) => ({
+        data: new Uint8ClampedArray(w * hh * 4),
+      }),
+    } as Record<string, unknown>,
+    {
+      get: (target, prop: string) => (prop in target ? target[prop] : () => {}),
+      set: () => true,
+    },
+  );
+  return { width: 0, height: 0, getContext: () => ctx };
 }
 
 interface FakeGame {
@@ -382,6 +516,35 @@ describe("buildDisplayPatchScript — 繪圖緩衝", () => {
     ]);
   });
 
+  it("BitmapMask 合回螢幕時 uResolution × 倍率（不然被遮的長髮縮到左下）；畫進 framebuffer 時不動", () => {
+    // 2026-09-26 回報：艾茵的髮型等長髮，頭髮跑到畫面左下、人物光頭。
+    const h = makeHarness();
+    install(h);
+    const pipe = h.game.renderer.maskPipe;
+    const cam = { width: 760, height: 680 };
+    pipe.endMask({}, {}, cam);
+    expect(pipe.drawn.at(-1)).toEqual([1140, 1020]);
+    // 畫完設回邏輯值（Phaser 自己的那一下不換算）
+    expect(pipe.res).toEqual([760, 680]);
+    // 沒給 camera 也換算
+    pipe.endMask({}, {});
+    expect(pipe.drawn.at(-1)).toEqual([1140, 1020]);
+    // set2f 只在 endMask 期間被包
+    expect(Object.getOwnPropertyDescriptor(pipe, "set2f")).toBeUndefined();
+
+    // 巢狀在 framebuffer 裡（RenderTexture／濾鏡）：那塊畫布是原尺寸，不換算
+    h.gl.bindFramebuffer(h.gl.FRAMEBUFFER, { webGLFramebuffer: 3 });
+    pipe.endMask({}, {}, cam);
+    expect(pipe.drawn.at(-1)).toEqual([760, 680]);
+    h.gl.bindFramebuffer(h.gl.FRAMEBUFFER, null);
+
+    // 關掉放大：endMask 還原成官方的
+    install(h, { render: "off", size: "x1" });
+    expect(Object.getOwnPropertyDescriptor(pipe, "endMask")).toBeUndefined();
+    pipe.endMask({}, {}, cam);
+    expect(pipe.drawn.at(-1)).toEqual([760, 680]);
+  });
+
   it("FxPipeline 的順序：先 viewport(760×680) 再綁 fxTarget → 畫進 fxTarget 的是原尺寸", () => {
     // 2026-09-13 實機：任務地圖的區域高亮與標籤（preFX colorMatrix）整個消失，
     // 因為 viewport 在還綁著螢幕時就被乘了倍率。
@@ -500,12 +663,79 @@ describe("buildDisplayPatchScript — 生命週期", () => {
     expect(h.canvas._w).toBe(1140);
   });
 
-  it("沒貼圖時不動 Option 的 CATEGORY（否則 create 會拿不存在的 frame 建鈕）", () => {
+  it("沒貼圖時不建 plugin 鈕（否則會拿不存在的 frame 建鈕）", () => {
     const h = makeHarness();
     install(h);
     const option = h.game.scene.keys["Option"] as FakeOption;
-    expect(Object.keys(option.CATEGORY)).toEqual(["sound", "language", "profile"]);
+    option.create();
+    expect(option["btn_plugin"]).toBeUndefined();
     expect(status(h)).toMatchObject({ tab: false, mounted: false });
+  });
+});
+
+describe("buildDisplayPatchScript — Option 的 plugin 分頁（2026-09-23 改版後）", () => {
+  function withTexture() {
+    const h = makeHarness();
+    const tex = makeOptionCategoryTexture();
+    const textures = h.game.textures as unknown as Record<string, unknown>;
+    textures["exists"] = (k: string) => k === "option_category";
+    textures["get"] = () => tex;
+    (h.doc as unknown as Record<string, unknown>)["createElement"] = stubCanvas;
+    const phaser = h.window["Phaser"] as Record<string, Record<string, unknown>>;
+    phaser["Textures"]!["TextureSource"] = class {
+      constructor(
+        public texture: unknown,
+        public image: unknown,
+      ) {}
+    };
+    const option = h.game.scene.keys["Option"] as FakeOption;
+    return { h, tex, option };
+  }
+
+  it("進 Option 就在官方分頁後面補一顆鈕，frame 是 plugin_out/over/up", () => {
+    const { h, tex, option } = withTexture();
+    install(h);
+    option.create();
+    const btn = option["btn_plugin"] as FakeTabButton;
+    expect(btn).toBeInstanceOf(FakeTabButton);
+    expect([btn.x, btn.y]).toEqual([288, 32]);
+    expect(btn.frame).toBe("plugin_out");
+    expect(Object.keys(tex.frames)).toEqual(
+      expect.arrayContaining(["plugin_out", "plugin_over", "plugin_up"]),
+    );
+    expect(status(h)).toMatchObject({ tab: true });
+  });
+
+  it("點 plugin：官方那頁照官方的方式收掉、鈕變選中；點回官方分頁會呼叫 destroy_plugin 把鈕放回來", () => {
+    const { h, option } = withTexture();
+    install(h);
+    option.create();
+    const btn = option["btn_plugin"] as FakeTabButton;
+
+    btn.emit("pointerup");
+    expect(option.category).toBe("plugin");
+    expect(option.calls).toEqual(["destroy_volume"]);
+    expect(option.tab("volume")).toMatchObject({ frame: "volume_out", interactive: true });
+    expect(btn).toMatchObject({ frame: "plugin_up", interactive: false });
+
+    option.tab("language").emit("pointerup");
+    expect(option.category).toBe("language");
+    expect(option.calls).toEqual(["destroy_volume", "show_language"]);
+    expect(btn).toMatchObject({ frame: "plugin_out", interactive: true });
+  });
+
+  it("停在 plugin 分頁時拆掉：切回第一頁，場景上不留我們的東西", () => {
+    const { h, option } = withTexture();
+    install(h);
+    option.create();
+    (option["btn_plugin"] as FakeTabButton).emit("pointerup");
+    run(h, DISPLAY_UNINSTALL_EXPRESSION);
+    expect(option.category).toBe("volume");
+    expect(option.calls.at(-1)).toBe("show_volume");
+    expect(option.tab("volume").frame).toBe("volume_up");
+    expect(option["btn_plugin"]).toBeUndefined();
+    expect(option["show_plugin"]).toBeUndefined();
+    expect(option["destroy_plugin"]).toBeUndefined();
   });
 });
 
@@ -555,6 +785,76 @@ describe("buildDisplayPatchScript — 網頁版的畫面大小", () => {
       alignContent: "",
     });
     expect(h.windows).toHaveLength(n);
+  });
+
+  it("可以縮小到 ×0.5，再小就當 ×1", () => {
+    const h = makeHarness();
+    install(h, { render: "auto", size: "x0.5" });
+    expect(h.doc.documentElement.style["zoom"]).toBe("0.5");
+    expect(h.windows.at(-1)).toMatchObject({ width: 380, height: 340 });
+    run(h, buildDisplayStateExpression({ render: "auto", size: "x0.4" }));
+    expect(h.doc.documentElement.style["zoom"]).toBe("");
+  });
+});
+
+describe("buildDisplayPatchScript — 摸不到外殼的桌面版（2026-09-23 起）", () => {
+  /** iframe 跨來源又在自己的程序：讀 parent.document 會丟例外。 */
+  function remoteHarness() {
+    const h = makeHarness();
+    h.window["parent"] = {
+      get document(): never {
+        throw new Error("Blocked a frame with origin from accessing a cross-origin frame.");
+      },
+    };
+    return h;
+  }
+
+  it("不當成網頁版：不 zoom、不動 body 版面、不請 Node 調視窗", () => {
+    const h = remoteHarness();
+    h.doc.body.style["margin"] = "0px"; // 官方 HTML 的 inline style
+    const st = install(h, { render: "auto", size: "x1.5" });
+    expect(st.host).toBe("remote");
+    expect(h.doc.documentElement.style["zoom"] ?? "").toBe("");
+    expect(h.doc.body.style["margin"]).toBe("0px");
+    expect(h.doc.body.style["justifyItems"] ?? "").toBe("");
+    expect(h.windows).toHaveLength(0);
+  });
+
+  it("上一版誤判成網頁版留下的樣式，重裝時清回官方原樣", () => {
+    const h = remoteHarness();
+    Object.assign(h.doc.body.style, {
+      margin: "0px",
+      padding: "0px",
+      justifyItems: "start",
+      alignContent: "start",
+    });
+    h.doc.documentElement.style["zoom"] = "1.5";
+    install(h, { render: "auto", size: "x1" });
+    expect(h.doc.body.style).toMatchObject({
+      margin: "0px",
+      padding: "",
+      justifyItems: "",
+      alignContent: "",
+    });
+    expect(h.doc.documentElement.style["zoom"]).toBe("");
+  });
+
+  // 2026-09-24 玩家回報：v8 把 margin 清成空字串 → 瀏覽器預設 8px 露出來，
+  // 畫面往右下偏。官方 HTML 是 <body style="margin: 0px;">。
+  it("margin 被清掉的頁面也釘回 0px，拆掉時一樣", () => {
+    const h = remoteHarness();
+    h.doc.body.style["margin"] = "";
+    install(h, { render: "auto", size: "x1" });
+    expect(h.doc.body.style["margin"]).toBe("0px");
+    h.doc.body.style["margin"] = "";
+    run(h, DISPLAY_UNINSTALL_EXPRESSION);
+    expect(h.doc.body.style["margin"]).toBe("0px");
+  });
+
+  it("解析度照樣放大（那一半在 iframe 裡就做得到）", () => {
+    const h = remoteHarness();
+    const st = install(h, { render: "auto", size: "x1" });
+    expect(st.scale).toBe(1.5);
   });
 });
 
@@ -618,6 +918,12 @@ describe("parseDisplayStatus / isDisplaySettingsReport", () => {
       parseDisplayStatus(JSON.stringify({ installed: true, state: { render: "auto", size: "x9" } }))
         .state,
     ).toBeNull();
+    expect(
+      isDisplaySettingsReport({ type: "display-settings", render: "auto", size: "x0.5" }),
+    ).toBe(true);
+    expect(
+      isDisplaySettingsReport({ type: "display-settings", render: "auto", size: "x0.4" }),
+    ).toBe(false);
     expect(
       isDisplaySettingsReport({ type: "display-settings", render: "auto", size: "fullscreen" }),
     ).toBe(true);

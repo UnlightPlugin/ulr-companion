@@ -195,8 +195,15 @@ export class ArbiterRunner {
   #lastError: string | null = null;
   /** 上一次看到的移動階段序號。變了就代表換階段，狀態要重置。 */
   #phaseId = -1;
-  /** 上一次推給頁面的顯示秒數。一樣就不要再往返一次。 */
-  #displayCap: number | null = null;
+  /**
+   * 上一次推給頁面的顯示秒數。一樣就不要再往返一次。`undefined` = 不知道頁面上
+   * 現在是什麼（剛啟動、或頁面上的 patch 換過一份），下一次一定推。
+   *
+   * ⚠ 頁面重裝之後它那邊是 null，這裡卻還記著上次推的值 —— 值沒變就不推的話，
+   * 重載過一次遊戲之後畫面上的倒數就再也不縮了，只剩「時間到替你按」還在動
+   * （2026-10-04 實測）。所以看到 patch 不見或階段序號倒退都要清掉。
+   */
+  #displayCap: number | null | undefined = undefined;
   /** 上一次看到的 room id 雜湊。變了就代表換場。 */
   #roomId: string | null = null;
   /** 目前這個階段頁面回報的 hazard。 */
@@ -354,6 +361,16 @@ export class ArbiterRunner {
         this.#state = initialState(); // 換場了，場上的牌也要清掉
       }
     }
+    // ⚠ **先換階段，再處理這一按。**（2026-10-04 雙開實測踩到）
+    // 移動階段一開始就按 OK 的話，tick 還沒看到新的序號。照原本的順序是
+    // 「這一按 → 準備」，下一個 tick 才「換階段 → 清掉準備」—— 玩家的第一下
+    // 不算數，再按一次反而變成準備，跟他的意思剛好相反。
+    if (
+      (report.type === "ok-intercepted" || report.type === "ok-pressed-again") &&
+      typeof report.phaseId === "number"
+    ) {
+      this.#adoptPhase(report.phaseId);
+    }
 
     const input = translate(report);
     if (input === null) return;
@@ -385,6 +402,7 @@ export class ArbiterRunner {
     if (beat === null || beat === undefined) {
       // patch 不在頁面上了 —— 幾乎一定是玩家重載了遊戲。
       this.#armed = false;
+      this.#displayCap = undefined;
       this.#reportError("頁面上的攔截不見了（遊戲重載過？）—— 重新裝一次");
       // ⚠ **要真的重裝，不能只印錯誤。** 見 `onPatchLost` 的說明：
       // 這條路不會觸發重連，所以沒有別人會來救。
@@ -392,7 +410,11 @@ export class ArbiterRunner {
       return;
     }
     // 裝回來了 → 階段序號是新的一份，重新對齊，不要當成「換階段」而誤觸重置。
-    if (this.#phaseId !== -1 && beat.phaseId < this.#phaseId) this.#phaseId = beat.phaseId;
+    // 序號倒退 = 頁面上換了一份新的 patch（重載、或手動重裝），它的顯示秒數也是空的。
+    if (this.#phaseId !== -1 && beat.phaseId < this.#phaseId) {
+      this.#phaseId = beat.phaseId;
+      this.#displayCap = undefined;
+    }
     this.#armed = beat.armed;
 
     /**
@@ -449,16 +471,7 @@ export class ArbiterRunner {
     // OK，是我們替他按的），只靠送出事件重置的話 `committed` 會卡在 true，
     // 之後每個階段都不再仲裁 —— 而且完全沒有錯誤訊息（WP-12 的坑 #5 換了個
     // 方式復發）。
-    if (typeof beat.phaseId === "number" && beat.phaseId !== this.#phaseId) {
-      const first = this.#phaseId === -1;
-      this.#phaseId = beat.phaseId;
-      if (!first) {
-        this.#state = resetForNextPhase(this.#state);
-        // 新階段一開始一定是「沒準備」。不明講的話中間人那邊還留著上一個
-        // 階段的旗標，下一次對手按下去就會立刻湊成 both-ready。
-        this.#options.onAnnounceReady?.(false);
-      }
-    }
+    if (typeof beat.phaseId === "number") this.#adoptPhase(beat.phaseId);
 
     await this.#syncDisplayCap();
 
@@ -474,6 +487,23 @@ export class ArbiterRunner {
     }
     this.#lastError = null;
     await this.#apply({ type: "tick", remainingSeconds: beat.remaining });
+  }
+
+  /**
+   * 頁面說現在是第幾個移動階段。跟上次不同就換階段：清掉準備、告訴側通道。
+   *
+   * tick 與「按下 OK」的回報都會叫 —— 誰先到誰換，後到的那個看到序號一樣就
+   * 什麼都不做。只靠 tick 的話，階段一開始的那一按會被晚到的換階段清掉。
+   */
+  #adoptPhase(phaseId: number): void {
+    if (phaseId === this.#phaseId) return;
+    const first = this.#phaseId === -1;
+    this.#phaseId = phaseId;
+    if (first) return;
+    this.#state = resetForNextPhase(this.#state);
+    // 新階段一開始一定是「沒準備」。不明講的話中間人那邊還留著上一個
+    // 階段的旗標，下一次對手按下去就會立刻湊成 both-ready。
+    this.#options.onAnnounceReady?.(false);
   }
 
   /**

@@ -160,7 +160,9 @@ export const BUNDLE_DISCOVERY_EXPRESSION = `(function () {
  */
 export const SERVED_BUNDLES_EXPRESSION = `(function () {
   var params = new URLSearchParams(location.search);
-  if (!params.get("token")) return "null";
+  // 2026-09-23 改版把 token 改名成 access_token（steamid 也改成 platform_id）。
+  // 只認舊名的話，桌面版的真頁面永遠被當成「重建的」，雲端清單就此卡住不更新。
+  if (!params.get("token") && !params.get("access_token")) return "null";
   if (window.__ulrBootShell && window.__ulrBootShell.rebuilt) return "null";
   if (document.documentElement.dataset.${BUNDLES_DATASET_KEY}) return "null";
   return ${BUNDLE_DISCOVERY_EXPRESSION};
@@ -242,7 +244,8 @@ export function buildBootShellScript(options: BootShellOptions = {}): string {
     title: GAME_TITLE,
     portMin: GAME_PORTS.quest[0],
     portMax: GAME_PORTS.quest[1],
-    allowPortRedirect: options.allowPortRedirect ?? true,
+    // 2026-09-23 起預設不導向：:14012~14021 已經連不上，頁面就在沒有 port 的來源上。
+    allowPortRedirect: options.allowPortRedirect ?? false,
   };
 
   const bundlesExpr =
@@ -263,6 +266,7 @@ export function buildBootShellScript(options: BootShellOptions = {}): string {
   var params = new URLSearchParams(location.search);
   // 網址沒帶身分時退回擴充功能記下來的那個，這樣書籤不必寫死 steamid。
   var authString =
+    params.get("platform_id") ||
     params.get("steamid") ||
     params.get("stove_id") ||
     document.documentElement.dataset.${AUTH_DATASET_KEY} ||
@@ -273,7 +277,7 @@ export function buildBootShellScript(options: BootShellOptions = {}): string {
 
   window[FLAG] = { rebuilt: false };
 
-  // 遊戲實際跑在 :14012~14021 的其中一個 port，沒帶 port 的網址會拿到 403。
+  // 舊版遊戲跑在 :14012~14021 的其中一個 port（2026-09-23 改版後已連不上，預設關閉）。
   if (location.port === "" && CFG.allowPortRedirect) {
     var span = CFG.portMax - CFG.portMin + 1;
     var port = CFG.portMin + Math.trunc(Math.random() * span);
@@ -286,6 +290,14 @@ export function buildBootShellScript(options: BootShellOptions = {}): string {
   window.SERVER = "steam";
   window.platform_type = location.pathname.indexOf("stove") !== -1 ? "stove" : "steam";
   window.auth_string = authString;
+  // 2026-09-23 起遊戲登入讀的是這個（connection_socket.fetch("getid", platform_config)），
+  // 不再讀 auth_string。真頁面的內嵌腳本就是這三個欄位 —— 沒有 access_token，
+  // 那顆 token 只是拿來讓伺服器吐 HTML 的。
+  window.platform_config = {
+    platform_id: authString,
+    platform_key: "unlight",
+    platform_type: window.SERVER
+  };
 
   function alreadyServed() {
     // 伺服器有正常吐頁面的時候（正常 Steam 流程），文件裡本來就有 client/ 的
@@ -350,11 +362,14 @@ export function buildBootShellScript(options: BootShellOptions = {}): string {
 // 三種輸出形態
 // ---------------------------------------------------------------------------
 
-/** 書籤要指向的網址。帶 port，這樣 bookmarklet 不必先導向就能直接用。 */
+/**
+ * 書籤要指向的網址。
+ *
+ * 2026-09-23 起預設**不帶 port**：舊的 :14012~14021 已經連不上，頁面就在來源本身。
+ */
 export function buildBookmarkUrl(steamId: string, origin: string, port?: number): string {
-  const span = GAME_PORTS.quest[1] - GAME_PORTS.quest[0] + 1;
-  const chosen = port ?? GAME_PORTS.quest[0] + Math.trunc(Math.random() * span);
-  return `${origin}:${chosen}/?steamid=${encodeURIComponent(steamId)}`;
+  const host = port === undefined ? origin : `${origin}:${port}`;
+  return `${host}/?steamid=${encodeURIComponent(steamId)}`;
 }
 
 /**
@@ -418,7 +433,7 @@ export function buildExtensionFiles(options: ExtensionOptions = {}): Record<stri
   return {
     "manifest.json": JSON.stringify(manifest, null, 2) + "\n",
     "content.js": buildExtensionContentScript(),
-    "shell.js": buildBootShellScript({ bundlesSource: "dataset", allowPortRedirect: true }),
+    "shell.js": buildBootShellScript({ bundlesSource: "dataset", allowPortRedirect: false }),
     "README.txt": buildExtensionReadme(origin),
   };
 }
@@ -643,7 +658,8 @@ export function buildExtensionContentScript(): string {
 
   ready(function () {
     var params = new URLSearchParams(location.search);
-    var urlAuth = params.get("steamid") || params.get("stove_id") || "";
+    // platform_id 是 2026-09-23 改版後 Steam 流程網址上的 SteamID（之前叫 steamid）。
+    var urlAuth = params.get("platform_id") || params.get("steamid") || params.get("stove_id") || "";
 
     var served = currentBundles();
     if (served.length > 0) {

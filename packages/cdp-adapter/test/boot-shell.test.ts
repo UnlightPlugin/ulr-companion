@@ -9,7 +9,7 @@ import {
   isCompleteBundleSet,
   parseDiscoveredBundles,
 } from "../src/boot-shell.js";
-import { GAME_ORIGIN, GAME_PORTS } from "../src/constants.js";
+import { GAME_ORIGIN } from "../src/constants.js";
 
 const BUNDLES = [
   "client/runtime.0e89562b7d68d7d0099f.js",
@@ -102,10 +102,15 @@ describe("buildBootShellScript", () => {
     expect(script).toContain("__ulrBootShell");
   });
 
-  it("allowPortRedirect=false 時不會自己導向", () => {
-    // bookmarklet 用的模式：導向會把它的執行環境整個換掉。
-    const manual = buildBootShellScript({ bundles: BUNDLES, allowPortRedirect: false });
-    expect(manual).toContain('"allowPortRedirect\\":false');
+  it("預設不導向 port —— 2026-09-23 改版後 :14012~14021 已經連不上", () => {
+    expect(script).toContain('"allowPortRedirect\\":false');
+    const legacy = buildBootShellScript({ bundles: BUNDLES, allowPortRedirect: true });
+    expect(legacy).toContain('"allowPortRedirect\\":true');
+  });
+
+  it("設 platform_config —— 改版後遊戲登入讀的是它，不是 auth_string", () => {
+    expect(script).toContain("window.platform_config");
+    expect(script).toContain('params.get("platform_id")');
   });
 
   it("壞掉的 bundle 清單不會產生腳本", () => {
@@ -114,14 +119,10 @@ describe("buildBootShellScript", () => {
 });
 
 describe("buildBookmarkUrl", () => {
-  it("帶 port，落在遊戲的範圍內", () => {
-    // 不帶 port 會拿到 403，而 bookmarklet 沒辦法在導向後自己再跑一次。
-    for (let i = 0; i < 50; i++) {
-      const url = new URL(buildBookmarkUrl("76561199854644708", GAME_ORIGIN));
-      const port = Number(url.port);
-      expect(port).toBeGreaterThanOrEqual(GAME_PORTS.quest[0]);
-      expect(port).toBeLessThanOrEqual(GAME_PORTS.quest[1]);
-    }
+  it("預設不帶 port —— 2026-09-23 改版後頁面就在來源本身", () => {
+    const url = new URL(buildBookmarkUrl("76561199854644708", GAME_ORIGIN));
+    expect(url.port).toBe("");
+    expect(url.origin).toBe(GAME_ORIGIN);
   });
 
   it("指定 port 就用指定的", () => {

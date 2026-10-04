@@ -1,59 +1,60 @@
 /**
  * 自動開房／進房（WP-16）
  * =========================
- * 約戰配對湊成之後，這支負責驅動遊戲原本的開房與進房流程。**協定是實測挖
- * 出來的**，不是猜的：
+ * 約戰配對湊成之後，這支負責驅動遊戲原本的開房與進房流程。**協定是從跑著的
+ * 客戶端挖出來的**，不是猜的。
+ *
+ * ## 2026-09-23 改版之後的協定（2026-09-27 從 chunk 191／693 讀的）
+ *
+ * 每個頻道有自己的一條連線（`Match.socket_channel`，網址是頻道物件的 `domain`），
+ * 一律走 `fetch`（＝ `once(ev)` ＋ `emit(ev)`，回應就是同名事件）：
  *
  * ```
- *   開房  emit("match_room_make", id, channel, name, stage, multi, friend, pass, cost, deckNow)
- *         → once("match_waiting")      成功
- *         → once("match_room_error")   失敗，帶 fail 代碼
- *         → once("duel_standby")       有人進來了，開打
- *
- *   進房  emit("room_in", id, channel, roomId, pass, deckNow)
- *         → once("duel_standby")       成功
- *         → once("match_room_error")   失敗
+ *   頻道清單  socket.fetch("get_matching_channel")
+ *             → [{ channel, quick, event, cost, required_ap, domain }]
+ *   房間清單  sc.channel_room（伺服器推 refresh_room 時整份換掉）
+ *   開房      socket_channel.fetch("create_room", deck_now, channel,
+ *               { room_name, stage, friend, cost, password, deck_id })
+ *             → room_id（字串）；失敗回 null，另外推 match_error(代碼)
+ *             成功後官方做：room_wait = true、room_select = id、create_match_wait()
+ *   有人進來  推 match_start(房間設定) → on_match_start() → MatchBoot
+ *   進房      socket_channel.fetch("enter_room", room_id, deck_now, 密碼或 null)
+ *             → 房間設定；官方接著 create_match_loading() ＋ launch("MatchBoot", …)
+ *   收房      socket_channel.fetch("cancel_room", room_id)
  * ```
+ *
+ * 改版前那一套（`match_room_make`／`room_in`／`delete_room`、`sc.id`、
+ * `channels_cross`、`channel_panel`）**全部不存在了**，這支整個照新協定重寫。
+ *
+ * ⚠ 收房現在吃 **room_id**，不再是「整個頻道一起收」—— 舊版那條「插件的取消會把
+ * 玩家手動開的房一起收掉」的坑沒有了。
  *
  * ## ⚠ 這支會改變遊戲狀態
  *
- * 開房會**消耗 AP 5**、會在公開的房間清單裡出現、會讓玩家進入對戰。
+ * 開房會**消耗 AP**、會在公開的房間清單裡出現、會讓玩家進入對戰。
  * 跟這個 package 其他的注入不同（那些只改顯示），這裡是真的在替玩家操作。
  * 呼叫端必須是玩家明確按下的動作，絕對不能自動觸發。
  *
  * ## 房間密碼就是配對 token
  *
- * 遊戲自己的密碼是客戶端產生的 8 碼英數字串，當成普通參數送出：
- *
- *     pass: this.pass ? this.pass_string : null
- *
- * 所以插件可以指定成中間人給的那一組 —— 外人看得到那間房但進不去。
- * ⚠ **房名絕對不能包含 token**，那等於把密碼貼在公開清單上。
+ * 官方的密碼是客戶端產生的英數字串（6 碼，輸入框收 12 碼以內的英數），當成
+ * 普通參數送出。所以插件可以指定成中間人給的那一組（8 碼英數）—— 外人看得到
+ * 那間房但進不去。⚠ **房名絕對不能包含 token**，那等於把密碼貼在公開清單上。
  *
  * ## 房間清單是公開資訊
  *
- * `channel{n}_room` 推送的每一筆都帶著 `deckA` / `deckB`（含 `chara`、
- * `charaIndex`、`cost`）—— 那是遊戲廣播給大廳裡**每一個人**的，MatchingLobby
- * 的房間列也確實會畫出雙方的卡片縮圖。所以拿它來驗「對手的牌組在約定規則下
- * 合不合法」不涉及隱藏資訊。
- *
+ * `channel_room` 的每一筆都帶著雙方的牌組（`playerA_deck`／`playerB_deck`）——
+ * 那是遊戲送給大廳裡**每一個人**的，房間詳細面板也確實會畫出雙方的卡。
  * ⚠ 但**不得**拿它來挑對手（看到不好打的就不配）。那不是 §12 的隱藏資訊問題，
  * 是運動精神問題，而且會讓整個約戰功能失去意義。
  */
 
 import { embedJson } from "./embed.js";
 
-/** 遊戲頻道裡一副公開可見的牌組。 */
+/** 房間清單裡一副公開可見的牌組（改版後的卡片 id）。 */
 export interface RoomDeck {
-  /**
-   * 這一格放的是誰。角色是 `cc069`，怪物是 `mc001_01`。空槽是 `null`。
-   *
-   * ⚠ **前綴決定 `charaIndex` 該查哪份資產** —— `cc` 查 `cc_asset`、
-   * `mc` 查 `mc_asset`。查錯的話不會報錯，會拿到一張**存在但不相干**的卡。
-   */
-  chara: (string | null)[];
-  /** `cc_asset` 或 `mc_asset` 的 `frames` 索引 —— 就是規則鍵要用的那個。 */
-  charaIndex: (number | null)[];
+  /** 三個槽位的 `CharaCards[].id`，空槽是 `null`。 */
+  charaCardId: (number | null)[];
   /** 伺服器算的 COST（原版規則）。 */
   cost: number;
 }
@@ -78,19 +79,26 @@ export interface RoomEntry {
   /** 房主顯示名稱。host 靠它找出自己開的那間。 */
   playerAName: string | null;
   playerBName: string | null;
-  /** 1 = 需要密碼 */
+  /** 有沒有密碼。 */
   pass: boolean;
   deckA: RoomDeck | null;
   deckB: RoomDeck | null;
 }
 
+/** 開一間房要多少 AP —— 頻道物件自己帶的 `required_ap.normal`。 */
+export interface RequiredAp {
+  single: number;
+  multi: number;
+}
+
 export interface MatchContext {
-  /** 玩家 id（`db_*` 呼叫都要帶）。⚠ 高熵字串，**不得離開本機**。 */
+  /** 讀得到玩家 id 嗎。⚠ id 本身是登入憑證，**不得離開本機**，所以只回有沒有。 */
   hasId: boolean;
   /** 目前所在頻道。沒進頻道是 `null`。 */
   channel: number | null;
   /**
-   * 全部頻道，兩組併在一起。實測（2026-08-15）：
+   * 看過的頻道。來源是遊戲自己送的 `get_matching_channel`（順路記下來的，不另外
+   * 發請求），再加上玩家目前所在的那一個。一次都沒看過頻道選單時可能缺頻道。
    *
    * | # | 名稱             | type   | crossplay |
    * |---|------------------|--------|-----------|
@@ -100,42 +108,35 @@ export interface MatchContext {
    * | 4 | 布萊德克洛伊茲   | duel   | true      |
    */
   channels: Record<string, ChannelInfo> | null;
-  /** 目前頻道是不是跨平台頻道（走 `socket_cross`）。 */
+  /** 目前頻道是不是跨平台頻道。 */
   crossplay: boolean;
+  /**
+   * 目前頻道開房要多少 AP（頻道物件的 `required_ap.normal`）。讀不到是 `null`，
+   * 那時退回 {@link duelApCost}。
+   */
+  requiredAp: RequiredAp | null;
   /** 目前選的牌組（1/2/3）。 */
   deckNow: number | null;
   /**
-   * 目前牌組的 COST，**遊戲自己算的那個數字**（大廳牌組縮圖下面的 `cost:NN`）。
+   * 目前牌組的 COST，**伺服器存的那個數字**（`registry.deck[].cost`）。
    *
-   * ⚠⚠ **兩次實測結論相反，不要憑印象用它。**
-   *
-   * | 日期       | 觀察                                                     |
-   * | ---------- | -------------------------------------------------------- |
-   * | 2026-08-15 | 改寫 cc_asset 後三張加起來 48，這個欄位仍是 49 → 沒跟著改 |
-   * | 2026-08-19 | Deck3 顯示 101 = 自訂規則的 101，而官方規則算出來是 105   |
-   *
-   * 後者是三副牌一起量的（54／92／101 三副全中自訂規則），所以「它跟著自訂
-   * 規則走」在**那個時間點**是確定的 —— 差別多半在牌組資料什麼時候被重算。
-   *
-   * **要判檔位、要顯示總和，一律自己用 `calculateTeamCost()` 算**（
-   * `teamCostCenti()`），不要讀這一格：那支吃的是玩家手上那份規則，答案什麼
-   * 時候都對。這一格留著只給「遊戲說它幾 C」這種診斷用途。
+   * ⚠ 客戶端從不自己算它。要判檔位、要顯示總和，一律自己用
+   * `calculateTeamCost()` 算（`teamCostCenti()`），這一格只給診斷用。
    */
   deckCost: number | null;
   /**
    * 目前牌組的**規則鍵**，四種卡都有。讀不到牌組時整個是 `null`。
    *
-   * 這是配對用的東西：角色與怪物的鍵就是資產的 `filename`，而封包給的
-   * `charaIndex` 就是那份資產 `frames` 的索引（docs/open-questions.md 第 1 題），
-   * 所以只是查一次陣列，不需要任何對照表。裝備與事件卡沒有 filename，鍵是
-   * 由索引組出來的（`wp001` / `ev091`，見 `@ulr/rule-schema` 的 card-key.ts）。
+   * 角色與怪物的鍵是 `CharaCards[].filename`；武器與事件卡是**改版前的索引**
+   * 組出來的（`wp001`／`ev091`，規則檔一直是用那套寫的），新 id → 舊索引的對照
+   * 由安裝時傳進來（見 {@link MatchRoomScriptOptions}）。
    *
    * ⚠ 這是**自己的**牌組。對手的牌組永遠不從這裡來。
    */
   deckKeys: DeckKeySet | null;
   /** 玩家顯示名稱。找自己開的房要用。 */
   playerName: string | null;
-  /** 玩家自己是不是正在配對中（已經開了房在等人）。 */
+  /** 玩家已經有一間開著在等人的房（遊戲自己的 `room_wait`）。 */
   isMatching: boolean;
   /** Match 場景是不是 active。不是的話什麼都不能做。 */
   inMatch: boolean;
@@ -153,20 +154,15 @@ export interface MatchContext {
 }
 
 /**
- * 開一間對戰房要多少 AP。**照客戶端自己的算式**（2026-08-19 從 bundle 讀的）：
+ * 開一間對戰房要多少 AP —— **讀不到頻道物件時的退路**。
  *
- * ```js
- *   this.ap = this.crossplay ? (+this.multi ? 4 : 2) : (+this.multi ? 5 : 2)
- * ```
+ * 改版後頻道物件自己帶 `required_ap`（迪城實測 `normal: {single: 2, multi: 5}`），
+ * 讀得到就用那個（{@link MatchContext.requiredAp}）。這張表是改版前從 bundle 讀的：
  *
  * | 頻道                       | 1vs1 | 3vs3 |
  * | -------------------------- | ---- | ---- |
  * | 一般（亞城／迪城）         | 2    | 5    |
  * | 跨平台（峰亥盧／布萊德）   | 2    | 4    |
- *
- * ⚠ **不要寫死 5。** 自動配對現在固定 3vs3 非跨平台，所以確實是 5 —— 但那兩個
- * 條件都是變數，寫死的話官方調價或我們開放 1vs1 時會變成「插件說不夠、遊戲說
- * 夠」，而那種矛盾玩家永遠查不出原因。
  */
 export function duelApCost(options: { multi: boolean; crossplay: boolean }): number {
   if (!options.multi) return 2;
@@ -190,9 +186,9 @@ export type DuelAffordability =
  * ```
  *
  * ⚠⚠ **讀不到就當打得起。** `ap` 或 `duelFree` 是 `null` 代表我們沒問到
- * （玩家還沒進大廳、`db_player` 還沒回來、遊戲改版換了欄位）——「不知道」不是
- * 「不夠」。擋錯的代價是玩家完全排不了隊而且看不出原因，放行的代價只是退回
- * 原本的行為（伺服器自己會回 `fail: 4`）。這一條的方向不能反。
+ * （玩家還沒進大廳、遊戲改版換了欄位）——「不知道」不是「不夠」。擋錯的代價是
+ * 玩家完全排不了隊而且看不出原因，放行的代價只是退回原本的行為（伺服器自己會回
+ * `NOT_ENOUGH_AP`）。這一條的方向不能反。
  */
 export function canAffordDuel(options: {
   ap: number | null;
@@ -207,8 +203,7 @@ export function canAffordDuel(options: {
 }
 
 /**
- * 頻道編號 → 顯示名稱。**實測抄下來的**（2026-08-15 的 MatchingLobby），
- * 遊戲沒有把名稱放進 `channels` 物件裡，只有 type 跟 cost。
+ * 頻道編號 → 顯示名稱（`MatchUITexts.channel_info.channelN.name`）。
  *
  * ⚠ 只拿來**顯示**。判斷一律用編號與 `crossplay`，名稱換了不該影響行為。
  */
@@ -220,14 +215,28 @@ export const CHANNEL_NAMES: Readonly<Record<number, string>> = {
 };
 
 /**
- * 對戰地點。**照抄客戶端 bundle 裡的 `Match.STAGES.tcn`**（2026-08-15），
- * 不是自己編的。
+ * 跨平台頻道（`channel_info` 的說明寫著「跨平台對戰專用頻道」的那兩個）。
  *
- * ⚠ **`"014"` 才是「隨機」，`"000"` 是雷德貝魯格城。** 這兩個很容易搞反 ——
- * 官方對話框預設選的是清單第一項（000），而不是隨機，所以大廳上一堆房是
- * `stage:"000"`，看起來很像「沒選 = 隨機」。
+ * ⚠ 改版後頻道物件**沒有**分組的欄位了（以前是 `channels`／`channels_cross` 兩張表）。
+ * 這張表只拿來決定「duel 頻道借哪一個 ranked 頻道的 COST 檔位」（{@link costTiersFor}）
+ * 與 AP 的退路（{@link duelApCost}）。
+ */
+export const CROSSPLAY_CHANNELS: readonly number[] = [3, 4];
+
+/**
+ * 官方的「隨機」—— 送給遊戲的是 **999**（`MatchUITexts.room_config.stage.option`
+ * 的最後一項）。插件內部一律寫成 3 位數字串，送出去之前才轉數字（{@link stageValue}）。
  *
- * ⚠ **不能傳 `null`**，伺服器會回 `fail: 20`。
+ * ⚠ 改版前「隨機」是 `014`，而 014 現在是一張真的地圖（聖域的凱旋門）。
+ */
+export const RANDOM_STAGE_CODE = "999";
+
+/**
+ * 對戰地點。**照抄客戶端的 `MatchUITexts.room_config.stage.option`**（tcn，
+ * 2026-09-27），不是自己編的。遊戲那邊的 `value` 是數字，這裡寫成 3 位數字串。
+ *
+ * ⚠ **`999` 才是「隨機」，`000` 是雷德貝魯格城。** 官方對話框畫面上預設顯示
+ * 第一項，但下拉的 `value` 一開始是 `undefined`，要玩家點過才有值。
  */
 export const STAGES: readonly { value: string; name: string }[] = [
   { value: "000", name: "雷德貝魯格城" },
@@ -240,56 +249,49 @@ export const STAGES: readonly { value: string; name: string }[] = [
   { value: "007", name: "峰亥盧遺跡" },
   { value: "008", name: "魔都羅占布爾克" },
   { value: "009", name: "瘋狂山脈" },
-  { value: "014", name: "隨機" },
+  { value: RANDOM_STAGE_CODE, name: "隨機" },
 ];
 
 /**
- * 隱藏地圖 —— 官方選單裡**沒有**，但客戶端與伺服器都認得的四張。
+ * 隱藏地圖 —— 官方選單裡**沒有**，但客戶端認得的四張（**2026-09-23 改版後的代號**）。
  *
- * 官方選單是 `000`~`009` 加上 `014`（隨機），中間的 010~013 整段跳過。但那四張
- * 是**真的地圖**，不是空號：
+ * 2026-09-27 從跑著的客戶端逐一驗過：
  *
- * ```
- *   loadBackgroundAssets(pack, room)   ← 客戶端自己組路徑，沒有白名單
- *     images/assets/bg/{room_stage}/bg_{room_stage}.webp
- * ```
+ * | 代號 | 背景 `Backgrounds/bgNNN.avif` | 房間縮圖 `MatchThumImages` | 畫面            |
+ * | ---- | ----------------------------- | -------------------------- | --------------- |
+ * | 010  | 沒有（載入器直接借 `bg000`）  | 沒有 `thum10`              | 雷德貝魯格城    |
+ * | 011  | 760×680                       | `thum11`                   | 荒漠與岩柱      |
+ * | 012  | 760×680                       | `thum12`                   | 霧中的湖與小船  |
+ * | 013  | 760×680                       | `thum13`                   | 巨石陣          |
+ * | 014  | 3040×2040 **動畫**            | `thum14`                   | 拱門長廊        |
  *
- * 2026-08-15 直接對資產主機驗過每一個代號（`new Image()` 抓得到就是有）：
+ * 010 只是雷德貝魯格城的另一個代號（背景載入器 `case "000": case "010":` 同一支），
+ * 不算一張圖，所以不放。
  *
- * | 代號 | 圖         | 尺寸        | 說明                              |
- * | ---- | ---------- | ----------- | --------------------------------- |
- * | 009  | 有         | 760×680     | 官方選單裡的最後一張，當對照組    |
- * | 010  | 有         | 760×680     | 魔女山谷                          |
- * | 011  | 有         | 760×680     | 白魔的圓環石陣                    |
- * | 012  | 有         | 760×680     | 烏波斯的黑湖                      |
- * | 013  | 有         | 4560×1360   | 聖域的凱旋門 —— **動畫圖**        |
- * | 014  | 沒有       | —           | 那是「隨機」，伺服器才解析成地圖  |
+ * ⚠ 改版前這四張是 010〜013（動畫那張是 013），整段往後挪了一格。名稱是看圖對的：
+ * 湖＝烏波斯的黑湖、巨石陣＝白魔的圓環石陣；另外兩張照「整段挪一格」對回舊表
+ * （舊 010 魔女山谷 → 011、舊 013 動畫圖聖域的凱旋門 → 014）。舊表把黑湖與石陣
+ * 對反了，而且那張表沒有出處 —— 找到官方譯名時以官方為準。
  *
- * 013 是動畫圖這件事客戶端自己也知道 —— `loadBackgroundAssets` 裡唯一的特例是
- * `"000" != stage && "013" != stage`，那兩個走 `spritesheet`，其餘走 `image`。
- * 一張純粹的空號不會被寫進程式碼的特例分支。
-
- *
- * ⚠ 還是沒有在這四張上**打完一整場**。背景載得起來是實證，戰鬥流程沒有。
+ * ⚠ 還沒有在這四張上**打完一整場**，也還沒實測伺服器收不收這四個代號開房。
  */
 export const HIDDEN_STAGES: readonly { value: string; name: string }[] = [
-  { value: "010", name: "魔女山谷" },
-  { value: "011", name: "白魔的圓環石陣" },
+  { value: "011", name: "魔女山谷" },
   { value: "012", name: "烏波斯的黑湖" },
-  { value: "013", name: "聖域的凱旋門" },
+  { value: "013", name: "白魔的圓環石陣" },
+  { value: "014", name: "聖域的凱旋門" },
 ];
 
 /**
- * 「亞城隨機」抽的那幾張 —— 官方選單的 `000`~`009` **再加上 `010`**。
+ * 「亞城隨機」抽的那幾張 —— 官方選單的 `000`~`009` **再加上 `011`**（魔女山谷）。
  *
- * ⚠ `010`（魔女山谷）在官方的開房選單裡是選不到的（見 {@link HIDDEN_STAGES}），
- * 但客戶端與伺服器都認得它，背景圖也實測抓得到。放進來是玩家指定的：
- * 自動配對要取代亞歷山卓城的快速比賽，而那邊的隨機池就是這十一張。
+ * 放進來是玩家指定的：自動配對要取代亞歷山卓城的快速比賽，而那邊的隨機池就是
+ * 這十一張。改版前那一張的代號是 010，改版後是 011（見 {@link HIDDEN_STAGES}）。
  *
- * ⚠ **這一張還沒有在上面打完一整場。** 背景載得起來是實證，戰鬥流程不是 ——
- * 不想碰的人在配對頁選「官方隨機」，那條路只會開 `014`。
+ * ⚠ **這一張還沒有在上面打完一整場。** 不想碰的人在配對頁選「官方隨機」，那條路
+ * 只會開 {@link RANDOM_STAGE_CODE}。
  *
- * ⚠ 不含 `014`：那不是地圖，是「叫伺服器自己抽」。抽到它等於白抽一次。
+ * ⚠ 不含 `999`：那不是地圖，是「叫伺服器自己抽」。抽到它等於白抽一次。
  */
 export const ARCADIA_STAGES: readonly string[] = [
   "000",
@@ -302,14 +304,14 @@ export const ARCADIA_STAGES: readonly string[] = [
   "007",
   "008",
   "009",
-  "010",
+  "011",
 ];
 
 /**
  * 玩家在插件裡指得到名字的那幾張地圖 —— 官方選單的 `000`~`009` 加上隱藏的
- * `010`~`013`。
+ * `011`~`014`。
  *
- * ⚠ **不含 `014`**：那不是地圖，是「叫伺服器自己抽」。它在配對頁是另一個選項
+ * ⚠ **不含 `999`**：那不是地圖，是「叫伺服器自己抽」。它在配對頁是另一個選項
  * （「官方隨機」），不是這串裡的一張。
  *
  * ⚠ 這是**型別的來源**（`StagePick` 的地圖那一半就是這個 union），所以代號寫在
@@ -327,13 +329,13 @@ export const STAGE_CODES = [
   "007",
   "008",
   "009",
-  "010",
   "011",
   "012",
   "013",
+  "014",
 ] as const;
 
-/** 三位數的地點代號。`"014"` **不在**裡面（見 {@link STAGE_CODES}）。 */
+/** 三位數的地點代號。`"999"`（隨機）**不在**裡面（見 {@link STAGE_CODES}）。 */
 export type StageCode = (typeof STAGE_CODES)[number];
 
 /** 這個字串是認得的地點代號嗎。⚠ 開房參數會用它，所以一律驗過再送。 */
@@ -342,7 +344,18 @@ export function isStageCode(value: unknown): value is StageCode {
 }
 
 /**
- * 配對頁那個下拉選單的地圖那一段 —— 代號 + 名字，`000` 到 `013`。
+ * 3 位數字串 → 遊戲選單的 `value`（數字）。`"011"` → 11、`"999"` → 999。
+ *
+ * ⚠ 認不得的一律丟例外，不要送出去 —— 開房參數錯了伺服器只會回一個代碼。
+ */
+export function stageValue(code: string): number {
+  if (!/^\d{3}$/.test(code))
+    throw new Error(`地點代號必須是 3 位數字，收到 ${JSON.stringify(code)}`);
+  return Number(code);
+}
+
+/**
+ * 配對頁那個下拉選單的地圖那一段 —— 代號 + 名字。
  *
  * 名字是**查出來的**，不是這裡編的（見 {@link STAGE_CODES}）。查不到就退回
  * 代號本身 —— 少一個譯名不該讓整個選單少一張圖。
@@ -355,14 +368,14 @@ export const SELECTABLE_STAGES: readonly { value: StageCode; name: string }[] = 
 );
 
 /**
- * 「牌組Cost限制」可以填的值。照抄 `Match.COST_RANGES`。
+ * 「牌組Cost限制」可以填的值（容差 ±N）。
  *
- * ⚠ 只有 0~5，不是任意數字。它是**容差**（房間對話框寫「± 5」），
- * 而且伺服器用**原版 COST** 判。
+ * ⚠ 它是**容差**不是上限，而且伺服器用**原版 COST** 判。官方下拉的「±3」那一項
+ * 送的值寫成了 5（客戶端的筆誤，2026-09-27 讀到的），插件不用這一格。
  */
 export const COST_RANGES: readonly number[] = [0, 1, 2, 3, 4, 5];
 
-/** 官方預設房名（`Match.DEFAULT_NAMES.tcn`）。 */
+/** 官方預設房名（`MatchUITexts.room_config.default_name`）。 */
 export const DEFAULT_ROOM_NAME = "請多關照";
 
 /**
@@ -371,50 +384,34 @@ export const DEFAULT_ROOM_NAME = "請多關照";
  * ⚠ **這是插件自己的上限，不是實測出來的伺服器上限。** 依據是官方快速比賽
  * 開出來的房名 —— `Quickmatch [COST:57]` 剛好 20 個字，而那是遊戲自己產的，
  * 所以 20 一定塞得下。再長會不會被截、被拒，沒有驗過。
- *
- * 自動配對的房名是系統組的（見 `@ulr/arbiter-engine` 的 `buildRoomName`），
- * 組出來一定在這個長度之內 —— 而且 `[COST:57]` 那一段永遠完整，被截的
- * 只會是前面的規則名。
  */
 export const ROOM_NAME_MAX_LENGTH = 20;
 
 export interface ChannelInfo {
-  /** `ranked` = 有 BP 排名，`duel` = 一般約戰。 */
+  /** `ranked` = 有 COST 檔位與快速比賽，`duel` = 一般約戰，`event` = 活動頻道。 */
   type: string;
   /**
-   * COST 階層。**只有 ranked 頻道有**，duel 頻道是 `null`。
-   *
-   * 2026-08-16 兩個客戶端實測：
-   *
-   * ```
-   *   channels       = {"1":{type:"ranked",cost:[57,66,78]}, "2":{type:"duel"}}
-   *   channels_cross = {"3":{type:"ranked",cost:[56,69,71]}, "4":{type:"duel"}}
-   * ```
-   *
-   * ⚠ 2 與 4 **連 `cost` 這個鍵都沒有**，不是空陣列。要拿 duel 頻道的階層得走
-   * {@link costTiersFor}。
+   * COST 階層。**只有 ranked 頻道有**，其餘是 `null`。
+   * duel 頻道要拿階層得走 {@link costTiersFor}。
    */
   cost: (number | null)[] | null;
-  /** true = 走 `socket_cross`。 */
+  /** 跨平台頻道（見 {@link CROSSPLAY_CHANNELS}）。 */
   crossplay: boolean;
 }
 
 /**
- * 這個頻道的 COST 階層。**duel 頻道借用同一條 socket 上那個 ranked 頻道的。**
+ * 這個頻道的 COST 階層。**duel 頻道借用同一組（同為跨平台或同為一般）的 ranked 頻道。**
  *
  * 玩家給的規則（2026-08-16）：
  *
  * > 頻道二（迪特赫姆）的 COST 限制用亞歷山卓城（頻道一）的 COST，
  * > 頻道四（布萊德克洛伊茲）用峰亥盧遺跡（頻道三）的。**每週二遊戲更新時會跟著變。**
  *
- * ⚠ **不要寫死成 `{2:1, 4:3}`。** 實測的結構比那個對映更基本：`channels` 與
- * `channels_cross` 是兩組**各自成套**的頻道（各走一條 socket），每一組裡有一個
- * ranked 與一個 duel，duel 借用同組 ranked 的階層。照結構推導的話，官方哪天多開
- * 一組頻道也不會壞；寫死編號的話會安靜地拿到另一組的數字 —— 而 1 是
- * `[57,66,78]`、3 是 `[56,69,71]`，**兩組真的不一樣**，拿錯不會報錯只會配錯。
+ * ⚠ 1 與 3 的數字**真的不一樣**（改版前實測 `[57,66,78]` 與 `[56,69,71]`），拿錯組
+ * 不會報錯只會配錯。
  *
- * ⚠ **每週二會變，所以不能烤進插件裡。** 這支只從客戶端當下的 `channels` 讀，
- * 玩家的客戶端永遠是他實際在玩的那一版。
+ * ⚠ **每週二會變，所以不能烤進插件裡。** 這支只從客戶端當下送來的頻道清單讀。
+ * 那一個 ranked 頻道沒看過（玩家這次還沒經過頻道選單）時回 `null`。
  */
 export function costTiersFor(
   channels: Readonly<Record<string, ChannelInfo>> | null,
@@ -433,7 +430,7 @@ export function costTiersFor(
   const own = tiers(mine);
   if (own !== null) return own;
 
-  // 自己沒有 → 找同一組（同一條 socket）的 ranked 頻道。
+  // 自己沒有 → 找同一組的 ranked 頻道。
   for (const info of Object.values(channels)) {
     if (info.crossplay !== mine.crossplay) continue;
     const borrowed = tiers(info);
@@ -446,81 +443,165 @@ export interface CreateRoomOptions {
   name: string;
   /**
    * 對戰地點代號。**3 位數字串**（見 {@link STAGES}），不是地圖名稱。
-   * 隨機是 `"014"`。
-   *
-   * ⚠ **不能傳 `null`。** 原本這裡寫「`null` = 隨機」，那是猜的：實測傳 null
-   * 伺服器直接回 `fail: 20`（那個代碼一路被誤判成「AP 不足」）。
+   * 隨機是 {@link RANDOM_STAGE_CODE}。送出去之前轉成數字（{@link stageValue}）。
    */
   stage: string;
-  /** 3vs3 = true */
-  multi: boolean;
   friend: boolean;
   /** 房間密碼。約戰一律要有。 */
   pass: string;
   /**
-   * 遊戲的「牌組 Cost 限制」—— **是容差不是上限**。開房對話框上寫的是
-   * 「牌組Cost限制 ☑ ± 5」，也就是「對手的牌組 COST 要在我的 ±N 之內」。
-   * 不限制傳 `null`。
+   * 遊戲的「牌組 Cost 限制」—— **是容差不是上限**（「對手的牌組 COST 要在我的
+   * ±N 之內」）。不限制傳 `null`。
    *
-   * ⚠ 伺服器用**原版 COST** 判，跟自訂規則的總和對不上 —— 自訂規則算出來
-   * 差很多的兩副牌，在伺服器眼中可能剛好在 ±N 內，反之亦然。
+   * ⚠ 伺服器用**原版 COST** 判，跟自訂規則的總和對不上。
+   *
+   * ⚠ 3vs3 不在這裡：改版後的開房參數沒有那一格，伺服器看牌組張數決定。
    */
   cost: number | null;
 }
 
 export type CreateRoomResult =
-  { ok: true; roomId: string | null } | { ok: false; reason: string; fail?: number };
+  { ok: true; roomId: string | null } | { ok: false; reason: string; fail?: string };
 
-export type JoinRoomResult = { ok: true } | { ok: false; reason: string; fail?: number };
+export type JoinRoomResult = { ok: true } | { ok: false; reason: string; fail?: string };
+
+/** {@link buildMatchRoomScript} 要的東西。 */
+export interface MatchRoomScriptOptions {
+  /**
+   * 改版後的 `WeaponCards[].id` → 改版前的武器索引（規則鍵 `wpNNN` 的那個數字）。
+   * 由呼叫端用 `@ulr/rule-schema` 的 `LEGACY_WEAPON_IDS` 反查出來（這個 package
+   * 不依賴 rule-schema）。
+   */
+  weaponIndexById: Readonly<Record<string, number>>;
+  /** 同上，事件卡（`evNNN`）。 */
+  eventIndexById: Readonly<Record<string, number>>;
+}
 
 // ---------------------------------------------------------------------------
 
+/** 腳本版本。**改動注入腳本裡任何一行就 +1**，修 bug 也算。 */
+export const MATCH_ROOM_SCRIPT_VERSION = 9;
+
 /**
- * 注入的腳本：在頁面上裝一組 `window.__ulrMatch` 的操作介面。
+ * 注入的腳本：在頁面上裝一組 `window.__ulrMatch` 的操作介面，並在遊戲的 socket
+ * 類別上順路記下頻道清單。
  *
- * 用 `Runtime.evaluate` 裝就好，**不需要重載** —— Match 場景與 socket 在遊戲
- * 跑起來之後一直都在。
+ * 用 `Runtime.evaluate` 裝就好，**不需要重載**。重裝一律整份換掉（這一版沒有掛
+ * 任何會留下來的 listener，除了頻道清單那一個包裝 —— 它認得自己，不會包兩層）。
  *
  * ⚠ 每個函式都回傳 JSON 字串而不是物件：序列化失敗的錯誤沒有上下文，
  * 而這支要在真的對戰流程裡跑，出錯時必須看得懂。
+ *
+ * ⚠ 整支住在 template literal 裡：**不能出現反引號**，也不要寫反斜線（正規式
+ * 裡的 \d 之類會被吃掉一層）。
  */
-export const MATCH_ROOM_INSTALL_EXPRESSION = `(function () {
+export function buildMatchRoomScript(options: MatchRoomScriptOptions): string {
+  const config = {
+    version: MATCH_ROOM_SCRIPT_VERSION,
+    weaponIndex: options.weaponIndexById,
+    eventIndex: options.eventIndexById,
+    crossplay: CROSSPLAY_CHANNELS,
+  };
+  return `(function () {
   "use strict";
+  var CFG = JSON.parse(${embedJson(config)});
   var FLAG = "__ulrMatch";
-  // 腳本版本。**改動 listen() 裡任何一行就要 +1**，修 bug 也算。
-  //
-  // ⚠ 不 +1 的話守衛會認定「已經是這一版」而不重掛，頁面上跑的仍是**有 bug 的
-  // 那一支**，而且完全沒有錯誤訊息。2026-08-15 實測踩過：把 st.seq++ 修成
-  // b.seq++ 卻沒改版本號，結果清單有內容但 seq 永遠 0，所有「等新推播」全部逾時。
-  var VERSION = 7;
-  // ⚠ **不要在這裡 early-return。** 改了這支腳本之後，頁面上跑的仍會是舊版，
-  // 症狀是「測試綠了但實際跑起來是舊行為」。這個專案在 ws-events 與 patch-ok
-  // 上各栽過一次，2026-08-15 這支又栽了一次。
-  var reinstall = !!(window[FLAG] && window[FLAG].installed);
+  var CHANNELS = "__ulrMatchChannels";
 
+  function matchScene() {
+    var keys = window.game && window.game.scene && window.game.scene.keys;
+    return (keys && keys.Match) || null;
+  }
+
+  /** Match 而且是 active 的（玩家人在對戰大廳）。對戰中 Match 是 sleep。 */
   function scene() {
-    var sc = window.game && window.game.scene && window.game.scene.keys.Match;
-    return sc && sc.scene.isActive() ? sc : null;
+    var sc = matchScene();
+    return sc && sc.scene && sc.scene.isActive() ? sc : null;
   }
 
-  function pickDeck(d) {
-    if (!d) return null;
-    return { chara: d.chara, charaIndex: d.charaIndex, cost: d.cost };
+  // ---- 頻道清單 ------------------------------------------------------------
+  //
+  // 頻道物件只在頻道選單那一刻出現（get_matching_channel 的回應），進了頻道之後
+  // 場景上只留玩家選的那一個。迪城要借亞城的 COST 檔位，所以得把整份記下來。
+  //
+  // ⚠ 搭遊戲自己送的那一次（包在 socket 類別的 fetch 上，只看回應、不改任何東西），
+  // 不另外發請求。遊戲裡每個場景的 socket 都是同一個類別，所以開機時就包得到。
+
+  function pickChannel(c) {
+    var ap = c.required_ap && c.required_ap.normal;
+    return {
+      channel: c.channel,
+      quick: c.quick === true,
+      event: c.event === true,
+      cost: c.cost && c.cost.length !== undefined ? Array.prototype.slice.call(c.cost) : null,
+      requiredAp: ap && typeof ap.single === "number" && typeof ap.multi === "number"
+        ? { single: ap.single, multi: ap.multi } : null
+    };
   }
 
-  /** 拿一份快取 JSON 裡的陣列，拿不到就 null。 */
-  function framesOf(cacheKey, field) {
-    try {
-      var cache = window.game && window.game.cache && window.game.cache.json;
-      var asset = cache ? cache.get(cacheKey) : null;
-      var rows = asset ? asset[field] : null;
-      return rows && rows.length !== undefined ? rows : null;
-    } catch (e) {
-      return null;
+  function remember(c) {
+    if (!c || typeof c.channel !== "number") return;
+    if (!window[CHANNELS]) window[CHANNELS] = {};
+    window[CHANNELS][String(c.channel)] = pickChannel(c);
+  }
+
+  function tapChannels() {
+    var keys = window.game && window.game.scene && window.game.scene.keys;
+    if (!keys) return false;
+    for (var k in keys) {
+      var so = keys[k] && keys[k].socket;
+      if (!so || typeof so.fetch !== "function") continue;
+      var P = Object.getPrototypeOf(so);
+      if (!P || typeof P.fetch !== "function") continue;
+      if (P.__ulrChannelTap) return true;
+      var orig = P.fetch;
+      P.fetch = function (ev) {
+        var p = orig.apply(this, arguments);
+        if (ev === "get_matching_channel" && p && typeof p.then === "function") {
+          p.then(function (list) {
+            try {
+              if (list && list.length !== undefined) {
+                for (var i = 0; i < list.length; i++) remember(list[i]);
+              }
+            } catch (e) {}
+          }, function () {});
+        }
+        return p;
+      };
+      P.__ulrChannelTap = orig;
+      return true;
     }
+    return false;
   }
 
-  /** 補零到 3 位。⚠ 要跟 @ulr/rule-schema 的 card-key.ts 一致。 */
+  function isCross(n) { return CFG.crossplay.indexOf(n) !== -1; }
+
+  function channelTable() {
+    var src = window[CHANNELS] || {};
+    var out = {};
+    for (var k in src) {
+      if (!Object.prototype.hasOwnProperty.call(src, k)) continue;
+      var c = src[k];
+      out[k] = {
+        type: c.quick ? "ranked" : c.event ? "event" : "duel",
+        cost: c.cost,
+        crossplay: isCross(c.channel)
+      };
+    }
+    return out;
+  }
+
+  // ---- 牌組 ----------------------------------------------------------------
+
+  function currentDeck(sc) {
+    var list = sc.deck || (window.game.registry && window.game.registry.get("deck"));
+    if (!list || list.length === undefined) return null;
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && list[i].deck_id === sc.deck_now) return list[i];
+    }
+    return null;
+  }
+
   function padIndex(i) {
     var s = String(i);
     while (s.length < 3) s = "0" + s;
@@ -530,385 +611,355 @@ export const MATCH_ROOM_INSTALL_EXPRESSION = `(function () {
   /**
    * 牌組的四種規則鍵。
    *
-   * charaIndex 就是那份資產 frames 的陣列索引 —— 客戶端自己的
-   * Chara.getAsset() 就是這樣查的，所以不需要任何對照表。
+   * 角色（含怪物）：CharaCards 裡那張的 filename。武器／事件卡：改版後的 id 先換回
+   * 改版前的索引（安裝時傳進來的對照），再組成 wpNNN／evNNN —— 規則檔一直是用
+   * 那套寫的。
    *
-   * ⚠⚠ **要看 chara 的前綴決定查哪一份。** 怪物卡的 charaIndex 索引的是
-   * mc_asset，拿去查 cc_asset 會撈到一張**存在但完全不相干**的角色卡，而且
-   * 不會報錯 —— 自訂規則的總和與配對相容性判定會靜靜地錯掉。
-   * 判準抄自客戶端的 Chara.getCharaType()：cc → 角色、mc → 怪物。
-   *
-   * ⚠ 讀的是 filename **不是 cost**。自訂 COST 的注入會就地改寫同一份快取的
-   * cost 欄位，但 filename 沒被動過，所以套過規則的客戶端上讀也是對的。
    * ⚠ 查不到就給 null，不要用空字串頂替 —— 呼叫端要分得出「這格是空的」與
    * 「這格有卡但我讀不到它是誰」，後者算出來的 COST 會少一項。
    */
   function deckKeysOf(d) {
-    if (!d || !d.charaIndex || d.charaIndex.length === undefined) return null;
-    var cc = framesOf("cc_asset", "frames");
-    var mc = framesOf("mc_asset", "frames");
-    if (cc === null) return null;
+    if (!d || !d.chara_card_id || d.chara_card_id.length === undefined) return null;
+    var cards = window.game.cache && window.game.cache.json && window.game.cache.json.get("CharaCards");
+    if (!cards || cards.length === undefined) return null;
+    var fileById = {};
+    for (var n = 0; n < cards.length; n++) {
+      if (cards[n] && typeof cards[n].id === "number") fileById[cards[n].id] = cards[n].filename;
+    }
 
     var characters = [];
-    for (var i = 0; i < d.charaIndex.length; i++) {
-      var idx = d.charaIndex[i];
-      var chara = d.chara && d.chara[i];
-      // 前綴認不出來時當角色 —— cc 是絕大多數，而認錯的代價兩邊一樣。
-      var frames = typeof chara === "string" && chara.indexOf("mc") === 0 ? mc : cc;
-      var f =
-        frames !== null && typeof idx === "number" && idx >= 0 && idx < frames.length
-          ? frames[idx]
-          : null;
-      characters.push(f && typeof f.filename === "string" && f.filename !== "" ? f.filename : null);
+    for (var i = 0; i < d.chara_card_id.length; i++) {
+      var id = d.chara_card_id[i];
+      var f = typeof id === "number" ? fileById[id] : null;
+      characters.push(typeof f === "string" && f !== "" ? f : null);
     }
 
-    // 裝備與事件卡沒有 filename，鍵直接由索引組出來。⚠ 不查資產是刻意的：
-    // 索引本身就是鍵，多查一次只會多一種「資產還沒載入 → 鍵變 null」的失敗。
-    var equipment = [];
-    var weapons = d.weapon && d.weapon.length !== undefined ? d.weapon : [];
-    for (var w = 0; w < weapons.length; w++) {
-      var wi = weapons[w];
-      equipment.push(typeof wi === "number" && wi >= 0 ? "wp" + padIndex(wi) : null);
-    }
-
-    var eventCards = [];
-    var events = d.eventIndex && d.eventIndex.length !== undefined ? d.eventIndex : [];
-    for (var e = 0; e < events.length; e++) {
-      var ei = events[e];
-      eventCards.push(typeof ei === "number" && ei >= 0 ? "ev" + padIndex(ei) : null);
-    }
-
-    return { characters: characters, equipment: equipment, eventCards: eventCards };
-  }
-
-  // ⚠ **頻道分兩組，走的是兩條不同的 socket。** 2026-08-15 實測：
-  //     sc.channels       = {"1":ranked, "2":duel}   → sc.socket
-  //     sc.channels_cross = {"3":ranked, "4":duel}   → sc.socket_cross
-  // 3/4 是「跨平台對戰專用頻道」（峰亥盧遺跡、布萊德克洛伊茲）。用錯 socket
-  // 的症狀不是報錯，是**安靜地什麼都收不到**：房間清單永遠空的、開房沒有回應。
-  function isCross(sc) {
-    var t = sc.channels_cross || {};
-    return sc.channel !== null && sc.channel !== undefined &&
-      Object.prototype.hasOwnProperty.call(t, String(sc.channel));
-  }
-
-  /** 目前頻道該用哪一條 socket。 */
-  function sock(sc) {
-    return isCross(sc) ? sc.socket_cross : sc.socket;
-  }
-
-  /** 兩組頻道併成一張表，每筆標好走不走 cross。UI 要靠它列出全部頻道。 */
-  function channelTable(sc) {
-    var out = {};
-    function add(src, cross) {
-      for (var k in src) {
-        if (!Object.prototype.hasOwnProperty.call(src, k)) continue;
-        out[k] = { type: src[k].type, cost: src[k].cost || null, crossplay: cross };
+    function keys(ids, table, prefix) {
+      var out = [];
+      var list = ids && ids.length !== undefined ? ids : [];
+      for (var j = 0; j < list.length; j++) {
+        var v = list[j];
+        var idx = typeof v === "number" ? table[String(v)] : undefined;
+        out.push(typeof idx === "number" ? prefix + padIndex(idx) : null);
       }
+      return out;
     }
-    add(sc.channels || {}, false);
-    add(sc.channels_cross || {}, true);
-    return out;
-  }
 
-  // ⚠ 只挑需要的欄位。房間清單一筆就有兩個 avatar 物件，整份搬回 Node
-  // 又大又全是跟我們無關的東西。
-  function pickRoom(r) {
     return {
-      roomId: r.room_id,
-      name: r.name,
-      playerAName: r.playerA ? r.playerA.name : null,
-      playerBName: r.playerB ? r.playerB.name : null,
-      pass: r.pass === 1 || r.pass === true,
-      deckA: pickDeck(r.deckA),
-      deckB: pickDeck(r.deckB)
+      characters: characters,
+      equipment: keys(d.weapon_card_id, CFG.weaponIndex, "wp"),
+      eventCards: keys(d.event_card_id, CFG.eventIndex, "ev")
     };
   }
 
-  // ⚠ 同時留一份**原始**物件。驅動遊戲自己的 room_in() 時要把整個原始
-  // 房間物件交回去（它會讀 e.pass），挑過欄位的副本不夠用。
-  //
-  // ⚠ **重裝必須沿用同一個 state 物件，不能開新的。** 舊版腳本掛在 socket 上的
-  // listener 是綁閉包的（那一版還沒改成從 window 查），拆不掉也改不了，它會一直
-  // 往舊物件寫。換成新物件的話 window.__ulrMatch.raw 就永遠是空的 ——
-  // 症狀是 rooms_snapshot() 看得到那間房、join() 卻回「清單裡沒有這個 room_id」，
-  // 因為兩者讀的是同一份資料的兩個副本。2026-08-15 實測在 guest 端踩過。
-  var state = (reinstall ? window[FLAG] : null) || { installed: true, byChannel: {} };
-  state.installed = true;
-  if (!state.byChannel) state.byChannel = {};
+  // ---- 房間清單 ------------------------------------------------------------
+
+  function pickDeck(d) {
+    if (!d || !d.chara_card_id) return null;
+    return { charaCardId: Array.prototype.slice.call(d.chara_card_id), cost: d.cost };
+  }
+
+  // ⚠ 只挑需要的欄位。房間清單一筆就有兩份 avatar，整份搬回 Node 又大又全是
+  // 跟我們無關的東西。
+  function pickRoom(r) {
+    return {
+      roomId: r.room_id,
+      name: r.room_name,
+      playerAName: r.playerA_info ? r.playerA_info.player_name : null,
+      playerBName: r.playerB_info ? r.playerB_info.player_name : null,
+      pass: r.password === true,
+      deckA: pickDeck(r.playerA_deck),
+      deckB: pickDeck(r.playerB_deck)
+    };
+  }
+
+  /** 玩家目前所在的頻道物件。沒進頻道是 null。 */
+  function channelOf(sc) {
+    return sc && sc.channel && typeof sc.channel.channel === "number" ? sc.channel : null;
+  }
+
+  /**
+   * 對戰已經開始了嗎（有人進了我的房、或我進了別人的房）。
+   *
+   * 官方在兩條路上都會先設 player_side 再 launch MatchBoot，回到大廳時 wake()
+   * 把它清回 null。對戰中 Match 是 sleep 的，房間清單也停止更新 —— 所以「房還在
+   * 不在清單上」在那時候不能拿來判斷，要看這個。
+   */
+  function started(sc) {
+    return !!(sc && sc.player_side !== null && sc.player_side !== undefined);
+  }
+
+  var state = { installed: true, version: CFG.version };
   window[FLAG] = state;
-
-  // 讀資料一律走這裡，不要直接用閉包的 state：卸載後再裝會換掉 window[FLAG]，
-  // 而還掛在 socket 上的 listener 是往 window[FLAG] 寫的。
-  function cur() { return window[FLAG] || state; }
-
-  /**
-   * ⚠ **清單一定要按頻道分開存。**
-   *
-   * 玩家換頻道之後，舊頻道的 listener 還掛在 socket 上（拆不掉：沒留 handler
-   * 參考，而 off(ev) 不帶 handler 會把遊戲自己那支一起拆掉）。伺服器也還在
-   * 推舊頻道的清單。共用一份 raw 的話兩支會互相蓋，誰最後推播誰贏 ——
-   * 2026-08-15 實測：人在頻道 4，raw 裡卻是頻道 2 的房。
-   *
-   * 後果不是顯示錯而已：findOwnRoom 會從別的頻道的清單裡挑房，然後把
-   * **另一個頻道的 room_id** 交給對手。
-   *
-   * ⚠ 這段在注入腳本的 template literal 裡面 —— **不能用反引號**，
-   * 它會讓字串提早結束。
-   */
-  /**
-   * 目前頻道的房間清單 —— **以遊戲自己手上那份為準**。
-   *
-   * channel_panel.match_room_data 就是大廳正在畫的那份，屬於目前頻道，
-   * 而且**不必等推播**。
-   *
-   * ⚠ 房間清單是「有變動才推」，不是定時推 —— 2026-08-15 實測：頻道裡沒人
-   * 開關房時，等 45 秒一次推播都收不到。只靠推播快取的話，剛進頻道的玩家
-   * 會看到空清單，而空清單會被誤判成「我沒有自己的房」，直接踩到
-   * delete_room 是頻道層級的那個坑。
-   *
-   * 推播 listener 留著只為了 seq（有沒有變動過），資料本身不靠它。
-   */
-  function panelRooms(sc) {
-    var d = sc.channel_panel && sc.channel_panel.match_room_data;
-    return Array.prototype.slice.call(d && d.length !== undefined ? d : []);
-  }
-
-  /** 有沒有讀得到遊戲那份清單。讀不到才退回推播快取。 */
-  function hasPanel(sc) {
-    var d = sc.channel_panel && sc.channel_panel.match_room_data;
-    return !!(d && d.length !== undefined);
-  }
-
-  function bucket(channel) {
-    var st = cur();
-    if (!st.byChannel) st.byChannel = {};
-    var key = String(channel);
-    if (!st.byChannel[key]) st.byChannel[key] = { raw: [], rooms: [], seq: 0 };
-    return st.byChannel[key];
-  }
-
-  // 房間清單是推播的，先把最後一次收到的留著。
-  function listen(sc) {
-    // ⚠ 記住**註冊當下**的頻道。回呼時再讀 sc.channel 會拿到玩家後來換到的
-    // 那個，於是把舊頻道的清單寫進新頻道的格子裡 —— 正是要修的那個 bug。
-    var chan = sc.channel;
-    var ev = "channel" + chan + "_room";
-    // ⚠ 掛在**該頻道自己那條** socket 上。掛錯的話一筆推播都收不到。
-    var so = sock(sc);
-    // 掛過的記在 socket 上 —— state 會被重裝換掉，socket 不會。
-    //
-    // ⚠ 記的是**版本**不是 true。舊版的 listener 綁閉包，只能再掛一支新的蓋過去
-    // （拆不掉：當時沒留 handler 參考，而 socket.off(ev) 不帶 handler 會把遊戲
-    // 自己那支一起拆掉，房間列表就不會畫了）。多掛一支是安全的 —— 每一支都往
-    // window[FLAG] 寫同一份快照，只是重複做一次。
-    if (!so.__ulrListened) so.__ulrListened = {};
-    if (so.__ulrListened[ev] === VERSION) return;
-    so.__ulrListened[ev] = VERSION;
-    so.on(ev, function (list) {
-      // ⚠ 從 window 查，**不要用閉包裡的 state** —— 重裝之後舊的 listener
-      // 還掛在 socket 上，綁閉包的話它會一直往舊物件寫，新的永遠收不到推播。
-      var st = window[FLAG];
-      if (!st) return;
-      var b = bucket(chan);
-      try {
-        b.raw = Array.prototype.slice.call(list || []);
-        b.rooms = Array.prototype.map.call(b.raw, pickRoom);
-        // ⚠ 每次推播 +1。呼叫端要靠它分辨「這份清單是不是我開房之後才來的」——
-        // 用舊快取會把**上一場的 room_id** 交給對手，而伺服器會正確地回
-        // fail:9（那間房早就配對過了）。2026-08-15 實測踩過。
-        //
-        // ⚠ 加在**這個頻道那一格**上，不是根物件。加錯地方的症狀很安靜：
-        // 清單有內容但 seq 永遠 0，於是每一次「等新推播」都會逾時。
-        b.seq++;
-      } catch (e) {
-        b.raw = [];
-        b.rooms = [];
-      }
-    });
-  }
+  tapChannels();
 
   state.context = function () {
+    tapChannels();
     var sc = scene();
     if (sc === null) {
       return JSON.stringify({
-        hasId: false, channel: null, channels: null, crossplay: false,
+        hasId: false, channel: null, channels: null, crossplay: false, requiredAp: null,
         deckNow: null, deckCost: null, deckKeys: null,
         playerName: null, isMatching: false, inMatch: false,
         ap: null, apMax: null, duelFree: null
       });
     }
-    if (sc.channel !== undefined && sc.channel !== null && sock(sc)) listen(sc);
-    var deck = sc["deck" + sc.deck_now];
+    var ch = channelOf(sc);
+    if (ch !== null) remember(ch);
+    var picked = ch === null ? null : pickChannel(ch);
+    var deck = currentDeck(sc);
+    var ap = sc.player_ap;
     return JSON.stringify({
-      hasId: typeof sc.id === "string" && sc.id.length > 0,
-      channel: sc.channel === undefined ? null : sc.channel,
-      channels: channelTable(sc),
-      crossplay: isCross(sc),
-      deckNow: sc.deck_now === undefined ? null : sc.deck_now,
-      // ⚠ 這是**伺服器用原版 COST 算的**總和，不是自訂規則的總和。改寫 cc_asset
-      // 不會動到它（實測：改寫後三張加起來 48，這個欄位仍是 49）。
+      hasId: typeof sc.player_id === "string" && sc.player_id.length > 0,
+      channel: ch === null ? null : ch.channel,
+      channels: channelTable(),
+      crossplay: ch === null ? false : isCross(ch.channel),
+      requiredAp: picked === null ? null : picked.requiredAp,
+      deckNow: typeof sc.deck_now === "number" ? sc.deck_now : null,
       deckCost: deck && typeof deck.cost === "number" ? deck.cost : null,
-      // 自訂規則的總和要靠這個算 —— 見 deckKeysOf() 上面那段。
       deckKeys: deckKeysOf(deck),
-      playerName: sc.player ? sc.player.name : null,
-      isMatching: !!(sc.channel_panel && sc.channel_panel.is_matching),
+      playerName: sc.player && typeof sc.player.player_name === "string" ? sc.player.player_name : null,
+      isMatching: sc.room_wait === true,
       inMatch: true,
-      // ⚠ 開房要 AP（3vs3 是 5，跨平台頻道 4），不夠就白排一場 —— 玩家會排到
-      // 配對成功才看到「AP不足」，而那時對手也白等了。三個欄位都是遊戲自己
-      // 從 db_player 收下來的，我們只是唸出來。
-      ap: sc.player && typeof sc.player.ap === "number" ? sc.player.ap : null,
-      apMax: sc.player && typeof sc.player.ap_max === "number" ? sc.player.ap_max : null,
-      // 免費對戰星星（0～3）。⚠ 有星星就不吃 AP，所以它不是「附加資訊」，
-      // 是判斷「排不排得了」的另一半。
+      ap: ap && typeof ap.ap === "number" ? ap.ap : null,
+      apMax: ap && typeof ap.ap_max === "number" ? ap.ap_max : null,
+      // 免費對戰星星（0～3）。⚠ 有星星就不吃 AP，所以它是判斷「排不排得了」的另一半。
       duelFree: sc.player && typeof sc.player.duel_free === "number" ? sc.player.duel_free : null
     });
   };
 
-  // ⚠ 只回**目前頻道**那一份。換頻道之後舊頻道的 listener 還在推，共用一份的
-  // 話會拿到別的頻道的房。剛換過去、還沒收到推播時 seq 是 0 —— 呼叫端要靠它
-  // 分辨「這個頻道沒有房」跟「還不知道」。
+  /**
+   * 目前頻道的房間清單 —— **遊戲自己手上那份**（channel_room），大廳正在畫的就是它。
+   *
+   * live = 讀得到那一份（人在頻道裡、大廳是 active 的）。對戰中 Match 是 sleep，
+   * 清單不再更新，那時 live 是 false，要看 started。
+   */
   state.rooms_snapshot = function () {
+    var any = matchScene();
+    var st = started(any);
     var sc = scene();
-    if (sc === null || sc.channel === null || sc.channel === undefined) {
-      return JSON.stringify({ seq: 0, rooms: [] });
-    }
-    var b = bucket(sc.channel);
-    // 遊戲那份是即時的；讀不到才退回推播快取。
-    if (hasPanel(sc)) {
-      return JSON.stringify({
-        seq: b.seq, live: true,
-        rooms: Array.prototype.map.call(panelRooms(sc), pickRoom)
-      });
-    }
-    return JSON.stringify({ seq: b.seq, live: false, rooms: b.rooms || [] });
+    var list = sc && channelOf(sc) !== null && sc.channel_room && sc.channel_room.length !== undefined
+      ? sc.channel_room : null;
+    if (list === null) return JSON.stringify({ seq: 0, live: false, started: st, rooms: [] });
+    var rooms = [];
+    for (var i = 0; i < list.length; i++) if (list[i]) rooms.push(pickRoom(list[i]));
+    return JSON.stringify({ seq: 0, live: true, started: st, rooms: rooms });
   };
 
+  /**
+   * 開房。照官方 create_panel() 按下 ok 之後那一段：送 create_room，拿到 room_id
+   * 就 room_wait = true、room_select = id、跳等待視窗。
+   *
+   * ⚠ 等待視窗**一定要有**：有人進來時官方的 on_match_start() 會先 remove_match_wait()，
+   * 那支假設視窗存在，沒有的話直接丟例外、對戰開不起來。大廳補丁排隊時已經開了
+   * 同一個視窗的話就沿用。
+   *
+   * 失敗時伺服器回 null，代碼另外用 match_error 推（官方自己的 listener 會跳錯誤框，
+   * 那是遊戲自己的話，留著）。我們另掛一個 once 把代碼接回來報給 Node。
+   */
   state.create = function (optsJson) {
     var o = JSON.parse(optsJson);
     var sc = scene();
-    if (sc === null) return Promise.resolve(JSON.stringify({ ok: false, reason: "不在 Match 畫面" }));
-    listen(sc);
-
-    var so = sock(sc);
+    if (sc === null) return Promise.resolve(JSON.stringify({ ok: false, reason: "不在對戰大廳" }));
+    var ch = channelOf(sc);
+    if (ch === null || !sc.socket_channel) {
+      return Promise.resolve(JSON.stringify({ ok: false, reason: "還沒進頻道" }));
+    }
+    if (sc.room_wait === true) {
+      return Promise.resolve(JSON.stringify({ ok: false, reason: "你已經有一間開著的房" }));
+    }
+    var so = sc.socket_channel;
     return new Promise(function (resolve) {
       var done = false;
+      var code = null;
       function finish(v) { if (!done) { done = true; resolve(JSON.stringify(v)); } }
+      try { so.once("match_error", function (c) { code = c; }); } catch (e) {}
 
-      so.once("match_room_error", function (e) {
-        finish({ ok: false, reason: "伺服器拒絕開房", fail: e && e.fail });
-      });
-      so.once("match_waiting", function () {
-        // 房開好了。room_id 要等下一次房間清單推送才知道 —— 這裡先回成功，
-        // 由 Node 端輪詢 rooms_snapshot() 找自己那間。
-        finish({ ok: true, roomId: null });
-      });
+      var R = {
+        room_name: o.name,
+        stage: o.stage,
+        friend: o.friend === true,
+        cost: typeof o.cost === "number" ? o.cost : null,
+        password: o.pass,
+        deck_id: sc.deck_now
+      };
+      var p;
+      try { p = so.fetch("create_room", sc.deck_now, ch.channel, R); }
+      catch (e) { finish({ ok: false, reason: String((e && e.message) || e) }); return; }
 
-      try {
-        so.emit("match_room_make", sc.id, sc.channel, o.name, o.stage,
-          o.multi, o.friend, o.pass, o.cost, sc.deck_now);
-      } catch (e) {
+      Promise.resolve(p).then(function (id) {
+        if (typeof id !== "string" || id.length === 0) {
+          // 代碼可能比回應晚一拍到。
+          setTimeout(function () {
+            finish(code === null
+              ? { ok: false, reason: "伺服器拒絕開房" }
+              : { ok: false, reason: "伺服器拒絕開房", fail: String(code) });
+          }, 300);
+          return;
+        }
+        try {
+          sc.room_wait = true;
+          sc.room_select = id;
+          // 等待中玩家點房間看牌組會改掉 room_select，收房要讀這一格（見 patch-lobby）。
+          sc.__ulrWaitRoom = id;
+          if (!sc.wait_zone) sc.create_match_wait();
+        } catch (e) {}
+        finish({ ok: true, roomId: id });
+      }, function (e) {
         finish({ ok: false, reason: String((e && e.message) || e) });
-      }
-      setTimeout(function () { finish({ ok: false, reason: "等 match_waiting 逾時" }); }, 15000);
+      });
+      setTimeout(function () { finish({ ok: false, reason: "等 create_room 回應逾時" }); }, 15000);
     });
   };
 
-  // 進房：驅動遊戲自己的 room_in()，不自己 emit。
-  // ⚠ 自己 emit 會漏掉那個函式裡做的事 —— 最關鍵的是 room_id 其實是從
-  // channel_panel.room_select.room_id 讀的，不是參數。詳見這支的檔頭。
-  // 密碼那關遊戲會開輸入框等玩家打字，所以暫時把 sc.password 換掉，叫完再還原。
-  // ⚠ 參數是**一包 JSON 字串**，跟 create() 一樣，進來第一件事就是 parse。
-  // 兩個字串參數直接收 embedJson() 的輸出會拿到「連引號一起」的值
-  // （embedJson 產的是 JSON 的字面值，設計上就是要 parse 一次）——
-  // 症狀是 rooms_snapshot() 看得到那間房、join() 回「清單裡沒有這個 room_id」，
-  // 因為比對是拿「含引號的 abc」去比「abc」。密碼同樣會多帶一對引號。
-  // 2026-08-15 實測踩過，一路被誤判成「快取有兩份」。
+  /**
+   * 進房。照官方房間詳細面板的進房鈕那一段：送 enter_room，拿到房間設定就
+   * player_side、讀取畫面、launch MatchBoot。
+   *
+   * ⚠ 參數是**一包 JSON 字串**，進來第一件事就是 parse（embedJson 產的是 JSON 的
+   * 字面值，設計上就是要 parse 一次）。
+   */
   state.join = function (payloadJson) {
     var p = JSON.parse(payloadJson);
-    var roomId = p.roomId;
-    var pass = p.pass;
     var sc = scene();
-    if (sc === null) return Promise.resolve(JSON.stringify({ ok: false, reason: "不在 Match 畫面" }));
-
-    // ⚠ 只在**目前頻道**那一份裡找。找到別的頻道的房也進不去，而且會把錯的
-    // room_id 當成有效的。優先用遊戲那份即時清單。
-    var raw = hasPanel(sc) ? panelRooms(sc) : bucket(sc.channel).raw || [];
+    if (sc === null) return Promise.resolve(JSON.stringify({ ok: false, reason: "不在對戰大廳" }));
+    if (channelOf(sc) === null || !sc.socket_channel) {
+      return Promise.resolve(JSON.stringify({ ok: false, reason: "還沒進頻道" }));
+    }
+    var list = sc.channel_room && sc.channel_room.length !== undefined ? sc.channel_room : [];
     var entry = null;
-    for (var i = 0; i < raw.length; i++) {
-      if (raw[i] && raw[i].room_id === roomId) { entry = raw[i]; break; }
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && list[i].room_id === p.roomId) { entry = list[i]; break; }
     }
     if (entry === null) {
       return Promise.resolve(JSON.stringify({ ok: false, reason: "房間清單裡沒有這個 room_id" }));
     }
-    if (!sc.channel_panel) {
-      return Promise.resolve(JSON.stringify({ ok: false, reason: "還沒進頻道（沒有 channel_panel）" }));
-    }
 
-    var so = sock(sc);
+    var so = sc.socket_channel;
     return new Promise(function (resolve) {
       var done = false;
-      var originalPassword = sc.password;
+      var code = null;
+      function finish(v) { if (!done) { done = true; resolve(JSON.stringify(v)); } }
+      try { so.once("match_error", function (c) { code = c; }); } catch (e) {}
 
-      function finish(v) {
-        if (done) return;
-        done = true;
-        try { sc.password = originalPassword; } catch (e) {}
-        resolve(JSON.stringify(v));
-      }
-
-      so.once("match_room_error", function (e) {
-        finish({ ok: false, reason: "進房被拒", fail: e && e.fail });
-      });
-      so.once("duel_standby", function () { finish({ ok: true }); });
-
-      try {
-        // 遊戲從這裡拿 room_id —— 這是自己 emit 時漏掉的那一塊。
-        sc.channel_panel.room_select = entry;
-        // 密碼輸入框換成直接回傳 token。
-        sc.password = function () { return Promise.resolve(pass); };
-        // ⚠ 第一個參數是 crossplay，要跟頻道對上。頻道 3/4（峰亥盧遺跡、
-        // 布萊德克洛伊茲）是跨平台頻道，傳 false 會讓遊戲拿錯 socket。
-        sc.room_in(isCross(sc), entry);
-      } catch (e) {
+      sc.input.enabled = false;
+      sc.room_wait = true;
+      var pass = entry.password === true ? p.pass : null;
+      var q;
+      try { q = so.fetch("enter_room", entry.room_id, sc.deck_now, pass); }
+      catch (e) {
+        sc.room_wait = false;
+        sc.input.enabled = true;
         finish({ ok: false, reason: String((e && e.message) || e) });
+        return;
       }
-      setTimeout(function () { finish({ ok: false, reason: "等 duel_standby 逾時" }); }, 25000);
+
+      Promise.resolve(q).then(function (a) {
+        if (a === null || typeof a !== "object") {
+          sc.room_wait = false;
+          sc.input.enabled = true;
+          setTimeout(function () {
+            finish(code === null
+              ? { ok: false, reason: "進房被拒" }
+              : { ok: false, reason: "進房被拒", fail: String(code) });
+          }, 300);
+          return;
+        }
+        try {
+          sc.player_side = a.player_side;
+          // 大廳補丁排隊時開的等待視窗 —— 官方進房那條路沒有它，要自己收。
+          if (sc.wait_zone) sc.remove_match_wait();
+          sc.create_match_loading();
+          sc.scene.launch("MatchBoot", {
+            is_tutorial: false, host: a.domain, port: a.port,
+            room_config: a, player_side: a.player_side
+          });
+        } catch (e) {
+          finish({ ok: false, reason: "進房之後開不了對戰：" + String((e && e.message) || e) });
+          return;
+        }
+        finish({ ok: true });
+      }, function (e) {
+        sc.room_wait = false;
+        sc.input.enabled = true;
+        finish({ ok: false, reason: String((e && e.message) || e) });
+      });
+      setTimeout(function () { finish({ ok: false, reason: "等 enter_room 回應逾時" }); }, 25000);
     });
   };
 
-  // 收掉自己開的房。取消配對時一定要叫，否則清單上會留一堆空房。
-  //
-  // ⚠ delete_room 只吃 channel、**不吃 room_id** —— 它收掉的是你在那個頻道的
-  // 房，而玩家可能同時有兩間（手動開了一間，插件又開了一間）。2026-08-15 實測：
-  // 按一次取消，兩間一起消失。所以插件開房之前要先確認玩家沒有自己的房，
-  // 否則「取消配對」會順手把他手動開的那間也收掉。
+  /**
+   * 收掉自己開著的那一間房（遊戲的 room_select）。照官方等待視窗的 Cancel 那一段。
+   *
+   * ⚠ 收的是**那一間**（cancel_room 吃 room_id），不是整個頻道。
+   *
+   * ⚠ 優先讀 __ulrWaitRoom：等待中玩家可以點房間看牌組（patch-lobby），點了
+   * room_select 就變成那一間，拿它去收會收錯房。
+   */
   state.cancel = function () {
-    var sc = scene();
-    if (sc === null) return "不在 Match 畫面";
-    try {
-      sock(sc).emit("delete_room", sc.channel);
-      if (sc.channel_panel) {
-        sc.channel_panel.is_matching = false;
-        if (sc.channel_panel.refresh_rooms) sc.channel_panel.refresh_rooms();
+    var sc = matchScene();
+    if (sc === null) return Promise.resolve("不在對戰大廳");
+    if (!sc.socket_channel) return Promise.resolve("沒有頻道連線");
+    var id = typeof sc.__ulrWaitRoom === "string" ? sc.__ulrWaitRoom : sc.room_select;
+    if (sc.room_wait !== true || typeof id !== "string") return Promise.resolve("沒有開著的房");
+    return new Promise(function (resolve) {
+      var done = false;
+      function finish(v) { if (!done) { done = true; resolve(v); } }
+      function tidy() {
+        sc.room_wait = false;
+        sc.room_select = null;
+        sc.__ulrWaitRoom = null;
+        try { if (sc.room_detail) { sc.room_detail.destroy(); sc.room_detail = null; } } catch (e) {}
+        try { if (sc.wait_zone) sc.remove_match_wait(); } catch (e) {}
       }
-      return "ok";
-    } catch (e) { return String((e && e.message) || e); }
+      try {
+        Promise.resolve(sc.socket_channel.fetch("cancel_room", id)).then(function () {
+          tidy();
+          finish("ok");
+        }, function (e) { finish(String((e && e.message) || e)); });
+      } catch (e) { finish(String((e && e.message) || e)); }
+      setTimeout(function () { finish("等 cancel_room 回應逾時"); }, 8000);
+    });
   };
 
-  return reinstall ? "reinstalled" : "installed";
+  return "installed:" + CFG.version;
 })()`;
+}
 
-/** 拆掉。留著也無害（只是幾個函式），但換版本時要能清乾淨。 */
+/**
+ * 拆掉。頻道清單那一層包裝也還原（它掛在遊戲的 socket 類別上）。
+ * 記下來的頻道清單留著 —— 那只是資料，重裝時還用得到。
+ */
 export const MATCH_ROOM_UNINSTALL_EXPRESSION = `(function () {
-  try { delete window.__ulrMatch; return "ok"; } catch (e) { return String(e); }
+  try {
+    var keys = window.game && window.game.scene && window.game.scene.keys;
+    if (keys) {
+      for (var k in keys) {
+        var so = keys[k] && keys[k].socket;
+        var P = so && Object.getPrototypeOf(so);
+        if (P && P.__ulrChannelTap) { P.fetch = P.__ulrChannelTap; delete P.__ulrChannelTap; break; }
+      }
+    }
+    delete window.__ulrMatch;
+    return "ok";
+  } catch (e) { return String(e); }
 })()`;
 
 // ---------------------------------------------------------------------------
 
-/** 產生「開房」的呼叫。參數走 `embedJson`，永遠不會被當程式碼執行（§12）。 */
+/**
+ * 產生「開房」的呼叫。參數走 `embedJson`，永遠不會被當程式碼執行（§12）。
+ * 地點在這裡轉成遊戲要的數字。
+ */
 export function buildCreateRoomExpression(options: CreateRoomOptions): string {
-  return `window.__ulrMatch.create(${embedJson(options)})`;
+  const payload = {
+    name: options.name,
+    stage: stageValue(options.stage),
+    friend: options.friend,
+    pass: options.pass,
+    cost: options.cost,
+  };
+  return `window.__ulrMatch.create(${embedJson(payload)})`;
 }
 
 /**
@@ -924,9 +975,10 @@ export function buildJoinRoomExpression(roomId: string, pass: string): string {
 /**
  * 從房間清單裡找出「我自己開的那一間」。
  *
- * ⚠ 靠 `playerA.name` 比對，不是靠房名 —— 房名是玩家自訂的，撞名就會拿到
- * 別人的 roomId 然後把對手送進陌生人的房間。一個玩家同時只能開一間房，
- * 所以名字是可靠的。
+ * 改版後開房直接回 room_id，這支只剩「回應沒帶 id」時的退路。
+ *
+ * ⚠ 靠房主名稱比對，不是靠房名 —— 房名是玩家自訂的，撞名就會拿到別人的 roomId
+ * 然後把對手送進陌生人的房間。
  *
  * ⚠ **房名不能拿來當識別碼的另一個理由**：房名會出現在公開清單上，而我們
  * 唯一能用來識別的祕密是 token —— 那是密碼，貼上去就等於沒有密碼。
@@ -938,20 +990,14 @@ export function findOwnRoom(
 ): RoomEntry | null {
   let mine = rooms.filter((r) => r.playerAName === playerName);
 
-  // ⚠ 一個玩家可能同時有不只一間房（手動開過一間又用插件開了一間）。
-  // 2026-08-15 實測就踩到：抓到的是玩家手動開的那間，於是把它的 pass 欄位
-  // 當成插件開的那間的，得出「密碼沒生效」這個完全錯誤的結論。
-  //
-  // 先用房名縮小，再排掉已經有對手的（那間一定不是我們剛開的）。
-  // ⚠ 指定了房名就**只認那個名字**，找不到一律回 null。原本這裡是
-  // 「找不到就退回全部」，結果在清單還沒更新時挑到玩家的舊房，把上一場的
-  // room_id 交了出去。退讓的預設值在這裡是危險的。
+  // ⚠ 指定了房名就**只認那個名字**，找不到一律回 null。退讓的預設值在這裡是危險的：
+  // 清單還沒更新時會挑到玩家的舊房，把上一場的 room_id 交出去。
   if (expectedName !== undefined) {
     mine = mine.filter((r) => r.name === expectedName);
   }
   const empty = mine.filter((r) => r.playerBName === null);
   if (empty.length > 0) mine = empty;
 
-  // 還是分不出來就回 null。猜錯會把對手送進別的房間，寧可讓呼叫端等下一次推播。
+  // 還是分不出來就回 null。猜錯會把對手送進別的房間，寧可讓呼叫端再等一輪。
   return mine.length === 1 ? (mine[0] ?? null) : null;
 }

@@ -6,7 +6,7 @@
  */
 
 import { createServer, type Server } from "node:net";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -227,9 +227,43 @@ describe("explainDebugPort", () => {
 });
 
 describe("desktopUserDataDir", () => {
-  it("跟著 APPDATA 走，不寫死 C:\\Users", () => {
+  it("跟著 APPDATA 走，不寫死 C:\\Users；什麼都沒有時給新名字", () => {
     expect(desktopUserDataDir({ APPDATA: "D:\\Roaming" } as NodeJS.ProcessEnv)).toBe(
-      join("D:\\Roaming", "UNLIGHT-Revive"),
+      join("D:\\Roaming", "UNLIGHT Revive"),
+    );
+  });
+
+  it("新舊資料夾都有 DevToolsActivePort 時，挑最新寫入的（舊的是更新前留下的死埠）", () => {
+    const appData = userDataDir();
+    const oldDir = join(appData, "UNLIGHT-Revive");
+    const newDir = join(appData, "UNLIGHT Revive");
+    mkdirSync(oldDir);
+    mkdirSync(newDir);
+    writeFileSync(join(oldDir, DEVTOOLS_ACTIVE_PORT_FILE), "58846\n", "utf8");
+    writeFileSync(join(newDir, DEVTOOLS_ACTIVE_PORT_FILE), "55018\n", "utf8");
+    const env = { APPDATA: appData } as NodeJS.ProcessEnv;
+
+    utimesSync(
+      join(oldDir, DEVTOOLS_ACTIVE_PORT_FILE),
+      new Date(2026, 8, 22),
+      new Date(2026, 8, 22),
+    );
+    expect(desktopUserDataDir(env)).toBe(newDir);
+
+    // 反過來也要成立 —— 不是寫死「新名字優先」
+    utimesSync(
+      join(newDir, DEVTOOLS_ACTIVE_PORT_FILE),
+      new Date(2026, 8, 21),
+      new Date(2026, 8, 21),
+    );
+    expect(desktopUserDataDir(env)).toBe(oldDir);
+  });
+
+  it("只有舊資料夾存在（還沒更新的玩家）就用舊的", () => {
+    const appData = userDataDir();
+    mkdirSync(join(appData, "UNLIGHT-Revive"));
+    expect(desktopUserDataDir({ APPDATA: appData } as NodeJS.ProcessEnv)).toBe(
+      join(appData, "UNLIGHT-Revive"),
     );
   });
 });

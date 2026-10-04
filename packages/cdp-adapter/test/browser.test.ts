@@ -6,7 +6,10 @@ import {
   browserDebugPort,
   browserProfileDir,
   buildBrowserArgs,
+  buildBrowserLaunchCmd,
+  buildBrowserShortcutArgs,
   findBrowser,
+  loadExtensionArgs,
 } from "../src/browser.js";
 
 const PROFILE = "C:\\Users\\someone\\ulr-cdp-profile";
@@ -45,6 +48,50 @@ describe("buildBrowserArgs", () => {
     // steamid 只出現在 openGameTab 導向的網址上。啟動參數會進工作管理員、
     // 也會被其他程序讀到，§12 不得外洩。
     expect(args.join(" ")).not.toMatch(/765611\d+/);
+  });
+});
+
+describe("buildBrowserArgs startUrl", () => {
+  it("null = 不帶網址（開瀏覽器自己的新分頁）", () => {
+    const args = buildBrowserArgs({ port: 0, profileDir: PROFILE, startUrl: null });
+    expect(args.at(-1)).toBe("--hide-crash-restore-bubble");
+  });
+});
+
+describe("buildBrowserLaunchCmd", () => {
+  for (const family of ["chrome", "edge"] as const) {
+    const cmd = buildBrowserLaunchCmd(family);
+
+    it(`${family}：只有 ASCII（cmd.exe 用系統碼頁讀，中文會被拆成指令）`, () => {
+      expect([...cmd].every((c) => c.charCodeAt(0) < 0x80)).toBe(true);
+    });
+
+    it(`${family}：埠是 0、profile 是這一族自己的那份`, () => {
+      expect(cmd).toContain('"--remote-debugging-port=0"');
+      expect(cmd).toContain('"--user-data-dir=%PROFILE%"');
+      const leaf = browserProfileDir(family).split(/[\\/]/).at(-1);
+      expect(cmd).toContain(`set "PROFILE=%USERPROFILE%\\${leaf}"`);
+    });
+
+    it(`${family}：不寫死這台機器的路徑、也不帶遊戲網址`, () => {
+      expect(cmd).not.toMatch(/[A-Z]:\\Users\\/i);
+      expect(cmd).not.toContain("playunlight");
+      expect(cmd).not.toContain("about:blank");
+    });
+
+    it(`${family}：CRLF 結尾`, () => {
+      expect(
+        cmd
+          .split("\n")
+          .slice(0, -1)
+          .every((l) => l.endsWith("\r")),
+      ).toBe(true);
+    });
+  }
+
+  it("只找自己那一族的執行檔 —— 挑了 Edge 不能開到 Chrome", () => {
+    expect(buildBrowserLaunchCmd("edge")).not.toContain("chrome.exe");
+    expect(buildBrowserLaunchCmd("chrome")).not.toContain("msedge.exe");
   });
 });
 
@@ -122,5 +169,30 @@ describe("findBrowser", () => {
     expect(findBrowser({ ProgramFiles: join(tmpdir(), "nope-1a2b3c") } as NodeJS.ProcessEnv)).toBe(
       null,
     );
+  });
+});
+
+describe("buildBrowserShortcutArgs", () => {
+  it("埠是 0、帶專用 profile、不帶網址（開瀏覽器自己的新分頁）", () => {
+    const s = buildBrowserShortcutArgs(PROFILE);
+    expect(s).toContain("--remote-debugging-port=0");
+    expect(s).toContain(`--user-data-dir=${PROFILE}`);
+    expect(s).not.toContain("about:blank");
+    expect(s).not.toContain("--load-extension");
+  });
+
+  it("⚠ 路徑有空白要整個包引號，否則 user-data-dir 斷成兩段、落回預設設定檔（不開埠）", () => {
+    const s = buildBrowserShortcutArgs("C:\\Users\\Some One\\ulr-cdp-profile");
+    expect(s).toContain('"--user-data-dir=C:\\Users\\Some One\\ulr-cdp-profile"');
+  });
+
+  it("給了擴充資料夾就帶 kill-switch＋--load-extension（少了 kill-switch，137+ 安靜地不載）", () => {
+    const s = buildBrowserShortcutArgs(PROFILE, "C:\\Users\\someone\\ulr-boot-extension");
+    expect(s).toContain("--disable-features=DisableLoadExtensionCommandLineSwitch");
+    expect(s).toContain("--load-extension=C:\\Users\\someone\\ulr-boot-extension");
+    expect(loadExtensionArgs("X")).toEqual([
+      "--disable-features=DisableLoadExtensionCommandLineSwitch",
+      "--load-extension=X",
+    ]);
   });
 });

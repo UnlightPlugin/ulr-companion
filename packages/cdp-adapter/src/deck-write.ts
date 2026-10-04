@@ -1,75 +1,82 @@
 /**
- * 讀寫玩家的三副牌組（WP-18）
- * ============================
- * 本地牌組庫要能「瞬間換牌組」，靠的是繞過牌組編輯畫面直接送 `db_editdeck`。
- * 這支負責那條路徑。**協定與服務分池都是 2026-08-24 實機挖出來的**，不是猜的。
+ * 讀寫玩家的牌組（WP-18，2026-09-24 照改版後的協定重寫）
+ * =====================================================
+ * 牌組庫要能「瞬間換牌組」，靠的是繞過牌組編輯畫面直接寫。這支負責頁面那一端。
  *
- * ## ⚠ 寫 Deck1 會連帶換掉大廳立繪
- *
- * `Lobby.init` **寫死讀 `db_deck1`**（2026-08-25 實測），立繪取它的第一格。
- * Deck1 是牌組庫的工作槽，所以換牌組就會換掉大廳站的人。玩家要固定立繪的話
- * 去 Library 設「最愛角色」—— 設了之後 Deck1 寫什麼都不影響大廳，見
- * {@link DeckSnapshot.favorite}。
- *
- * 而且是**進場景時**才讀，之後不重讀：玩家已經站在大廳時寫進去，要等他離開
- * 再回來才看得到。
- *
- * ## 存牌組只有一個事件，而且一次覆寫三副
+ * ## 2026-09-23 改版後的牌組（實機讀原始碼）
  *
  * ```
- *   emit("db_editdeck", id, deck1, deck2, deck3, uiFlag)   → 伺服器回同名事件當 ack
+ *   registry.deck      [{ deck_id, main, chara_card_id[3], weapon_card_id[3],
+ *                         event_card_id[18], card_effect[], cost }]   ← 全部場景共用同一個物件
+ *   registry.deck_now  開機時取 main === 1 那一副；牌組編輯離開時寫回
+ *   registry.deck_max  3
  * ```
  *
- * 原版客戶端只在**離開 Edit 畫面時**送一次（`scene_end().then(...)`）。
- * 第 5 個參數是 `player.deck_check`（游標顯示資訊的 UI 偏好），跟牌組無關 ——
- * 照原值帶回去就不會動到玩家設定。
+ * - 每個場景 `init()` 都是 `this.deck = registry.get("deck")`（**同一個參照**，
+ *   只有教學複製一份），`this.deck_now = registry.get("deck_now")`。房裡的 ◀▶
+ *   只改場景自己的 `deck_now` 再 `show_deck()`；Edit 的是 `refresh()`＋
+ *   `show_deck_label()`＋`show_cost()`。
+ * - 開戰一律帶 `deck_now`：`quest_start(pid, deck_now)`、`raid_start(id, 回合,
+ *   deck_now)`、`quick_room(deck_now, ch)`、`create_room(deck_now, ch, R)`、
+ *   `enter_room(room, deck_now, t)` —— 伺服器用它**自己存的**那一副。
+ * - 寫：lobby 池新開一條連線 → `fetch("register", player_id)` →
+ *   `fetch("deck_update", 整份陣列)`，**回 `false` 是成功**。Edit 就是這樣做的，
+ *   而且只在離開畫面時送一次（`try_scene_end`）。
+ * - 讀：`fetch("db_deck")` 回整份陣列。官方寫完之後會
+ *   `update_data(scene, "deck")` → `registry.set("deck", 新陣列)`。
  *
- * ⚠ 送出去的形狀跟讀回來的**不一樣**：`db_deck*` 讀回來是扁平的
- * `chara1..3 / event1..18`，送出去要的是 `{chara[], charaIndex[], eventIndex[],
- * weapon[], cost}`。
+ * ## ⚠ 新版 Edit 寫失敗時不說話
  *
- * ## ⚠⚠ 必須送到 game 服務，不是玩家當下那條 socket
+ * `try_scene_end` 的 `deck_update` 被伺服器退回時**不顯示任何錯誤**，只是把
+ * 輸入打開、人留在原畫面 —— 玩家看到的是「按返回沒反應」。所以塞進客戶端記憶體
+ * 的東西一定要是伺服器會收的（庫存夠、三副合起來不超量）—— 那一關在托盤
+ * （`@ulr/deck-library` 的 `findShortages`／`findSetShortages`）。
  *
- * 遊戲的服務是**分池**的，每個場景各自 `new WSClient(隨機挑一個)`：
+ * ## 客戶端那份、伺服器那份
+ *
+ * 新版所有場景讀的都是同一個 `registry.deck`，所以「客戶端那份」只有一份。
+ * 「伺服器那份」由頁面自己記著（`window.__ulrDeckMirror`，見
+ * {@link DECK_MIRROR_SNIPPET}），不必每次去問伺服器（2026-09-13 玩家定的規矩：
+ * 盡量不要多送請求）：
  *
  * ```
- *   game  : playunlight.online:11002-11011   ← db_editdeck 歸這裡
- *   duel  : playunlight.online:11012-11015   ← Match（配對大廳）在這，只管配對
- *   cross : playunlight-dmm.com:20002-20005
+ *   registry 的 "deck" 被整份換掉（changedata-deck）  → 那是官方剛從伺服器拉的
+ *   我們的 deck_update 回 false                      → 伺服器現在就是我們送的那份
+ *   都還沒發生過                                     → 讀一次 db_deck（每次開遊戲一次）
  * ```
  *
- * 2026-08-24 實測：從 Match 場景那條 socket（`:11013`）送 `db_editdeck`，
- * **伺服器完全沒反應** —— 沒有 ack，牌組也沒變。換成自己開一條到 game 池的
- * 連線送同樣的東西，立刻 ack 而且生效。
+ * ## ⚠⚠ 必須送到 lobby 服務
  *
- * 所以這支自己開一條 WSClient。`Edit.init` 就是這樣做的（沒有專用的 Edit
- * 服務，它也是從 game 池隨機挑），而且**不需要 `register`** —— 玩家 id 就是
- * 憑證，直接 `fetch("db_player", id)` 就有東西。
- *
- * ## ⚠ 寫完一定要同步客戶端記憶體
- *
- * 只寫伺服器的話有兩個問題：畫面不會變；更糟的是玩家若停在 Edit 畫面，**他
- * 離開時客戶端會用自己記憶體裡的舊 deck 再送一次 `db_editdeck`，把你寫的蓋掉**。
- * 所以 {@link buildDeckApplyExpression} 會把每個場景的 `deck1/2/3` 一起更新 ——
- * 這樣玩家之後離開 Edit 送出的那一次，帶的正是新內容。
+ * 遊戲的服務是分池的（`UL_CONFIG.domains`），Edit 用的是 `lobby`。舊版踩過：
+ * 送到別的池伺服器完全沒反應（2026-08-24，當時是 `db_editdeck`）。
  */
 
+import { CHARA_CARDS_KEY } from "./constants.js";
 import { embedJson } from "./embed.js";
 import { ROOM_COST_SNIPPET } from "./room-cost.js";
 
-/** 送給 `db_editdeck` 的一副牌組。**這是送出去的形狀，不是讀回來的。** */
-export interface DeckPayload {
-  chara: (string | null)[];
-  charaIndex: (number | null)[];
+/** 伺服器那一副（`registry.deck` 的元素、`db_deck` 與 `deck_update` 的形狀）。 */
+export interface ServerDeck {
+  deck_id: number;
+  /** 1 = 主牌組（開機時 `deck_now` 從它來、大廳立繪用它）。 */
+  main: number;
+  chara_card_id: (number | null)[];
+  weapon_card_id: (number | null)[];
   /** 18 格。 */
-  eventIndex: (number | null)[];
-  weapon: (number | null)[];
-  /** 伺服器自己會算，這裡帶什麼都行；帶原值可以少一次畫面跳動。 */
+  event_card_id: (number | null)[];
+  /** 閃卡特效的狀態。牌組庫不管它，寫回去時照原樣帶。 */
+  card_effect: unknown[];
+  /** 伺服器算的；寫回去時照帶，伺服器會自己重算。 */
   cost: number;
 }
 
-/** `db_deck*` 讀回來的扁平物件（`chara1`、`charaIndex1`、`event1`…）。 */
-export type FlatDeck = Record<string, unknown>;
+/** 換進某一格的內容。`deckId` 是 `deck_id`（1..3），不是陣列位置。 */
+export interface DeckSlotWrite {
+  deckId: number;
+  chara_card_id: (number | null)[];
+  weapon_card_id: (number | null)[];
+  event_card_id: (number | null)[];
+}
 
 /**
  * 快取的連線多久沒連上就換一條新的（毫秒）。
@@ -81,48 +88,66 @@ export type FlatDeck = Record<string, unknown>;
 export const DECK_SOCKET_STALE_MS = 10_000;
 
 /**
- * 在頁面裡建立（或取回）我們自己的 game 服務連線。
+ * 「伺服器那份」的記錄。**全頁只裝一次**，之後每一支讀寫都拿它比對。
  *
- * 存在 `window.__ulrDeckSock`，跨呼叫重用 —— 每次都開一條新的話，玩家連按
- * 幾下換牌組就會留下一串閒置連線。
+ * ⚠ 聽的是 registry 的 `changedata-deck`：官方只有兩個地方會整份換掉
+ * `registry.deck` —— 開機（`PreBoot`）與離開牌組編輯（`deck_update` 成功之後
+ * `update_data`），兩個都是剛從伺服器拉回來的。我們自己寫記憶體一律**就地改**，
+ * 不會觸發它 —— 所以這個事件等於「伺服器那份變了」。
+ *
+ * ⚠ 存的是**拷貝**。存參照的話，玩家在 Edit 裡拖卡（就地改 registry）會連這份
+ * 一起改掉，於是「伺服器那份」永遠等於客戶端那份，開戰前的比對就廢了。
+ */
+const DECK_MIRROR_SNIPPET = `
+  var g = window.game;
+  if (!g) throw new Error("遊戲還沒起來");
+  var M = window.__ulrDeckMirror;
+  if (!M || M.v !== 1 || M.game !== g) {
+    M = window.__ulrDeckMirror = { v: 1, game: g, server: null, at: 0, source: null };
+    try {
+      g.registry.events.on("changedata-deck", function (_p, value) {
+        try {
+          M.server = JSON.parse(JSON.stringify(value));
+          M.at = Date.now();
+          M.source = "game";
+        } catch (e) {}
+      });
+    } catch (e) {}
+  }
+`;
+
+/**
+ * 在頁面裡建立（或取回）我們自己的 lobby 連線，並確定已經 `register`。
+ *
+ * 存在 `window.__ulrDeckSock`，跨呼叫重用 —— 每次都開一條新的話，玩家連按幾下
+ * 換牌組就會留下一串閒置連線。
  *
  * ## ⚠⚠ 重用之前要確認它真的連著（2026-09-13）
  *
- * 回報：「渦房開牌盒無法換牌組，左右也無法切換；牌組編輯內無法切換房間」。
- * 托盤記錄只有一句「讀不到你的卡片庫存，先不換」，而牌組庫從斷線之後就再也
- * 沒接上過。實機查到的是：
+ * 遊戲斷線（code 1006）後 WSClient 會自己重連，WebSocket `readyState=1` 看起來
+ * 正常，但 WSClient 卡在 REGISTERING、永遠等不到 `__connected`；送出去的東西全
+ * 堆在 `#outBuffer`，每次 `fetch` 都等到 30 秒逾時。遊戲自己不受影響（每進一個
+ * 場景都 new 一條），只有我們這條是永遠重用的。
  *
- * ```
- *   __ulrDeckSock   readyState=1（WebSocket 開著）  state=1（REGISTERING）
- *   Raid.socket     readyState=1                    state=2（CONNECTED）
- * ```
- *
- * 遊戲那次斷線（code 1006）之後，WSClient **自己重連**了：WebSocket 打開 →
- * `#onOpen` 把狀態設成 REGISTERING → 帶舊 id 去握手 → 伺服器始終沒回
- * `__connected`。REGISTERING 期間送出去的東西全部躺在 `#outBuffer` 裡不發，
- * 所以每一次 `fetch` 都是等到逾時 —— **換牌組要先讀庫存，於是整個牌組庫的
- * 每一個操作都失敗**，而 WebSocket 本身看起來完全正常。
- *
- * 遊戲自己不受影響，是因為它每進一個場景都 new 一條新的；只有我們這條是
- * 永遠重用的。
- *
- * 所以現在用 WSClient **自己的事件**記「這條真的連上了」（`connect` 是收到
+ * 所以用 WSClient **自己的事件**記「這條真的連上了」（`connect` 是收到
  * `__connected` 才發的，`close` 是斷線）：連著就重用；沒連著而且超過
- * {@link DECK_SOCKET_STALE_MS} 就拆掉換一條新的。不讀 `state` 的數字 ——
- * 那是遊戲內部的列舉，哪天重排了這裡會安靜地判錯。
+ * {@link DECK_SOCKET_STALE_MS} 就拆掉換一條新的。
  *
- * ⚠ 舊版腳本留下的連線沒有這些記號，會被當成「很久沒連上」換掉一次。那是
- * 對的：它正是這次卡死的那一條。
+ * ## `register` 每條連線（每個玩家）只做一次
+ *
+ * 改版後 `fetch` 不再帶玩家 id，連線要先 `register` 才認得人（`Edit.init` 一進來
+ * 就做）。記的是「哪一條連線、哪個玩家、有沒有斷過」—— 斷線重連、換帳號都要
+ * 重做一次。
  */
 const DECK_SOCKET_SETUP = `
-  var g = window.game;
-  if (!g) throw new Error("遊戲還沒起來");
+  var pid = g.registry.get("player_id");
+  if (!pid) throw new Error("還沒登入");
   var host = null, names = Object.keys(g.scene.keys);
   for (var i = 0; i < names.length; i++) {
     var s = g.scene.keys[names[i]];
-    if (s.socket && s.id) { host = s; break; }
+    if (s && s.socket && typeof s.socket.fetch === "function") { host = s; break; }
   }
-  if (!host) throw new Error("找不到可借用 WSClient 與玩家 id 的場景");
+  if (!host) throw new Error("找不到可借用 WSClient 的場景");
   var old = window.__ulrDeckSock;
   if (old && window.__ulrDeckSockLive !== old &&
       !(Date.now() - (window.__ulrDeckSockAt || 0) < ${DECK_SOCKET_STALE_MS})) {
@@ -130,43 +155,87 @@ const DECK_SOCKET_SETUP = `
     window.__ulrDeckSock = null;
   }
   if (!window.__ulrDeckSock) {
-    var cfg = UL_CONFIG.domains.game;
-    var url = cfg.urls[0] + ":" + cfg.ports[Math.floor(Math.random() * cfg.ports.length)];
+    var cfg = UL_CONFIG.domains.lobby;
+    var url = cfg.urls[Math.floor(Math.random() * cfg.urls.length)] + ":" +
+      cfg.ports[Math.floor(Math.random() * cfg.ports.length)];
     var fresh = new (host.socket.constructor)(url);
     window.__ulrDeckSock = fresh;
     window.__ulrDeckSockUrl = url;
     window.__ulrDeckSockAt = Date.now();
     window.__ulrDeckSockLive = null;
+    window.__ulrDeckSockReg = null;
     fresh.on("connect", function () {
       if (window.__ulrDeckSock === fresh) window.__ulrDeckSockLive = fresh;
     });
-    // 斷線後從這一刻重新起算寬限時間：WSClient 自己重連得上就繼續用它。
+    // 斷線後從這一刻重新起算寬限時間：WSClient 自己重連得上就繼續用它，
+    // 但伺服器那邊的 register 跟著連線沒了，要重做。
     fresh.on("close", function () {
       if (window.__ulrDeckSock !== fresh) return;
       window.__ulrDeckSockLive = null;
       window.__ulrDeckSockAt = Date.now();
+      window.__ulrDeckSockReg = null;
     });
   }
-  // ⚠ id 每次都從場景重讀，不快取 —— 玩家換帳號登入時快取的會是上一個人的
-  var sock = window.__ulrDeckSock, pid = host.id;
+  var sock = window.__ulrDeckSock;
+  // ⚠ id 每次都從 registry 重讀，不快取 —— 玩家換帳號登入時快取的會是上一個人的
+  if (window.__ulrDeckSockReg !== String(pid)) {
+    await sock.fetch("register", pid);
+    window.__ulrDeckSockReg = String(pid);
+  }
 `;
 
 /**
- * 帳號指紋：玩家 id 的 SHA-256 前 8 個 hex。
+ * 帳號指紋：**玩家名稱**的 SHA-256 前 8 個 hex。
  *
- * ⚠ 規格書 §12：id 是高熵字串，**不得離開本機**。牌組庫要分辨「這份庫是誰
- * 的」、雲端要分租戶，靠的都是這個指紋 —— 它反推不回 id。
+ * ## ⚠⚠ 不要再用 `player_id`（2026-09-25）
+ *
+ * 2026-09-23 改版後 `registry.player_id` 是頁面全域 `player_id`（`Unlight_Init`
+ * 抄進 registry），**每次登入都發一個新的 UUID** —— 它是這次登入拿去 `register`
+ * 各條 socket 的憑證，不是角色 id。拿它算指紋的結果是每次開遊戲都是「新帳號」：
+ * 找不到上次的牌組庫 → 當成第一次用 → 把 Deck1 各收一份進四房（插件模式的
+ * Deck2／Deck3 早已清空），玩家看到的是「牌組只剩一副，全部都是昨天用的那副」。
+ * 實機：同一個角色一天拿到三個指紋，遊戲每重載一次換一個。
+ *
+ * 名稱在遊戲裡改不了、`registry.player` 本來就有（不必多送請求），而舊存檔的
+ * `accountLabel` 也是它 —— 換過來時托盤靠它把舊指紋的那幾份庫找回來
+ * （`deck-store.ts` 的 `readLibrary`）。
+ *
+ * ## 雲端鍵：名稱 ＋ 註冊時間（`player.regist_at`）
+ *
+ * 雲端的規矩是「知道鍵就能讀寫那份庫」（`@ulr/arbiter-link` 的 `deck-sync.ts`），
+ * 所以鍵的材料要**固定**又**只有本人拿得到**。2026-09-25 對著客戶端查過：
+ *
+ * ```
+ *   player_id、access_token     每次登入都換                  ✗
+ *   名稱、好友代碼、Steam ID    固定，但公開（好友清單、排行榜） ✗ 單獨用
+ *   regist_at                   固定；好友清單、好友個人資料、    ✓
+ *                               排行榜都沒有，客戶端程式碼也從不讀它
+ * ```
+ *
+ * `regist_at` 是精確到毫秒的時間，外人只能對雲端一個一個猜。名稱放進去是讓兩個
+ * 角色不會因為同一毫秒註冊而撞鍵。⚠ 還沒查過的管道：對戰時對手收到的房間資料、
+ * 房間列表、渦列表 —— 哪天發現那裡帶了 `regist_at`，這把鍵就要換。
+ *
+ * 讀不到 `regist_at` 時 `__sync` 是 `null`：托盤看到 `null` 就不同步，**絕不能
+ * 退回只用名稱算**（那等於把門票公開）。
  */
 const FINGERPRINT_SNIPPET = `
-  var __enc = new TextEncoder().encode(String(pid));
-  var __buf = await crypto.subtle.digest("SHA-256", __enc);
-  var __fp = Array.from(new Uint8Array(__buf)).slice(0, 4)
-    .map(function (b) { return b.toString(16).padStart(2, "0"); }).join("");
-  var __sbuf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(${JSON.stringify(
-    "ulr-deck-sync\n",
-  )} + String(pid)));
-  var __sync = Array.from(new Uint8Array(__sbuf))
-    .map(function (b) { return b.toString(16).padStart(2, "0"); }).join("");
+  var __pl = g.registry.get("player") || {};
+  var __name = typeof __pl.player_name === "string" ? __pl.player_name : "";
+  var __reg = typeof __pl.regist_at === "string" ? __pl.regist_at : "";
+  var __fp = null, __sync = null;
+  if (__name) {
+    var __buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(__name));
+    __fp = Array.from(new Uint8Array(__buf)).slice(0, 4)
+      .map(function (b) { return b.toString(16).padStart(2, "0"); }).join("");
+    if (__reg) {
+      var __sbuf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(${JSON.stringify(
+        "ulr-deck-sync\n",
+      )} + __name + "\\n" + __reg));
+      __sync = Array.from(new Uint8Array(__sbuf))
+        .map(function (b) { return b.toString(16).padStart(2, "0"); }).join("");
+    }
+  }
 `;
 
 /**
@@ -176,64 +245,129 @@ const FINGERPRINT_SNIPPET = `
  */
 export const DECK_SYNC_SALT = "ulr-deck-sync\n";
 
-/** 讀回來的一份快照。 */
+/**
+ * 把一副整理成乾淨的純資料（固定長度、只留我們認得的欄位）。
+ *
+ * ⚠ registry 裡的物件是遊戲活著的東西，直接 `JSON.stringify` 帶回來沒問題，但
+ * 送 `deck_update` 時送的是這個形狀 —— 跟 Edit 自己送的 `this.deck` 一樣。
+ */
+const DECK_CLEAN_SNIPPET = `
+  function ulrCells(src, n) {
+    var out = [];
+    for (var i = 0; i < n; i++) {
+      var v = src && src[i];
+      out.push(typeof v === "number" && isFinite(v) ? v : null);
+    }
+    return out;
+  }
+  function ulrCleanDeck(d) {
+    return {
+      deck_id: d.deck_id,
+      main: d.main === 1 ? 1 : 0,
+      chara_card_id: ulrCells(d.chara_card_id, 3),
+      weapon_card_id: ulrCells(d.weapon_card_id, 3),
+      event_card_id: ulrCells(d.event_card_id, 18),
+      card_effect: Array.isArray(d.card_effect) ? d.card_effect : [],
+      cost: typeof d.cost === "number" && isFinite(d.cost) ? d.cost : 0
+    };
+  }
+  function ulrCleanDecks(list) {
+    if (!Array.isArray(list)) return null;
+    return list.map(ulrCleanDeck).sort(function (a, b) { return a.deck_id - b.deck_id; });
+  }
+`;
+
+/**
+ * 重畫玩家眼前那個有牌組列的場景。回傳重畫了哪一個（沒有就 `null`）。
+ *
+ * ```
+ *   Edit                 refresh() ＋ show_deck_label() ＋ show_cost()   原版 ◀▶ 就是這三下
+ *   Quest／Raid／Match   show_deck()
+ * ```
+ */
+const REDRAW_SNIPPET = `
+  function ulrDeckScene(g) {
+    var ed = g.scene.keys.Edit;
+    if (ed && ed.scene.isActive() && typeof ed.refresh === "function") return { name: "Edit", sc: ed };
+    var rooms = ["Quest", "Raid", "Match"];
+    for (var i = 0; i < rooms.length; i++) {
+      var sc = g.scene.keys[rooms[i]];
+      if (sc && sc.scene.isActive() && typeof sc.show_deck === "function" && sc.deck_card) {
+        return { name: rooms[i], sc: sc };
+      }
+    }
+    return null;
+  }
+  function ulrRedraw(hit) {
+    if (!hit) return null;
+    if (hit.name === "Edit") {
+      hit.sc.refresh();
+      try { hit.sc.show_deck_label(); } catch (e) {}
+      try { hit.sc.show_cost(); } catch (e) {}
+      return "Edit";
+    }
+    hit.sc.show_deck();
+    return hit.name;
+  }
+`;
+
+/** 讀回來的一份快照：**伺服器那份**加上帳號資訊。 */
 export interface DeckSnapshot {
   /** 帳號指紋（8 hex）。 */
   account: string;
   /** 玩家顯示名稱，給人看的。讀不到是 `null`。 */
   accountLabel: string | null;
-  /**
-   * `player.deck` 的原值。
-   *
-   * ⚠ **這個欄位沒有任何場景會讀**（2026-08-25 掃過全部場景，只有
-   * `player.deck_check` 被讀）。真正決定開戰用哪一副的是各場景自己的
-   * `deck_now`，跟著開戰的 emit 送出去 —— 別拿這個欄位當「玩家現在用第幾副」。
-   */
+  /** `registry.deck_now`：開戰時用哪一副（場景各自會改，這是全域那一份）。 */
   deckNow: number | null;
   /**
-   * `player.favorite`（`"cc069"` 這種字串，沒設是 `null`）。玩家在 Library
-   * 設的「最愛角色」。
+   * 伺服器上的牌組，照 `deck_id` 排好。
    *
-   * ⚠ **這個欄位決定了換牌組會不會動到大廳立繪。** `Lobby.loader` 在
-   * `favorite !== null` 時直接用它覆寫 `deck.chara[0]`：
-   *
-   * - `null` → 大廳站的是 Deck1 第一格，**換牌組就會換人**
-   * - 有值   → 大廳站的固定是那個角色，Deck1 寫什麼都不影響畫面
-   *
-   * 玩家抱怨「換牌組害我大廳的人一直變」時，答案是去 Library 設一個。
+   * ⚠ 這是「伺服器那份」，不是玩家眼前那份 —— 兩者在換房、在 Edit 裡排牌時本來
+   * 就會不一樣。眼前那份用 {@link EDIT_DECK_READ_EXPRESSION}。
    */
-  favorite: string | null;
-  /** `player.deck_check`，寫回去時要照原值帶。 */
-  deckCheck: boolean;
-  /** 三副的原樣內容，索引 0 是 Deck1。 */
-  decks: FlatDeck[];
-  /** 這次用的是哪個 game 端點，診斷用。 */
+  decks: ServerDeck[];
+  /** 這次的伺服器那份是怎麼來的：頁面記著的（`mirror`）或剛查的（`server`）。 */
+  source: "mirror" | "server";
+  /** 用哪個 lobby 端點（只有真的連過才有），診斷用。 */
   endpoint: string;
   /**
    * 雲端牌組庫的鍵：`SHA-256(DECK_SYNC_SALT + 角色 id)` 的 64 hex。同一個角色在
    * 哪台電腦都一樣，反推不回 id（見 `@ulr/arbiter-link` 的 `deck-sync.ts`）。
-   * 舊版頁面腳本沒有這一欄 → `null`（不同步，不是錯誤）。
    */
   syncKey: string | null;
 }
 
-/** 讀出三副牌組與帳號指紋。 */
+/**
+ * 讀伺服器那份與帳號指紋。
+ *
+ * 頁面記過伺服器那份就直接用（**一趟網路都不跑**）；還沒記過（這次開遊戲第一次）
+ * 才 `db_deck` 一次，順手記下。
+ */
 export const DECK_READ_EXPRESSION = `(async function () {
   try {
-    ${DECK_SOCKET_SETUP}
+    ${DECK_MIRROR_SNIPPET}
+    ${DECK_CLEAN_SNIPPET}
     ${FINGERPRINT_SNIPPET}
-    var player = await sock.fetch("db_player", pid);
-    var decks = [];
-    for (var n = 1; n <= 3; n++) decks.push(await sock.fetch("db_deck" + n, pid));
+    if (!__fp) return JSON.stringify({ error: "還沒登入" });
+    var source = "mirror";
+    if (!M.server) {
+      ${DECK_SOCKET_SETUP}
+      var got = await sock.fetch("db_deck");
+      if (!Array.isArray(got)) return JSON.stringify({ error: "db_deck 回的不是陣列" });
+      M.server = JSON.parse(JSON.stringify(got));
+      M.at = Date.now();
+      M.source = "db_deck";
+      source = "server";
+    }
+    var player = g.registry.get("player") || {};
     return JSON.stringify({
       account: __fp,
       syncKey: __sync,
-      accountLabel: (player && player.name) || null,
-      deckNow: player && typeof player.deck === "number" ? player.deck : null,
-      favorite: (player && player.favorite) || null,
-      deckCheck: !(player && player.deck_check === 0),
-      decks: decks,
-      endpoint: window.__ulrDeckSockUrl
+      accountLabel: player.player_name || player.name || null,
+      deckNow: g.registry.get("deck_now"),
+      decks: ulrCleanDecks(M.server),
+      source: source,
+      endpoint: window.__ulrDeckSockUrl || ""
     });
   } catch (e) { return JSON.stringify({ error: String((e && e.message) || e) }); }
 })()`;
@@ -251,19 +385,53 @@ function parseOrThrow(raw: string, what: string): Record<string, unknown> {
   return rec;
 }
 
+function cells(src: unknown, n: number): (number | null)[] {
+  const arr = Array.isArray(src) ? src : [];
+  const out: (number | null)[] = [];
+  for (let i = 0; i < n; i++) {
+    const v: unknown = arr[i];
+    out.push(typeof v === "number" && Number.isFinite(v) ? v : null);
+  }
+  return out;
+}
+
+/** 頁面帶回來的一副 → {@link ServerDeck}。`deck_id` 不是數字的丟掉。 */
+function parseServerDeck(raw: unknown): ServerDeck | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const d = raw as Record<string, unknown>;
+  if (typeof d.deck_id !== "number") return null;
+  return {
+    deck_id: d.deck_id,
+    main: d.main === 1 ? 1 : 0,
+    chara_card_id: cells(d.chara_card_id, 3),
+    weapon_card_id: cells(d.weapon_card_id, 3),
+    event_card_id: cells(d.event_card_id, 18),
+    card_effect: Array.isArray(d.card_effect) ? (d.card_effect as unknown[]) : [],
+    cost: typeof d.cost === "number" && Number.isFinite(d.cost) ? d.cost : 0,
+  };
+}
+
+/** 一串 → 照 `deck_id` 排好的 {@link ServerDeck}。不是陣列回 `null`。 */
+function parseServerDecks(raw: unknown): ServerDeck[] | null {
+  if (!Array.isArray(raw)) return null;
+  return raw
+    .map(parseServerDeck)
+    .filter((d): d is ServerDeck => d !== null)
+    .sort((a, b) => a.deck_id - b.deck_id);
+}
+
 export function parseDeckSnapshot(raw: string): DeckSnapshot {
   const rec = parseOrThrow(raw, "讀牌組");
-  const decks = Array.isArray(rec.decks) ? (rec.decks as FlatDeck[]) : [];
-  if (decks.length !== 3) throw new Error(`讀牌組：預期三副，拿到 ${decks.length} 副`);
+  const decks = parseServerDecks(rec.decks);
+  if (decks === null || decks.length === 0) throw new Error("讀牌組：伺服器那份是空的");
   const account = typeof rec.account === "string" ? rec.account : "";
   if (!/^[0-9a-f]{8}$/.test(account)) throw new Error("讀牌組：帳號指紋的格式不對");
   return {
     account,
     accountLabel: typeof rec.accountLabel === "string" ? rec.accountLabel : null,
     deckNow: typeof rec.deckNow === "number" ? rec.deckNow : null,
-    favorite: typeof rec.favorite === "string" && rec.favorite !== "" ? rec.favorite : null,
-    deckCheck: rec.deckCheck !== false,
     decks,
+    source: rec.source === "server" ? "server" : "mirror",
     endpoint: typeof rec.endpoint === "string" ? rec.endpoint : "",
     syncKey:
       typeof rec.syncKey === "string" && /^[0-9a-f]{64}$/.test(rec.syncKey) ? rec.syncKey : null,
@@ -272,90 +440,89 @@ export function parseDeckSnapshot(raw: string): DeckSnapshot {
 
 /** 寫入的結果。 */
 export interface DeckApplyResult {
-  /** 伺服器有沒有回 ack。**沒有 ack 就是沒寫進去**（見檔頭的服務分池）。 */
-  ack: boolean;
-  /** 記憶體被同步到的場景名。空的表示沒有場景載入過牌組。 */
-  synced: string[];
-  /** 畫面刷新做了什麼，沒做是 `null`。 */
+  /**
+   * 伺服器怎麼回：
+   *
+   * ```
+   *   ok         回 false —— 收下了（官方的慣例：false = 沒有錯誤）
+   *   rejected   回 true  —— 退回（多半是庫存超量：三副共用一個卡池）
+   *   no-answer  逾時或丟例外 —— 不知道有沒有寫進去
+   * ```
+   */
+  answer: "ok" | "rejected" | "no-answer";
+  /** 重畫了哪個場景。沒有就是 `null`。 */
   refreshed: string | null;
 }
 
 /**
- * 建立「寫入三副牌組」的表達式。
+ * 建立「把整份牌組寫進伺服器」的表達式。
  *
- * @param decks 三副，索引 0 是 Deck1。
- * @param deckCheck `player.deck_check` 的原值，照帶回去。
+ * @param decks 整份（三副），跟 Edit 離開時送的 `this.deck` 同一個形狀。
  *
- * ⚠ 頁面端**還有一道 Deck1 非空的閘門**。呼叫端（`@ulr/deck-library` 的
- * `guardDeck1`）已經擋過一次，這裡再擋一次是故意的：寫空了會讓玩家在牌組
- * 編輯畫面的**兩個出口都出不去**，卡死在裡面。這種等級的後果值得兩道鎖。
+ * 成功之後三件事：
+ *
+ * 1. 伺服器那份（mirror）記成我們送的這份。
+ * 2. **客戶端記憶體就地改成同一份** —— 不改的話玩家停在 Edit 時，他離開那一下
+ *    遊戲會拿記憶體裡的舊內容再送一次，把我們寫的蓋掉。就地改（不是整份換掉）
+ *    是因為每個場景手上拿的都是同一個陣列參照。
+ * 3. 重畫眼前那個場景。
+ *
+ * ⚠ 頁面端**還有一道「整份是空的就不送」**：呼叫端已經擋過，這裡再擋一次是故意
+ * 的 —— 把玩家三副全部清空的後果不值得只靠一道鎖。
  */
-export function buildDeckApplyExpression(decks: DeckPayload[], deckCheck: boolean): string {
+export function buildDeckApplyExpression(decks: ServerDeck[]): string {
   return `(async function () {
   try {
-    ${DECK_SOCKET_SETUP}
-    var D = JSON.parse(${embedJson(decks)});
-    if (D.length !== 3) return JSON.stringify({ error: "要三副，拿到 " + D.length + " 副" });
-    if (D[0].charaIndex[0] === null || D[0].charaIndex[0] === undefined) {
-      return JSON.stringify({ error: "拒絕寫入：Deck1 第一格是空的，會讓玩家卡死在牌組編輯畫面" });
-    }
-
-    var ackP = new Promise(function (resolve) {
-      sock.once("db_editdeck", function () { resolve(true); });
-      setTimeout(function () { resolve(false); }, 4000);
-    });
-    sock.emit("db_editdeck", pid, D[0], D[1], D[2], ${deckCheck ? "true" : "false"});
-    var ack = await ackP;
-
-    // 同步客戶端記憶體，見檔頭「寫完一定要同步客戶端記憶體」
+    ${DECK_MIRROR_SNIPPET}
+    ${DECK_CLEAN_SNIPPET}
+    ${REDRAW_SNIPPET}
     ${ROOM_COST_SNIPPET}
-    var synced = [];
-    Object.keys(g.scene.keys).forEach(function (k) {
-      var sc = g.scene.keys[k];
-      for (var n = 1; n <= 3; n++) {
-        var cur = sc["deck" + n];
-        if (!cur || typeof cur !== "object" || cur.chara === undefined) continue;
-        var src = D[n - 1];
-        cur.chara = src.chara.slice();
-        cur.charaIndex = src.charaIndex.slice();
-        if (cur.eventIndex !== undefined) cur.eventIndex = src.eventIndex.slice();
-        if (cur.weapon !== undefined) cur.weapon = src.weapon.slice();
-        // ⚠ cost 不能照抄 payload：呼叫端帶的是快照裡**上一副**的數字（2026-09-12
-        // 迪城「COST 變來變去」的其中一個來源）。照房型算成跟牌盒一樣的數字，見
-        // room-cost.ts；算不出來才用帶來的值。
-        var rc = ulrRoomCostOf(cur, ulrRoomOfScene(k, sc));
-        cur.cost = rc !== null ? rc : src.cost;
-        if (synced.indexOf(k) < 0) synced.push(k);
-      }
+    var D = JSON.parse(${embedJson(decks)});
+    if (!Array.isArray(D) || D.length === 0) return JSON.stringify({ error: "沒有牌組可以寫" });
+    var any = D.some(function (d) {
+      return (d.chara_card_id || []).some(function (x) { return x !== null && x !== undefined; });
     });
+    if (!any) return JSON.stringify({ error: "拒絕寫入：三副全是空的" });
+    ${DECK_SOCKET_SETUP}
 
-    // 畫面刷新：Match 的大廳縮圖用遊戲自己的重繪
+    var res;
+    try {
+      res = await Promise.race([
+        sock.fetch("deck_update", D),
+        new Promise(function (resolve) { setTimeout(function () { resolve("__timeout"); }, 6000); })
+      ]);
+    } catch (e) { res = "__error"; }
+    if (res === "__timeout" || res === "__error") {
+      return JSON.stringify({ answer: "no-answer", refreshed: null });
+    }
+    if (res !== false) return JSON.stringify({ answer: "rejected", refreshed: null });
+
+    M.server = JSON.parse(JSON.stringify(D));
+    M.at = Date.now();
+    M.source = "ulr";
+
+    // 客戶端記憶體就地跟上（見上面第 2 點）。
+    var hit = ulrDeckScene(g);
+    var lists = [g.registry.get("deck")];
+    if (hit && hit.sc.deck && lists.indexOf(hit.sc.deck) < 0) lists.push(hit.sc.deck);
+    var room = hit ? ulrRoomOfScene(hit.name, hit.sc) : null;
+    lists.forEach(function (list) {
+      if (!Array.isArray(list)) return;
+      D.forEach(function (src) {
+        for (var i = 0; i < list.length; i++) {
+          var cur = list[i];
+          if (!cur || cur.deck_id !== src.deck_id) continue;
+          cur.chara_card_id = src.chara_card_id.slice();
+          cur.weapon_card_id = src.weapon_card_id.slice();
+          cur.event_card_id = src.event_card_id.slice();
+          var c = ulrRoomCostOf(cur, room);
+          if (c !== null) cur.cost = c;
+        }
+      });
+    });
     var refreshed = null;
-    var m = g.scene.keys.Match;
-    if (m && m.scene.isActive() && typeof m.change_deck === "function" && m.deckCard) {
-      try { m.change_deck(0); refreshed = "Match.change_deck"; }
-      catch (e) { refreshed = "刷新失敗：" + String(e && e.message); }
-    }
-
-    // ⚠⚠ **牌組編輯畫面一定要重畫，而且它是最重要的那一個。**
-    //
-    // 換牌組的入口就開在這個畫面上，所以玩家幾乎一定正站在這裡 —— 而這裡是
-    // 唯一「記憶體換了、畫面還是舊的」會被直接看見的地方。2026-08-27 玩家回報
-    // 的「選了牌組，牌也沒變化」有一半是這個：牌其實換了，畫面沒重畫。
-    //
-    // edit_reflesh() 是遊戲自己的重繪（原版 ◀▶ 換牌組時呼叫的就是它），
-    // 它照 deck_now 讀，所以要先確定 deck_now 是 1 —— 我們寫的一直是 Deck1。
-    var ed = g.scene.keys.Edit;
-    if (ed && ed.scene.isActive() && typeof ed.edit_reflesh === "function") {
-      try {
-        ed.deck_now = 1;
-        ed.edit_reflesh();
-        refreshed = (refreshed ? refreshed + " + " : "") + "Edit.edit_reflesh";
-      } catch (e) {
-        refreshed = (refreshed ? refreshed + " + " : "") + "Edit 刷新失敗：" + String(e && e.message);
-      }
-    }
-    return JSON.stringify({ ack: ack, synced: synced, refreshed: refreshed });
+    try { refreshed = ulrRedraw(hit); } catch (e) { refreshed = "重畫失敗：" + String(e && e.message); }
+    return JSON.stringify({ answer: "ok", refreshed: refreshed });
   } catch (e) { return JSON.stringify({ error: String((e && e.message) || e) }); }
 })()`;
 }
@@ -363,278 +530,226 @@ export function buildDeckApplyExpression(decks: DeckPayload[], deckCheck: boolea
 export function parseDeckApplyResult(raw: string): DeckApplyResult {
   const rec = parseOrThrow(raw, "寫牌組");
   return {
-    ack: rec.ack === true,
-    synced: Array.isArray(rec.synced) ? (rec.synced as string[]) : [],
+    answer: rec.answer === "ok" ? "ok" : rec.answer === "rejected" ? "rejected" : "no-answer",
     refreshed: typeof rec.refreshed === "string" ? rec.refreshed : null,
   };
 }
 
-/** 玩家的卡片庫存，形狀就是那幾個 `db_*` 的原樣回傳。 */
+/** 玩家的卡片庫存：registry 的原樣（`[{card_id, quantity}]`），三種卡各一份。 */
 export interface InventorySnapshot {
-  chara: Record<string, string>;
-  event: Record<string, number | string>;
-  weapon: Record<string, number | string>;
+  chara: unknown[];
+  weapon: unknown[];
+  event: unknown[];
+  /**
+   * 玩家角色卡（`CharaCards` 裡 `kind` 0 的）：卡片 id → 格子鍵（`cc035_r02`）。
+   * 讀不到卡片資料時是空的。
+   *
+   * 格子鍵裡就有「哪個角色、L 還是 R、第幾級」—— 牌組裡的角色卡手上沒有了
+   * （多半是合成掉了），托盤靠它臨時換成同一個角色的另一張。怪物卡不列：
+   * 同一個代號底下有好幾張同等級的，也不會被合成。
+   */
+  charaFiles: Record<string, string>;
 }
 
 /**
  * 讀庫存 —— 「只用玩家真的有的卡」那條線靠它。
  *
- * ⚠ 這裡讀的是**整個庫存**，沒有扣掉三副牌組正在用的。牌組庫的前提是
- * Deck2/Deck3 已經清空、同時只有一副躺在伺服器上，所以整個庫存都是可用的。
+ * **一趟網路都不跑**：讀的是 registry 裡遊戲自己維護的那份（開機與進牌組編輯時
+ * 官方會更新），角色卡的格子鍵讀的是遊戲開機載好的 `CharaCards`。
  */
-export const INVENTORY_READ_EXPRESSION = `(async function () {
+export const INVENTORY_READ_EXPRESSION = `(function () {
   try {
-    ${DECK_SOCKET_SETUP}
-    return JSON.stringify({
-      chara: await sock.fetch("db_characard", pid),
-      event: await sock.fetch("db_eventcard", pid),
-      weapon: await sock.fetch("db_item_weapon", pid)
-    });
+    var g = window.game;
+    if (!g) return JSON.stringify({ error: "遊戲還沒起來" });
+    var c = g.registry.get("chara_card"), w = g.registry.get("weapon_card"), e = g.registry.get("event_card");
+    if (!Array.isArray(c) || !Array.isArray(w) || !Array.isArray(e)) {
+      return JSON.stringify({ error: "庫存還沒載入" });
+    }
+    function slim(list) {
+      return list.map(function (r) { return { card_id: r.card_id, quantity: r.quantity }; });
+    }
+    var charaFiles = {};
+    try {
+      var cards = g.cache && g.cache.json && g.cache.json.get(${JSON.stringify(CHARA_CARDS_KEY)});
+      if (Array.isArray(cards)) {
+        cards.forEach(function (x) {
+          if (x && typeof x.id === "number" && x.kind === 0 && typeof x.filename === "string") {
+            charaFiles[x.id] = x.filename;
+          }
+        });
+      }
+    } catch (err) { charaFiles = {}; }
+    return JSON.stringify({ chara: slim(c), weapon: slim(w), event: slim(e), charaFiles: charaFiles });
   } catch (e) { return JSON.stringify({ error: String((e && e.message) || e) }); }
 })()`;
 
 export function parseInventorySnapshot(raw: string): InventorySnapshot {
   const rec = parseOrThrow(raw, "讀庫存");
-  const table = (v: unknown): Record<string, never> =>
-    typeof v === "object" && v !== null ? (v as Record<string, never>) : {};
-  return {
-    chara: table(rec.chara),
-    event: table(rec.event),
-    weapon: table(rec.weapon),
-  };
+  const list = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
+  const charaFiles: Record<string, string> = {};
+  if (typeof rec.charaFiles === "object" && rec.charaFiles !== null) {
+    for (const [k, v] of Object.entries(rec.charaFiles as Record<string, unknown>)) {
+      if (/^\d+$/.test(k) && typeof v === "string") charaFiles[k] = v;
+    }
+  }
+  return { chara: list(rec.chara), weapon: list(rec.weapon), event: list(rec.event), charaFiles };
 }
 
 /**
- * 讀**牌組編輯畫面正在編輯的那一副**（客戶端記憶體裡的 `Edit.deck1`）。
+ * 讀**玩家眼前那份**（客戶端記憶體 `registry.deck`）＋頁面記著的伺服器那份。
  *
- * ## ⚠ 為什麼不能只讀伺服器
+ * 回傳 `active: false` 表示玩家不在任何有牌組列的畫面（Edit／任務／渦／對戰房）。
+ * 那時候呼叫端該用伺服器那份（{@link DECK_READ_EXPRESSION}）。
  *
- * 玩家在編輯畫面拖卡片時，改的是**客戶端記憶體**；遊戲要等他**離開畫面**才
- * 送 `db_editdeck`（`scene_end().then(...)`，2026-08-28 從實機讀到）。所以人
- * 還站在那個畫面時，伺服器上的 Deck1 是**舊的**。
+ * ## 為什麼 `where` 不能省
  *
- * 只讀伺服器的後果不是「晚一點才存到」那麼輕：玩家改完牌直接按 ◀▶ 換牌組時，
- * 插件看到的 Deck1 還是舊內容 → 判定「沒有編輯要存」→ 接著把目標牌組寫進
- * Deck1 並同步記憶體 —— **他剛剛排的牌當場消失，而且沒有任何訊息**。
+ * 只有 Edit 裡的變動是「玩家自己改的牌」；房間場景裡的變動是我們的進房預載
+ * （`patch-room-gate`）做的。分不出來的話自動存檔會把上一房的牌存進這一房
+ * （2026-09-10 實機災情），見托盤 `main.ts` 的 `mayAutoSave`。
  *
- * 回傳 `null` 表示牌組編輯畫面沒開著（那時候伺服器才是真相）。
- *
- * ⚠ 形狀是**陣列版**（`{chara, charaIndex, eventIndex, weapon, cost}`），
- * 跟 `db_deck*` 讀回來的扁平版不一樣 —— 用 `parseDeckContent()` 讀它，
- * 不要用 `deckContentFromFlat()`。
+ * ⚠ 帳號指紋跟著一起帶回去：人一直待在有牌組列的畫面時托盤只走這條，換帳號
+ * 要從這裡看出來（2026-09-14）。
  */
-export const EDIT_DECK_READ_EXPRESSION = `(function () {
+export const EDIT_DECK_READ_EXPRESSION = `(async function () {
   try {
-    var g = window.game;
-    if (!g) return JSON.stringify({ active: false });
-
-    // ⚠⚠ **這支要跟 buildEditDeckWriteExpression() 認得一樣多的場景。**
-    //
-    // 它回答的是「玩家**現在眼前**那一副是什麼」，而那是所有比對的基準：
-    // 「選的這副跟手上這副一不一樣」、自動存檔要不要存。
-    //
-    // 2026-09-09 踩過：寫入端教會了它認房間場景、讀取端沒有 —— 於是在任務房裡
-    // 這支回 active:false，呼叫端退回去讀**伺服器**的 Deck1。而伺服器那份是
-    // 刻意延後、還沒更新的舊資料，於是「選 Deck1」被拿去跟舊內容比，判成
-    // 「一模一樣」→ 不寫、不重畫 → **玩家永遠換不到那一副**。
-    //
-    // 讀寫兩邊認的場景一旦不一致，症狀就是這種「有時候換不過去」。
-    var order = ["Edit", "Quest", "Raid", "Match"];
-    for (var i = 0; i < order.length; i++) {
-      var sc = g.scene.keys[order[i]];
-      if (!sc || !sc.scene.isActive()) continue;
-      // ⚠ 一律讀 deck1：牌組庫把 Deck1 當唯一工作槽，而且頁面補丁把 deck_now
-      // 釘死在 1。讀 deck_now 的話，玩家在補丁掛上之前切到過 2 就會讀錯一副。
-      var d = sc.deck1;
-      if (!d || d.chara === undefined) continue;
-      return JSON.stringify({
-        active: true,
-        where: order[i] === "Edit" ? "edit" : "room",
-        deck: {
-          chara: d.chara, charaIndex: d.charaIndex,
-          eventIndex: d.eventIndex, weapon: d.weapon,
-          cost: typeof d.cost === "number" ? d.cost : 0
-        }
-      });
-    }
-    return JSON.stringify({ active: false });
+    ${DECK_MIRROR_SNIPPET}
+    ${DECK_CLEAN_SNIPPET}
+    ${REDRAW_SNIPPET}
+    var __acct = null;
+    try {
+      ${FINGERPRINT_SNIPPET}
+      __acct = __fp;
+    } catch (e) { __acct = null; /* 認不出帳號就當不知道，不要擋住讀牌組 */ }
+    var hit = ulrDeckScene(g);
+    if (!hit) return JSON.stringify({ active: false, account: __acct });
+    var list = hit.sc.deck || g.registry.get("deck");
+    return JSON.stringify({
+      active: true,
+      where: hit.name === "Edit" ? "edit" : "room",
+      scene: hit.name,
+      account: __acct,
+      deckNow: typeof hit.sc.deck_now === "number" ? hit.sc.deck_now : null,
+      decks: ulrCleanDecks(list),
+      server: M.server ? ulrCleanDecks(M.server) : null
+    });
   } catch (e) { return JSON.stringify({ error: String((e && e.message) || e) }); }
 })()`;
 
 /**
- * **換牌組的快路徑：只動客戶端記憶體，一次網路都不跑。**
+ * 「玩家眼前那份」讀回來的東西。
  *
- * ## 為什麼要有這條路
- *
- * 走伺服器的話，換一副牌要 8~11 趟 WebSocket（讀三副 → emit → 等 ack 最多
- * 4 秒 → 再讀回來驗證）。而原版左下角那兩個 ◀▶ **完全不碰網路**：
- *
- * ```js
- *   let t = this.deck_now - 1; if (t < 1) t = 3;
- *   this.switch_decks(t); this.deck_now = t; this.edit_reflesh();
- * ```
- *
- * 它換的是「畫面在畫哪一個記憶體物件」，等玩家**離開編輯畫面**才送一次
- * `db_editdeck`。自訂牌組要跟它一樣順，就得走同一條路。
- *
- * ## 照抄 reset 鈕（2026-08-28 從實機讀到）
- *
- * ```js
- *   this[`deck${this.deck_now}`] = { charaIndex:[…], chara:[…], eventIndex:[…],
- *                                    weapon:[…], cost:null };
- *   this.edit_reflesh();
- * ```
- *
- * ⚠ **整個物件換掉，不要就地改欄位。** 遊戲自己就是這樣做的，而 `edit_reflesh()`
- * 會把卡片、槽位與三個 cost 標籤全部重畫 —— cost 不必自己算。
- *
- * ⚠ 寫完**不上伺服器**。玩家離開編輯畫面時遊戲會自己送 `this.deck1`，而那時
- * 它裝的正是我們寫進去的內容。這也表示：遊戲被強制關掉（沒有正常離開畫面）時
- * 這次切換不會留在伺服器上 —— 跟玩家自己排牌沒存就關掉是同一種結果。
- *
- * ## 空牌組在 Edit 畫面是合法的 —— 那就是 reset 鈕按下去的狀態（2026-09-12）
- *
- * 選單裡選了一副空的（玩家自己按過 reset 又存起來的那種），Edit 這一段照寫
- * 不誤：寫進記憶體的東西跟遊戲 reset 產生的一模一樣，出口那道「第一格不能空」
- * 的檢查是遊戲自己擋的、玩家看得到原因。原本一律拒絕的後果是「選了空牌組，
- * 舊的那副還在畫面上」，玩家得自己再按一次 reset。
- *
- * `guardDeck1` 守的是**伺服器**那條路（`buildDeckApplyExpression`）——
- * 寫空到伺服器才會讓玩家卡死。房間場景也不收，回 `empty-room`，見下面。
- *
- * ## ⚠ 房間場景要自己把 COST 算對（2026-09-12）
- *
- * 大廳／房間的 `cost:NN` 讀的是 `deck1.cost`，而遊戲**只在載入時信任這個欄位、
- * 從不重算**。payload 的 cost 一律帶 0（伺服器自己會算，見 {@link DeckPayload}），
- * 所以換牌之後房間會顯示「COST 0」，或停在上一副的舊數字 —— 2026-09-12 在亞城
- * 回報的正是這個。這支換完會把真的數字補進 `deck1.cost` 再重畫。
- *
- * ⚠ 算法只有一種，在 `room-cost.ts`：**跟牌盒畫的同一張表**（迪城自訂價、其餘
- * 官方價）。原本這裡固定算官方價，而慢路徑抄的是上一副的數字、遊戲自己載入的
- * 又是自訂價 —— 同一副牌輪流出現三個數字，就是 2026-09-12 迪城回報的「COST
- * 變來變去」。
- *
- * 回 `not-active` 表示編輯畫面沒開著，呼叫端要退回走伺服器那條路。
- */
-export function buildEditDeckWriteExpression(deck: DeckPayload, label?: string): string {
-  return `(function () {
-  try {
-    var g = window.game;
-    if (!g) return "not-active";
-    ${ROOM_COST_SNIPPET}
-    var d = JSON.parse(${embedJson(deck)});
-    // ⚠ 一定要 JSON.parse。embedJson() 給的是「要餵給 JSON.parse 的字串字面
-    // 值」，直接用的話 label 會變成字串 "null" 而不是 null —— 症狀是遊戲裡
-    // 那行小字真的印出「null」。
-    var label = JSON.parse(${embedJson(label ?? null)});
-
-    function load(sc) {
-      // ⚠ 整個換掉，跟 reset 鈕一樣；deck_now 釘 1（牌組庫只用 Deck1 這個工作槽）
-      sc.deck1 = {
-        chara: d.chara, charaIndex: d.charaIndex,
-        eventIndex: d.eventIndex, weapon: d.weapon, cost: d.cost
-      };
-      sc.deck_now = 1;
-    }
-
-    // ── 牌組編輯畫面 ────────────────────────────────────────────────────
-    var ed = g.scene.keys.Edit;
-    if (ed && ed.scene.isActive() && typeof ed.edit_reflesh === "function") {
-      load(ed);
-      ed.edit_reflesh();
-      // ⚠ "ok" 專指**編輯畫面**。呼叫端靠它決定「還要不要寫伺服器」：遊戲會在
-      // 玩家離開 Edit 時自己把它送上伺服器，所以那條路不必補寫。
-      return "ok";
-    }
-
-    // ── 房間場景（任務／渦／對戰）──────────────────────────────────────
-    //
-    // ⚠⚠ **這一段不是可有可無的。** 玩家在任務房按左下角的 ◀▶ 換牌組時，
-    // Edit 畫面根本沒開著 —— 少了這裡，畫面上那三張卡完全不會變，而症狀是
-    // 「按了箭頭沒反應」。2026-09-09 回報的「牌組二看不到」就是這一塊
-    // （那時候箭頭切的還是遊戲自己那兩格空的 Deck2/Deck3）。
-    var names = ["Quest", "Raid", "Match"];
-    for (var i = 0; i < names.length; i++) {
-      var sc = g.scene.keys[names[i]];
-      if (!sc || !sc.scene.isActive()) continue;
-      // 這個場景有在畫牌組嗎？沒有 deck1 就不是（例如還在載入）。
-      if (!sc.deck1) continue;
-      // ⚠ 空牌組**只有 Edit 收**（那裡等於幫玩家按 reset，見上面）。房間裡
-      // 沒有 reset 這回事：寫進去畫面會變成三格空的、開戰卻用伺服器那副舊的，
-      // 而且沒有人會把它送上去 —— 呼叫端拿到這個值就照 guardDeck1 的理由拒絕。
-      if (d.charaIndex[0] === null || d.charaIndex[0] === undefined) return "empty-room";
-      load(sc);
-      // ⚠ COST 要自己算出來填進去（2026-09-12 回報）。房間場景的 cost:NN 讀的是
-      // deck1.cost，而遊戲**不重算** —— 它只在載入時信任那個欄位。上面 load()
-      // 帶進來的是 0（payload 的 cost 一律 0），所以不補的話畫面會顯示「COST 0」，
-      // 或停在上一副的舊數字。哪一種價看房型（跟牌盒同一張表），見 room-cost.ts；
-      // 算不出來就維持原樣。
-      var c = ulrRoomCostOf(sc.deck1, ulrRoomOfScene(names[i], sc));
-      if (c !== null) sc.deck1.cost = c;
-      // 名字：⚠ 遊戲原本寫死 "Deck1 "，但牌組庫裡那一副有自己的名字，而
-      // 「Deck1」對玩家已經沒有意義了（工作槽永遠是 1）。
-      try {
-        if (label !== null && sc.deck_name && typeof sc.deck_name.setText === "function") {
-          sc.deck_name.setText(label + " ");
-        }
-      } catch (e) { /* 標籤畫不出來不影響換牌 */ }
-      // 重畫：Match 有自己的 change_deck，任務／渦用 deck_card。
-      try {
-        if (typeof sc.change_deck === "function") sc.change_deck(0);
-        else if (typeof sc.deck_card === "function") sc.deck_card(sc.deck1);
-      } catch (e) {
-        return "錯誤：重畫失敗 " + String((e && e.message) || e);
-      }
-      // ⚠⚠ **回 "ok-room" 而不是 "ok"。**
-      //
-      // 兩者的差別是「還要不要寫伺服器」：
-      //   ok       編輯畫面 —— 遊戲會在玩家離開時自己把它送上去，不必補寫
-      //   ok-room  房間場景 —— **沒有人會送**，要提交的話呼叫端得自己走慢路徑
-      //
-      // 混成同一個值的話，開戰前的提交會在這裡就 return 掉，伺服器上還是舊的
-      // 那一副 —— 而畫面看起來完全正常。
-      return "ok-room";
-    }
-
-    return "not-active";
-  } catch (e) { return "錯誤：" + String((e && e.message) || e); }
-})()`;
-}
-
-/** 讀不到、或畫面沒開著，一律回 `null` —— 呼叫端該退回去讀伺服器。 */
-/**
- * 「玩家眼前那一副」讀回來的東西。
- *
- * ⚠⚠ `where` **不是裝飾，是自動存檔的閘門。** 這支認四個場景（Edit／Quest／
- * Raid／Match），而其中只有 Edit 裡的變動是「玩家自己改的牌」；房間場景裡
- * Deck1 會被 `patch-room-gate` 的 preload 換掉（進哪一房就換成那一房的牌），
- * 那是**我們自己做的事，不是玩家的編輯**。
- *
- * 2026-09-10 實機災情：分不出這兩者的時候，玩家從任務房跳到渦房，autoSave 把
- * 任務房那一副存進了渦房那一副（庫裡 raid 的第 3 副整個被覆蓋），而且因為
- * autoSave 從不出聲，記錄檔上一個字都沒有。
+ * ⚠⚠ `where` **不是裝飾，是自動存檔的閘門**：`edit` 裡的變動是玩家的編輯，
+ * `room` 裡的變動是我們自己的進房預載。
  */
 export interface EditDeckRead {
-  deck: Record<string, unknown>;
+  /** 客戶端記憶體的整份，照 `deck_id` 排好。 */
+  decks: ServerDeck[];
+  /** 頁面記著的伺服器那份；還沒記過是 `null`。 */
+  server: ServerDeck[] | null;
   /** `edit` = 牌組編輯畫面；`room` = 任務／渦／對戰房。 */
   where: "edit" | "room";
+  /** 那個場景自己的 `deck_now`（玩家眼前是第幾副）。 */
+  deckNow: number | null;
+  /**
+   * 帳號指紋（8 hex，跟 `DeckSnapshot.account` 同一套）。認不出來是 `null` ——
+   * 呼叫端**不能**把 `null` 當成「換帳號了」，那只是這一拍不知道。
+   */
+  account: string | null;
 }
 
+/** 畫面沒開著、或讀不懂，一律回 `null` —— 呼叫端該退回去讀伺服器那份。 */
 export function parseEditDeck(raw: string): EditDeckRead | null {
   try {
     const data = JSON.parse(raw) as Record<string, unknown>;
     if (data.active !== true) return null;
-    const deck = data.deck;
-    if (typeof deck !== "object" || deck === null) return null;
+    const decks = parseServerDecks(data.decks);
+    if (decks === null || decks.length === 0) return null;
     return {
-      deck: deck as Record<string, unknown>,
+      decks,
+      server: parseServerDecks(data.server),
       // ⚠ 認不出來時當成 `room`（保守的那一邊）：猜錯成 edit 會吃掉牌組，
       //   猜錯成 room 只是少存一次玩家的編輯，而下一拍就補回來了。
       where: data.where === "edit" ? "edit" : "room",
+      deckNow: typeof data.deckNow === "number" ? data.deckNow : null,
+      account:
+        typeof data.account === "string" && /^[0-9a-f]{8}$/.test(data.account)
+          ? data.account
+          : null,
     };
   } catch {
     return null;
   }
+}
+
+/**
+ * **換牌組的快路徑：只動客戶端記憶體，一次網路都不跑。**
+ *
+ * 原版 ◀▶ 就是這樣：換的是「畫面在畫哪一副」，等玩家離開編輯畫面才送一次
+ * `deck_update`。自訂牌組要跟它一樣順，就走同一條路 —— 把內容就地寫進
+ * `registry.deck` 的那幾格，然後照原版的方式重畫。
+ *
+ * @param slots 要換的格子（`deckId` 1..3）。插件模式只換第 1 格；官方三牌組模式
+ *   三格一起換。
+ * @param pin 寫完把場景的 `deck_now` 釘在第幾副（插件模式是 1）；`null` 不動。
+ *
+ * 回傳：
+ *
+ * ```
+ *   ok          編輯畫面 —— 遊戲會在玩家離開時自己送上伺服器，不必補寫
+ *   ok-room     房間場景 —— **沒有人會送**，要提交的話呼叫端得自己寫伺服器
+ *   not-active  玩家不在有牌組列的畫面，什麼都沒動
+ *   empty-room  房間場景裡要釘的那一副是空的 —— 拒絕（開戰會拿空牌上場）
+ * ```
+ *
+ * ⚠ 空牌組**只有 Edit 收**（那等於幫玩家按 reset，出口的檢查是遊戲自己的）。
+ *
+ * ⚠ 房間的 `cost:NN` 讀的是那一副的 `cost`，而遊戲**不重算**。寫完照房型算好填
+ * 進去（跟牌盒同一張表，見 `room-cost.ts`）。
+ */
+export function buildEditDeckWriteExpression(slots: DeckSlotWrite[], pin: number | null): string {
+  return `(function () {
+  try {
+    var g = window.game;
+    if (!g) return "not-active";
+    ${REDRAW_SNIPPET}
+    ${ROOM_COST_SNIPPET}
+    var S = JSON.parse(${embedJson(slots)});
+    var PIN = JSON.parse(${embedJson(pin)});
+    var hit = ulrDeckScene(g);
+    if (!hit) return "not-active";
+    var isRoom = hit.name !== "Edit";
+    if (isRoom && PIN !== null) {
+      for (var k = 0; k < S.length; k++) {
+        if (S[k].deckId === PIN && (S[k].chara_card_id[0] === null || S[k].chara_card_id[0] === undefined)) {
+          return "empty-room";
+        }
+      }
+    }
+    var room = ulrRoomOfScene(hit.name, hit.sc);
+    var lists = [g.registry.get("deck")];
+    if (hit.sc.deck && lists.indexOf(hit.sc.deck) < 0) lists.push(hit.sc.deck);
+    var touched = 0;
+    lists.forEach(function (list) {
+      if (!Array.isArray(list)) return;
+      S.forEach(function (src) {
+        for (var i = 0; i < list.length; i++) {
+          var cur = list[i];
+          if (!cur || cur.deck_id !== src.deckId) continue;
+          cur.chara_card_id = src.chara_card_id.slice();
+          cur.weapon_card_id = src.weapon_card_id.slice();
+          cur.event_card_id = src.event_card_id.slice();
+          var c = ulrRoomCostOf(cur, room);
+          if (c !== null) cur.cost = c;
+          touched++;
+        }
+      });
+    });
+    if (touched === 0) return "錯誤：記憶體裡找不到要換的那幾格";
+    if (PIN !== null) hit.sc.deck_now = PIN;
+    ulrRedraw(hit);
+    return isRoom ? "ok-room" : "ok";
+  } catch (e) { return "錯誤：" + String((e && e.message) || e); }
+})()`;
 }
 
 /** 關掉我們自己那條連線。玩家關插件時用，免得留一條閒置的 WebSocket。 */
@@ -644,6 +759,7 @@ export const DECK_SOCKET_CLOSE_EXPRESSION = `(function () {
       try { window.__ulrDeckSock.disconnect(); } catch (e) { /* 已經斷了 */ }
       window.__ulrDeckSock = null;
       window.__ulrDeckSockLive = null;
+      window.__ulrDeckSockReg = null;
       return "closed";
     }
     return "none";

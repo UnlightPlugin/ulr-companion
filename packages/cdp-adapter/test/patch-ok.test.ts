@@ -1,6 +1,6 @@
 import { Script } from "node:vm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { OK_BUTTON, WS_CLIENT } from "../src/constants.js";
+import { BATTLE_FIELDS, OK_BUTTON, OK_EVENT, WS_CLIENT } from "../src/constants.js";
 import type { OkPatchReport } from "../src/patch-ok.js";
 import {
   buildOkPatchScript,
@@ -18,7 +18,12 @@ const script = buildOkPatchScript({ bindingName: "__test_binding" });
  * `JSON.parse("{\"readyTint\":null}")` —— 直接對腳本字串比對會抓不到跳脫過的
  * 引號，而且會安靜地失敗成「找不到 = 測試紅」或更糟的「找到 = 假綠」。
  */
-function configOf(src: string): { readyTint: number | null; localDeadlineSeconds: number } {
+function configOf(src: string): {
+  readyTint: number | null;
+  localDeadlineSeconds: number;
+  okEvent: string;
+  okField: string;
+} {
   const m = /var CFG = JSON\.parse\((".*?")\);/.exec(src);
   if (m?.[1] === undefined) throw new Error("腳本裡找不到 CFG —— 嵌入方式改了？");
   return JSON.parse(JSON.parse(m[1]) as string) as ReturnType<typeof configOf>;
@@ -52,21 +57,20 @@ describe("buildOkPatchScript", () => {
   it("⚠ 已經壓著一個時，第二次按**不能**直接送出", () => {
     // 直接送出的話玩家就永遠取消不了，等於這個功能不存在。
     // 正確做法是回報給仲裁，由它判成取消準備。
-    expect(script).toContain('report({ type: "ok-pressed-again", at: Date.now() });');
+    expect(script).toContain(
+      'report({ type: "ok-pressed-again", at: Date.now(), phaseId: state.phaseId });',
+    );
     // 而且不可以疊第二個 held —— 釋放順序會亂掉。
     expect(script).toContain("if (state.held) {");
   });
 
-  it("⚠ 釘 frame 的做法是把遊戲的 hover handler 收起來，不是跟它搶", () => {
-    // 遊戲有 .on("pointerout", () => setTexture("ok", 0))。因為我們保持
-    // setInteractive() 讓玩家能取消，滑鼠一移開 frame 就被改回普通的 OK。
-    //
-    // 「再掛一組搶」的版本會在漏拆時**讓 hover 直接顯示成準備狀態**
-    // —— 玩家根本沒按（2026-08-02 實測）。收起來的版本漏拆只是 hover 沒反應。
-    expect(script).toContain("pinFrame:");
-    expect(script).toContain('ok.off("pointerover")');
-    expect(script).toContain('ok.off("pointerout")');
-    expect(script).toContain('ok.listeners("pointerover").slice()');
+  it("⚠ 「再按一次」要自己聽 —— 遊戲在 frame 2 時什麼都不做", () => {
+    // 改版後遊戲的 handler 開頭就是 "2" != frame && (…)。壓著的時候按鈕正是
+    // frame 2，玩家再按一次遊戲不會 emit 任何東西 —— 取消準備按不動。
+    expect(script).toContain("setAgain: function (on)");
+    expect(script).toContain("btn.on(CFG.okPressEvent, fn)");
+    // 只在真的壓著時才回報，漏拆不會假裝成玩家按了。
+    expect(script).toContain('if (state.held) report({ type: "ok-pressed-again"');
   });
 
   it("⚠ 階段一結束就放掉，不能壓過階段邊界", () => {
@@ -90,12 +94,13 @@ describe("buildOkPatchScript", () => {
       "var engaged = inPhase && state.armed && state.holdThisPhase && inPvpMatch();",
     );
     expect(script).toContain("if (engaged && !state.tinted)");
-    expect(script).toContain("sc.ok.clearTint();");
+    expect(script).toContain("btn.clearTint();");
     // setOkFrame 不可以再碰染色
     const body = script.slice(
       script.indexOf("setOkFrame: function"),
-      script.indexOf("pinned: null"),
+      script.indexOf("again: null"),
     );
+    expect(body.length).toBeGreaterThan(100);
     expect(body).not.toContain("setTint");
   });
 
@@ -177,7 +182,7 @@ describe("buildOkPatchScript", () => {
     // 不回 set-ok-frame，所以 commandsFor 的 interactive:false 永遠輪不到。
     // 少了這個，琥珀色鎖頭會一路留到下個階段 —— 玩家以為還在準備中，
     // 其實早就送出去了（2026-08-02 實測踩到）。
-    expect(releaseBody()).toContain("state.pinFrame(null)");
+    expect(releaseBody()).toContain("state.setAgain(false)");
   });
 
   it("⚠ 送出之後 OK 鈕必須**不可按**，否則會攔到第二個 I_am_ok", () => {
@@ -238,16 +243,21 @@ describe("buildOkPatchScript", () => {
     expect(script).toContain(OK_PATCH_GLOBAL);
   });
 
-  it("座位是讀 PLAYER，不是自己推的", () => {
-    // 原始碼：this.socket.on(`okVisible${this.PLAYER}`, …)
-    expect(script).toContain("sc.PLAYER");
-  });
-
-  it("倒數讀 (380,318) 的 BitmapText，並用 parseFloat", () => {
-    // 低於 10 秒會變成一位小數（9.2 / 8.2），parseInt 會把精度丟掉。
-    expect(script).toContain("parseFloat");
-    expect(script).toContain("380");
-    expect(script).toContain("318");
+  it("⚠ 欄位名照 2026-09-23 改版後的客戶端（2026-10-04 實測）", () => {
+    // 改版前是 PLAYER / room / config.rule / ok / timelimit。舊名字留著的症狀
+    // 是「讀不到 rule → 當成不是對戰 → 準備整組安靜地不生效」，不會報錯。
+    expect(OK_EVENT).toBe("player_ready");
+    expect(OK_BUTTON).toMatchObject({ field: "decide_btn", pressEvent: "pointerup" });
+    expect(BATTLE_FIELDS).toMatchObject({
+      seat: "player_side",
+      room: "room_id",
+      roomConfig: "room_config",
+      complete: "is_complete",
+      timer: "battle_timer",
+      timerLeftMs: "timer_left",
+      hand: "player_card",
+    });
+    expect(configOf(script)).toMatchObject({ okEvent: "player_ready", okField: "decide_btn" });
   });
 });
 
@@ -266,23 +276,31 @@ describe("buildOkPatchScript", () => {
  * onAny 掛在實例上），那些都是實測確認過的。
  */
 
-/** 遊戲的 OK 鈕。frame 與可按狀態是分開的兩件事 —— 那正是坑 #1。 */
+/**
+ * 遊戲的 OK 鈕（改版後叫 decide_btn）。frame 與可按狀態是分開的兩件事 —— 那正是坑 #1。
+ *
+ * 形狀照 Phaser：frame 是物件、name 是**數字**（實測 `frame.name === 2`），
+ * 可按狀態在 `input.enabled`。
+ */
 class FakeOkButton {
-  frame = 0;
-  interactive = true;
+  frame = { name: 0 };
+  input = { enabled: true };
   tint: number | null = null;
   #listeners: Record<string, ((...a: unknown[]) => void)[]> = {};
 
+  get interactive(): boolean {
+    return this.input.enabled;
+  }
   setTexture(_key: string, frame: number): this {
-    this.frame = frame;
+    this.frame = { name: frame };
     return this;
   }
   setInteractive(): this {
-    this.interactive = true;
+    this.input.enabled = true;
     return this;
   }
   disableInteractive(): this {
-    this.interactive = false;
+    this.input.enabled = false;
     return this;
   }
   setTint(t: number): this {
@@ -297,16 +315,19 @@ class FakeOkButton {
     (this.#listeners[name] ??= []).push(fn);
     return this;
   }
-  off(name: string): this {
-    this.#listeners[name] = [];
+  /** Phaser 的 off：給 fn 只拆那一個，不給就整個事件拆光。 */
+  off(name: string, fn?: (...a: unknown[]) => void): this {
+    this.#listeners[name] = fn === undefined ? [] : this.listeners(name).filter((f) => f !== fn);
     return this;
   }
   listeners(name: string): ((...a: unknown[]) => void)[] {
     return this.#listeners[name] ?? [];
   }
   /**
-   * Phaser 的 GameObject 就是 EventEmitter —— `emit("pointerdown")` 會直接叫
+   * Phaser 的 GameObject 就是 EventEmitter —— `emit("pointerup")` 會直接叫
    * handler，**不管物件可不可按**。WP-15 的「替玩家按 OK」靠的就是這條。
+   *
+   * ⚠ 照 eventemitter3：emit 開始時就定好要叫哪幾個，途中掛上的不會在這一次被叫到。
    */
   emit(name: string, ...args: unknown[]): boolean {
     const fns = [...this.listeners(name)];
@@ -314,16 +335,84 @@ class FakeOkButton {
     return fns.length > 0;
   }
 
-  /** 遊戲自己那組 hover handler（實測從 MainA 的原始碼挖出來的）。 */
-  installGameHover(): void {
-    this.on("pointerover", () => this.setTexture("ok", 1));
-    this.on("pointerout", () => this.setTexture("ok", 0));
+  /**
+   * 遊戲自己那組 handler，逐字照 2026-10-04 從 MainA.create 讀到的：
+   * 四個都先問 "2" != frame，送出在 pointerup，送出前先把手牌鎖起來。
+   */
+  installGame(main: Record<string, unknown>): void {
+    const notDown = (): boolean => String(this.frame.name) !== "2";
+    this.on("pointerover", () => notDown() && this.setTexture("decide_btn", 1));
+    this.on("pointerout", () => notDown() && this.setTexture("decide_btn", 0));
+    this.on("pointerdown", () => notDown() && this.setTexture("decide_btn", 0));
+    this.on("pointerup", () => {
+      if (!notDown()) return;
+      for (const c of main["player_card"] as (FakeCard | null)[]) c?.set_insteractive(false);
+      this.setTexture("decide_btn", 2);
+      (main["socket"] as FakeSocket | undefined)?.emit("player_ready", main["room_id"]);
+    });
   }
 
   /** 滑鼠移開。⚠ 不可按的物件在 Phaser 裡根本不會收到指標事件。 */
   hoverOut(): void {
     if (!this.interactive) return;
-    for (const fn of [...this.listeners("pointerout")]) fn();
+    this.emit("pointerout");
+  }
+
+  /** 玩家點一下：按下再放開。不可按就什麼都不會發生。 */
+  click(): void {
+    if (!this.interactive) return;
+    this.emit("pointerdown");
+    this.emit("pointerup");
+  }
+}
+
+/** 手牌一張。只做 set_insteractive（拼字是遊戲的）。 */
+class FakeCard {
+  enabled = true;
+  set_insteractive(v: boolean): void {
+    this.enabled = v;
+  }
+}
+
+/**
+ * 改版後的倒數（每個階段場景上一顆 battle_timer）。
+ *
+ * ⚠ refresh_timer 掛在**原型**上 —— patchDisplay 包的是原型，遊戲的計時器
+ * 每 10ms 呼叫 this.refresh_timer() 現查。掛在實例上的話 patch 會找不到東西
+ * 可包，而測試會綠得毫無意義。
+ *
+ * 畫法照抄遊戲：≥10 秒整數、≥1 秒一位小數、<1 秒 0.xx；條子長度
+ * timer_left / 30000；顏色索引 trunc(timer_left / 30000 * 240)（假配色表就是索引本身）。
+ */
+class FakeBattleTimer {
+  timer_left = 30_000;
+  timer_text = { text: "30" };
+  timer_guage_alpha = new FakeGauge();
+  timer_guage_beta = new FakeGauge();
+
+  refresh_timer(): void {
+    const l = this.timer_left;
+    let e = "0";
+    if (l >= 1e4) e = `${Math.trunc(l / 1e3)}`;
+    else if (l >= 1e3) e = `${Math.trunc(l / 1e3)}.${Math.trunc((l % 1e3) / 100)}`;
+    else if (l > 0) e = `0.${Math.trunc((l % 1e3) / 10)}`;
+    this.timer_text.text = e;
+    const t = Math.max(0, Math.trunc((l / 3e4) * 240));
+    this.timer_guage_alpha.setScale(l / 3e4, 1).setFillStyle(t);
+    this.timer_guage_beta.setScale(l / 3e4, 1).setFillStyle(t);
+  }
+}
+
+class FakeGauge {
+  scaleX = 1;
+  fillColor = 240;
+  setScale(x: number, _y: number): this {
+    this.scaleX = x;
+    return this;
+  }
+  setFillStyle(c: number): this {
+    this.fillColor = c;
+    return this;
   }
 }
 
@@ -414,8 +503,18 @@ interface Page {
   /** 進入／離開移動階段。用來跨階段邊界。 */
   setInPhase(active: boolean): void;
   setMovePhase(active: boolean): void;
-  /** 讓 MovePhaseA 走一幀，並可順便設定剩餘秒數。 */
-  frame(timelimit?: number): { text: string; scaleX: number; fill: number };
+  /** 讓移動階段的倒數畫一次（遊戲每 10ms 一次），並可順便設定剩餘秒數。 */
+  frame(seconds?: number): { text: string; scaleX: number; fill: number };
+  /** 手牌。遊戲按 OK 時會把它們全部 set_insteractive(false)。 */
+  hand: FakeCard[];
+  /** 伺服器送 decide_btn_visible(true/false)。 */
+  serverButton(visible: boolean): void;
+  /** 換座位（player_side）。`null` = 讀不到。 */
+  setSeat(seat: "A" | "B" | null): void;
+  /** 攻擊階段那顆倒數畫一次。 */
+  attackFrame(seconds?: number): { text: string; scaleX: number; fill: number };
+  /** 攻擊階段 active 與否（移動階段要另外關）。 */
+  setAttackPhase(active: boolean): void;
   /** 手牌換成這些 event_info 索引。91 = 聖水。 */
   setHand(frames: readonly number[]): void;
   /** 換戰鬥模式。`null` = 讀不到（還沒進戰鬥，或改版換了欄位）。 */
@@ -429,7 +528,7 @@ interface Page {
    * ⚠ 兩件事一定要分開做得到 —— 中間那段時間（結算動畫、語音）是真實存在的，
    * 而插件在那段時間裡就已經該停手了。
    */
-  endBattle(step: "socket" | "scene"): void;
+  endBattle(step: "complete" | "socket" | "scene"): void;
   /** MainA 起來了／收掉了。下一場開始就是 `true` + `swapSocket()`。 */
   setMainActive(active: boolean): void;
   /**
@@ -459,19 +558,19 @@ function bootPage(
   });
   const { sent, makeSocket } = makeSocketWorld();
   const ok = new FakeOkButton();
-  ok.installGameHover();
   const reports: OkPatchReport[] = [];
+  const hand = [new FakeCard(), new FakeCard(), new FakeCard()];
 
-  const timer = { type: "BitmapText", x: 380, y: 318, visible: true, text: "30" };
   /** 手牌一格：帶 event_asset 材質的 sprite，frame 名就是 event_info 的索引。 */
   const handCard = (frame: number): unknown => [
     { texture: { key: "event_asset" }, frame: { name: String(frame) }, visible: true },
   ];
   const mainA: Record<string, unknown> = {
-    ok,
-    PLAYER: "A",
-    room: "room-1",
-    id: "player-1",
+    decide_btn: ok,
+    player_side: "A",
+    room_id: "room-1",
+    is_complete: false,
+    player_card: hand,
     socket: options.withSocket === false ? undefined : makeSocket(),
     /**
      * ⚠ **status 要跟 active 一起給。** Phaser 的 5 = RUNNING、8 = SHUTDOWN
@@ -485,10 +584,10 @@ function bootPage(
      * ⚠ **預設是對戰**，因為這個檔案裡幾乎每一條測試都在驗「有在管的時候」
      * 的行為。要驗 NPC（任務／渦）就明確 `setRule("quest")`。
      *
-     * 實測形狀：`MainA.config.rule`，值是 quest / raid / event / duel / ranked
-     * （2026-08-09，見 constants.ts 的 PVP_RULES）。
+     * 實測形狀：`MainA.room_config.rule`（改版前是 config.rule），值是
+     * quest / raid / event / duel / ranked（見 constants.ts 的 PVP_RULES）。
      */
-    config: { rule: options.rule === undefined ? "duel" : options.rule },
+    room_config: { rule: options.rule === undefined ? "duel" : options.rule },
     /**
      * 畫面上那排狀態圖示。**實測形狀**（2026-08-10）：一個容器裡放
      * 一張 `state_tmp` 的圖（frame 名就是狀態鍵）＋一個 BitmapText（剩餘回合）。
@@ -501,66 +600,34 @@ function bootPage(
      */
     children: { list: [] as unknown[] },
   };
-  /** 遊戲自己的 pointerdown handler，逐字抄實測挖到的那一行。 */
-  ok.on("pointerdown", () => {
-    ok.setTexture("ok", 2);
-    ok.disableInteractive();
-    (mainA["socket"] as FakeSocket | undefined)?.emit("I_am_ok", mainA["room"], mainA["id"]);
-  });
+  ok.installGame(mainA);
   /**
-   * 假的 MovePhaseA。
-   *
-   * ⚠ `update()` 掛在**原型**上，因為 patchDisplay 包的是原型（實測遊戲的
-   * 場景類別就是這個形狀）。掛在實例上的話 patch 會找不到東西可包，而測試
-   * 會綠得毫無意義。
+   * 每個假頁面一個自己的倒數類別 —— 真的頁面也是一頁一份原型。共用同一個
+   * 類別的話，前一條測試包過的 refresh_timer（連同它的 __ulrTimerPatched）
+   * 會留給下一條，而那份包裝讀的是前一頁的 state。
    */
-  const movePhaseProto = {
-    update(this: Record<string, unknown>): void {
-      // 遊戲原本的畫法：三樣東西都是 timelimit 的純函式，分母寫死 30。
-      const t = this["timelimit"] as number;
-      (this["text"] as { setText(v: string): void }).setText(
-        t > 10.1 || (t <= 10 && t >= 1) ? t.toPrecision(2) : t.toPrecision(1),
-      );
-      const ci = Math.max(0, Math.trunc((t / 30) * 240));
-      this["colorIdx"] = ci;
-      (this["guage"] as { setFillStyle(c: number): void }).setFillStyle(
-        (this["hsv"] as { color: number }[])[ci]!.color,
-      );
-      (this["guage"] as { scaleX: number }).scaleX = (t / 30) * 0.934 + 0.066;
-    },
+  const PageTimer = class extends FakeBattleTimer {};
+  /** 假的 MovePhaseA：身上一顆倒數。 */
+  const timer = new PageTimer();
+  const movePhaseA: Record<string, unknown> = {
+    sys: { settings: { active: true } },
+    battle_timer: timer,
   };
-  const movePhaseA: Record<string, unknown> = Object.create(movePhaseProto) as Record<
-    string,
-    unknown
-  >;
-  // ⚠⚠ **Phaser 在 Systems.init 就把 scene.update 抄了一份**，之後每一幀跑的是
-  // 那份抄本，不是原型上那個。假的頁面一定要照抄這個行為 —— 少了它，只換原型
-  // 的實作會在測試裡完全正常，然後在真的遊戲裡毫無反應（2026-08-06 實測踩到，
-  // 而且症狀是「原型檢查起來明明是新版」）。
-  movePhaseA["sys"] = {
-    settings: { active: true },
-    sceneUpdate: movePhaseProto.update,
+  /**
+   * 假的 AttackPhaseA。**同一個倒數類別**（實測移動／攻擊／防禦共用）——
+   * 約定秒數只能改移動階段那一顆，所以假頁面要有另一顆可以拿來驗「沒被改到」。
+   */
+  const attackTimer = new PageTimer();
+  const attackPhaseA: Record<string, unknown> = {
+    sys: { settings: { active: false } },
+    battle_timer: attackTimer,
   };
-  movePhaseA["children"] = { list: [timer] };
-  movePhaseA["timelimit"] = 30;
-  movePhaseA["text"] = {
-    value: "30",
-    setText(v: string): void {
-      (movePhaseA["text"] as { value: string }).value = v;
-    },
-  };
-  movePhaseA["guage"] = {
-    scaleX: 1,
-    fill: 0,
-    setFillStyle(c: number): void {
-      (movePhaseA["guage"] as { fill: number }).fill = c;
-    },
-  };
-  // 240 = 藍、0 = 紅，跟遊戲的 HSVColorWheel 同一個方向。
-  movePhaseA["hsv"] = Array.from({ length: 241 }, (_v, i) => ({ color: i }));
-  movePhaseA["colorIdx"] = 240;
 
-  const scenes: Record<string, unknown> = { MainA: mainA, MovePhaseA: movePhaseA };
+  const scenes: Record<string, unknown> = {
+    MainA: mainA,
+    MovePhaseA: movePhaseA,
+    AttackPhaseA: attackPhaseA,
+  };
 
   const sandbox: Record<string, unknown> = {
     setTimeout: (fn: () => void, ms: number) => setTimeout(fn, ms),
@@ -598,15 +665,34 @@ function bootPage(
       return (mainA["socket"] as FakeSocket | undefined) ?? null;
     },
     arbiter: win[OK_PATCH_GLOBAL] as Page["arbiter"],
+    hand,
     setTimeLimit(seconds: number | null): void {
       if (seconds !== null) {
-        movePhaseA["timelimit"] = seconds;
+        timer.timer_left = seconds * 1000;
         return;
       }
-      // ⚠ 「讀不到」要把**兩個來源**都拿掉。remaining() 讀不到 timelimit 時會
-      // 退回去掃畫面上那個 BitmapText，只刪一個的話它照樣讀得到 30。
-      delete movePhaseA["timelimit"];
-      timer.visible = false;
+      delete (timer as Partial<FakeBattleTimer>).timer_left;
+    },
+    serverButton(visible: boolean): void {
+      // MainA 的 decide_btn_visible handler，逐字照抄。
+      if (visible) ok.setTexture("decide_btn", 0).setInteractive();
+      else ok.setTexture("decide_btn", 2).disableInteractive();
+    },
+    setSeat(seat: "A" | "B" | null): void {
+      if (seat === null) delete mainA["player_side"];
+      else mainA["player_side"] = seat;
+    },
+    attackFrame(seconds?: number): { text: string; scaleX: number; fill: number } {
+      if (seconds !== undefined) attackTimer.timer_left = seconds * 1000;
+      attackTimer.refresh_timer();
+      return {
+        text: attackTimer.timer_text.text,
+        scaleX: attackTimer.timer_guage_alpha.scaleX,
+        fill: attackTimer.timer_guage_alpha.fillColor,
+      };
+    },
+    setAttackPhase(active: boolean): void {
+      (attackPhaseA["sys"] as { settings: { active: boolean } }).settings.active = active;
     },
     setInPhase(active: boolean): void {
       (movePhaseA["sys"] as { settings: { active: boolean } }).settings.active = active;
@@ -624,15 +710,14 @@ function bootPage(
     setMovePhase(active: boolean): void {
       (movePhaseA["sys"] as { settings: { active: boolean } }).settings.active = active;
     },
-    frame(timelimit?: number): { text: string; scaleX: number; fill: number } {
-      if (timelimit !== undefined) movePhaseA["timelimit"] = timelimit;
-      // ⚠ 走 sys.sceneUpdate，就跟 Phaser 的 Systems.step 一樣。
-      // 直接叫 movePhaseA.update() 會讓「只換原型」的實作假裝成功。
-      (movePhaseA["sys"] as { sceneUpdate: () => void }).sceneUpdate.call(movePhaseA);
+    frame(seconds?: number): { text: string; scaleX: number; fill: number } {
+      if (seconds !== undefined) timer.timer_left = seconds * 1000;
+      // 遊戲的計時器 callback 就是 this.refresh_timer() —— 每次現查原型。
+      timer.refresh_timer();
       return {
-        text: (movePhaseA["text"] as { value: string }).value,
-        scaleX: (movePhaseA["guage"] as { scaleX: number }).scaleX,
-        fill: (movePhaseA["guage"] as { fill: number }).fill,
+        text: timer.timer_text.text,
+        scaleX: timer.timer_guage_alpha.scaleX,
+        fill: timer.timer_guage_alpha.fillColor,
       };
     },
     setHand(frames: readonly number[]): void {
@@ -648,14 +733,20 @@ function bootPage(
       }));
     },
     setRule(rule: string | null): void {
-      // ⚠ 整顆 config 拿掉，不是把 rule 設成 null —— 「還沒進戰鬥」時
-      // MainA.config 本身就不存在，讀 config.rule 會是存取 undefined 的屬性。
-      if (rule === null) delete mainA["config"];
-      else mainA["config"] = { rule };
+      // ⚠ 整顆 room_config 拿掉，不是把 rule 設成 null —— 「還沒進戰鬥」時
+      // 它本身就不存在，讀 .rule 會是存取 undefined 的屬性。
+      if (rule === null) delete mainA["room_config"];
+      else mainA["room_config"] = { rule };
     },
-    endBattle(step: "socket" | "scene"): void {
-      // ⚠ **room / config / socket / ok 全部留著不動** —— Phaser 不丟場景物件，
-      // 而那正是這個 bug 的成因。假頁面只要少留一個欄位，測試就會綠得毫無意義。
+    endBattle(step: "complete" | "socket" | "scene"): void {
+      // ⚠ **room_id / room_config / socket / decide_btn 全部留著不動** —— Phaser
+      // 不丟場景物件，而那正是這個 bug 的成因。假頁面只要少留一個欄位，
+      // 測試就會綠得毫無意義。
+      if (step === "complete") {
+        // 改版後 game_result() 的第一行，比 disconnect 還早。
+        mainA["is_complete"] = true;
+        return;
+      }
       if (step === "socket") {
         const so = mainA["socket"] as FakeSocket | undefined;
         if (so) so.readyState = 3; // CLOSED
@@ -670,6 +761,8 @@ function bootPage(
       const s = (mainA["sys"] as { settings: { active: boolean; status: number } }).settings;
       s.active = active;
       s.status = active ? 5 : 8;
+      // 新的一場是新的 MainA.create，is_complete 從頭開始。
+      if (active) mainA["is_complete"] = false;
     },
     pauseMain(): void {
       const s = (mainA["sys"] as { settings: { active: boolean; status: number } }).settings;
@@ -682,15 +775,11 @@ function bootPage(
 /**
  * 玩家按下 OK。
  *
- * ⚠ 走的是**遊戲的**路徑：不可按的鈕收不到 pointerdown，所以什麼都不會發生。
- * 直接呼叫 `socket.emit` 會繞過這一層，測到的東西就不是玩家會遇到的。
+ * ⚠ 走的是**遊戲的**路徑：不可按的鈕收不到指標事件、frame 2 時遊戲的 handler
+ * 什麼都不做。直接呼叫 `socket.emit` 會繞過這兩層，測到的東西就不是玩家會遇到的。
  */
 function pressOk(page: Page): void {
-  if (!page.ok.interactive) return;
-  // 遊戲的 pointerdown handler 先做這兩件事，再 emit。
-  page.ok.setTexture("ok", 2);
-  page.ok.disableInteractive();
-  page.socket?.emit("I_am_ok", "room-1", 7);
+  page.ok.click();
 }
 
 /** 讓 phaseTick 跑 n 輪（每輪 200ms）。 */
@@ -726,20 +815,21 @@ describe("跑起來：心跳與攔截", () => {
 
     expect(page.sent).toHaveLength(0);
     expect(page.arbiter.held).not.toBeNull();
-    expect(page.ok.frame).toBe(2);
+    expect(page.ok.frame.name).toBe(2);
     expect(page.ok.interactive).toBe(true);
     expect(page.ok.tint).not.toBeNull();
   });
 
   it("⚠ 壓著的時候滑鼠移開，不可以變回未準備的樣子", async () => {
-    // pin 就是為了這個：遊戲的 pointerout 會 setTexture("ok", 0)。
+    // 改版前遊戲的 pointerout 會無條件 setTexture(0)，所以要把 hover 收起來。
+    // 改版後它先問 frame 是不是 2 —— 這條釘住「我們壓著時 frame 確實是 2」。
     const page = bootPage();
     page.arbiter.tick();
     await ticks(1);
     pressOk(page);
     page.ok.hoverOut();
 
-    expect(page.ok.frame).toBe(2);
+    expect(page.ok.frame.name).toBe(2);
   });
 
   it("⚠ 送出之後滑鼠移開，也不可以看起來像被取消了", async () => {
@@ -753,11 +843,11 @@ describe("跑起來：心跳與攔截", () => {
     page.arbiter.release("arbiter");
 
     expect(page.sent).toHaveLength(1);
-    expect(page.ok.frame).toBe(2);
+    expect(page.ok.frame.name).toBe(2);
     expect(page.ok.interactive).toBe(false);
 
     page.ok.hoverOut();
-    expect(page.ok.frame).toBe(2);
+    expect(page.ok.frame.name).toBe(2);
 
     // 已經送出去了就按不動 —— 否則會攔到第二個 I_am_ok 再壓一輪
     pressOk(page);
@@ -990,11 +1080,10 @@ describe("跑起來：只對真人對戰生效（玩家 2026-08-09 回報）", (
     page.setMovePhase(false);
     await ticks(1);
     page.setMovePhase(true);
-    // 新階段開始時**遊戲自己**會把 OK 鈕還原成可按 —— 上一個階段送出後它停在
-    // frame 2 + disableInteractive。假頁面沒有那段，手動補上，否則下面的
+    // 新階段開始時**伺服器**會送 decide_btn_visible(true) 把 OK 鈕還原成可按 ——
+    // 上一個階段送出後它停在 frame 2 + disableInteractive。少了這步，下面的
     // pressOk 會因為「按鈕按不動」而什麼都不做，測試就變成假綠。
-    page.ok.setTexture("ok", 0);
-    page.ok.setInteractive();
+    page.serverButton(true);
     page.arbiter.tick();
     await ticks(1);
 
@@ -1142,11 +1231,11 @@ describe("跑起來：跨場與生命週期", () => {
 
     expect(page.reports.some((r) => r.type === "ok-patch-rearmed")).toBe(true);
 
-    fresh.fire("cardclickedB", 3, true);
+    fresh.fire("card_submit_opponent", 3, true);
     expect(page.reports.filter((r) => r.type === "ok-patch-event")).toHaveLength(1);
 
     // 舊的那顆不該再回報 —— 不拆的話同一則事件會送兩次
-    old.fire("cardclickedB", 3, true);
+    old.fire("card_submit_opponent", 3, true);
     expect(page.reports.filter((r) => r.type === "ok-patch-event")).toHaveLength(1);
   });
 
@@ -1180,12 +1269,12 @@ describe("跑起來：跨場與生命週期", () => {
 
     // 之後的 emit 完全走原路
     page.arbiter.tick();
-    socket.emit("I_am_ok", "room-1", 7);
+    socket.emit("player_ready", "room-1");
     expect(page.sent).toHaveLength(2);
 
     // onAny 也拆乾淨了
     const before = page.reports.length;
-    socket.fire("cardclickedB", 3, true);
+    socket.fire("card_submit_opponent", 3, true);
     expect(page.reports).toHaveLength(before);
   });
 
@@ -1203,6 +1292,200 @@ describe("跑起來：跨場與生命週期", () => {
     expect(released[0]).toMatchObject({ by: "phase-ended" });
     // ⚠ 不可以把按鈕鎖成不可按 —— 那顆鈕已經屬於攻擊／防禦階段了
     expect(page.ok.interactive).toBe(true);
+  });
+});
+
+/**
+ * 2026-09-23 改版後的形狀（2026-10-04 對著對戰中的雙開讀的）
+ * =========================================================
+ * 改版前後行為不同、而且不寫測試就一定會再壞一次的幾件事。
+ */
+describe("跑起來：改版後的 OK 鈕與出牌事件", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("⚠ 壓著時再按一次要回報 —— 遊戲自己在 frame 2 時什麼都不做", async () => {
+    const page = bootPage();
+    page.arbiter.tick();
+    await ticks(1);
+    pressOk(page);
+    expect(page.arbiter.held).not.toBeNull();
+    // 同一次 pointerup 裡掛上的監聽不可以把這一按當成「再按一次」。
+    expect(page.reports.filter((r) => r.type === "ok-pressed-again")).toHaveLength(0);
+
+    pressOk(page);
+
+    expect(page.reports.filter((r) => r.type === "ok-pressed-again")).toHaveLength(1);
+    expect(page.sent).toHaveLength(0); // 沒有送出 —— 交給仲裁判成取消
+  });
+
+  it("⚠ 取消準備要把手牌解鎖，按鈕也回到可按", async () => {
+    // 遊戲按 OK 時順手鎖了手牌，解鎖要等伺服器的 card_interactive(true) ——
+    // 而我們沒送，伺服器不知道玩家按過，不會來解。
+    const page = bootPage();
+    page.arbiter.tick();
+    await ticks(1);
+    pressOk(page);
+    expect(page.hand.every((c) => !c.enabled)).toBe(true);
+
+    expect(page.arbiter.cancel()).toBe("cancelled");
+
+    expect(page.hand.every((c) => c.enabled)).toBe(true);
+    expect(page.ok.frame.name).toBe(0);
+    expect(page.ok.interactive).toBe(true);
+    // 取消之後再按，要能再準備一次（遊戲的 handler 在 frame 0 時會照常跑）。
+    pressOk(page);
+    expect(page.arbiter.held).not.toBeNull();
+    expect(page.sent).toHaveLength(0);
+  });
+
+  it("⚠ 取消之後的「再按一次」監聽要拆掉", async () => {
+    // 留著的話：取消 → 再按（這次是新的準備）→ 舊監聽也跟著報一次 pressed-again
+    // → 仲裁把剛準備好的又取消掉。
+    const page = bootPage();
+    page.arbiter.tick();
+    await ticks(1);
+    pressOk(page);
+    page.arbiter.cancel();
+    pressOk(page);
+    expect(page.reports.filter((r) => r.type === "ok-pressed-again")).toHaveLength(0);
+  });
+
+  it("⚠ 壓著時伺服器把鈕重新打開，要壓回準備中的樣子", async () => {
+    // decide_btn_visible(true)（凍結解除時會來）把鈕設成 frame 0 + 可按。放著
+    // 不管，玩家以為被取消了而再按一次 —— 那一按會被當成「取消」，剛好相反。
+    const page = bootPage();
+    page.arbiter.tick();
+    await ticks(1);
+    pressOk(page);
+
+    page.serverButton(true);
+    page.arbiter.tick();
+    await ticks(1);
+
+    expect(page.ok.frame.name).toBe(2);
+    expect(page.ok.interactive).toBe(true);
+    expect(page.arbiter.held).not.toBeNull();
+  });
+
+  it("壓著時伺服器把鈕收起來就不動它 —— 那是「現在不能按」", async () => {
+    const page = bootPage();
+    page.arbiter.tick();
+    await ticks(1);
+    pressOk(page);
+
+    page.serverButton(false);
+    page.arbiter.tick();
+    await ticks(1);
+
+    expect(page.ok.frame.name).toBe(2);
+    expect(page.ok.interactive).toBe(false);
+  });
+
+  it("⚠ 替玩家按，但鈕被伺服器收著 → 回 no-button，下一次還能再試", async () => {
+    // 遊戲的 handler 在 frame 2 時什麼都不做。當成「按了」的話這個階段
+    // 會被記成已送出，之後再也不會試 —— 而伺服器其實什麼都沒收到。
+    const page = bootPage();
+    page.arbiter.tick();
+    await ticks(1);
+    page.serverButton(false);
+
+    expect(page.arbiter.forceEnd("arbiter")).toBe("no-button");
+    expect(page.sent).toHaveLength(0);
+
+    page.serverButton(true);
+    expect(page.arbiter.forceEnd("arbiter")).toBe("pressed");
+    expect(page.sent).toHaveLength(1);
+  });
+
+  it("準備關掉時玩家自己按的 OK 也算這個階段送過了", async () => {
+    // 不記的話約定秒數那條路會再替他按一次 —— 遊戲會擋（frame 2），但
+    // forceEnd 會一直回 no-button，Node 那邊看起來像按鈕不見了。
+    const page = bootPage();
+    page.arbiter.tick();
+    await ticks(1);
+    page.arbiter.setHold(false);
+    pressOk(page);
+    expect(page.sent).toHaveLength(1);
+    expect(page.arbiter.tick().sent).toBe(true);
+    expect(page.arbiter.forceEnd("arbiter")).toBe("already-sent");
+  });
+
+  it("⚠ 出牌事件翻成仲裁認得的形狀，座位用 player_side 現算", () => {
+    const page = bootPage();
+    const events = (): Extract<OkPatchReport, { type: "ok-patch-event" }>[] =>
+      page.reports.filter(
+        (r): r is Extract<OkPatchReport, { type: "ok-patch-event" }> => r.type === "ok-patch-event",
+      );
+
+    // 坐 A：對手是 B
+    page.socket!.fire("card_submit_opponent", 2, true);
+    page.socket!.fire("card_rotate_player", 1, true);
+    expect(events().map((e) => e.event)).toEqual(["cardclickedB", "cardrotateA"]);
+    expect(events()[0]).toMatchObject({ clicked: true, cardRef: 1 });
+
+    // 換到 B：同一個「對手出牌」事件要翻成 A
+    page.setSeat("B");
+    page.socket!.fire("card_submit_opponent", 2, false);
+    page.socket!.fire("card_rotate_opponent", 2, true);
+    expect(
+      events()
+        .slice(2)
+        .map((e) => e.event),
+    ).toEqual(["cardclickedA", "cardrotateA"]);
+    expect(events()[2]).toMatchObject({ clicked: false });
+  });
+
+  it("⚠ 讀不到座位就整則丟掉，不要猜", () => {
+    // 猜錯的話一半的玩家會被自己的出牌取消準備（2026-08-02 那個坑）。
+    const page = bootPage();
+    page.setSeat(null);
+    page.socket!.fire("card_submit_opponent", 2, true);
+    expect(page.reports.filter((r) => r.type === "ok-patch-event")).toHaveLength(0);
+  });
+
+  it("is_complete 一設就算打完 —— 比斷線還早", async () => {
+    const page = bootPage();
+    page.arbiter.tick();
+    await ticks(1);
+    expect(page.arbiter.tick()).toMatchObject({ pvp: true, room: "room-1" });
+
+    page.endBattle("complete");
+
+    expect(page.arbiter.tick()).toMatchObject({ pvp: false, rule: null, room: null });
+  });
+
+  it("⚠ 階段一開始就按：回報要帶**這個**階段的序號，不是上一個的", async () => {
+    // phaseTick 每 200ms 才數一次階段。按得比它快的話，舊版回報出去的是上一個
+    // 階段的序號，接著 phaseTick 才 +1 —— Node 看到序號變了就把這一按清掉。
+    const page = bootPage();
+    page.arbiter.tick();
+    await ticks(1);
+    const before = page.arbiter.tick().phaseId;
+
+    page.setMovePhase(false);
+    await ticks(1);
+    page.setMovePhase(true);
+    page.serverButton(true);
+    pressOk(page); // phaseTick 還沒跑
+
+    const hit = page.reports.find((r) => r.type === "ok-intercepted");
+    expect(hit).toMatchObject({ phaseId: before + 1 });
+    expect(page.arbiter.held).not.toBeNull();
+    await ticks(2);
+    expect(page.arbiter.tick().phaseId).toBe(before + 1); // 不會再 +1 一次
+  });
+
+  it("攻擊階段的剩餘秒數讀那個階段自己的倒數", async () => {
+    const page = bootPage();
+    page.setMovePhase(false);
+    page.setAttackPhase(true);
+    page.attackFrame(12.5);
+    expect(page.arbiter.tick().remaining).toBe(12.5);
   });
 });
 
@@ -1276,9 +1559,11 @@ describe("跑起來：約定秒數（WP-15）", () => {
 
     expect(page.arbiter.forceEnd("arbiter")).toBe("pressed");
     expect(page.sent).toHaveLength(1);
-    expect(page.sent[0]?.[0]).toBe("I_am_ok");
+    expect(page.sent[0]?.[0]).toBe("player_ready");
     // 參數是**遊戲自己組的** —— 插件不知道也不需要知道協定（不變量 3）。
-    expect(page.sent[0]?.slice(1)).toEqual(["room-1", "player-1"]);
+    expect(page.sent[0]?.slice(1)).toEqual(["room-1"]);
+    // 遊戲的 handler 整段跑完了：手牌也跟著鎖起來，跟玩家自己按的一樣。
+    expect(page.hand.every((c) => !c.enabled)).toBe(true);
   });
 
   it("⚠ 替玩家按的那次不可以被自己攔下來", () => {
@@ -1337,6 +1622,8 @@ describe("跑起來：約定秒數（WP-15）", () => {
     page.setMovePhase(false);
     await ticks(1);
     page.setMovePhase(true);
+    // 新階段由伺服器把鈕打開（decide_btn_visible(true)）。
+    page.serverButton(true);
     page.arbiter.tick();
     await ticks(1);
 
@@ -1385,13 +1672,48 @@ describe("跑起來：讀秒顯示跟著約定秒數改", () => {
     expect(page.frame(16).fill).toBe(16);
   });
 
-  it("條子的長度也跟著縮，而且留著遊戲原本的最小長度", async () => {
+  it("條子的長度也跟著縮", async () => {
     const page = bootPage();
     page.arbiter.tick();
     await ticks(1);
     page.arbiter.setDisplayCap(15);
-    expect(page.frame(15).scaleX).toBeCloseTo(0.066, 5);
+    expect(page.frame(15).scaleX).toBeCloseTo(0, 5);
+    expect(page.frame(22.5).scaleX).toBeCloseTo(0.5, 5);
     expect(page.frame(30).scaleX).toBeCloseTo(1, 5);
+  });
+
+  it("⚠ 畫完之後 timer_left 一定換回真的值", async () => {
+    // patchDisplay 畫的時候會暫時換掉 timer_left。換不回來的話，遊戲的倒數
+    // 會從換算過的值繼續扣，硬底線也跟著讀錯 —— 插件會提早替玩家送出。
+    const page = bootPage();
+    page.arbiter.tick();
+    await ticks(1);
+    page.arbiter.setDisplayCap(15);
+    page.frame(25);
+    page.frame();
+    expect(page.arbiter.tick().remaining).toBe(25);
+  });
+
+  it("攻擊階段就先把倒數包好，移動階段第一次畫就是約定秒數", async () => {
+    // 2026-10-04 實測：等移動階段 active 才包，開頭會閃一下原本的 "29"。
+    const page = bootPage();
+    page.setMovePhase(false);
+    page.setAttackPhase(true);
+    page.arbiter.tick();
+    await ticks(1);
+    page.arbiter.setDisplayCap(15);
+
+    page.setAttackPhase(false);
+    page.setMovePhase(true); // phaseTick 還沒跑
+    expect(page.frame(30).text).toBe("15");
+  });
+
+  it("⚠ 只改移動階段那一顆 —— 攻擊／防禦用同一個類別，但不歸約定秒數管", async () => {
+    const page = bootPage();
+    page.arbiter.tick();
+    await ticks(1);
+    page.arbiter.setDisplayCap(15);
+    expect(page.attackFrame(30)).toEqual({ text: "30", scaleX: 1, fill: 240 });
   });
 
   it("⚠ 改的只有畫面 —— 真正的剩餘秒數不受影響", async () => {

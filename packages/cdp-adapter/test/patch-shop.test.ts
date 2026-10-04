@@ -4,33 +4,32 @@
  * 跟 `patch-present` 同一套：搭一個夠像的假遊戲，把 `buildShopPatchScript()`
  * 產出來的**那一串字**原封不動 `new Function` 起來跑。
  *
- * 假環境照 2026-09-12 從跑著的客戶端挖出來的形狀寫：
+ * 假環境照 2026-09-26 從跑著的客戶端（2026-09-23 改版後）挖出來的形狀寫：
  *
  * ```js
- *   // 確認框開啟（btn_buy pointerdown）：
- *   t = Math.trunc(this.gem / i.price.gem);  …取 ccoin 最小值… …upper…
- *   t > 20 && (t = 20);                       // 那刀
- *   rm 商品另一套：t = 10
- *   this.panel = V.Create(this, 430, 309, t).setVisible(false).setDepth(2001);
- *
- *   // V.Create 裝的 handler 只讀 e.name：
- *   o.on("child.down", (e) => {
- *     t.btn_panel_text.setText(e.name); o.setVisible(false);
- *     t.buy_quantity = Number(e.name);
- *     t.gem_left_text.setText("" + (t.gem - price.gem * t.buy_quantity));
- *     t.events.emit("test_quantity_select", i);
- *   });
- *
- *   // 數量鈕：this.panel.setVisible(true)；No：this.panel.setVisible(false)
+ *   get_max_purchase(t) {
+ *     let e = [20];
+ *     t.price.gem > 0 && e.push(trunc(money.gem / t.price.gem));  …各 item_xxx…
+ *     t.upper !== null && e.push(upper - shop_config 已買);
+ *     return Math.min(...e);
+ *   }
+ *   create_purchase_screen(t) {
+ *     const i = this.get_max_purchase(t);
+ *     for (E = 0; E < max(i, 1); E++) o[E] = { text: E+1, value: E+1 };
+ *     d = this.rexUI.add.dropDownList({ options: o, list: { onButtonClick: n.quantity = value } });
+ *     ok → this.socket.fetch("shop_buy", n.id, n.quantity)
+ *   }
  * ```
+ *
+ * 伺服器（改版後）一次最多給 20 個，多的安靜截掉、照樣回成功。
  *
  * 這支要抓的坑：
  *
- * 1. 只放寬 GEM 商品 —— 課金（rm）、碎片（純 cmem）、活動一律不碰
- * 2. 對帳：算出來的上限跟官方面板的個數對不上就不碰
- * 3. 點選交給官方 handler（buy_quantity / 預覽 / 事件都是它改的）
- * 4. 確認框每開一次官方就建一個新面板 —— 我們的舊面板要跟著收
- * 5. 拆掉時 sc.panel 要還給官方那份
+ * 1. 只放寬 GEM 商品 —— 課金（price.rm）、碎片（item_10011）、活動點數一律不碰
+ * 2. 對帳：官方回 20 時我們重算，重算 < 20 就不碰
+ * 3. 點選走官方的 onButtonClick（數量是它記的）
+ * 4. > 20 的 shop_buy 拆成每批 ≤20 依序送，失敗就停
+ * 5. 拆掉時場景上的方法與 socket.fetch 都要還原成原型那支
  */
 
 import { describe, expect, it } from "vitest";
@@ -48,49 +47,93 @@ import {
 // 假的遊戲
 // ---------------------------------------------------------------------------
 
-type Handler = (...args: unknown[]) => void;
-
-class FakeEmitter {
-  handlers = new Map<string, Handler[]>();
-  on(name: string, fn: Handler): this {
-    const list = this.handlers.get(name) ?? [];
-    list.push(fn);
-    this.handlers.set(name, list);
-    return this;
-  }
-  off(name: string, fn: Handler): this {
-    this.handlers.set(
-      name,
-      (this.handlers.get(name) ?? []).filter((h) => h !== fn),
-    );
-    return this;
-  }
-  emit(name: string, ...args: unknown[]): void {
-    for (const h of [...(this.handlers.get(name) ?? [])]) h(...args);
-  }
+interface Option {
+  text: string;
+  value: number;
 }
 
 /** Phaser 物件 destroy 之後 `scene` 會變 undefined —— 腳本靠這個判活。 */
-class FakeObject extends FakeEmitter {
+class FakeObject {
   scene: object | undefined = {};
-  visible = true;
-  depth = 0;
   destroy(): void {
     this.scene = undefined;
   }
-  setVisible(v: boolean): this {
-    this.visible = v;
+}
+
+/** rexUI 的 dropDownList：清單點開時才照 `options` 現建，所以換 options 就好。 */
+class FakeDropDown extends FakeObject {
+  options: Option[];
+  constructor(
+    options: Option[],
+    private onButtonClick: (opt: Option) => void,
+  ) {
+    super();
+    this.options = options;
+  }
+  setOptions(options: Option[]): this {
+    this.options = options;
     return this;
   }
-  setDepth(d: number): this {
-    this.depth = d;
-    return this;
+  /** 玩家點開清單、點了值為 value 的那項。 */
+  pick(value: number): void {
+    const opt = this.options.find((o) => o.value === value);
+    if (!opt) throw new Error(`清單裡沒有 ${value}`);
+    this.onButtonClick(opt);
   }
-  setOrigin(): this {
-    return this;
+  values(): number[] {
+    return this.options.map((o) => o.value);
   }
-  setResolution(): this {
-    return this;
+}
+
+interface Price {
+  gem: number;
+  rm: number;
+  point: number;
+  item_10001: number;
+  item_10011: number;
+}
+
+interface FakeItem {
+  id: number;
+  price: Price;
+  upper: number | null;
+}
+
+type Money = Record<keyof Price, number>;
+
+interface BuyResponse {
+  error: string | null;
+  rm_process: string | null;
+}
+
+/**
+ * 官方的 socket。`fetch` 在原型上（實測 ownFetch=false）。
+ *
+ * 伺服器照 2026-09-26 實測：一次最多給 20 個，多的**安靜截掉**、照樣回成功，
+ * 只扣實際給的那 20 個的錢。
+ */
+class FakeSocket {
+  calls: unknown[][] = [];
+  /** 第幾次 shop_buy（從 1 起算）回失敗 / 丟例外。 */
+  failAt: number | null = null;
+  throwAt: number | null = null;
+  /** 伺服器每個多扣的 gem（模擬對帳不符）。 */
+  overcharge = 0;
+  private buys = 0;
+  constructor(private server: { gem: number; prices: Map<number, number> }) {}
+  async fetch(name: string, ...args: unknown[]): Promise<unknown> {
+    this.calls.push([name, ...args]);
+    if (name !== "shop_buy") return { echo: name };
+    this.buys++;
+    if (this.throwAt === this.buys) throw new Error("shop_buy: timed out");
+    if (this.failAt === this.buys) return { error: "NOT_ENOUGH", rm_process: null };
+    const [id, qty] = args as [number, number];
+    const given = Math.min(qty, OFFICIAL_QUANTITY_CAP);
+    this.server.gem -= (this.server.prices.get(id)! + this.overcharge) * given;
+    return { error: null, rm_process: null };
+  }
+  shopBuys(): number[] {
+    return this.calls.filter((c) => c[0] === "shop_buy").map((c) => c[2] as number);
   }
 }
 
@@ -98,231 +141,191 @@ class FakeText extends FakeObject {
   constructor(public text: string) {
     super();
   }
-  setText(t: string): this {
-    this.text = t;
+  setText(s: string): this {
+    this.text = s;
     return this;
   }
 }
 
-class FakeRoundRect extends FakeObject {
-  fillColor = 0xffffff;
-  stroke: unknown[] = [];
-  setStrokeStyle(...args: unknown[]): this {
-    this.stroke = args;
-    return this;
-  }
+interface ShopEntry {
+  id: number;
+  item: { type: number; id: number; slot: number; amount: number }[];
 }
 
-class FakeLabel extends FakeObject {
-  name: string;
-  background: FakeRoundRect;
-  constructor(cfg: { name: string; background: FakeRoundRect; text: FakeText }) {
-    super();
-    this.name = cfg.name;
-    this.background = cfg.background;
-  }
-  getElement(key: string): unknown {
-    return key === "background" ? this.background : undefined;
-  }
-}
+/** 照 2026-10-02 客戶端的 WeaponCards / Characters 形狀（只留用得到的欄位）。 */
+const WEAPON_CARDS = [
+  { id: 1, name_tcn: "妖魔短劍", chara: null },
+  { id: 89, name_tcn: "毒鐵線", chara: "cc022" },
+  { id: 5005, name_tcn: "魔之刀身", chara: "cc000" },
+];
+const EVENT_CARDS = [{ id: 89, name_tcn: "某張事件卡" }];
+const CHARACTERS: Record<string, { name_tcn: string }> = { cc022: { name_tcn: "薩爾卡多" } };
 
-class FakeSizer extends FakeObject {
-  children: FakeLabel[] = [];
-  add(child: FakeLabel): this {
-    this.children.push(child);
-    return this;
-  }
-}
+const WEAPON_89: ShopEntry = { id: 1553, item: [{ type: 2, id: 89, slot: 0, amount: 1 }] };
+/** 事件卡跟武器 id 撞號 —— 只看 id 會標錯。 */
+const EVENT_89: ShopEntry = { id: 3851, item: [{ type: 2, id: 89, slot: 2, amount: 1 }] };
+const GENERIC_1: ShopEntry = { id: 5415, item: [{ type: 2, id: 1, slot: 0, amount: 1 }] };
+const MATERIAL_5005: ShopEntry = { id: 6000, item: [{ type: 2, id: 5005, slot: 0, amount: 1 }] };
+const POTION: ShopEntry = { id: 3230, item: [{ type: 3, id: 1, slot: 0, amount: 1 }] };
 
-/** rexUI 的 scrollablePanel。名字查詢照官方用法 `getByName(name, true)`。 */
-class FakePanel extends FakeObject {
-  x: number;
-  y: number;
-  height: number;
-  child: FakeSizer;
-  interactive = false;
-  constructor(cfg: { x: number; y: number; height: number; panel: { child: FakeSizer } }) {
-    super();
-    this.x = cfg.x;
-    this.y = cfg.y;
-    this.height = cfg.height;
-    this.child = cfg.panel.child;
-  }
-  layout(): this {
-    return this;
-  }
-  scrollToChild(): this {
-    return this;
-  }
-  setChildrenInteractive(): this {
-    this.interactive = true;
-    return this;
-  }
-  getByName(name: string): FakeLabel | null {
-    return this.child.children.find((c) => c.name === name) ?? null;
-  }
-  names(): number[] {
-    return this.child.children.map((c) => Number(c.name));
-  }
-}
+class FakeShopScene {
+  scene = {};
+  children = { list: [] as unknown[] };
+  /** create 裡建一次的「使用場所」值，官方之後不再動它。 */
+  item_place = new FakeText("-");
+  item_name = new FakeText("");
+  shop_select: number | null = null;
+  shopData: ShopEntry[] = [WEAPON_89, EVENT_89, GENERIC_1, MATERIAL_5005, POTION];
+  cache = {
+    json: {
+      get: (key: string): unknown =>
+        ({ WeaponCards: WEAPON_CARDS, EventCards: EVENT_CARDS, Characters: CHARACTERS })[key],
+    },
+  };
+  money: Money;
+  /** 伺服器那邊的真實餘額；player 是官方重抓時才更新的快照。 */
+  server: { gem: number; prices: Map<number, number> };
+  player: { gem: number };
+  socket: FakeSocket;
+  shop_config: { shop_id: number; quantity: number }[] = [];
+  /** 官方 ok 流程最後走到哪：success / error:xxx。 */
+  outcome: string | null = null;
+  /** 最近一次確認框的數量下拉，與它的 ok。 */
+  last: { dd: FakeDropDown; ok: () => Promise<void>; preview: () => number } | null = null;
+  rexUI = {
+    add: {
+      dropDownList: (cfg: {
+        options: Option[];
+        list: { onButtonClick: (opt: Option) => void };
+      }) => {
+        const dd = new FakeDropDown(cfg.options, cfg.list.onButtonClick);
+        this.children.list.push(dd);
+        return dd;
+      },
+    },
+  };
 
-interface FakeItem {
-  price: { gem: number; ccoin0?: number; ccoin1?: number; cmem5?: number };
-  upper: number | null;
-  rm?: number;
-  name_tcn: string;
-}
+  constructor(money: Partial<Money>) {
+    this.money = { gem: 0, rm: 0, point: 0, item_10001: 0, item_10011: 0, ...money };
+    this.server = { gem: this.money.gem, prices: new Map() };
+    this.player = { gem: this.money.gem };
+    this.socket = new FakeSocket(this.server);
+  }
 
-interface FakeShop {
-  gem: number;
-  data_ccoin: Record<string, number>;
-  select: { cate1: string | null; cate2: string | null; index: number | null };
-  panel: FakePanel | undefined;
-  buy_quantity: number;
-  btn_panel_text: FakeText;
-  gem_left_text: FakeText;
-  events: FakeEmitter;
-  shop: { item: { other: { upper: number | null }[] } };
-  item_other: { upper: number | null }[];
-  rexUI: { add: Record<string, (cfg: never) => unknown> };
-  add: { text: (x: number, y: number, t: string) => FakeText; sprite: () => FakeObject };
-  get_selected_item: () => FakeItem | null;
-  /** 面板建了幾個（含官方與我們的）。 */
-  built: FakePanel[];
-  /** 官方 handler 收到的 child.down。 */
-  picked: string[];
-  /** 官方 create() 那段：照抄公式建面板。 */
-  openDialog(): FakePanel;
-  /** 數量鈕。 */
-  pressQuantityButton(): void;
-  /** No 鈕。 */
-  pressNo(): void;
+  get_money(): Money {
+    return { ...this.money, gem: this.player.gem };
+  }
+
+  /** 官方：重抓 player（換一個新物件）、跳成功框。 */
+  async show_dialogue_success(): Promise<void> {
+    this.player = { gem: this.server.gem };
+    this.outcome = "success";
+  }
+
+  async shop_error(e: string): Promise<void> {
+    this.outcome = `error:${e}`;
+  }
+
+  /** 照抄官方：武器 type 2 slot 0、事件卡 type 2 slot 2，數量 > 1 接 " xN"。 */
+  get_item_info(t: ShopEntry): { item_name: string; item_effect: string } {
+    const it = t.item[0]!;
+    const list = it.type === 2 && it.slot === 0 ? WEAPON_CARDS : it.type === 2 ? EVENT_CARDS : [];
+    const card = list.find((c) => c.id === it.id);
+    const name = card ? card.name_tcn : "精靈之藥";
+    return { item_name: it.amount === 1 ? name : `${name} x${it.amount}`, item_effect: "" };
+  }
+
+  /** 官方：點格子設 shop_select 後呼叫，更新名字等等，但不碰 item_place。 */
+  show_detail(): void {
+    const t = this.shopData.find(({ id }) => id === this.shop_select)!;
+    this.item_name.setText(this.get_item_info(t).item_name);
+  }
+
+  /** 玩家點了上方某一格。 */
+  select(entry: ShopEntry): void {
+    this.shop_select = entry.id;
+    this.show_detail();
+  }
+
+  /** ⚠ 照抄官方，含那刀 [20]。這是被測物要對帳的對象。 */
+  get_max_purchase(t: FakeItem): number {
+    const e = [OFFICIAL_QUANTITY_CAP];
+    const s = this.get_money();
+    if (t.price.gem > 0) e.push(Math.trunc(s.gem / t.price.gem));
+    if (t.price.item_10001 > 0) e.push(Math.trunc(s.item_10001 / t.price.item_10001));
+    if (t.price.item_10011 > 0) e.push(Math.trunc(s.item_10011 / t.price.item_10011));
+    if (t.upper !== null) {
+      let i = t.upper;
+      const c = this.shop_config.find(({ shop_id }) => shop_id === t.id);
+      if (c) i -= c.quantity;
+      e.push(i);
+    }
+    return Math.min(...e);
+  }
+
+  create_purchase_screen(t: FakeItem): void {
+    this.server.prices.set(t.id, t.price.gem);
+    const i = this.get_max_purchase(t);
+    const n = { id: t.id, quantity: 1 };
+    const o: Option[] = [];
+    for (let E = 0; E < Math.max(i, 1); E++) o[E] = { text: `${E + 1}`, value: E + 1 };
+    this.children.list.push(new FakeObject()); // 背景之類的
+    const dd = this.rexUI.add.dropDownList({
+      options: o,
+      list: {
+        onButtonClick: (opt) => {
+          n.quantity = opt.value;
+        },
+      },
+    });
+    this.children.list.push(new FakeObject());
+    this.last = {
+      dd,
+      // 照抄官方 ok 的 pointerup
+      ok: async () => {
+        const r = (await this.socket.fetch("shop_buy", n.id, n.quantity)) as BuyResponse;
+        if (r.error !== null || r.rm_process !== null) {
+          if (!(r.error === null && r.rm_process !== null)) await this.shop_error(r.error!);
+        } else await this.show_dialogue_success();
+      },
+      preview: () => this.player.gem - t.price.gem * n.quantity,
+    };
+  }
 }
 
 interface FakeWindow {
-  game: { scene: { keys: Record<string, unknown> } };
+  game: { scene: { keys: Record<string, unknown> }; registry: { get(key: string): unknown } };
+  lang: string;
   [key: string]: unknown;
 }
 
 interface FakeGame {
   window: FakeWindow;
-  shop: FakeShop;
+  shop: FakeShopScene;
 }
 
-function makeGame(
-  options: { gem?: number; item?: FakeItem | null; ccoin?: Record<string, number> } = {},
-): FakeGame {
-  const gem = options.gem ?? 5404;
-  const item: FakeItem | null =
-    options.item === undefined
-      ? { price: { gem: 200 }, upper: null, name_tcn: "白色石楠1" }
-      : options.item;
-  const ccoin = options.ccoin ?? { 0: 5, 1: 53, 2: 52, 3: 1, 4: 17 };
-
-  const built: FakePanel[] = [];
-  const picked: string[] = [];
-
-  const rexAdd = {
-    sizer: () => new FakeSizer(),
-    roundRectangle: () => new FakeRoundRect(),
-    label: (cfg: { name: string; background: FakeRoundRect; text: FakeText }) => new FakeLabel(cfg),
-    scrollablePanel: (cfg: {
-      x: number;
-      y: number;
-      height: number;
-      panel: { child: FakeSizer };
-    }) => {
-      const p = new FakePanel(cfg);
-      built.push(p);
-      return p;
-    },
-  };
-
-  const shop: FakeShop = {
-    gem,
-    data_ccoin: ccoin,
-    select: { cate1: "item", cate2: "battle", index: 0 },
-    panel: undefined,
-    buy_quantity: 1,
-    btn_panel_text: new FakeText("1"),
-    gem_left_text: new FakeText(""),
-    events: new FakeEmitter(),
-    shop: { item: { other: [{ upper: null }] } },
-    item_other: [{ upper: null }],
-    rexUI: { add: rexAdd as unknown as Record<string, (cfg: never) => unknown> },
-    add: { text: (_x, _y, t) => new FakeText(t), sprite: () => new FakeObject() },
-    get_selected_item: () => item,
-    built,
-    picked,
-    openDialog() {
-      // ⚠ 照抄官方公式，含那刀。這是被測物要對帳的對象。
-      const i = shop.get_selected_item()!;
-      let t: number;
-      const isRm = "rm" in i && i.rm !== undefined;
-      if (i.price.gem !== 0) {
-        t = Math.trunc(shop.gem / i.price.gem);
-        for (const k of Object.keys(shop.data_ccoin)) {
-          const price = (i.price as Record<string, number | undefined>)["ccoin" + k];
-          const e = Math.trunc((shop.data_ccoin[k] ?? 0) / (price ?? 0));
-          if (e < t) t = e;
-        }
-      } else t = 20;
-      if (i.upper !== null && t > i.upper) t = i.upper;
-      if (t > OFFICIAL_QUANTITY_CAP) t = OFFICIAL_QUANTITY_CAP;
-      if (isRm) t = 10;
-
-      const list = new FakeSizer();
-      for (let s = 1; s <= t; s++) {
-        list.add(
-          new FakeLabel({
-            name: String(s),
-            background: new FakeRoundRect(),
-            text: new FakeText(String(s)),
-          }),
-        );
-      }
-      const o = new FakePanel({
-        x: 430,
-        y: 309,
-        height: t < 10 ? 22 * t : 220,
-        panel: { child: list },
-      });
-      built.push(o);
-      o.on("child.down", (e) => {
-        const name = (e as { name: string }).name;
-        picked.push(name);
-        shop.btn_panel_text.setText(name);
-        o.setVisible(false);
-        shop.buy_quantity = Number(name);
-        shop.gem_left_text.setText("" + (shop.gem - i.price.gem * shop.buy_quantity));
-        shop.events.emit("test_quantity_select", Number(name));
-      });
-      shop.buy_quantity = 1;
-      shop.btn_panel_text.setText("1");
-      shop.panel = o;
-      o.setVisible(false).setDepth(2001);
-      return o;
-    },
-    pressQuantityButton() {
-      shop.panel?.setVisible(true);
-    },
-    pressNo() {
-      shop.panel?.setVisible(false);
-    },
-  };
-
-  const window: FakeWindow = { game: { scene: { keys: { Shop: shop } } } };
-  return { window, shop };
+function makeGame(money: Partial<Money> = { gem: 5404 }): FakeGame {
+  const shop = new FakeShopScene(money);
+  const registry = { get: (key: string) => (key === "ShopData" ? shop.shopData : undefined) };
+  return { window: { game: { scene: { keys: { Shop: shop } }, registry }, lang: "tcn" }, shop };
 }
+
+function price(p: Partial<Price>): Price {
+  return { gem: 0, rm: 0, point: 0, item_10001: 0, item_10011: 0, ...p };
+}
+
+/** 白色石楠1，200 GEM。 */
+const HEATHER: FakeItem = { id: 3230, price: price({ gem: 200 }), upper: null };
 
 let poll: (() => void) | null = null;
 
-function run(game: FakeGame, expression: string): string {
+/** `cleared` 收 clearInterval 拿到的 id。 */
+function run(game: FakeGame, expression: string, cleared: unknown[] = []): string {
   // eslint-disable-next-line no-new-func
   const fn = new Function("window", "setInterval", "clearInterval", `return ${expression};`) as (
     w: FakeWindow,
     si: (fn: () => void, ms: number) => number,
-    ci: () => void,
+    ci: (id: unknown) => void,
   ) => string;
   return fn(
     game.window,
@@ -330,7 +333,8 @@ function run(game: FakeGame, expression: string): string {
       poll = cb;
       return 1;
     },
-    () => {
+    (id) => {
+      cleared.push(id);
       poll = null;
     },
   );
@@ -349,241 +353,318 @@ function status(game: FakeGame) {
   return parseShopStatus(run(game, SHOP_STATUS_EXPRESSION));
 }
 
+/** 按購買，回傳這次的數量下拉。 */
+function open(game: FakeGame, item: FakeItem = HEATHER): FakeDropDown {
+  game.shop.create_purchase_screen(item);
+  return game.shop.last!.dd;
+}
+
 // ---------------------------------------------------------------------------
 
 describe("商店的購買數量檔位", () => {
-  it("GEM 商品：確認框開了之後 sc.panel 換成檔位表，只留買得起的", () => {
-    // gem 5404 / 200 = 27 → 官方 1..20，我們 1..20 那幾檔
+  it("GEM 商品：數量下拉換成檔位表，只留買得起的", () => {
+    // gem 5404 / 200 = 27 → 官方 1..20，我們 ≤27 那幾檔
     const game = makeGame({ gem: 5404 });
     install(game);
-    const official = game.shop.openDialog();
-    expect(official.names()).toHaveLength(20);
-    tick();
-    expect(game.shop.panel).not.toBe(official);
-    expect(game.shop.panel!.names()).toEqual([1, 2, 3, 5, 7, 10, 15, 20]);
-    expect(official.visible).toBe(false);
+    const dd = open(game);
+    expect(dd.values()).toEqual([1, 2, 3, 5, 7, 10, 15, 20]);
     expect(status(game)).toMatchObject({
       active: true,
       max: 27,
       tiers: [1, 2, 3, 5, 7, 10, 15, 20],
+      reason: null,
     });
   });
 
   it("GEM 充足時 14 個檔位全出，而且是照 QUANTITY_TIERS 的順序", () => {
-    const game = makeGame({ gem: 999_999 });
+    const game = makeGame({ gem: 312_900 });
     install(game);
-    game.shop.openDialog();
-    tick();
-    expect(game.shop.panel!.names()).toEqual([...QUANTITY_TIERS]);
-    expect(status(game).max).toBe(4999);
+    expect(open(game).values()).toEqual([...QUANTITY_TIERS]);
+    expect(status(game).max).toBe(1564);
   });
 
   it("不夠買 20 個就看不到 20（跟官方一樣）", () => {
     const game = makeGame({ gem: 1800 }); // 9 個
     install(game);
-    game.shop.openDialog();
-    tick();
-    expect(game.shop.panel!.names()).toEqual([1, 2, 3, 5, 7]);
+    expect(open(game).values()).toEqual([1, 2, 3, 5, 7]);
+    expect(status(game).max).toBe(9);
   });
 
-  it("面板高度規則照抄官方：不到 10 項是 22*n，否則 220 加捲軸", () => {
-    const a = makeGame({ gem: 1800 });
-    install(a);
-    a.shop.openDialog();
-    tick();
-    expect(a.shop.panel!.height).toBe(22 * 5);
+  // ── 分批 ────────────────────────────────────────────────────────────────
 
-    const b = makeGame({ gem: 999_999 });
-    install(b);
-    b.shop.openDialog();
-    tick();
-    expect(b.shop.panel!.height).toBe(220);
+  it("選 500 按 ok：拆成 25 批各 20 依序送，官方跳成功框，對帳通過", async () => {
+    const game = makeGame({ gem: 312_900 });
+    install(game);
+    const dd = open(game);
+    dd.pick(500);
+    expect(game.shop.last!.preview()).toBe(312_900 - 200 * 500);
+    await game.shop.last!.ok();
+    expect(game.shop.socket.shopBuys()).toEqual(Array(25).fill(20));
+    expect(game.shop.socket.calls.every((c) => c[1] === 3230)).toBe(true);
+    expect(game.shop.outcome).toBe("success");
+    expect(game.shop.server.gem).toBe(312_900 - 200 * 500);
+    tick(); // 官方重抓過 player，輪詢對帳
+    expect(status(game).lastBuy).toEqual({
+      requested: 500,
+      bought: 500,
+      batches: 25,
+      expectedGemDelta: -100_000,
+      gemDelta: -100_000,
+      verified: true,
+    });
+    expect(status(game).reason).toBeNull();
   });
 
-  it("點了檔位：交給官方 handler 改 buy_quantity、預覽與事件，我們只把自己收起來", () => {
+  it("白色石楠3 買 30 個 → 20 + 10", async () => {
+    const game = makeGame({ gem: 312_900 });
+    install(game);
+    open(game, { id: 6622, price: price({ gem: 540 }), upper: null });
+    game.shop.last!.dd.pick(30);
+    await game.shop.last!.ok();
+    expect(game.shop.socket.shopBuys()).toEqual([20, 10]);
+    expect(game.shop.server.gem).toBe(312_900 - 540 * 30);
+  });
+
+  it("≤20 原樣放行，一個請求", async () => {
+    const game = makeGame({ gem: 312_900 });
+    install(game);
+    open(game).pick(15);
+    await game.shop.last!.ok();
+    expect(game.shop.socket.shopBuys()).toEqual([15]);
+    expect(status(game).lastBuy).toBeNull();
+  });
+
+  it("別的事件、別的商品的 shop_buy 原樣放行", async () => {
+    const game = makeGame({ gem: 312_900 });
+    install(game);
+    open(game);
+    expect(await game.shop.socket.fetch("db_event")).toEqual({ echo: "db_event" });
+    await game.shop.socket.fetch("shop_buy", 9999, 40);
+    expect(game.shop.socket.shopBuys()).toEqual([40]);
+  });
+
+  it("課金品開的框不接手（下拉沒換，就沒有 pending）", async () => {
+    const game = makeGame({ gem: 312_900 });
+    install(game);
+    open(game); // 先開一個 GEM 的
+    open(game, { id: 6717, price: price({ rm: 135 }), upper: null }); // 再開課金的
+    await game.shop.socket.fetch("shop_buy", 3230, 40); // 就算送了 GEM 那件也不接手
+    expect(game.shop.socket.shopBuys()).toEqual([40]);
+  });
+
+  it("一個框只接手一次", async () => {
+    const game = makeGame({ gem: 312_900 });
+    install(game);
+    open(game).pick(50);
+    await game.shop.last!.ok();
+    await game.shop.socket.fetch("shop_buy", 3230, 50);
+    expect(game.shop.socket.shopBuys()).toEqual([20, 20, 10, 50]);
+  });
+
+  it("中途失敗：停下、回成功形狀讓官方重抓，短少寫進 reason", async () => {
+    const game = makeGame({ gem: 312_900 });
+    install(game);
+    open(game).pick(500);
+    game.shop.socket.failAt = 3;
+    await game.shop.last!.ok();
+    expect(game.shop.socket.shopBuys()).toEqual([20, 20, 20]);
+    expect(game.shop.outcome).toBe("success");
+    tick();
+    const s = status(game);
+    expect(s.lastBuy).toMatchObject({ requested: 500, bought: 40, batches: 3, verified: true });
+    expect(s.reason).toContain("40 / 500");
+  });
+
+  it("第一批就失敗：原樣交回官方跳錯誤框，不留 lastBuy", async () => {
+    const game = makeGame({ gem: 312_900 });
+    install(game);
+    open(game).pick(500);
+    game.shop.socket.failAt = 1;
+    await game.shop.last!.ok();
+    expect(game.shop.outcome).toBe("error:NOT_ENOUGH");
+    expect(status(game).lastBuy).toBeNull();
+  });
+
+  it("第一批就逾時：例外照丟（跟官方一樣）", async () => {
+    const game = makeGame({ gem: 312_900 });
+    install(game);
+    open(game).pick(500);
+    game.shop.socket.throwAt = 1;
+    await expect(game.shop.last!.ok()).rejects.toThrow("timed out");
+    expect(game.shop.socket.shopBuys()).toEqual([20]);
+  });
+
+  it("數量超過開框時的上限：一個都不送", async () => {
+    const game = makeGame({ gem: 5404 }); // 27 個
+    install(game);
+    open(game);
+    const r = await game.shop.socket.fetch("shop_buy", 3230, 500);
+    expect(r).toEqual({ error: "DEFAULT", rm_process: null });
+    expect(game.shop.socket.shopBuys()).toEqual([]);
+    expect(status(game).reason).toContain("一個都沒送");
+  });
+
+  it("伺服器扣的跟預期不同：對帳不符寫進 reason", async () => {
+    const game = makeGame({ gem: 312_900 });
+    install(game);
+    open(game).pick(50);
+    game.shop.socket.overcharge = 1;
+    await game.shop.last!.ok();
+    tick();
+    const s = status(game);
+    expect(s.lastBuy).toMatchObject({ verified: false, gemDelta: -201 * 50 });
+    expect(s.reason).toContain("對帳不符");
+  });
+
+  it("文字照官方格式：text 是字串、value 是數字", () => {
     const game = makeGame({ gem: 999_999 });
     install(game);
-    game.shop.openDialog();
-    tick();
-    game.shop.pressQuantityButton();
-    expect(game.shop.panel!.visible).toBe(true);
-
-    let got: unknown = null;
-    game.shop.events.on("test_quantity_select", (n) => (got = n));
-    const mine = game.shop.panel!;
-    mine.emit("child.down", mine.getByName("500"));
-
-    expect(game.shop.picked).toEqual(["500"]);
-    expect(game.shop.buy_quantity).toBe(500);
-    expect(game.shop.btn_panel_text.text).toBe("500");
-    expect(game.shop.gem_left_text.text).toBe(String(999_999 - 200 * 500));
-    expect(got).toBe(500);
-    expect(mine.visible).toBe(false);
-  });
-
-  it("數量鈕與 No 鈕操作的是我們的面板（官方只動 sc.panel 這個參考）", () => {
-    const game = makeGame();
-    install(game);
-    game.shop.openDialog();
-    tick();
-    const mine = game.shop.panel!;
-    expect(mine.visible).toBe(false);
-    game.shop.pressQuantityButton();
-    expect(mine.visible).toBe(true);
-    game.shop.pressNo();
-    expect(mine.visible).toBe(false);
-  });
-
-  it("換的時候官方面板已經亮著，我們的就跟著亮 —— 不會讓清單憑空消失", () => {
-    const game = makeGame();
-    install(game);
-    game.shop.openDialog();
-    game.shop.pressQuantityButton(); // 玩家手快，輪詢還沒到
-    tick();
-    expect(game.shop.panel!.visible).toBe(true);
+    const dd = open(game);
+    expect(dd.options[0]).toEqual({ text: "1", value: 1 });
   });
 
   // ── 閘門 ────────────────────────────────────────────────────────────────
 
-  it("課金商品完全不碰：sc.panel 還是官方那份 1..10", () => {
-    const game = makeGame({
-      item: { price: { gem: 0 }, upper: null, rm: 80, name_tcn: "白色石楠5" },
-    });
+  it("課金商品（price.rm > 0）完全不碰", () => {
+    const game = makeGame({ gem: 999_999 });
     install(game);
-    const official = game.shop.openDialog();
-    tick();
-    expect(game.shop.panel).toBe(official);
-    expect(official.names()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-    expect(official.visible).toBe(false);
+    const dd = open(game, { id: 6717, price: price({ rm: 135 }), upper: null });
+    expect(dd.values()).toHaveLength(20);
     expect(status(game)).toMatchObject({ active: false, reason: null });
   });
 
-  it("碎片商品（純 cmem，gem=0）完全不碰", () => {
-    const game = makeGame({ item: { price: { gem: 0, cmem5: 2 }, upper: null, name_tcn: "碎片" } });
+  it("碎片商品（item_10011，gem=0）完全不碰", () => {
+    const game = makeGame({ gem: 999_999, item_10011: 999 });
     install(game);
-    const official = game.shop.openDialog();
-    tick();
-    expect(game.shop.panel).toBe(official);
-    expect(official.names()).toHaveLength(20);
+    const dd = open(game, { id: 1, price: price({ item_10011: 2 }), upper: null });
+    expect(dd.values()).toHaveLength(20);
   });
 
-  it("活動商店（cate1 === event）完全不碰", () => {
-    const game = makeGame({ gem: 999_999 });
-    game.shop.select = { cate1: "event", cate2: "x", index: 0 };
+  it("活動點數商品完全不碰，就算也標了 GEM", () => {
+    const game = makeGame({ gem: 999_999, point: 999 });
     install(game);
-    const official = game.shop.openDialog();
-    tick();
-    expect(game.shop.panel).toBe(official);
+    const dd = open(game, { id: 1, price: price({ gem: 1, point: 1 }), upper: null });
+    expect(dd.values()).toHaveLength(20);
   });
 
   // ── 上限 ────────────────────────────────────────────────────────────────
 
-  it("購買上限（upper）會壓住檔位", () => {
-    const game = makeGame({
-      gem: 999_999,
-      item: { price: { gem: 200 }, upper: 30, name_tcn: "限購品" },
-    });
+  it("購買上限（upper − 已買）會壓住檔位", () => {
+    const game = makeGame({ gem: 999_999 });
+    game.shop.shop_config = [{ shop_id: 77, quantity: 10 }];
     install(game);
-    game.shop.openDialog();
-    tick();
-    expect(game.shop.panel!.names()).toEqual([1, 2, 3, 5, 7, 10, 15, 20, 30]);
-    expect(status(game).max).toBe(30);
+    const dd = open(game, { id: 77, price: price({ gem: 200 }), upper: 60 });
+    expect(dd.values()).toEqual([1, 2, 3, 5, 7, 10, 15, 20, 30, 50]);
+    expect(status(game).max).toBe(50);
   });
 
-  it("GEM+ccoin 商品：ccoin 不夠時以 ccoin 為準", () => {
-    const game = makeGame({
-      gem: 999_999,
-      ccoin: { 0: 5, 1: 53 },
-      item: { price: { gem: 1000, ccoin0: 0, ccoin1: 11 }, upper: null, name_tcn: "武器" },
-    });
+  it("GEM+角色碎片商品：碎片不夠時以碎片為準", () => {
+    const game = makeGame({ gem: 999_999, item_10001: 530 });
     install(game);
-    game.shop.openDialog();
-    tick();
-    // 53 / 11 = 4
-    expect(game.shop.panel!.names()).toEqual([1, 2, 3]);
-    expect(status(game).max).toBe(4);
+    const dd = open(game, { id: 1, price: price({ gem: 1000, item_10001: 11 }), upper: null });
+    // 530 / 11 = 48
+    expect(dd.values()).toEqual([1, 2, 3, 5, 7, 10, 15, 20, 30]);
+    expect(status(game).max).toBe(48);
   });
 
   it("對帳不符（官方公式變了）就不碰，原因說得出來", () => {
-    const game = makeGame({ gem: 5404 });
+    const game = makeGame({ gem: 999_999 });
     install(game);
-    const official = game.shop.openDialog();
-    // 官方面板被動了手腳：只有 15 個，但我們算 27 → 預期 20
-    official.child.children.splice(15);
-    tick();
-    expect(game.shop.panel).toBe(official);
+    // 官方公式改了：回 20，但照我們抄的公式只買得起 5 個
+    const realGetMoney = game.shop.get_money.bind(game.shop);
+    game.shop.get_money = () => ({ ...realGetMoney(), gem: 1000 });
+    const official = game.shop.get_max_purchase.bind(game.shop);
+    game.shop.get_max_purchase = (t) => Math.max(official(t), OFFICIAL_QUANTITY_CAP);
+    const dd = open(game);
+    expect(dd.values()).toHaveLength(20);
     expect(status(game).active).toBe(false);
     expect(status(game).reason).toContain("對帳");
   });
 
+  it("官方下拉的選項數跟上限對不上就不碰", () => {
+    const game = makeGame({ gem: 999_999 });
+    const orig = FakeShopScene.prototype.create_purchase_screen;
+    game.shop.get_max_purchase = () => 20;
+    // 官方改成只建 10 項
+    Object.getPrototypeOf(game.shop).create_purchase_screen = function (
+      this: FakeShopScene,
+      t: FakeItem,
+    ) {
+      orig.call(this, t);
+      this.last!.dd.options.splice(10);
+    };
+    try {
+      install(game);
+      const dd = open(game);
+      expect(dd.values()).toHaveLength(10);
+      expect(status(game).reason).toContain("選項");
+    } finally {
+      FakeShopScene.prototype.create_purchase_screen = orig;
+    }
+  });
+
   // ── 生命週期 ────────────────────────────────────────────────────────────
 
-  it("確認框再開一次：舊的我們那份銷毀，新的換上", () => {
+  it("確認框再開一次：新的下拉照樣換", () => {
     const game = makeGame({ gem: 999_999 });
     install(game);
-    game.shop.openDialog();
-    tick();
-    const first = game.shop.panel!;
-    game.shop.openDialog();
-    tick();
-    const second = game.shop.panel!;
-    expect(second).not.toBe(first);
-    expect(first.scene).toBeUndefined();
-    expect(second.scene).toBeDefined();
-    expect(second.names()).toEqual([...QUANTITY_TIERS]);
+    open(game);
+    const second = open(game);
+    expect(second.values()).toEqual([...QUANTITY_TIERS]);
   });
 
-  it("sc.panel 是死物件（離開商店又回來）就跳過，不會炸", () => {
+  it("Shop 場景晚出現：輪詢到了才包", () => {
+    const game = makeGame({ gem: 999_999 });
+    const shop = game.shop;
+    delete game.window.game.scene.keys.Shop;
+    install(game);
+    expect(Object.prototype.hasOwnProperty.call(shop, "create_purchase_screen")).toBe(false);
+    game.window.game.scene.keys.Shop = shop;
+    tick();
+    expect(open(game).values()).toEqual([...QUANTITY_TIERS]);
+  });
+
+  it("場景的形狀變了就說出來，不包", () => {
     const game = makeGame();
+    (game.shop as unknown as Record<string, unknown>).get_max_purchase = undefined;
     install(game);
-    const official = game.shop.openDialog();
-    official.destroy();
-    tick();
-    expect(game.shop.panel).toBe(official);
-    expect(status(game)).toMatchObject({ installed: true, active: false, reason: null });
+    expect(status(game).reason).toContain("形狀變了");
+    expect(Object.prototype.hasOwnProperty.call(game.shop, "create_purchase_screen")).toBe(false);
   });
 
-  it("還沒選商品（get_selected_item 是 null）時安靜等著", () => {
-    const game = makeGame({ item: null });
+  it("拆得乾淨：方法還原成原型那支、旗標刪除、輪詢停掉", () => {
+    const game = makeGame({ gem: 999_999 });
     install(game);
-    game.shop.panel = new FakePanel({
-      x: 430,
-      y: 309,
-      height: 22,
-      panel: { child: new FakeSizer() },
-    });
-    tick();
-    expect(status(game)).toMatchObject({ installed: true, active: false, reason: null });
-  });
-
-  it("拆得乾淨：sc.panel 還給官方、我們的銷毀、旗標刪除", () => {
-    const game = makeGame();
-    install(game);
-    const official = game.shop.openDialog();
-    tick();
-    const mine = game.shop.panel!;
+    expect(Object.prototype.hasOwnProperty.call(game.shop, "create_purchase_screen")).toBe(true);
+    expect(Object.prototype.hasOwnProperty.call(game.shop.socket, "fetch")).toBe(true);
     expect(run(game, SHOP_UNINSTALL_EXPRESSION)).toBe("ok");
-    expect(game.shop.panel).toBe(official);
-    expect(mine.scene).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(game.shop, "create_purchase_screen")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(game.shop.socket, "fetch")).toBe(false);
     expect(game.window.__ulrShop).toBeUndefined();
     expect(poll).toBeNull();
+    expect(open(game).values()).toHaveLength(20);
     expect(status(game).installed).toBe(false);
   });
 
-  it("重裝從原狀開始：先還給官方再換一次，不會疊兩層", () => {
-    const game = makeGame();
+  it("重裝從原狀開始：不會包兩層", () => {
+    const game = makeGame({ gem: 999_999 });
     install(game);
-    const official = game.shop.openDialog();
-    tick();
-    const first = game.shop.panel!;
+    const first = game.shop.create_purchase_screen;
     install(game);
-    // 重裝那一刻 sc.panel 已經還給官方，第一輪 tick 又換一次
-    tick();
-    const second = game.shop.panel!;
-    expect(first.scene).toBeUndefined();
-    expect(second).not.toBe(official);
+    const second = game.shop.create_purchase_screen;
     expect(second).not.toBe(first);
-    expect(second.names()).toEqual([1, 2, 3, 5, 7, 10, 15, 20]);
+    expect(open(game).values()).toEqual([...QUANTITY_TIERS]);
+    run(game, SHOP_UNINSTALL_EXPRESSION);
+    expect(game.shop.create_purchase_screen).toBe(FakeShopScene.prototype.create_purchase_screen);
+  });
+
+  it("v1 留在頁面上的狀態也拆得掉", () => {
+    const game = makeGame({ gem: 999_999 });
+    const cleared: unknown[] = [];
+    game.window.__ulrShop = { version: 1, timer: 9, mine: null, orig: null };
+    run(game, buildShopPatchScript(), cleared);
+    expect(cleared).toEqual([9]);
+    expect(status(game).version).toBe(SHOP_SCRIPT_VERSION);
   });
 
   it("狀態帶著版本號，而且沒裝的時候說得出來", () => {
@@ -594,6 +675,7 @@ describe("商店的購買數量檔位", () => {
       active: false,
       tiers: [],
       max: null,
+      lastBuy: null,
       reason: null,
     });
     install(game);
@@ -607,9 +689,7 @@ describe("商店的購買數量檔位", () => {
   it("檔位表可以換，但一定會排序、去掉非正整數", () => {
     const game = makeGame({ gem: 999_999 });
     install(game, { tiers: [50, 1, 0, -3, 2.5, 10] });
-    game.shop.openDialog();
-    tick();
-    expect(game.shop.panel!.names()).toEqual([1, 10, 50]);
+    expect(open(game).values()).toEqual([1, 10, 50]);
   });
 
   it("讀不懂的回應當成沒裝，原文帶在 reason 裡", () => {
@@ -621,5 +701,102 @@ describe("商店的購買數量檔位", () => {
   it("沒有「最大」、沒有輸入框 —— 檔位表就是使用者給的那 14 個", () => {
     expect(QUANTITY_TIERS).toEqual([1, 2, 3, 5, 7, 10, 15, 20, 30, 50, 100, 200, 300, 500]);
     expect(buildShopPatchScript()).not.toContain("inputText");
+  });
+});
+
+describe("商店的專武：使用場所填角色名", () => {
+  it("點專武：使用場所顯示角色名，官方面板照常更新", () => {
+    const game = makeGame();
+    install(game);
+    game.shop.select(WEAPON_89);
+    expect(game.shop.item_name.text).toBe("毒鐵線");
+    expect(game.shop.item_place.text).toBe("薩爾卡多");
+    expect(status(game).reason).toBeNull();
+  });
+
+  it("通用武器（chara null）與魔之刀身那類（cc000）照舊「-」", () => {
+    const game = makeGame();
+    install(game);
+    game.shop.select(GENERIC_1);
+    expect(game.shop.item_place.text).toBe("-");
+    game.shop.select(MATERIAL_5005);
+    expect(game.shop.item_place.text).toBe("-");
+  });
+
+  it("從專武換點別的：變回「-」", () => {
+    const game = makeGame();
+    install(game);
+    game.shop.select(WEAPON_89);
+    game.shop.select(POTION);
+    expect(game.shop.item_place.text).toBe("-");
+  });
+
+  it("跟武器撞號的事件卡不會被標成專武", () => {
+    const game = makeGame();
+    install(game);
+    game.shop.select(EVENT_89);
+    expect(game.shop.item_name.text).toBe("某張事件卡");
+    expect(game.shop.item_place.text).toBe("-");
+  });
+
+  it("數量大於 1 的武器商品（名字接 xN）照樣標", () => {
+    const game = makeGame();
+    const pack: ShopEntry = { id: 7000, item: [{ type: 2, id: 89, slot: 0, amount: 3 }] };
+    game.shop.shopData.push(pack);
+    install(game);
+    game.shop.select(pack);
+    expect(game.shop.item_name.text).toBe("毒鐵線 x3");
+    expect(game.shop.item_place.text).toBe("薩爾卡多");
+  });
+
+  it("官方顯示的名字跟那把武器對不上（type/slot 常數變了）就不標", () => {
+    const game = makeGame();
+    install(game);
+    game.shop.get_item_info = () => ({ item_name: "別的東西", item_effect: "" });
+    game.shop.select(WEAPON_89);
+    expect(game.shop.item_place.text).toBe("-");
+  });
+
+  it("裝上時面板已經停在專武上：立刻補上", () => {
+    const game = makeGame();
+    game.shop.select(WEAPON_89);
+    expect(game.shop.item_place.text).toBe("-");
+    install(game);
+    expect(game.shop.item_place.text).toBe("薩爾卡多");
+  });
+
+  it("重裝不會包兩層，面板維持角色名", () => {
+    const game = makeGame();
+    install(game);
+    game.shop.select(WEAPON_89);
+    install(game);
+    expect(game.shop.item_place.text).toBe("薩爾卡多");
+    const wrapped = game.shop.show_detail;
+    install(game);
+    expect(game.shop.show_detail).not.toBe(wrapped);
+    run(game, SHOP_UNINSTALL_EXPRESSION);
+    expect(game.shop.show_detail).toBe(FakeShopScene.prototype.show_detail);
+  });
+
+  it("拆掉：show_detail 還原成原型那支、使用場所變回「-」", () => {
+    const game = makeGame();
+    install(game);
+    game.shop.select(WEAPON_89);
+    expect(run(game, SHOP_UNINSTALL_EXPRESSION)).toBe("ok");
+    expect(Object.prototype.hasOwnProperty.call(game.shop, "show_detail")).toBe(false);
+    expect(game.shop.item_place.text).toBe("-");
+    game.shop.select(WEAPON_89);
+    expect(game.shop.item_place.text).toBe("-");
+  });
+
+  it("我們這段出錯不影響官方的面板，原因寫進 reason", () => {
+    const game = makeGame();
+    install(game);
+    game.shop.cache.json.get = () => {
+      throw new Error("cache 壞了");
+    };
+    game.shop.select(WEAPON_89);
+    expect(game.shop.item_name.text).toBe("毒鐵線");
+    expect(status(game).reason).toContain("專武");
   });
 });

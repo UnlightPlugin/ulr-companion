@@ -528,6 +528,12 @@ export function parseIndexedCards(raw: string): IndexedCardTable {
  *
  * 這跟兩份資產的 `chara` 欄位是一致的（怪物的 `chara` 就等於 `filename`）。
  * 混用會查不到而讓整排卡變成沒有名字。
+ *
+ * ⚠ 2026-09-23 改版後兩張表都不存在了，合成一份 `Characters`：鍵是
+ * `CharaCards[].chara`（角色 `cc034`、怪物 `mc20092` 這種），名字在
+ * `name_${lang}`（官方 `Characters[chara]["name_" + lang]`），另外混著碎片／渦幣
+ * （`cmem_0`、`ccoin_0`）。所以照前綴分：`cc` 加三位數是角色，`mc` 開頭是怪物。
+ * 2026-09-26 玩家回報卡面 MOD 對不到中文檔名就是這支讀不到名字。
  */
 export interface CardProfiles {
   /** `cc001` → `艾伯李斯特`。70 位（2026-08-16）。 */
@@ -546,18 +552,24 @@ export const PROFILE_READ_EXPRESSION = `(function () {
     if (!game || !game.cache || !game.cache.json) {
       return JSON.stringify({ error: "window.game.cache.json 還沒建立，遊戲可能還在載入" });
     }
-    function names(key) {
+    /* 官方的 lang 是頁面全域（可能是 let，不一定掛在 window 上） */
+    var L = typeof lang === "string" ? lang : "tcn";
+    function names(key, keep) {
       var src = game.cache.json.get(key);
       var out = {};
       if (!src || typeof src !== "object") return out;
       for (var k in src) {
         if (!Object.prototype.hasOwnProperty.call(src, k)) continue;
+        if (keep && !keep.test(k)) continue;
         var p = src[k];
         if (!p) continue;
-        var n = typeof p.name_tcn === "string" && p.name_tcn !== "" ? p.name_tcn : p.name_ja;
-        if (typeof n === "string" && n !== "") out[k] = n;
+        var n = [p["name_" + L], p.name_tcn, p.name_ja].filter(function (x) { return typeof x === "string" && x !== ""; })[0];
+        if (n !== undefined) out[k] = n;
       }
       return out;
+    }
+    if (game.cache.json.exists("Characters")) {
+      return JSON.stringify({ characters: names("Characters", /^cc\\d{3}$/), monsters: names("Characters", /^mc/) });
     }
     return JSON.stringify({ characters: names("charaProfile"), monsters: names("monsProfile") });
   } catch (e) {

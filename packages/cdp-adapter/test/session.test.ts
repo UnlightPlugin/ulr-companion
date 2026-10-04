@@ -65,6 +65,45 @@ describe("selectGamePage", () => {
     expect(picked).toBeNull();
   });
 
+  it("2026-09-23 的桌面版：遊戲 iframe 是獨立 target 時直接選它，不選殼", () => {
+    // Electron 44 把跨來源 iframe 放進自己的程序；attach 殼只看得到殼的 context。
+    const picked = selectGamePage([
+      { ...DESKTOP_SHELL, url: DESKTOP_SHELL.url.replace("win-unpacked/", "") },
+      {
+        targetId: "GAME-FRAME",
+        type: "iframe",
+        url: "https://www.playunlight.online/?platform_id=76561199854644708&platform_key=unlight&platform_type=steam&access_token=abcdef0123456789",
+        // 沒有 <title> 的 frame，CDP 拿整串網址當標題（&amp; 是實測原樣）。
+        title:
+          "https://www.playunlight.online/?platform_id=76561199854644708&amp;platform_key=unlight&amp;platform_type=steam&amp;access_token=abcdef0123456789",
+      },
+    ]);
+    expect(picked?.targetId).toBe("GAME-FRAME");
+  });
+
+  it("iframe target 的標題是網址時換成遊戲名 —— 標題會進記錄", () => {
+    const picked = selectGamePage([
+      {
+        targetId: "GAME-FRAME",
+        type: "iframe",
+        url: "https://www.playunlight.online/?platform_id=76561199854644708&access_token=abcdef0123456789",
+        title:
+          "https://www.playunlight.online/?platform_id=76561199854644708&amp;access_token=abcdef0123456789",
+      },
+    ]);
+    expect(picked?.title).not.toContain("76561199854644708");
+    expect(picked?.title).not.toContain("abcdef0123456789");
+    expect(picked?.safeUrl).not.toContain("abcdef0123456789");
+  });
+
+  it("別的來源的 iframe target 不選", () => {
+    const picked = selectGamePage([
+      DESKTOP_SHELL,
+      { targetId: "AD", type: "iframe", url: "https://ads.example.com/", title: "" },
+    ]);
+    expect(picked?.targetId).toBe("SHELL");
+  });
+
   it("一個都沒有就回 null", () => {
     expect(selectGamePage([])).toBeNull();
   });

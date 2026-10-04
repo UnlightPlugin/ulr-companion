@@ -1,17 +1,20 @@
 /**
  * 迪特赫姆的快速比賽補丁
  *
- * 跟 `patch-stage.test.ts` 同一種寫法：搭一個假的遊戲（Match 場景、duel 頻道
- * 面板、按鈕類別、遊戲自己的人數模板），把 `buildLobbyPatchScript()` 產出來的
- * **那一串字**原封不動 `new Function` 起來跑。
+ * 跟 `patch-stage.test.ts` 同一種寫法：搭一個假的遊戲（改版後的 Match 場景、
+ * 頻道物件、`channel_match` 那顆鈕、遊戲自己的人數模板與錯誤字串表），把
+ * `buildLobbyPatchScript()` 產出來的**那一串字**原封不動 `new Function` 起來跑。
  *
  * ⚠ **不要改成「重寫一份等價的實作再測」。** 這支補丁的坑全部在「跟遊戲的形狀
- * 對不對得上」，而其中三個只有跑真的字串才抓得到：
+ * 對不對得上」，而其中幾個只有跑真的字串才抓得到：
  *
  * 1. 腳本整個住在 template literal 裡 —— **跳脫少一層就是語法錯誤**
  *    （`\\n` 寫成 `\n` 的話字串裡會出現真的換行，整支腳本掛掉）
- * 2. 按鈕位置是**從 room_btn 算的**，不是寫死座標
+ * 2. 按鈕位置是**從 channel_match 與翻頁鍵算的**，不是寫死座標
  * 3. 人數那幾行填的是**遊戲自己的模板**，欄位名一個字都不能差
+ * 4. 等待視窗是官方那一個，取消鈕要換成通知插件（排隊時還沒有房可以收）
+ *
+ * 假環境照 2026-09-27 從跑著的客戶端讀到的 Match 場景搭。
  */
 
 import { describe, expect, it } from "vitest";
@@ -19,868 +22,989 @@ import {
   buildLobbyErrorExpression,
   buildLobbyPatchScript,
   buildLobbyStateExpression,
+  LOBBY_SCRIPT_VERSION,
   LOBBY_STATUS_EXPRESSION,
   LOBBY_UNINSTALL_EXPRESSION,
   parseLobbyStatus,
+  ROOM_ERROR_AP_SHORT,
   ROOM_ERROR_DECK_INVALID,
+  WAIT_LAYOUT,
 } from "@ulr/cdp-adapter";
+import type { LobbyState } from "@ulr/cdp-adapter";
 
 // ---------------------------------------------------------------------------
 // 假的遊戲
 // ---------------------------------------------------------------------------
 
-/** 官方模板，**逐字照抄** 2026-08-18 讀到的 `PLAYER_COUNT.tcn`。 */
-const PLAYER_COUNT_TCN = [
-  "__NAME__:__CHANNEL__登入 [參加人數:__LENGTH__]",
-  "COST__COST1__:__LENGTH1__位玩家等待中。\nCOST__COST2__:__LENGTH2__位玩家等待中。\nCOST__COST3__:__LENGTH3__位玩家等待中。\nCOST90+:__LENGTH4__位玩家等待中。",
-];
+/** `MatchUITexts.channel_length.quick`，**逐字照抄** 2026-09-27 的 tcn。 */
+const QUICK_TEMPLATE =
+  "COST__COST1__:__LENGTH1__位玩家等待中。\nCOST__COST2__:__LENGTH2__位玩家等待中。\nCOST__COST3__:__LENGTH3__位玩家等待中。\nCOST90+:__LENGTH4__位玩家等待中。";
 
-const ROOM_ERROR_TCN = [
-  "發生錯誤 (--CODE--)",
-  "牌組與規定不合，無法創建房間。",
-  "因為懲罰，而無法創建對戰室",
-  "因為懲罰，而無法進入對戰室",
-  "AP不足",
-  "這間對戰房間為朋友限定。",
-  "密碼不對。",
-  "這個牌組不符合遊戲規則",
-];
+const ERRORS: Record<string, string> = {
+  label: "確認",
+  NOT_ENOUGH_AP: "AP不足。",
+  INVALID_DECK_ENTER: "這個牌組不符合遊戲規則。",
+  DEFAULT: "發生錯誤。(--CODE--)",
+};
 
-interface FakeObject {
-  type: string;
+type Handler = (...args: unknown[]) => void;
+
+interface FakeObj {
+  kind: string;
+  key?: string;
+  frame?: number | string;
   x: number;
   y: number;
   width: number;
   height: number;
-  texture?: { key: string };
-  frame?: string;
+  originX: number;
   text?: string;
   depth?: number;
-  scene?: object;
-  destroyed?: boolean;
-  handlers?: Record<string, (() => void)[]>;
-  [key: string]: unknown;
+  scene: object | undefined;
+  handlers: Record<string, Handler[]>;
+  /** Phaser 的 `type`（Image／Text…），補丁靠它認頁碼殘影。 */
+  type?: string;
+  texture?: { key: string };
+  /** 世界座標的範圍 [左, 上, 寬, 高]。沒給就是「點不到」。 */
+  box?: [number, number, number, number];
+  getBounds(): { contains(x: number, y: number): boolean };
+  /** 只給 Cancel 用：origin(0.5, 1)，中心在下緣往上半個高。 */
+  getCenter(): { x: number; y: number };
+  listeners(ev: string): Handler[];
+  setOrigin(x: number, y?: number): FakeObj;
+  setInteractive(): FakeObj;
+  setDepth(d: number): FakeObj;
+  setPosition(x: number, y: number): FakeObj;
+  setText(t: string): FakeObj;
+  setTexture(key: string, frame?: number | string): FakeObj;
+  on(ev: string, fn: Handler): FakeObj;
+  off(ev: string): FakeObj;
+  emit(ev: string): void;
+  destroy(): void;
 }
 
-function makeText(x: number, y: number, value: string): FakeObject {
-  const o: FakeObject = {
-    type: "Text",
+function obj(kind: string, x: number, y: number, extra: Partial<FakeObj> = {}): FakeObj {
+  const o: FakeObj = {
+    kind,
     x,
     y,
-    width: 0,
-    // 高度隨行數變 —— 狀態那一行要接在人數底下，行數算錯就會疊字。
-    height: value === "" ? 0 : value.split("\n").length * 18,
-    text: value,
+    width: 135,
+    height: 17,
+    originX: 0.5,
     scene: {},
-    setOrigin: () => o,
-    setText: (t: string) => {
-      o.text = t;
-      o.height = t === "" ? 0 : t.split("\n").length * 18;
+    handlers: {},
+    setOrigin(ox: number) {
+      o.originX = ox;
       return o;
     },
-    setPosition: (px: number, py: number) => {
+    setInteractive: () => o,
+    setDepth(d: number) {
+      o.depth = d;
+      return o;
+    },
+    setPosition(px: number, py: number) {
       o.x = px;
       o.y = py;
       return o;
     },
-    // 等待視窗的每一個字都是 `setOrigin(...).setAlpha(0)` 建的（原版的波浪動畫）。
-    setAlpha: (a: number) => {
-      o["alpha"] = a;
+    setText(t: string) {
+      o.text = t;
+      o.height = t === "" ? 0 : t.split("\n").length * 18;
       return o;
     },
-    destroy: () => {
-      o.destroyed = true;
-      delete o["scene"];
+    setTexture(key: string, frame?: number | string) {
+      o.key = key;
+      if (frame !== undefined) o.frame = frame;
+      return o;
     },
+    on(ev: string, fn: Handler) {
+      (o.handlers[ev] ??= []).push(fn);
+      return o;
+    },
+    off(ev: string) {
+      delete o.handlers[ev];
+      return o;
+    },
+    emit(ev: string) {
+      for (const h of o.handlers[ev] ?? []) h();
+    },
+    listeners(ev: string) {
+      return [...(o.handlers[ev] ?? [])];
+    },
+    getCenter() {
+      return { x: o.x, y: o.y - o.height / 2 };
+    },
+    getBounds() {
+      // 九宮格面板：原點在中心，範圍跟著位置與尺寸走
+      const b: FakeObj["box"] =
+        o.kind === "NineSlice" ? [o.x - o.width / 2, o.y - o.height / 2, o.width, o.height] : o.box;
+      return {
+        contains: (px: number, py: number) =>
+          b !== undefined && px >= b[0] && px < b[0] + b[2] && py >= b[1] && py < b[1] + b[3],
+      };
+    },
+    destroy() {
+      o.scene = undefined;
+    },
+    ...extra,
   };
   return o;
 }
 
-/** 遊戲自己的按鈕類別（`o.ae`）。⚠ 它在 constructor 裡就把自己加進場景。 */
-class FakeButton {
-  type = "Sprite";
-  width = 135;
-  height = 30;
-  texture: { key: string };
-  frame: string;
-  scene: object | undefined;
-  destroyed = false;
-  #handlers: Record<string, ((...args: unknown[]) => void)[]> = {};
-
-  constructor(
-    scene: { add: { existing: (o: unknown) => void } },
-    public x: number,
-    public y: number,
-    key: string,
-    options: { frames?: { default?: string; over?: string } } = {},
-  ) {
-    this.texture = { key };
-    this.frame = options.frames?.default ?? "0";
-    this.scene = scene;
-    scene.add.existing(this);
-  }
-  on(event: string, handler: (...args: unknown[]) => void): this {
-    (this.#handlers[event] ??= []).push(handler);
-    return this;
-  }
-  click(): void {
-    for (const h of this.#handlers["click"] ?? []) h();
-  }
-  destroy(): void {
-    this.destroyed = true;
-    this.scene = undefined;
-  }
+interface FakeMatch {
+  scene: { isActive: () => boolean };
+  channel: { channel: number; quick: boolean; event: boolean } | null;
+  channel_match: FakeObj | null;
+  channel_room_prev: FakeObj | null;
+  channel_room_next: FakeObj | null;
+  channel_page_text_now: FakeObj | null;
+  channel_page_text_slash: FakeObj | null;
+  channel_page_text_max: FakeObj | null;
+  channel_room_images: FakeObj[];
+  channel_length: FakeObj | null;
+  children: { readonly list: FakeObj[] };
+  room_wait: boolean;
+  room_select: string | null;
+  __ulrWaitRoom?: string | null;
+  player_side: string | null;
+  wait_zone: FakeZone | null;
+  wait_panel: FakeObj | null;
+  wait_text: FakeObj[] | null;
+  wait_time_text: FakeObj | null;
+  btn_cancel: FakeObj | null;
+  btn_cancel_text: FakeObj | null;
+  ulse01: { play: () => void };
+  textures: { exists: (k: string) => boolean };
+  add: { image: (...a: never[]) => FakeObj; text: (...a: never[]) => FakeObj };
+  create_match_wait(): void;
+  remove_match_wait(): void;
+  channel_logout(): void;
+  match_error(code: string): void;
 }
 
-interface FakePanel {
-  list: unknown[];
-  room_btn?: FakeButton;
-  quick_btn?: FakeButton;
-  player_count: FakeObject;
-  /** 「1 / 1」那一格。**面板的中線就是拿它量的**（實測 x=185）。 */
-  room_page_text?: FakeObject;
-  scene: object | undefined;
-  constructor: unknown;
-  add(items: unknown[]): void;
-}
+type HitCallback = (area: unknown, x: number, y: number, o: FakeZone) => boolean;
 
-interface FakeWindow {
-  game: {
-    scene: { keys: Record<string, unknown> };
-  };
-  lang: string;
-  [key: string]: unknown;
-}
-
-interface FakeTimer {
-  removed: boolean;
-  fire(): void;
+/** 官方的 wait_zone：zone(380, 340, 760, 680)，原點在中心，setInteractive() 不帶參數。 */
+interface FakeZone {
+  x: number;
+  y: number;
+  displayOriginX: number;
+  displayOriginY: number;
+  input: { hitArea: object; hitAreaCallback: HitCallback };
 }
 
 interface FakeGame {
-  window: FakeWindow;
-  scene: Record<string, unknown>;
-  panel: FakePanel | undefined;
-  /** 換一個新的面板（＝玩家換頻道）。 */
-  enterChannel(channel: number): void;
-  leaveChannel(): void;
+  window: Record<string, unknown>;
+  sc: FakeMatch;
+  added: FakeObj[];
   reports: { type: string; [k: string]: unknown }[];
-  /** 直接加進場景（不是面板）的東西 —— 等待視窗就是這樣掛的。 */
-  sceneObjects: FakeObject[];
-  /** `scene.time.addEvent()` 開出來的計時器。收乾淨了沒要靠它驗。 */
-  timers: FakeTimer[];
+  /** 官方取消鈕原本那支被叫過幾次（排隊時它不該被叫到）。 */
+  officialCancels: number;
+  /** 官方取消鈕送出的 cancel_room 房號。 */
+  cancelledRooms: (string | null)[];
+  waitsCreated: number;
+  errors: { code: string; text: string }[];
+  texts: { channel_length: { quick: string }; error: Record<string, string> };
+  /** 玩家（重新）進一個頻道：頻道畫面上的東西全部重建。 */
+  enterChannel(channel: { channel: number; quick: boolean; event: boolean }): void;
+  leaveChannel(): void;
+  setActive(on: boolean): void;
 }
 
-/** duel 面板的基底類別 —— `PLAYER_COUNT` 是這一層的 static。 */
-class FakePanelBase {
-  static PLAYER_COUNT: Record<string, string[]> = { tcn: PLAYER_COUNT_TCN };
-}
-class FakeDuelPanel extends FakePanelBase {}
-class FakeRankedPanel extends FakePanelBase {}
+const DUEL = { channel: 2, quick: false, event: false };
+const RANKED = { channel: 1, quick: true, event: false };
 
-function makeGame(options: { channel?: number; ranked?: boolean } = {}): FakeGame {
+function makeGame(channel: FakeMatch["channel"] = DUEL): FakeGame {
+  const added: FakeObj[] = [];
   const reports: { type: string; [k: string]: unknown }[] = [];
-  const created: unknown[] = [];
-  const sceneObjects: FakeObject[] = [];
-  const timers: FakeTimer[] = [];
+  const errors: { code: string; text: string }[] = [];
+  const texts = { channel_length: { quick: QUICK_TEMPLATE }, error: { ...ERRORS } };
+  let active = true;
 
-  const scene: Record<string, unknown> = {
-    // 等待視窗那句話是從場景的 static 讀的（`Match.WAIT_TEXT`）。
-    constructor: { WAIT_TEXT: { tcn: "正在等待對手加入..." } },
-    channels: { "1": { type: "ranked", cost: [54, 61, 77] }, "2": { type: "duel" } },
-    channels_cross: { "3": { type: "ranked", cost: [58, 67, 75] }, "4": { type: "duel" } },
-    channel: undefined,
-    channel_panel: undefined,
-    room_error: { tcn: ROOM_ERROR_TCN },
-    ulse01: { play: () => undefined },
-    scale: { width: 1150, height: 1050 },
-    textures: {
-      exists: (key: string) => key === "match_quick_btn" || key === "match_roommake_btn",
-    },
-    time: {
-      addEvent: (cfg: { callback: () => void }): FakeTimer => {
-        const timer: FakeTimer = {
-          removed: false,
-          fire: () => cfg.callback(),
-        };
-        (timer as { remove?: () => void }).remove = () => {
-          timer.removed = true;
-        };
-        timers.push(timer);
-        return timer;
-      },
-    },
-    tweens: { killTweensOf: () => undefined },
-    add: {
-      existing: (o: unknown) => created.push(o),
-      text: (x: number, y: number, value: string) => {
-        const t = makeText(x, y, value);
-        sceneObjects.push(t);
-        return t;
-      },
-      nineslice: (x: number, y: number, key: string) => {
-        const o = makeText(x, y, "");
-        o.type = "NineSlice";
-        o.texture = { key };
-        sceneObjects.push(o);
-        return o;
-      },
-      container: () => {
-        const items: unknown[] = [];
-        const o = makeText(0, 0, "");
-        o.type = "Container";
-        (o as { add?: (list: unknown[]) => unknown }).add = (list: unknown[]) => {
-          items.push(...list);
-          return o;
-        };
-        (o as { setDepth?: (d: number) => unknown }).setDepth = (d: number) => {
-          o.depth = d;
-          return o;
-        };
-        (o as { items?: unknown[] }).items = items;
-        sceneObjects.push(o);
-        return o;
-      },
-      tween: () => undefined,
-      zone: (x: number, y: number, w: number, h: number) => {
-        const o = makeText(x, y, "");
-        o.type = "Zone";
-        o.width = w;
-        o.height = h;
-        (o as { setInteractive?: () => unknown }).setInteractive = () => o;
-        (o as { setDepth?: (d: number) => unknown }).setDepth = (d: number) => {
-          o.depth = d;
-          return o;
-        };
-        return o;
-      },
-      rectangle: (x: number, y: number, _w: number, _h: number) => {
-        const o = makeText(x, y, "");
-        o.type = "Rectangle";
-        (o as { setDepth?: (d: number) => unknown }).setDepth = (d: number) => {
-          o.depth = d;
-          return o;
-        };
-        return o;
-      },
-    },
-  };
-  // `setOrigin` 在 zone/rectangle 上是鏈式的，makeText 已經有了。
-
-  const window: FakeWindow = {
-    game: { scene: { keys: { Match: scene } } },
-    lang: "tcn",
-  };
-
-  const game: FakeGame = {
-    window,
-    scene,
-    panel: undefined,
+  const game = {
+    added,
     reports,
-    sceneObjects,
-    timers,
-    enterChannel(channel: number) {
-      const ranked = options.ranked === true;
-      const list: unknown[] = [];
-      const panel: FakePanel = {
-        list,
-        player_count: makeText(10, 470, "玩家:迪特赫姆登入 [參加人數:22]"),
-        // ⚠ 座標照抄 2026-08-19 從跑著的客戶端量到的：面板內容是 0…370，
-        // 這一格置中在 185。按鈕的對稱位置就是拿它算的。
-        room_page_text: makeText(185, 407, "1 / 1"),
-        scene: {},
-        constructor: ranked ? FakeRankedPanel : FakeDuelPanel,
-        add(items: unknown[]) {
-          list.push(...items);
+    errors,
+    texts,
+    officialCancels: 0,
+    cancelledRooms: [],
+    waitsCreated: 0,
+  } as unknown as FakeGame;
+
+  /** 場景的顯示清單：頻道畫面上的東西都進這裡，destroy 過的就不在了。 */
+  const display: FakeObj[] = [];
+  const shown = (o: FakeObj): FakeObj => {
+    display.push(o);
+    return o;
+  };
+
+  const sc: FakeMatch = {
+    scene: { isActive: () => active },
+    channel: null,
+    channel_match: null,
+    channel_room_prev: null,
+    channel_room_next: null,
+    channel_page_text_now: null,
+    channel_page_text_slash: null,
+    channel_page_text_max: null,
+    channel_room_images: [],
+    channel_length: null,
+    children: {
+      get list() {
+        return display.filter((o) => o.scene !== undefined);
+      },
+    },
+    room_wait: false,
+    room_select: null,
+    player_side: null,
+    wait_zone: null,
+    wait_panel: null,
+    wait_text: null,
+    wait_time_text: null,
+    btn_cancel: null,
+    btn_cancel_text: null,
+    ulse01: { play: () => undefined },
+    textures: { exists: (k: string) => k === "match_quick" || k === "match_create" },
+    add: {
+      image: ((x: number, y: number, key: string, frame: number) => {
+        const o = obj("Image", x, y, { key, frame });
+        added.push(o);
+        return o;
+      }) as never,
+      text: ((x: number, y: number, t: string) => {
+        const o = obj("Text", x, y);
+        o.setText(t);
+        added.push(o);
+        return o;
+      }) as never,
+    },
+    // 官方的等待視窗（照 create_match_wait 的形狀）
+    create_match_wait() {
+      game.waitsCreated++;
+      // 原點在中心 → hitArea 的區域座標 0..760 × 0..680
+      sc.wait_zone = {
+        x: 380,
+        y: 340,
+        displayOriginX: 380,
+        displayOriginY: 340,
+        input: {
+          hitArea: {},
+          hitAreaCallback: (_a, x, y) => x >= 0 && x < 760 && y >= 0 && y < 680,
         },
       };
-      const btn = new FakeButton(scene as never, 296.5, 434, "match_roommake_btn", {
-        frames: { default: "tcn_1" },
+      // 實測面板範圍約 (297, 262) 起 166 × 156
+      // 照官方：面板 (380, 340) 高 156、逐字波浪 y 325、計時 354、Cancel 下緣在底 -16
+      sc.wait_panel = obj("NineSlice", 380, 340, { width: 166, height: 156 });
+      sc.wait_text = [360, 380, 400].map((x) => obj("Text", x, 325));
+      sc.wait_time_text = obj("Text", 380, 354);
+      const cancel = obj("Image", 380, 402, { key: "btn_gene", height: 24 });
+      sc.btn_cancel_text = obj("Text", 380, 390);
+      // 官方那支：送 cancel_room(room_select)
+      cancel.on("pointerup", () => {
+        game.officialCancels++;
+        game.cancelledRooms.push(sc.room_select);
       });
-      if (ranked) panel.quick_btn = btn;
-      else panel.room_btn = btn;
-      list.push(btn, panel.player_count);
-      // ⚠ prototype 要對：補丁是從 `room_btn` 的 prototype 拿按鈕類別的。
-      Object.setPrototypeOf(panel, ranked ? FakeRankedPanel.prototype : FakeDuelPanel.prototype);
-      scene["channel"] = channel;
-      scene["channel_panel"] = panel;
-      game.panel = panel;
+      sc.btn_cancel = cancel;
     },
-    leaveChannel() {
-      scene["channel"] = undefined;
-      scene["channel_panel"] = undefined;
-      game.panel = undefined;
+    remove_match_wait() {
+      sc.wait_zone = null;
+      sc.wait_panel = null;
+      sc.btn_cancel?.destroy();
+      sc.btn_cancel = null;
+    },
+    // 官方那支：拆 channel_match／channel_length／房間列，**沒拆**翻頁鍵與頁碼字
+    channel_logout() {
+      for (const o of [sc.channel_match, sc.channel_length, ...sc.channel_room_images])
+        o?.destroy();
+      sc.channel = null;
+      sc.room_select = null;
+      sc.channel_match = null;
+      sc.channel_length = null;
+      sc.channel_room_images = [];
+    },
+    // 官方的錯誤框：在第一個 await 之前就把字串讀走
+    match_error(code: string) {
+      const e = texts.error;
+      errors.push({
+        code,
+        text: code in e ? e[code]! : e["DEFAULT"]!.replace("--CODE--", code),
+      });
     },
   };
 
-  window["__ulrCompanionReport"] = (payload: string) => {
-    reports.push(JSON.parse(payload) as { type: string });
+  game.sc = sc;
+  // 照官方 channel_login：翻頁鍵與頁碼字**每次都新建**，舊的不管（官方的漏）。
+  game.enterChannel = (c) => {
+    for (const o of [sc.channel_match, sc.channel_length]) o?.destroy();
+    sc.channel = c;
+    sc.channel_match = shown(
+      obj("Image", 352, 434, {
+        key: c.quick ? "match_quick" : "match_create",
+        originX: 1,
+        width: 135,
+        box: [217, 420, 135, 28],
+      }),
+    );
+    const arrow = { type: "Image", texture: { key: "btn_arrow" } };
+    sc.channel_room_prev = shown(obj("Image", 143, 400, { ...arrow, box: [119, 400, 24, 14] }));
+    sc.channel_room_next = shown(obj("Image", 223, 400, { ...arrow, box: [223, 400, 24, 14] }));
+    sc.channel_page_text_now = shown(obj("Text", 175, 407, { type: "Text" }));
+    sc.channel_page_text_slash = shown(obj("Text", 183, 407, { type: "Text" }));
+    sc.channel_page_text_max = shown(obj("Text", 191, 407, { type: "Text" }));
+    // 房間列：實測每列 (16, 53 + 43i) 起 336 × 40
+    sc.channel_room_images = [0, 1, 2, 3, 4, 5, 6, 7].map((i) =>
+      shown(obj("Container", 184, 73 + i * 43, { box: [16, 53 + i * 43, 336, 40] })),
+    );
+    sc.channel_length = shown(obj("Text", 8, 472, { height: 17 }));
   };
-
-  if (options.channel !== undefined) game.enterChannel(options.channel);
+  game.leaveChannel = () => sc.channel_logout();
+  game.setActive = (on) => {
+    active = on;
+  };
+  game.window = {
+    game: {
+      scene: { keys: { Match: sc } },
+      cache: { json: { get: (k: string) => (k === "MatchUITexts" ? texts : null) } },
+    },
+    lang: "tcn",
+    __ulrReport: (json: string) => reports.push(JSON.parse(json)),
+  };
+  if (channel !== null) game.enterChannel(channel);
   return game;
 }
 
-/**
- * 把腳本丟進去跑。
- *
- * ⚠ 用 `new Function` 而不是 `eval`：跳脫錯了的話這裡會直接丟 SyntaxError，
- * 而那正是我們要抓的其中一個坑。
- */
-function run(game: FakeGame, expression: string): string {
-  // 頁面上的 setInterval 在測試裡不要真的跑 —— 我們自己叫 sync（換頻道那條）。
+function run<T>(game: FakeGame, expression: string): T {
   // eslint-disable-next-line no-new-func
-  const fn = new Function("window", "setInterval", "clearInterval", `return ${expression};`) as (
-    w: FakeWindow,
-    si: () => number,
-    ci: () => void,
-  ) => string;
-  return fn(
-    game.window,
-    () => 1,
-    () => undefined,
+  const fn = new Function("window", `return ${expression};`) as (w: unknown) => T;
+  return fn(game.window);
+}
+
+function install(game: FakeGame): ReturnType<typeof parseLobbyStatus> {
+  // 輪詢間隔拉到很大：測試自己叫 tick（重裝就是一次 sync）。
+  return parseLobbyStatus(
+    run<string>(game, buildLobbyPatchScript({ bindingName: "__ulrReport", pollIntervalMs: 1e9 })),
   );
 }
 
-function install(game: FakeGame): string {
-  return run(game, buildLobbyPatchScript({ bindingName: "__ulrCompanionReport" }));
+function setState(game: FakeGame, state: LobbyState): string {
+  return run<string>(game, buildLobbyStateExpression(state));
 }
 
-/** 讓補丁重新檢查一次面板（模擬那支 500ms 的輪詢跑了一輪）。 */
-function tick(game: FakeGame): void {
-  install(game);
+function status(game: FakeGame): ReturnType<typeof parseLobbyStatus> {
+  return parseLobbyStatus(run<string>(game, LOBBY_STATUS_EXPRESSION));
 }
 
-function texts(game: FakeGame): string[] {
-  return (game.panel?.list ?? [])
-    .filter((o): o is FakeObject => (o as FakeObject).type === "Text")
-    .map((o) => String(o.text));
+/** 我們畫的那顆鈕。 */
+function ourButton(game: FakeGame): FakeObj | undefined {
+  return game.added.find((o) => o.kind === "Image" && o.key === "match_quick" && o.scene);
 }
 
-function quickButton(game: FakeGame): FakeButton | undefined {
-  return (game.panel?.list ?? []).find(
-    (o): o is FakeButton =>
-      o instanceof FakeButton && o.texture.key === "match_quick_btn" && !o.destroyed,
-  );
+/** 我們畫的人數那幾行。 */
+function countsText(game: FakeGame): FakeObj | undefined {
+  return game.added.find((o) => o.kind === "Text" && o.scene && o.x === 8);
+}
+
+function uninstallAll(game: FakeGame): void {
+  run<string>(game, LOBBY_UNINSTALL_EXPRESSION);
 }
 
 // ---------------------------------------------------------------------------
 
-describe("大廳快速比賽補丁", () => {
-  it("在 duel 頻道的面板上加一顆按鈕，靠左而且跟創建對戰室左右對稱", () => {
-    const game = makeGame({ channel: 2 });
-    const status = parseLobbyStatus(install(game));
-
-    expect(status.installed).toBe(true);
-    expect(status.buttonReady).toBe(true);
-    expect(status.channel).toBe(2);
-
-    const btn = quickButton(game);
-    expect(btn).toBeDefined();
-    // 沿面板中線（185）把 room_btn（296.5）鏡射過去：2×185 − 296.5 = 73.5。
-    // 兩顆的邊距因此一模一樣（左緣 6、右緣 370−364＝6）。
-    expect(btn?.x).toBeCloseTo(73.5);
-    expect(btn?.y).toBe(434);
-    // ⚠ 貼圖與 frame 都要是官方那顆的 —— 自己畫一顆會被一眼看出來。
-    expect(btn?.frame).toBe("tcn_1");
-
-    // 中線本身也要是算出來的：官方把那一格移到哪，按鈕就跟到哪。
-    const mid = game.panel?.room_page_text as FakeObject;
-    const roomBtn = game.panel?.room_btn as FakeButton;
-    expect(btn!.x - mid.x).toBeCloseTo(mid.x - roomBtn.x);
-  });
-
-  it("讀不到面板中線時退回舊的相對位置，不是把按鈕丟到畫面外", () => {
-    const game = makeGame({ channel: 2 });
-    delete game.panel?.room_page_text;
-    install(game);
-
-    const btn = quickButton(game);
-    // 296.5 − 135 − 10 = 151.5
-    expect(btn?.x).toBeCloseTo(151.5);
-  });
-
-  it("開口檔的下限是從遊戲自己的模板讀的，不是寫死的 90", () => {
-    const game = makeGame({ channel: 2 });
-    const status = parseLobbyStatus(install(game));
-    expect(status.openTier).toBe(90);
-
-    // 官方改成 100+ 的話要跟著改，不能還是 90。
-    FakePanelBase.PLAYER_COUNT["tcn"] = [
-      PLAYER_COUNT_TCN[0]!,
-      PLAYER_COUNT_TCN[1]!.replace("COST90+", "COST100+"),
-    ];
-    const other = makeGame({ channel: 2 });
-    expect(parseLobbyStatus(install(other)).openTier).toBe(100);
-    FakePanelBase.PLAYER_COUNT["tcn"] = PLAYER_COUNT_TCN;
-  });
-
-  it("ranked 頻道不碰 —— 那邊有官方自己的快速比賽", () => {
-    const game = makeGame({ channel: 1, ranked: true });
-    const status = parseLobbyStatus(install(game));
-    expect(status.buttonReady).toBe(false);
-    expect(quickButton(game)).toBeUndefined();
-  });
-
-  it("還沒進頻道時不裝，進去之後自己補上", () => {
+describe("按鈕", () => {
+  it("迪城畫一顆遊戲自己的 match_quick，跟「創建對戰房間」沿翻頁鍵中線左右對稱", () => {
     const game = makeGame();
-    expect(parseLobbyStatus(install(game)).buttonReady).toBe(false);
-
-    game.enterChannel(2);
-    tick(game);
-    expect(quickButton(game)).toBeDefined();
+    const st = install(game);
+    try {
+      expect(st.installed).toBe(true);
+      expect(st.version).toBe(LOBBY_SCRIPT_VERSION);
+      expect(st.buttonReady).toBe(true);
+      expect(st.channel).toBe(2);
+      const btn = ourButton(game)!;
+      // 官方那顆右緣 352，中線 (143 + 223) / 2 = 183 → 我們的左緣 14
+      expect(btn.x).toBe(14);
+      expect(btn.originX).toBe(0);
+      expect(btn.y).toBe(434);
+    } finally {
+      uninstallAll(game);
+    }
   });
 
-  it("換頻道之後掛到新的面板上（舊的會被遊戲 destroy）", () => {
-    const game = makeGame({ channel: 2 });
-    install(game);
-    const first = quickButton(game);
-
-    game.enterChannel(4);
-    tick(game);
-    const second = quickButton(game);
-
-    expect(second).toBeDefined();
-    expect(second).not.toBe(first);
-    expect(parseLobbyStatus(run(game, LOBBY_STATUS_EXPRESSION)).channel).toBe(4);
+  it("⚠ 有官方快速比賽的頻道（亞城）不畫 —— 不要疊在官方那顆旁邊", () => {
+    const game = makeGame(RANKED);
+    const st = install(game);
+    try {
+      expect(st.buttonReady).toBe(false);
+      expect(ourButton(game)).toBeUndefined();
+      expect(st.reason).toContain("官方");
+    } finally {
+      uninstallAll(game);
+    }
   });
 
-  it("按下去會回報，而且帶著當下的頻道", () => {
-    const game = makeGame({ channel: 2 });
-    install(game);
-    quickButton(game)?.click();
-
-    expect(game.reports).toEqual([{ type: "lobby-quick", channel: 2, matching: false }]);
+  it("活動頻道不畫", () => {
+    const game = makeGame({ channel: 5, quick: false, event: true });
+    const st = install(game);
+    try {
+      expect(st.buttonReady).toBe(false);
+    } finally {
+      uninstallAll(game);
+    }
   });
 
-  it("配對中按下去，回報裡的 matching 是 true（那顆按鈕同時是取消鍵）", () => {
-    const game = makeGame({ channel: 2 });
-    install(game);
-    run(game, buildLobbyStateExpression({ counts: null, matching: true }));
-    quickButton(game)?.click();
-    expect(game.reports.at(-1)).toMatchObject({ matching: true });
+  it("還沒進頻道 → 等，不是錯誤", () => {
+    const game = makeGame(null);
+    const st = install(game);
+    try {
+      expect(st.installed).toBe(true);
+      expect(st.buttonReady).toBe(false);
+      expect(st.waiting).toBe(true);
+    } finally {
+      uninstallAll(game);
+    }
   });
 
-  it("人數填進遊戲自己的模板，四行都在", () => {
-    const game = makeGame({ channel: 2 });
+  it("按下去把頻道與配對狀態回報給 Node", () => {
+    const game = makeGame();
     install(game);
-    run(
-      game,
-      buildLobbyStateExpression({
+    try {
+      ourButton(game)!.emit("pointerup");
+      expect(game.reports).toEqual([{ type: "lobby-quick", channel: 2, matching: false }]);
+    } finally {
+      uninstallAll(game);
+    }
+  });
+
+  it("hover 照官方那顆換 frame", () => {
+    const game = makeGame();
+    install(game);
+    try {
+      const btn = ourButton(game)!;
+      btn.emit("pointerover");
+      expect(btn.frame).toBe(1);
+      btn.emit("pointerout");
+      expect(btn.frame).toBe(0);
+    } finally {
+      uninstallAll(game);
+    }
+  });
+
+  it("⚠ 換頻道（channel_match 重建）→ 重掛到新的那一顆上，舊的拆掉", () => {
+    const game = makeGame();
+    install(game);
+    try {
+      const first = ourButton(game)!;
+      game.enterChannel({ channel: 4, quick: false, event: false });
+      install(game); // 重裝＝跑一次 sync（輪詢做的是同一件事）
+      expect(first.scene).toBeUndefined();
+      expect(ourButton(game)).toBeDefined();
+      expect(status(game).channel).toBe(4);
+    } finally {
+      uninstallAll(game);
+    }
+  });
+
+  it("重裝不會多一顆", () => {
+    const game = makeGame();
+    install(game);
+    install(game);
+    install(game);
+    try {
+      expect(game.added.filter((o) => o.key === "match_quick" && o.scene)).toHaveLength(1);
+    } finally {
+      uninstallAll(game);
+    }
+  });
+});
+
+describe("人數那幾行", () => {
+  it("填進遊戲自己的模板，接在「參加人數」那一行底下", () => {
+    const game = makeGame();
+    install(game);
+    try {
+      setState(game, {
         counts: [
-          { tier: 54, waiting: 1 },
-          { tier: 61, waiting: 0 },
-          { tier: 77, waiting: 2 },
+          { tier: 57, waiting: 1 },
+          { tier: 66, waiting: 0 },
+          { tier: 78, waiting: 2 },
           { tier: 90, waiting: 3, open: true },
         ],
         matching: false,
-      }),
-    );
-
-    expect(texts(game)).toContain(
-      "COST54:1位玩家等待中。\nCOST61:0位玩家等待中。\nCOST77:2位玩家等待中。\nCOST90+:3位玩家等待中。",
-    );
+      });
+      const t = countsText(game)!;
+      expect(t.text).toBe(
+        "COST57:1位玩家等待中。\nCOST66:0位玩家等待中。\nCOST78:2位玩家等待中。\nCOST90+:3位玩家等待中。",
+      );
+      expect(t.y).toBe(472 + 17);
+    } finally {
+      uninstallAll(game);
+    }
   });
 
-  it("沒有開口檔的資料時整行拿掉，不留 0 也不留佔位符", () => {
-    const game = makeGame({ channel: 2 });
+  it("⚠ 沒有開口檔的資料就把那一行整個拿掉，不填 0", () => {
+    const game = makeGame();
     install(game);
-    run(
-      game,
-      buildLobbyStateExpression({
+    try {
+      setState(game, {
         counts: [
-          { tier: 54, waiting: 1 },
-          { tier: 61, waiting: 0 },
-          { tier: 77, waiting: 2 },
+          { tier: 57, waiting: 1 },
+          { tier: 66, waiting: 0 },
+          { tier: 78, waiting: 2 },
         ],
         matching: false,
-      }),
-    );
-
-    const shown = texts(game).find((t) => t.startsWith("COST54"));
-    expect(shown).toBe("COST54:1位玩家等待中。\nCOST61:0位玩家等待中。\nCOST77:2位玩家等待中。");
-    expect(shown).not.toContain("__LENGTH4__");
+      });
+      expect(countsText(game)!.text).not.toContain("90+");
+      expect(countsText(game)!.text).not.toContain("__LENGTH4__");
+    } finally {
+      uninstallAll(game);
+    }
   });
 
-  /**
-   * 自訂檔那一列（WP-18）。
-   *
-   * ⚠ 檔位改成照牌組算之後，落在官方階層之外的那一檔在遊戲自己的模板裡
-   * **沒有位置**（模板寫死三檔 + 一個開口檔）。它自己一行，而且前面要有 ★ ——
-   * 少了那個記號，畫面上會出現一個看起來像官方階層、實際上只有裝了插件的人
-   * 排得到的數字。
-   */
-  it("自訂檔多畫一列，接在官方那幾行後面而且標著 ★", () => {
-    const game = makeGame({ channel: 2 });
+  it("自訂檔另起一行，前面有 ★", () => {
+    const game = makeGame();
     install(game);
-    run(
-      game,
-      buildLobbyStateExpression({
+    try {
+      setState(game, {
         counts: [
-          { tier: 54, waiting: 1 },
-          { tier: 61, waiting: 0 },
-          { tier: 77, waiting: 2 },
-          { tier: 90, waiting: 3, open: true },
+          { tier: 57, waiting: 0 },
+          { tier: 66, waiting: 0 },
+          { tier: 78, waiting: 0 },
           { tier: 48, waiting: 1, custom: true },
         ],
         matching: false,
-      }),
-    );
-
-    expect(texts(game)).toContain(
-      "COST54:1位玩家等待中。\nCOST61:0位玩家等待中。\nCOST77:2位玩家等待中。" +
-        "\nCOST90+:3位玩家等待中。\n★COST48:1位玩家等待中。",
-    );
-  });
-
-  /**
-   * ⚠ 句型是**從模板借的**，不是插件自己寫死的中文 —— 自己組一句「N 位玩家
-   * 等待中」的話，玩家把客戶端換成別的語言就會在畫面上看到一行繁中。
-   */
-  it("自訂檔那一列用的是模板的句型，只換掉檔位與人數", () => {
-    const original = FakePanelBase.PLAYER_COUNT;
-    FakePanelBase.PLAYER_COUNT = {
-      tcn: [
-        "__NAME__",
-        "COST__COST1__ waits __LENGTH1__\nCOST__COST2__ waits __LENGTH2__\n" +
-          "COST__COST3__ waits __LENGTH3__\nCOST90+ waits __LENGTH4__",
-      ],
-    };
-    try {
-      const game = makeGame({ channel: 2 });
-      install(game);
-      run(
-        game,
-        buildLobbyStateExpression({
-          counts: [{ tier: 48, waiting: 2, custom: true }],
-          matching: false,
-        }),
-      );
-
-      expect(texts(game)).toContain("★COST48 waits 2");
+      });
+      expect(countsText(game)!.text!.split("\n").at(-1)).toBe("★COST48:1位玩家等待中。");
     } finally {
-      FakePanelBase.PLAYER_COUNT = original;
+      uninstallAll(game);
     }
   });
 
-  it("問不到人數（null）時那幾行是空的 —— 不能畫成 0 位", () => {
-    const game = makeGame({ channel: 2 });
-    install(game);
-    run(game, buildLobbyStateExpression({ counts: null, matching: false }));
-
-    for (const t of texts(game)) {
-      expect(t).not.toContain("位玩家等待中");
-    }
-  });
-
-  it("人數那幾行接在 player_count 底下", () => {
-    const game = makeGame({ channel: 2 });
-    install(game);
-    run(
-      game,
-      buildLobbyStateExpression({
-        counts: [
-          { tier: 54, waiting: 1 },
-          { tier: 61, waiting: 0 },
-          { tier: 77, waiting: 2 },
-        ],
-        matching: false,
-      }),
-    );
-
-    const counts = (game.panel?.list ?? [])
-      .filter((o): o is FakeObject => (o as FakeObject).type === "Text")
-      .find((o) => String(o.text).startsWith("COST54"));
-    // player_count 在 y=470、高 18 —— 亞城的那幾行就是接在它底下。
-    expect(counts?.y).toBe(488);
-  });
-
-  /**
-   * ⚠⚠ 2026-08-20 實機回歸：`baseY` 是掛上去那一刻算好就一直用的，而
-   * `player_count` 的高度是**會變的**（那一行字是遊戲自己重寫的）。實測到
-   * 一台的快取值卡在 506、而 player_count 底部是 488 —— 於是 COST54 上面
-   * 永遠空一行，換頻道也不會好。
-   *
-   * 官方那一版（`refresh_ranked_players`）每次 refresh 都重新 `setPosition`，
-   * 我們現在也是。
-   */
-  it("⚠ player_count 的高度變了，那幾行要跟著移，不能用掛上去時算的位置", () => {
-    const game = makeGame({ channel: 2 });
-    install(game);
-
-    const push = (): void => {
-      run(game, buildLobbyStateExpression({ counts: [{ tier: 54, waiting: 1 }], matching: false }));
-    };
-    const countsText = (): FakeObject | undefined =>
-      (game.panel?.list ?? [])
-        .filter((o): o is FakeObject => (o as FakeObject).type === "Text")
-        .find((o) => String(o.text).startsWith("COST54"));
-    /** 遊戲自己改寫那一行（`refresh_player_count` 做的就是這件事）。 */
-    const rewrite = (value: string): void => {
-      (game.panel?.player_count as unknown as { setText(v: string): void }).setText(value);
-    };
-
-    push();
-    expect(countsText()?.y).toBe(488);
-
-    // 遊戲把那一行改成兩行（名字太長換行、或推播帶了第二行）
-    rewrite("玩家:迪特赫姆登入 [參加人數:22]\n第二行");
-    push();
-    expect(countsText()?.y).toBe(470 + 36);
-
-    // 再變回一行 —— 也要跟著回去，不是卡在下面
-    rewrite("玩家:迪特赫姆登入 [參加人數:23]");
-    push();
-    expect(countsText()?.y).toBe(488);
-  });
-
-  it("⚠ 重裝時連上一版留下的東西一起拆（欄位可能跟這一版不一樣）", () => {
-    const game = makeGame({ channel: 2 });
-    install(game);
-    // 假裝上一版多掛了一個字（真的發生過：舊版有 statusText，新版沒有那一格）。
-    const leftover = makeText(10, 560, "排隊中…（上一版留下的）");
-    game.panel?.list.push(leftover);
-    const st = game.window["__ulrLobby"] as { mine: unknown[] };
-    st.mine.push(leftover);
-
-    install(game);
-    expect(leftover.destroyed).toBe(true);
-  });
-
-  it("拆掉之後畫面上的東西都不見了", () => {
-    const game = makeGame({ channel: 2 });
-    install(game);
-    const btn = quickButton(game);
-    expect(run(game, LOBBY_UNINSTALL_EXPRESSION)).toBe("uninstalled");
-    expect(btn?.destroyed).toBe(true);
-    expect(parseLobbyStatus(run(game, LOBBY_STATUS_EXPRESSION)).installed).toBe(false);
-  });
-
-  it("沒裝的時候問狀態不會爆", () => {
-    const game = makeGame({ channel: 2 });
-    const status = parseLobbyStatus(run(game, LOBBY_STATUS_EXPRESSION));
-    expect(status.installed).toBe(false);
-    expect(status.buttonReady).toBe(false);
-  });
-
-  it("⚠ 官方 bug 的墊片：Match 沒有 rule_btn，物品欄鈕的 handler 會炸 —— 補一顆假的", () => {
-    // 還沒進頻道也要補：那顆物品欄鈕在頻道選單那一頁就按得到。
+  it("⚠ 不知道（null）就整段不畫，不寫「0 位」", () => {
     const game = makeGame();
-    expect(game.scene["rule_btn"]).toBeUndefined();
     install(game);
-    const stub = game.scene["rule_btn"] as {
-      disableInteractive(): unknown;
-      setInteractive(): unknown;
-    };
-    expect(typeof stub.disableInteractive).toBe("function");
-    expect(typeof stub.setInteractive).toBe("function");
-    // 遊戲自己那三句就是這樣呼叫的，不能丟
-    expect(() => stub.disableInteractive()).not.toThrow();
-    expect(() => stub.setInteractive()).not.toThrow();
+    try {
+      setState(game, { counts: null, matching: false });
+      expect(countsText(game)!.text).toBe("");
+    } finally {
+      uninstallAll(game);
+    }
+  });
 
-    // 遊戲哪天真的補上了就不動它
-    const real = { disableInteractive: () => "real" };
-    game.scene["rule_btn"] = real;
-    tick(game);
-    expect(game.scene["rule_btn"]).toBe(real);
-
-    // 拆掉時只收自己放的那顆
-    game.scene["rule_btn"] = undefined;
-    tick(game);
-    expect(run(game, LOBBY_UNINSTALL_EXPRESSION)).toBe("uninstalled");
-    expect(game.scene["rule_btn"]).toBeUndefined();
+  it("開口檔的下限從模板讀（90），不寫死", () => {
+    const game = makeGame();
+    install(game);
+    try {
+      expect(status(game).openTier).toBe(90);
+      game.texts.channel_length.quick = QUICK_TEMPLATE.replace("COST90+", "COST100+");
+      expect(status(game).openTier).toBe(100);
+    } finally {
+      uninstallAll(game);
+    }
   });
 });
 
-/**
- * 假的 webpack 登錄表，裡面放遊戲那三樣 UI：確認對話框、文字按鈕、字串表。
- *
- * ⚠ 三個都是**照真的那幾個類別的特徵**放的（對話框的原始碼含 `ok_button` 與
- * `panel_gene`，按鈕含 `btn_gene` 與 `setText`，字串表有 `CANCEL_BUTTON`）——
- * 補丁就是靠這些特徵找它們的，測試用別的特徵等於沒測到那段。
- */
-function withWebpack(game: FakeGame): {
-  dialogs: { message: string; depth: number }[];
-  buttons: { label: string; click: () => void }[];
-} {
-  const dialogs: { message: string; depth: number }[] = [];
-  const buttons: { label: string; click: () => void }[] = [];
-
-  class FakeDialog {
-    ok_button = { on: (_e: string, _h: () => void) => undefined };
-    depth = 0;
-    // 這一行讓 toString() 裡有 ok_button 與 panel_gene —— 補丁靠它認人。
-    box = "panel_gene ok_button";
-    constructor(
-      _scene: unknown,
-      _x: number,
-      _y: number,
-      _lang: string,
-      public message: string,
-    ) {}
-    setDepth(d: number): this {
-      this.depth = d;
-      dialogs.push({ message: this.message, depth: d });
-      return this;
+describe("等待視窗", () => {
+  it("配對中 → 開遊戲自己的 create_match_wait()", () => {
+    const game = makeGame();
+    install(game);
+    try {
+      setState(game, { counts: null, matching: true });
+      expect(game.waitsCreated).toBe(1);
+      expect(game.sc.wait_zone).not.toBeNull();
+    } finally {
+      uninstallAll(game);
     }
-  }
+  });
 
-  class FakeTextButton {
-    #handlers: (() => void)[] = [];
-    base = "btn_gene";
-    constructor(
-      _scene: unknown,
-      public x: number,
-      public y: number,
-      public label: string,
-    ) {
-      buttons.push({ label, click: () => this.#handlers.forEach((h) => h()) });
+  it("⚠ 取消鈕改成通知插件 —— 官方那支會送 cancel_room，而排隊時還沒有房", () => {
+    const game = makeGame();
+    install(game);
+    try {
+      setState(game, { counts: null, matching: true });
+      game.sc.btn_cancel!.emit("pointerup");
+      expect(game.officialCancels).toBe(0);
+      expect(game.reports).toEqual([{ type: "lobby-quick", channel: 2, matching: true }]);
+    } finally {
+      uninstallAll(game);
     }
-    setText(t: string): this {
-      this.label = t;
-      return this;
-    }
-    on(_e: string, h: () => void): this {
-      this.#handlers.push(h);
-      return this;
-    }
-    destroy(): void {}
-  }
+  });
 
-  const labels = {
-    OK_BUTTON: { tcn: "ok" },
-    CANCEL_BUTTON: { tcn: "cancel" },
-    CONFIRM_TITLE: { tcn: "確認" },
-  };
+  it("停止配對 → 收掉我們開的那一個", () => {
+    const game = makeGame();
+    install(game);
+    try {
+      setState(game, { counts: null, matching: true });
+      setState(game, { counts: null, matching: false });
+      expect(game.sc.wait_zone).toBeNull();
+    } finally {
+      uninstallAll(game);
+    }
+  });
 
-  const req = Object.assign(
-    (id: string) => (id === "79733" ? { Cw: FakeDialog, KK: FakeTextButton, ES: labels } : {}),
-    { m: { "79733": {} } },
+  it("推同一個狀態很多次也只開一個", () => {
+    const game = makeGame();
+    install(game);
+    try {
+      setState(game, { counts: null, matching: true });
+      setState(game, { counts: [], matching: true });
+      install(game);
+      expect(game.waitsCreated).toBe(1);
+    } finally {
+      uninstallAll(game);
+    }
+  });
+
+  it("⚠ 玩家自己開著一間房（room_wait）→ 不開，那是官方的視窗", () => {
+    const game = makeGame();
+    game.sc.room_wait = true;
+    install(game);
+    try {
+      setState(game, { counts: null, matching: true });
+      expect(game.waitsCreated).toBe(0);
+    } finally {
+      uninstallAll(game);
+    }
+  });
+
+  it("⚠ 對戰已經開始（player_side 有值）→ 不開，Match 正要 sleep", () => {
+    const game = makeGame();
+    game.sc.player_side = "A";
+    install(game);
+    try {
+      setState(game, { counts: null, matching: true });
+      expect(game.waitsCreated).toBe(0);
+    } finally {
+      uninstallAll(game);
+    }
+  });
+
+  it("⚠ 不是我們開的視窗（插件開房時 match-room 開的）不由我們收", () => {
+    const game = makeGame();
+    install(game);
+    try {
+      game.sc.create_match_wait(); // 別人開的
+      setState(game, { counts: null, matching: true });
+      setState(game, { counts: null, matching: false });
+      expect(game.sc.wait_zone).not.toBeNull();
+    } finally {
+      uninstallAll(game);
+    }
+  });
+
+  it("標記那一行畫在視窗上，面板不夠寬就撐開", () => {
+    const game = makeGame();
+    install(game);
+    try {
+      setState(game, { counts: null, matching: true, badge: "★ COST 48 · 夾擠式罰C" });
+      const badge = game.added.find((o) => o.text === "★ COST 48 · 夾擠式罰C" && o.scene);
+      expect(badge).toBeDefined();
+      // 跟著搬過的框：水平置中、上緣 + badgeY
+      const p = game.sc.wait_panel!;
+      expect(badge!.x).toBe(p.x);
+      expect(badge!.y).toBe(WAIT_LAYOUT.top + WAIT_LAYOUT.badgeY);
+      setState(game, { counts: null, matching: false });
+      expect(badge!.scene).toBeUndefined();
+    } finally {
+      uninstallAll(game);
+    }
+  });
+});
+
+/** 擋板在 (x, y) 這一點吃不吃點擊。 */
+function blocks(game: FakeGame, x: number, y: number): boolean {
+  const z = game.sc.wait_zone!;
+  // Phaser 傳進來的是區域座標：原點在中心的 zone，世界 (x, y) = 區域 (x, y)
+  return z.input.hitAreaCallback(
+    z.input.hitArea,
+    x - z.x + z.displayOriginX,
+    y - z.y + z.displayOriginY,
+    z,
   );
-  // Array.isArray 要是 true，補丁才認得那是 chunk 陣列。
-  const arr: unknown[] = [];
-  (arr as unknown as { push: unknown }).push = (
-    chunk: [string[], object, ((r: unknown) => void)?],
-  ) => {
-    chunk[2]?.(req);
-    return 1;
-  };
-  game.window["webpackChunkulr"] = arr;
-  return { dialogs, buttons };
 }
 
-describe("牌組不符合規則的對話框", () => {
-  it("用遊戲自己那句話（room_error[lang][7]）", () => {
-    const game = makeGame({ channel: 2 });
-    install(game);
-    const { dialogs } = withWebpack(game);
+/** 照官方 quick_match：room_wait、room_select = 排隊 id、開等待視窗。 */
+function officialQuick(game: FakeGame, id: string): void {
+  game.sc.room_wait = true;
+  game.sc.room_select = id;
+  game.sc.create_match_wait();
+}
 
-    const out = run(game, buildLobbyErrorExpression(ROOM_ERROR_DECK_INVALID));
-    expect(out).toBe("ok");
-    expect(dialogs).toHaveLength(1);
-    expect(dialogs[0]?.message).toBe("這個牌組不符合遊戲規則");
-    // 照抄 room_quick()：對話框 500，遮罩與 zone 499。
-    expect(dialogs[0]?.depth).toBe(500);
+describe("等待中點房間看牌組", () => {
+  it("擋板只放行房間列與翻頁鍵", () => {
+    const game = makeGame(RANKED);
+    install(game);
+    try {
+      officialQuick(game, "Q1");
+      expect(blocks(game, 100, 73)).toBe(false); // 第一列房
+      expect(blocks(game, 100, 374)).toBe(false); // 最後一列房
+      expect(blocks(game, 130, 405)).toBe(false); // ◀
+      expect(blocks(game, 235, 405)).toBe(false); // ▶
+      expect(blocks(game, 300, 434)).toBe(true); // 快速比賽鈕
+      expect(blocks(game, 100, 640)).toBe(true); // 換牌組那一排
+      expect(blocks(game, 560, 172)).toBe(true); // 房間詳情（進入鈕在這）
+    } finally {
+      uninstallAll(game);
+    }
   });
 
-  it("遊戲沒有對應句子時才用我們自己的字串", () => {
-    const game = makeGame({ channel: 2 });
+  it("框搬走之後，原本被它蓋住的那一截房間列也點得到；框本身照擋", () => {
+    const game = makeGame(RANKED);
     install(game);
-    const { dialogs } = withWebpack(game);
+    try {
+      officialQuick(game, "Q1");
+      // 第 6 列 (y 268..308) 的右半截原本在官方框 (x 297..463) 底下
+      expect(blocks(game, 330, 290)).toBe(false);
+      expect(blocks(game, WAIT_LAYOUT.left + 20, WAIT_LAYOUT.top + 20)).toBe(true);
+    } finally {
+      uninstallAll(game);
+    }
+  });
 
-    run(game, buildLobbyErrorExpression(null, "請先進入一個頻道。"));
-    expect(dialogs[0]?.message).toBe("請先進入一個頻道。");
+  it("⚠ 點過別的房間再按 Cancel，送的還是排隊那一個 id", () => {
+    const game = makeGame(RANKED);
+    install(game);
+    try {
+      officialQuick(game, "Q1");
+      game.sc.room_select = "R9"; // 官方的房間點擊就是這樣改的
+      game.sc.btn_cancel!.emit("pointerup");
+      expect(game.cancelledRooms).toEqual(["Q1"]);
+    } finally {
+      uninstallAll(game);
+    }
+  });
+
+  it("視窗收掉就忘了那個 id", () => {
+    const game = makeGame(RANKED);
+    install(game);
+    try {
+      officialQuick(game, "Q1");
+      expect(game.sc.__ulrWaitRoom).toBe("Q1");
+      game.sc.remove_match_wait();
+      expect(game.sc.__ulrWaitRoom).toBeNull();
+    } finally {
+      uninstallAll(game);
+    }
+  });
+
+  it("迪城插件排隊（還沒有房）不記 id，取消鈕照舊通知插件", () => {
+    const game = makeGame();
+    install(game);
+    try {
+      game.sc.room_select = "R9"; // 排隊前點過房
+      setState(game, { counts: null, matching: true });
+      expect(game.sc.__ulrWaitRoom).toBeNull();
+      expect(blocks(game, 100, 73)).toBe(false);
+      game.sc.btn_cancel!.emit("pointerup");
+      expect(game.officialCancels).toBe(0);
+    } finally {
+      uninstallAll(game);
+    }
+  });
+
+  it("裝上之前就開著的視窗也補挖", () => {
+    const game = makeGame(RANKED);
+    officialQuick(game, "Q1");
+    install(game);
+    try {
+      expect(blocks(game, 100, 73)).toBe(false);
+      game.sc.room_select = "R9";
+      game.sc.btn_cancel!.emit("pointerup");
+      expect(game.cancelledRooms).toEqual(["Q1"]);
+    } finally {
+      uninstallAll(game);
+    }
+  });
+
+  it("⚠ 重裝不包兩層，拆掉之後方法與擋板都還原", () => {
+    const game = makeGame(RANKED);
+    const create = game.sc.create_match_wait;
+    const logout = game.sc.channel_logout;
+    install(game);
+    install(game);
+    officialQuick(game, "Q1");
+    expect(game.waitsCreated).toBe(1);
+    uninstallAll(game);
+    expect(game.sc.create_match_wait).toBe(create);
+    expect(game.sc.channel_logout).toBe(logout);
+    expect(blocks(game, 100, 73)).toBe(true);
   });
 });
 
-/**
- * 等待對手的視窗。
- *
- * ⚠ 這一組釘的是「**跟亞城那個框是同一個東西**」：同一句 WAIT_TEXT、
- * 同一顆 cancel 鈕、會計時。玩家會把兩邊擺在一起看。
- */
-describe("等待視窗", () => {
-  it("配對中跳出來，用遊戲自己的 WAIT_TEXT 與 cancel 鈕", () => {
-    const game = makeGame({ channel: 2 });
+describe("等待視窗搬到右下空白", () => {
+  const L = WAIT_LAYOUT;
+
+  it("左緣與上緣釘在 WAIT_LAYOUT，高度壓成它的高", () => {
+    const game = makeGame(RANKED);
     install(game);
-    const { buttons } = withWebpack(game);
-
-    run(game, buildLobbyStateExpression({ counts: null, matching: true }));
-
-    // WAIT_TEXT 是**一個字一個 text**（原版的波浪動畫就是這樣做的）。
-    const letters = game.sceneObjects.filter(
-      (o) => o.type === "Text" && "正在等待對手加入...".includes(String(o.text)),
-    );
-    expect(letters.length).toBeGreaterThan(5);
-    // 計時器從 00:00 起跳。
-    expect(game.sceneObjects.some((o) => o.text === "00:00")).toBe(true);
-    // cancel 鈕用的是遊戲自己的字串表。
-    expect(buttons.map((b) => b.label)).toEqual(["cancel"]);
+    try {
+      officialQuick(game, "Q1");
+      const p = game.sc.wait_panel!;
+      expect(p.height).toBe(L.height);
+      expect(p.x - p.width / 2).toBe(L.left);
+      expect(p.y - p.height / 2).toBe(L.top);
+    } finally {
+      uninstallAll(game);
+    }
   });
 
-  /**
-   * ⚠ 這一行是「**這個框不是官方的**」那個記號。整個視窗是照抄的，抄到一模
-   * 一樣 —— 而自訂檔在大廳左下沒有官方的那一行，玩家除了這裡之外沒有別的
-   * 地方看得到自己排的是什麼。
-   */
-  it("送了標記就在等待視窗上多一行", () => {
-    const game = makeGame({ channel: 2 });
+  it("裡面的東西跟著搬：水平位移一樣，y 照版面", () => {
+    const game = makeGame(RANKED);
     install(game);
-    withWebpack(game);
-
-    run(
-      game,
-      buildLobbyStateExpression({
-        counts: null,
-        matching: true,
-        badge: "★ COST48 · 夾擠式罰C",
-      }),
-    );
-
-    expect(game.sceneObjects.some((o) => o.text === "★ COST48 · 夾擠式罰C")).toBe(true);
+    try {
+      officialQuick(game, "Q1");
+      const dx = L.left + 166 / 2 - 380;
+      expect(game.sc.wait_text!.map((t) => [t.x, t.y])).toEqual(
+        [360, 380, 400].map((x) => [x + dx, L.top + L.textY]),
+      );
+      expect([game.sc.wait_time_text!.x, game.sc.wait_time_text!.y]).toEqual([
+        380 + dx,
+        L.top + L.timerY,
+      ]);
+      const c = game.sc.btn_cancel!;
+      expect([c.x, c.y]).toEqual([380 + dx, L.top + L.height - L.cancelBottom]);
+      expect(game.sc.btn_cancel_text!.y).toBe(c.getCenter().y);
+    } finally {
+      uninstallAll(game);
+    }
   });
 
-  /** ⚠ 舊的 Node 端不會送這一格 —— 沒有就是「不加那一行」，不是錯誤。 */
-  it("沒送標記就不加那一行", () => {
-    const game = makeGame({ channel: 2 });
+  it("⚠ 重裝不會再搬一次（y 不重排、x 不累加）", () => {
+    const game = makeGame(RANKED);
     install(game);
-    withWebpack(game);
-
-    run(game, buildLobbyStateExpression({ counts: null, matching: true }));
-
-    expect(game.sceneObjects.some((o) => String(o.text).startsWith("★"))).toBe(false);
+    try {
+      officialQuick(game, "Q1");
+      const before = game.sc.wait_text!.map((t) => [t.x, t.y]);
+      install(game);
+      expect(game.sc.wait_text!.map((t) => [t.x, t.y])).toEqual(before);
+      expect(game.sc.wait_panel!.x - game.sc.wait_panel!.width / 2).toBe(L.left);
+    } finally {
+      uninstallAll(game);
+    }
   });
 
-  it("按 cancel 等於再按一次快速比賽（同一條回報路徑）", () => {
-    const game = makeGame({ channel: 2 });
+  it("標記那一行把框撐寬時，左緣不動、往右長，裡面跟著重新置中", () => {
+    const game = makeGame();
     install(game);
-    const { buttons } = withWebpack(game);
-    run(game, buildLobbyStateExpression({ counts: null, matching: true }));
+    try {
+      setState(game, { counts: null, matching: true, badge: "★ COST 48 · 夾擠式罰C" });
+      const p = game.sc.wait_panel!;
+      const badge = game.added.find((o) => o.text === "★ COST 48 · 夾擠式罰C" && o.scene)!;
+      // 假的 Text 寬 135 → 需要 167；官方框 166 → 撐到 167
+      expect(p.width).toBe(167);
+      expect(p.x - p.width / 2).toBe(L.left);
+      expect(game.sc.btn_cancel!.x).toBe(p.x);
+      expect(badge.x).toBe(p.x);
+    } finally {
+      uninstallAll(game);
+    }
+  });
+});
 
-    buttons[0]?.click();
-    expect(game.reports.at(-1)).toEqual({ type: "lobby-quick", channel: 2, matching: true });
+describe("頁碼疊字（官方漏拆）", () => {
+  const pagerAlive = (game: FakeGame): number =>
+    game.sc.children.list.filter(
+      (o) => (o.type === "Text" && o.y === 407) || o.texture?.key === "btn_arrow",
+    ).length;
+
+  it("退頻道時翻頁鍵與頁碼字一起拆", () => {
+    const game = makeGame(RANKED);
+    install(game);
+    try {
+      expect(pagerAlive(game)).toBe(5);
+      game.leaveChannel();
+      expect(pagerAlive(game)).toBe(0);
+      expect(game.sc.channel_page_text_now).toBeNull();
+      game.enterChannel(DUEL);
+      expect(pagerAlive(game)).toBe(5);
+    } finally {
+      uninstallAll(game);
+    }
   });
 
-  it("配對結束就收掉，計時器也要停", () => {
-    const game = makeGame({ channel: 2 });
-    install(game);
-    withWebpack(game);
-    run(game, buildLobbyStateExpression({ counts: null, matching: true }));
-    expect(game.timers.filter((t) => !t.removed)).toHaveLength(2);
-
-    run(game, buildLobbyStateExpression({ counts: null, matching: false }));
-    // ⚠ 計時器沒收的話，它會抓著已經 destroy 的 text 每秒跑一次。
-    expect(game.timers.filter((t) => !t.removed)).toHaveLength(0);
-  });
-
-  it("⚠ 換頻道時也要收 —— 它掛在場景上，不會跟著面板被 destroy", () => {
-    const game = makeGame({ channel: 2 });
-    install(game);
-    withWebpack(game);
-    run(game, buildLobbyStateExpression({ counts: null, matching: true }));
-
+  it("裝上之前漏下來的幾組清掉，現役那一組留著", () => {
+    const game = makeGame(RANKED);
     game.leaveChannel();
-    tick(game);
-    expect(game.timers.filter((t) => !t.removed)).toHaveLength(0);
+    game.enterChannel(RANKED);
+    game.leaveChannel();
+    game.enterChannel(RANKED);
+    expect(pagerAlive(game)).toBe(15);
+    const now = game.sc.channel_page_text_now!;
+    install(game);
+    try {
+      expect(pagerAlive(game)).toBe(5);
+      expect(now.scene).toBeDefined();
+    } finally {
+      uninstallAll(game);
+    }
+  });
+});
+
+describe("錯誤框", () => {
+  it("用遊戲自己的 match_error 與字串表", () => {
+    const game = makeGame();
+    install(game);
+    try {
+      expect(run<string>(game, buildLobbyErrorExpression(ROOM_ERROR_AP_SHORT))).toBe("ok");
+      expect(run<string>(game, buildLobbyErrorExpression(ROOM_ERROR_DECK_INVALID))).toBe("ok");
+      expect(game.errors).toEqual([
+        { code: "NOT_ENOUGH_AP", text: "AP不足。" },
+        { code: "INVALID_DECK_ENTER", text: "這個牌組不符合遊戲規則。" },
+      ]);
+    } finally {
+      uninstallAll(game);
+    }
+  });
+
+  it("遊戲沒有對應句子時顯示 Node 給的字，而且用完就從字串表拿掉", () => {
+    const game = makeGame();
+    install(game);
+    try {
+      run<string>(game, buildLobbyErrorExpression(null, "讀不到你的牌組。"));
+      expect(game.errors).toEqual([{ code: "__ulr_message", text: "讀不到你的牌組。" }]);
+      expect(game.texts.error).not.toHaveProperty("__ulr_message");
+    } finally {
+      uninstallAll(game);
+    }
+  });
+
+  it("沒有代碼也沒有字 → 不跳", () => {
+    const game = makeGame();
+    install(game);
+    try {
+      expect(run<string>(game, buildLobbyErrorExpression(null))).toBe("no-message");
+      expect(game.errors).toEqual([]);
+    } finally {
+      uninstallAll(game);
+    }
+  });
+});
+
+describe("拆掉", () => {
+  it("按鈕、人數、我們開的等待視窗都收乾淨", () => {
+    const game = makeGame();
+    install(game);
+    setState(game, { counts: [], matching: true });
+    expect(run<string>(game, LOBBY_UNINSTALL_EXPRESSION)).toBe("uninstalled");
+    expect(ourButton(game)).toBeUndefined();
+    expect(countsText(game)).toBeUndefined();
+    expect(game.sc.wait_zone).toBeNull();
+    expect(status(game).installed).toBe(false);
+  });
+
+  it("沒裝過就回 not-installed", () => {
+    const game = makeGame();
+    expect(run<string>(game, LOBBY_UNINSTALL_EXPRESSION)).toBe("not-installed");
+  });
+
+  it("推狀態給沒裝的頁面 → not-installed，不會爆", () => {
+    const game = makeGame();
+    expect(setState(game, { counts: null, matching: false })).toBe("not-installed");
+  });
+});
+
+describe("parseLobbyStatus", () => {
+  it("頁面回垃圾就當成沒裝上", () => {
+    expect(parseLobbyStatus("not json").installed).toBe(false);
+    expect(parseLobbyStatus("null").installed).toBe(false);
+    expect(parseLobbyStatus('{"installed":true}').installed).toBe(false);
   });
 });

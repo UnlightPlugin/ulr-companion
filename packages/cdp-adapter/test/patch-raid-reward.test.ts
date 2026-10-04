@@ -1,20 +1,23 @@
 /**
  * 渦擊破結算的 OK 面板
  *
- * 假的 Raid 場景只有一件事：原型上有 `raid_reward(list)`，數一數被叫了幾次。
- * 三種模式各驗一次，外加「面板上切模式會回報」「拆掉原型還原」。
+ * 假的 Raid 場景照 2026-09-23 改版後的官方流程：`show_raid_reward()` fetch
+ * 清單 → 每個渦三個畫面方法 → `raid_reward_receive` → 重讀玩家資料。
+ * 畫面方法只數次數；要驗的是「不演」的時候領取回報一個都不能少。
  */
 
 import { describe, expect, it } from "vitest";
 import {
   buildRaidRewardPatchScript,
   buildRaidRewardSetModeExpression,
+  isRaidItemDeltaReport,
   isRaidRewardModeReport,
   isRaidRewardReport,
   parseRaidRewardStatus,
   RAID_REWARD_SCRIPT_VERSION,
   RAID_REWARD_STATUS_EXPRESSION,
   RAID_REWARD_UNINSTALL_EXPRESSION,
+  type RaidItemDeltaReport,
 } from "@ulr/cdp-adapter";
 
 const BINDING = "__ulrCompanionReport";
@@ -65,15 +68,35 @@ class Obj {
   }
 }
 
+const CACHE: Record<string, unknown> = {
+  CharaCards: [
+    { id: 1, chara: 0, kind: 0, rarity: 1, level: 1 },
+    { id: 500, chara: 1, kind: 2, rarity: 1, level: 1 },
+    { id: 501, chara: 2, kind: 2, rarity: 1, level: 1 },
+  ],
+  Characters: [{ name_tcn: "艾伯李斯特" }, { name_tcn: "黑死獸" }, { name_tcn: "妖精" }],
+  AvatarItems: [{ id: 7, name_tcn: "古代妙藥" }],
+  WeaponCards: [{ id: 6, name_tcn: "勇者短劍" }],
+  EventCards: [],
+};
+
 class Scene {
   made: Obj[] = [];
-  itemInfo = {
-    cmem: { 3: { name_tcn: "生命的碎片" } },
-    avatar: { 1: { name_tcn: "古代妙藥" } },
-    other: { 0: { name_tcn: "抽獎券(免費)" } },
-  };
+  pages: string[] = [];
+  sent: unknown[][] = [];
+  updated = 0;
+  queue: unknown[] = [];
+  afterFlow: (() => void) | null = null;
   ulse01 = { play: () => undefined };
-  textures = { exists: (k: string) => k === "panel_ok" };
+  textures = { exists: (k: string) => k === "raid_panel_ok" };
+  cache = { json: { get: (k: string) => CACHE[k] } };
+  socket = {
+    fetch: (ev: string, ...args: unknown[]): Promise<unknown> => {
+      this.sent.push([ev, ...args]);
+      if (ev === "db_raid_reward") return Promise.resolve(this.queue);
+      return Promise.resolve(true);
+    },
+  };
   add = {
     text: (_x: number, _y: number, text: string) => {
       const o = this.make("text");
@@ -92,14 +115,36 @@ class Scene {
   alive(): Obj[] {
     return this.made.filter((o) => o.scene !== null);
   }
-  /** 官方的：只數次數。 */
-  raid_reward(list: unknown[]): Promise<void> {
-    officialCalls.push(list);
+  receives(): unknown[] {
+    return this.sent.filter((m) => m[0] === "raid_reward_receive").map((m) => m[1]);
+  }
+  /** 官方流程（照 2026-09-25 讀到的原始碼）。 */
+  async show_raid_reward(): Promise<void> {
+    const list = (await this.socket.fetch("db_raid_reward")) as { profound_id: number }[];
+    if (list.length === 0) return;
+    for (const e of list) {
+      await this.create_reward_init(e);
+      await this.create_reward_image(e);
+      await this.create_reward_rank(e);
+      await this.socket.fetch("raid_reward_receive", e.profound_id);
+    }
+    this.updated += 1;
+    // 官方最後的 update_data（測試用：重讀道具清單）
+    this.afterFlow?.();
+  }
+  create_reward_init(_e: unknown): Promise<void> {
+    this.pages.push("init");
+    return Promise.resolve();
+  }
+  create_reward_image(_e: unknown): Promise<void> {
+    this.pages.push("image");
+    return Promise.resolve();
+  }
+  create_reward_rank(_e: unknown): Promise<void> {
+    this.pages.push("rank");
     return Promise.resolve();
   }
 }
-
-let officialCalls: unknown[][] = [];
 
 function makeWindow() {
   const reports: unknown[] = [];
@@ -124,25 +169,33 @@ function run(window: Record<string, unknown>, expression: string): string {
 }
 
 const REWARD = {
-  prf: "H59pGlAk1F2y",
-  boss: "黑死獸",
-  founder: "無名者EX",
-  defeat: "白無垢",
-  rank: 21,
-  dmg: 8201,
-  reward_founder: ["ticket_3"],
-  reward_participate: ["avatar_1_2"],
-  reward_defeat: [],
-  reward_rank: ["cmem_3_1"],
-  points: [],
+  profound_id: 101,
+  raid_name: "H59pGlAk1F2y",
+  raid_monster_id: 500,
+  raid_founder: "無名者EX",
+  raid_rank: 21,
+  raid_score: 8201,
+  raid_participants: [],
+  raid_reward: {
+    founder: [{ id: 6, type: 2, slot: 0, value: 1 }],
+    participate: [{ id: 7, type: 3, slot: 0, value: 2 }],
+    defeat: [],
+    rank: [
+      { id: 1, type: 1, slot: 0, value: 1 },
+      { id: 0, type: 5, slot: 0, value: 30 },
+    ],
+  },
 };
 
-const call = (raid: Scene, list: unknown[]) =>
-  (Object.getPrototypeOf(raid) as Scene).raid_reward.call(raid, list) as Promise<unknown>;
+const call = (raid: Scene) =>
+  (Object.getPrototypeOf(raid) as Scene).show_raid_reward.call(raid) as Promise<unknown>;
+
+const flush = () => new Promise((r) => setTimeout(r, 0));
+
+const okButton = (raid: Scene) => raid.alive().find((o) => o.texture.key === "raid_panel_ok")!;
 
 describe("渦擊破結算的 OK 面板", () => {
   it("all：官方原樣，但照樣回報一行", async () => {
-    officialCalls = [];
     const { window, raid, reports } = makeWindow();
     const st = parseRaidRewardStatus(
       run(window, buildRaidRewardPatchScript({ bindingName: BINDING, mode: "all" })),
@@ -154,35 +207,75 @@ describe("渦擊破結算的 OK 面板", () => {
       open: false,
       reason: null,
     });
-    await call(raid, [REWARD]);
-    expect(officialCalls.length).toBe(1);
+    raid.queue = [REWARD];
+    await call(raid);
+    expect(raid.pages).toEqual(["init", "image", "rank"]);
+    expect(raid.receives()).toEqual([101]);
     expect(reports.length).toBe(1);
     expect(isRaidRewardReport(reports[0])).toBe(true);
-    const r = reports[0] as { entries: { rewards: Record<string, string[]>; rank: number }[] };
+    const r = reports[0] as {
+      entries: { prf: string; boss: string; rewards: Record<string, string[]>; rank: number }[];
+    };
     expect(r.entries[0]!.rank).toBe(21);
+    expect(r.entries[0]!.prf).toBe("H59pGlAk1F2y");
+    expect(r.entries[0]!.boss).toBe("黑死獸");
     expect(r.entries[0]!.rewards).toEqual({
-      founder: ["抽獎券(免費) x3"],
+      founder: ["勇者短劍 x1"],
       participate: ["古代妙藥 x2"],
       defeat: [],
-      rank: ["生命的碎片 x1"],
+      rank: ["L1 艾伯李斯特 x1", "30GEM"],
     });
   });
 
-  it("none：什麼都不畫、官方不跑，回報照送", async () => {
-    officialCalls = [];
+  it("原始獎勵碼記給 patch-raid-view 學獎勵表：每個參加者的排名獎勵、沒有玩家名字", async () => {
+    const { window, raid } = makeWindow();
+    run(window, buildRaidRewardPatchScript({ bindingName: BINDING, mode: "none" }));
+    const blade = { id: 5005, type: 2, slot: 0, value: 2 };
+    raid.queue = [
+      {
+        ...REWARD,
+        raid_participants: [
+          { player_name: "甲", point: 900, reward: [blade] },
+          { player_name: "乙", point: 0, reward: [] },
+        ],
+      },
+    ];
+    await call(raid);
+    const seen = window.__ulrRaidRewardSeen as {
+      profound_id: number;
+      raw: Record<string, unknown>;
+    }[];
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.profound_id).toBe(101);
+    expect(seen[0]!.raw).toEqual({
+      founder: REWARD.raid_reward.founder,
+      participate: REWARD.raid_reward.participate,
+      defeat: [],
+      ranks: [[blade], []],
+      founderName: "無名者EX",
+    });
+    expect(JSON.stringify(seen[0]!.raw)).not.toContain("甲");
+  });
+
+  it("none：什麼都不畫，但每個渦的領取照樣回報、玩家資料照樣重讀", async () => {
     const { window, raid, reports } = makeWindow();
     run(window, buildRaidRewardPatchScript({ bindingName: BINDING, mode: "none" }));
-    await call(raid, [REWARD]);
-    expect(officialCalls.length).toBe(0);
+    raid.queue = [REWARD, { ...REWARD, profound_id: 102 }];
+    await call(raid);
+    expect(raid.pages).toEqual([]);
+    expect(raid.receives()).toEqual([101, 102]);
+    expect(raid.updated).toBe(1);
     expect(raid.alive().length).toBe(0);
     expect(reports.length).toBe(1);
   });
 
-  it("once：一張摘要、一顆 OK；沒勾詳細就不跑官方", async () => {
-    officialCalls = [];
+  it("once：官方流程先跑完，再一張摘要、一顆 OK；沒勾詳細就不演官方畫面", async () => {
     const { window, raid } = makeWindow();
     run(window, buildRaidRewardPatchScript({ bindingName: BINDING, mode: "once" }));
-    const p = call(raid, [REWARD, { ...REWARD, prf: "zzz", boss: "妖精" }]);
+    raid.queue = [REWARD, { ...REWARD, profound_id: 102, raid_name: "zzz", raid_monster_id: 501 }];
+    const p = call(raid);
+    await flush();
+    expect(raid.receives()).toEqual([101, 102]);
     expect(parseRaidRewardStatus(run(window, RAID_REWARD_STATUS_EXPRESSION)).open).toBe(true);
     const texts = raid
       .alive()
@@ -191,53 +284,51 @@ describe("渦擊破結算的 OK 面板", () => {
     expect(texts).toContain("渦擊破結算  (2)");
     expect(texts.some((t) => t.startsWith("「H59pGlAk1F2y」 黑死獸"))).toBe(true);
     expect(texts.some((t) => t.startsWith("「zzz」 妖精"))).toBe(true);
-    const ok = raid.alive().find((o) => o.texture.key === "panel_ok")!;
-    ok.emit("pointerup");
+    okButton(raid).emit("pointerup");
     await p;
-    expect(officialCalls.length).toBe(0);
+    expect(raid.pages).toEqual([]);
     expect(raid.alive().length).toBe(0);
   });
 
-  it("once：勾了「顯示官方詳細畫面」按 OK 後跑官方", async () => {
-    officialCalls = [];
+  it("once：勾了「顯示官方詳細畫面」按 OK 後重播官方畫面，不再多送領取", async () => {
     const { window, raid } = makeWindow();
     run(window, buildRaidRewardPatchScript({ bindingName: BINDING, mode: "once" }));
-    const p = call(raid, [REWARD]);
+    raid.queue = [REWARD];
+    const p = call(raid);
+    await flush();
     // 開關那一格是一個 zone，點一下打勾
     const detailHit = raid.alive().filter((o) => o.kind === "zone")[1]!;
     detailHit.emit("pointerup");
-    raid
-      .alive()
-      .find((o) => o.texture.key === "panel_ok")!
-      .emit("pointerup");
+    okButton(raid).emit("pointerup");
     await p;
-    expect(officialCalls.length).toBe(1);
+    expect(raid.pages).toEqual(["init", "image", "rank"]);
+    expect(raid.receives()).toEqual([101]);
   });
 
   it("面板上切模式：回報托盤、之後的結算照新模式走", async () => {
-    officialCalls = [];
     const { window, raid, reports } = makeWindow();
     run(window, buildRaidRewardPatchScript({ bindingName: BINDING, mode: "once" }));
-    const p = call(raid, [REWARD]);
+    raid.queue = [REWARD];
+    const p = call(raid);
+    await flush();
     const none = raid.alive().find((o) => o.__mode === "none")!;
     none.emit("pointerup");
     expect(reports.some((r) => isRaidRewardModeReport(r) && r.mode === "none")).toBe(true);
-    raid
-      .alive()
-      .find((o) => o.texture.key === "panel_ok")!
-      .emit("pointerup");
+    okButton(raid).emit("pointerup");
     await p;
     expect(parseRaidRewardStatus(run(window, RAID_REWARD_STATUS_EXPRESSION)).mode).toBe("none");
-    await call(raid, [REWARD]);
+    await call(raid);
     expect(raid.alive().length).toBe(0);
-    expect(officialCalls.length).toBe(0);
+    expect(raid.pages).toEqual([]);
+    expect(raid.receives()).toEqual([101, 101]);
   });
 
-  it("勾了詳細、又在面板上切成不再通知：OK 後官方不跑", async () => {
-    officialCalls = [];
+  it("勾了詳細、又在面板上切成不再通知：OK 後不演官方畫面", async () => {
     const { window, raid } = makeWindow();
     run(window, buildRaidRewardPatchScript({ bindingName: BINDING, mode: "once" }));
-    const p = call(raid, [REWARD]);
+    raid.queue = [REWARD];
+    const p = call(raid);
+    await flush();
     raid
       .alive()
       .filter((o) => o.kind === "zone")[1]!
@@ -246,34 +337,159 @@ describe("渦擊破結算的 OK 面板", () => {
       .alive()
       .find((o) => o.__mode === "none")!
       .emit("pointerup");
-    raid
-      .alive()
-      .find((o) => o.texture.key === "panel_ok")!
-      .emit("pointerup");
+    okButton(raid).emit("pointerup");
     await p;
-    expect(officialCalls.length).toBe(0);
+    expect(raid.pages).toEqual([]);
     expect(raid.alive().length).toBe(0);
   });
 
   it("托盤推模式下來；拆掉原型還原", async () => {
-    officialCalls = [];
     const { window, raid } = makeWindow();
     run(window, buildRaidRewardPatchScript({ bindingName: BINDING, mode: "once" }));
     expect(run(window, buildRaidRewardSetModeExpression("all"))).toBe("ok");
-    await call(raid, [REWARD]);
-    expect(officialCalls.length).toBe(1);
+    raid.queue = [REWARD];
+    await call(raid);
+    expect(raid.pages).toEqual(["init", "image", "rank"]);
     expect(run(window, RAID_REWARD_UNINSTALL_EXPRESSION)).toBe("ok");
-    const proto = Object.getPrototypeOf(raid) as { raid_reward: { __ulrRaidReward?: unknown } };
-    expect(proto.raid_reward.__ulrRaidReward).toBeUndefined();
+    const proto = Object.getPrototypeOf(raid) as Record<string, { __ulrRaidReward?: unknown }>;
+    for (const n of [
+      "show_raid_reward",
+      "create_reward_init",
+      "create_reward_image",
+      "create_reward_rank",
+    ]) {
+      expect(proto[n]!.__ulrRaidReward).toBeUndefined();
+    }
     expect(run(window, buildRaidRewardSetModeExpression("all"))).toBe("not-installed");
   });
 
-  it("空清單直接交給官方（它自己會不畫）", async () => {
-    officialCalls = [];
+  it("空清單：官方自己什麼都不畫，也不回報", async () => {
     const { window, raid, reports } = makeWindow();
     run(window, buildRaidRewardPatchScript({ bindingName: BINDING, mode: "once" }));
-    await call(raid, []);
-    expect(officialCalls.length).toBe(1);
+    raid.queue = [];
+    await call(raid);
+    expect(raid.sent).toEqual([["db_raid_reward"]]);
     expect(reports.length).toBe(0);
+    expect(raid.alive().length).toBe(0);
+  });
+
+  it("客戶端改版找不到方法：狀態帶原因，不假裝生效", () => {
+    const reports: unknown[] = [];
+    const window: Record<string, unknown> = {
+      game: { scene: { keys: { Raid: {} } } },
+      [BINDING]: (payload: string) => reports.push(JSON.parse(payload)),
+    };
+    const st = parseRaidRewardStatus(
+      run(window, buildRaidRewardPatchScript({ bindingName: BINDING, mode: "none" })),
+    );
+    expect(st.installed).toBe(true);
+    expect(st.reason).toContain("show_raid_reward");
+  });
+});
+
+/** 官方 registry 的樣子：set 已有的鍵發 changedata-鍵，第一次放發 setdata */
+class Registry {
+  data = new Map<string, unknown>();
+  handlers = new Map<string, Handler[]>();
+  events = {
+    on: (name: string, fn: Handler) => {
+      this.handlers.set(name, [...(this.handlers.get(name) ?? []), fn]);
+    },
+    off: (name: string, fn: Handler) => {
+      this.handlers.set(
+        name,
+        (this.handlers.get(name) ?? []).filter((h) => h !== fn),
+      );
+    },
+  };
+  get(k: string): unknown {
+    return this.data.get(k);
+  }
+  set(k: string, v: unknown): void {
+    const had = this.data.has(k);
+    this.data.set(k, v);
+    const name = had ? `changedata-${k}` : "setdata";
+    for (const h of this.handlers.get(name) ?? []) {
+      if (had) h(this, v);
+      else h(this, k, v);
+    }
+  }
+  count(): number {
+    return [...this.handlers.values()].reduce((s, l) => s + l.length, 0);
+  }
+}
+
+describe("結算對帳：領了沒、哪個渦、道具真的進了沒", () => {
+  const FRAG = { card_id: 10010, quantity: 320, update_at: "2026-09-26T13:00:00.000Z" };
+  const setup = () => {
+    const made = makeWindow();
+    const registry = new Registry();
+    registry.data.set("chara_card", [FRAG]);
+    (made.window.game as { registry?: Registry }).registry = registry;
+    CACHE.CharaCards = [
+      ...(CACHE.CharaCards as unknown[]),
+      { id: 10010, chara: 2, kind: 10, rarity: 1, level: 1 },
+    ];
+    return { ...made, registry };
+  };
+
+  it("回報「領了」的結果、發現時刻（從清單記的）、每樣獎勵落在哪份清單", async () => {
+    const { window, raid, reports } = setup();
+    window.__ulrRaidMeta = { "101": { found: 1790000000000 } };
+    run(window, buildRaidRewardPatchScript({ bindingName: BINDING, mode: "none" }));
+    const own = raid.socket.fetch;
+    raid.socket.fetch = (ev: string, ...args: unknown[]) =>
+      ev === "raid_reward_receive" && args[0] === 102 ? Promise.resolve(false) : own(ev, ...args);
+    raid.queue = [REWARD, { ...REWARD, profound_id: 102 }];
+    await call(raid);
+    const rep = reports.find((r) => isRaidRewardReport(r)) as {
+      entries: { found: number | null; received: boolean | null; items: unknown[] }[];
+    };
+    expect(rep.entries.map((e) => [e.found, e.received])).toEqual([
+      [1790000000000, true],
+      [null, false],
+    ]);
+    expect(rep.entries[0]!.items).toEqual([
+      { key: "weapon_card:6", name: "勇者短劍", value: 1 },
+      { key: "avatar_item:7", name: "古代妙藥", value: 2 },
+      { key: "chara_card:1", name: "L1 艾伯李斯特", value: 1 },
+    ]);
+    // 包的那層收掉了，官方的 socket.fetch 原樣
+    expect(Object.prototype.hasOwnProperty.call(raid.socket, "fetch")).toBe(true);
+    raid.socket.fetch = own;
+  });
+
+  it("裝上就報一次起點；結算途中官方重讀的道具等結算報完才報；拆掉聽的全收", async () => {
+    const { window, raid, reports, registry } = setup();
+    run(window, buildRaidRewardPatchScript({ bindingName: BINDING, mode: "none" }));
+    const deltas = () => reports.filter((r) => isRaidItemDeltaReport(r)) as RaidItemDeltaReport[];
+    expect(deltas()).toHaveLength(1);
+    expect(deltas()[0]).toMatchObject({
+      registry: "chara_card",
+      initial: true,
+      changes: [],
+      levels: { "chara_card:10006": 0, "chara_card:10010": 320 },
+    });
+    // 官方結算流程裡重讀 chara_card（假的：真的是在別處重讀）
+    raid.afterFlow = () => registry.set("chara_card", [{ ...FRAG, quantity: 322 }]);
+    reports.length = 0;
+    raid.queue = [REWARD];
+    await call(raid);
+    expect(reports.map((r) => (r as { type: string }).type)).toEqual([
+      "raid-reward",
+      "raid-item-delta",
+    ]);
+    expect(deltas()[0]!.changes).toMatchObject([
+      { key: "chara_card:10010", before: 320, after: 322 },
+    ]);
+    // 第一次放進 registry（登入）也聽得到
+    registry.set("weapon_card", [{ card_id: 5000, quantity: 203 }]);
+    expect(deltas().at(-1)).toMatchObject({
+      registry: "weapon_card",
+      levels: { "weapon_card:5000": 203 },
+    });
+    expect(registry.count()).toBeGreaterThan(0);
+    run(window, RAID_REWARD_UNINSTALL_EXPRESSION);
+    expect(registry.count()).toBe(0);
   });
 });

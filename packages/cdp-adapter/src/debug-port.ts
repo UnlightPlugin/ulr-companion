@@ -35,14 +35,14 @@
  * ⚠ **回退要限定在同一種客戶端。** 兩個客戶端各有各的 user-data-dir，所以各有
  * 各的 DevToolsActivePort：
  *
- *   桌面版  %APPDATA%\UNLIGHT-Revive
+ *   桌面版  %APPDATA%\UNLIGHT Revive（2026-09-23 前是 UNLIGHT-Revive）
  *   網頁版  ~\ulr-cdp-profile（`browser.ts` 的 DEFAULT_BROWSER_PROFILE_DIR）
  *
  * 不分種類地亂讀，症狀會是「我開的是網頁版的插件，它卻接到桌面版去」——
  * 那正是 `profiles-core.ts` 一直在防的那件事。
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -52,17 +52,37 @@ import { discoverDebuggerUrl } from "./transport.js";
 /** Chromium 把實際埠寫在 user-data-dir 底下的這個檔。 */
 export const DEVTOOLS_ACTIVE_PORT_FILE = "DevToolsActivePort";
 
+/** 桌面版 user-data-dir 歷來的名字，新的在前。 */
+export const DESKTOP_USER_DATA_DIR_NAMES = ["UNLIGHT Revive", "UNLIGHT-Revive"] as const;
+
 /**
  * 桌面版的 user-data-dir。
  *
  * 這是 Electron 的 `app.getPath("userData")`，由 package.json 的 name 決定，
  * 2026-08-16 對著跑著的客戶端確認過（`--user-data-dir=` 出現在它每個子程序的
- * 命令列上）。遊戲改名的話這裡要跟著改 —— 但改名會連存檔位置一起換，
- * 不會是安靜的失敗。
+ * 命令列上）。
+ *
+ * ⚠ 2026-09-23 的更新就改過一次名：`UNLIGHT-Revive` → `UNLIGHT Revive`（連字號
+ * 變空格）。當初以為「改名不會是安靜的失敗」—— 錯了：舊資料夾還在，裡面留著
+ * 一份上次的 DevToolsActivePort（指向早就沒人聽的埠），症狀只是「debug port
+ * 失效了」。所以現在每個候選都看，挑 DevToolsActivePort **最新寫入**的那個 ——
+ * 跑著的客戶端每次啟動都會重寫它。都沒有檔就給第一個存在的，再不然給新名字。
  */
 export function desktopUserDataDir(env: NodeJS.ProcessEnv = process.env): string {
   const appData = env["APPDATA"] ?? join(homedir(), "AppData", "Roaming");
-  return join(appData, "UNLIGHT-Revive");
+  const candidates = DESKTOP_USER_DATA_DIR_NAMES.map((name) => join(appData, name));
+  const written = (dir: string): number => {
+    try {
+      return statSync(join(dir, DEVTOOLS_ACTIVE_PORT_FILE)).mtimeMs;
+    } catch {
+      return -1;
+    }
+  };
+  let best: string | null = null;
+  for (const dir of candidates) {
+    if (written(dir) >= 0 && (best === null || written(dir) > written(best))) best = dir;
+  }
+  return best ?? candidates.find((dir) => existsSync(dir)) ?? candidates[0]!;
 }
 
 /**
@@ -164,7 +184,7 @@ export interface ResolveDebugPortOptions {
  * ⚠ 讀到的埠**一定要再驗一次**才算數 —— Chromium 當掉時會留下指向死埠的舊檔。
  *
  * ⚠ **已知限制：兩個桌面版客戶端分不開。** 它們共用
- * `%APPDATA%\UNLIGHT-Revive`，所以只有一份 `DevToolsActivePort`（後開的蓋掉先開的），
+ * `%APPDATA%\UNLIGHT Revive`，所以只有一份 `DevToolsActivePort`（後開的蓋掉先開的），
  * 上表第三列會讓兩份插件都接到同一個客戶端。要那樣多開就得給各自不同的
  * `--user-data-dir`，或不要傳 `userDataDir`（退回純設定值，失去所有回退能力）。
  * 支援的多開組合是**桌面版 + 網頁版**，那是兩個不同的目錄。
