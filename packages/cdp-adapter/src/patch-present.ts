@@ -1,121 +1,90 @@
 /**
- * 好友面板左上角的「今日還能送幾張地圖」
- * ======================================
+ * 好友面板下方的「今日還能送幾張地圖」
+ * ====================================
  * 玩家按任務畫面的 PRESENT 鈕 → 跳出好友面板 → 挑一個人把地圖送出去。
- * 每天有次數上限，而**官方沒有任何地方顯示還剩幾次** —— 送到第六次才會跳
+ * 每天有次數上限，而**官方沒有任何地方顯示還剩幾次** —— 送到超過上限才會跳
  * 「今天無法再贈送任務」。Discord 的地圖交換區是照著約定一次換好幾張的，
  * 所以「談好了卻送不出去，只能明天再補」是每天都在發生的事。
  *
- * ## ⭐ 這個數字**不用自己數** —— 伺服器早就送過來了
+ * ## ⚠ 2026-09-23 改版後伺服器**不再告訴我們剩幾次**，只能自己數
  *
- * 2026-09-12 在跑著的客戶端上挖出來的：
- *
- * ```
- *   await socket.fetch("db_quest", id)
- *   → { 0..19: {…}, map, region, proceed, …, quest_max, deckinfo,
- *       pre_id, pre_remain }          ← 就是它
- * ```
- *
- * `pre_remain` 是**今日剩餘次數**（滿值 5，實測玩家當天還沒送過時就是 5）。
- * 整份 bundle grep `pre_remain` **零命中** —— 伺服器每次 `db_quest` 都送，
- * 客戶端從來沒讀過它。所以這支不是「插件自己算一個估計值」，是**把伺服器
- * 本來就講了、只是沒人聽的那句話顯示出來**。
- *
- * ⚠ 這一點決定了整支的形狀。自己數會踩到兩個沒有答案的問題：上限到底是不是
- * 5（伺服器說了算）、每日重置是幾點幾分哪個時區（客戶端**完全沒有**那個
- * 資訊 —— grep `setHours` / `864e5` / `timeZone` 全是道具到期倒數，沒有一處
- * 在算日界）。讀 `pre_remain` 兩個問題都不存在。
- *
- * ## 為什麼場景裡找不到它
- *
- * `Quest` 場景拿到 `db_quest` 之後只挑欄位複製，其餘當場丟掉 —— 深度掃活著的
- * 物件圖是掃不到 `pre_remain` 的（實測掃過 60128 個物件，零命中）。
- * `Lobby.quest` 存的才是**完整**的回應，所以那裡讀得到。
- *
- * 取值順序因此是：
+ * 改版前 `db_quest` 的回應裡有一個客戶端從沒讀過的 `pre_remain`，v2 就是讀它。
+ * 2026-10-09 在小號上實測改版後的客戶端：
  *
  * ```
- *   1. Quest.socket.fetch("db_quest", id)   ← 最新，而且送完之後會變
- *   2. Lobby.quest.pre_remain               ← 進任務畫面前的快照，拿來墊檔
+ *   await Quest.socket.fetch("db_quest")      ← 參數也沒了
+ *   → { current_quest_id, current_land_id, deck,
+ *       chara1_hp, chara2_hp, chara3_hp, from_id }      ← pre_remain 不見了
  * ```
  *
- * ## 送出之後怎麼更新
+ * `db_player`、`get_quest_data`、registry 的 player / quest / quest_data、所有
+ * socket 推播事件名都掃過，沒有任何地方帶贈送次數。伺服器剩下的只有一句錯誤：
+ * `quest_error("PRESENT_LIMIT")` ＝「今天無法再贈送任務」。
  *
- * `Friend` 場景上有現成的事件，不必去包任何方法：
+ * 所以 v3 改成**插件自己數**，兩件事都搭官方本來就會收到的封包，不多送任何請求：
+ *
+ * ```
+ *   Quest.socket 收到 quest_pre（不是 false）  → 送成了，今天 +1
+ *   Quest.socket 收到 quest_error PRESENT_LIMIT → 伺服器說滿了，直接歸零
+ * ```
+ *
+ * 官方送出的那一行（Friend 面板點人 → 確認框 → OK）：
  *
  * ```js
- *   // Quest.create() 裡：
- *   x.events.on("quest_present", async (t, e) => {
- *     const s = await this.socket.fetch("quest_pre", this.id, this.list_select, t, e);
- *     x.events.emit("quest_present_code", s);      ← 我們聽這個
- *   });
+ *   if (!1 === await s.socket.fetch("quest_pre", quest_pid, friend_code, stamp))
+ *     return …;                 // 失敗：錯誤另外走 quest_error 事件
+ *   e.close();                  // 成功：好友面板直接關掉
  * ```
  *
- * 代碼對應 `PRESENT_CODE[lang]`：0 成功、1 失敗、2 這張不能送、3 AP 不足、
- * 4 對方任務欄滿、5 今天不能再送。
+ * 自己數要先知道兩件客戶端沒有的事：
  *
- * ⚠ **只有 0 才扣**。3/4 是「這一次沒送成」，次數沒有被消耗 —— 跟著扣的話
- * 玩家會以為自己少了一次，而那正是這個功能要消滅的那種不確定。
- * 收到 5 就直接把顯示歸零（伺服器的說法優先於我們的計數）。
+ * 1. **上限是不是 5** —— 照改版前 `pre_remain` 的滿值（沒有再證實過）。數到超過
+ *    5 還送得出去，分母就跟著頂上去。
+ * 2. **每日幾點重置** —— **台灣時間 03:00**（UTC 19:00），使用者 2026-10-09 告知。
+ *    ⚠ 不是日本時間午夜：伺服器的預設日期 `quest_find: "2023-12-31T15:00:00.000Z"`
+ *    看起來像 JST 午夜，但那跟贈送的換日無關，第一版照它猜錯過。
+ *    萬一官方改了時間，靠這個自我修正撐著：已經記成「滿了」卻又送成功，
+ *    就當作伺服器已經換日、從 1 重新數。
  *
- * ⚠ 扣完**還是要再 fetch 一次**。本機遞減只是為了讓數字立刻動（送出到
- * 伺服器回話中間有幾百毫秒），真相一律以 `pre_remain` 為準。
+ * 記錄存在遊戲頁的 localStorage，鍵是角色名＋註冊時間（player_id 每次登入都
+ * 換，見 unlight-player-id-per-login）。⚠ 所以**別台電腦／另一個客戶端送的不算** ——
+ * tooltip 有講。
  *
- * ## 畫面：跟右邊的好友數成一對
+ * ## 畫面：放在面板下方那條按鈕列的右端
  *
- * 面板右上角有遊戲自己的 `friend_max`：
- *
- * ```js
- *   this.friend_max = t.add.text(180, -140,
- *     `Friends ${friends.length}/${friend_max}`,
- *     { fontFamily: "font_light", fontSize: 10, resolution: 2, color: "black",
- *       padding: { bottom: 3 } }).setOrigin(0, 1);
- * ```
- *
- * 我們在同一條基線的左端放 `Presents 5/5`：
+ * 改版後的面板（rexContainerLite，children 用的是**世界座標**）下方那一列是
+ * 「顯示方法／排列／搜尋」，搜尋的下拉選單結束在 x≈506，右邊到面板邊緣
+ * （644）是空的。使用者要求放在下方，就放在那裡，靠右對齊：
  *
  * ```
- *   ┌─ 面板上緣 ────────────────────────────────────────────┐
- *   │ Presents 5/5                        Friends 171/200  │
- *   │ ┌────┐ ┌────┐ ┌────┐ ┌────┐ ┌────┐                   │
- *   │ │ 好 │ │ 友 │ │ 的 │ │ 格 │ │ 子 │                   │
- *   └─↑─────────────────────────────────────────────────────┘
- *     └ 開頭切齊格線左緣（x = list_background.x），不是 friend_max 的鏡像
+ *   ┌───────────────────────────────────────────────────────────┐
+ *   │                        ◁  1 / 1  ▷                        │
+ *   │ 顯示方法 [網格]  排列 [加入好友日期]  搜尋 [All]  剩餘贈送: 5/5 │
+ *   └───────────────────────────────────────────────────────────┘
+ *                                                     x = 右緣 - 8
  * ```
  *
- * 三件事都是照抄，不是自己決定的：
+ * 照抄的東西：`y` 跟「搜尋」標籤同一條線、字體用面板自己的 `FONT_LABEL`
+ * （白字）、左邊距 8 px 鏡到右邊。
  *
- * 1. **`y` 跟 friend_max 同一條基線**，兩行才讀得出是一對。
- * 2. **`x` 切齊好友格線左緣**（origin 靠左）。取 `-friend_max.x` 的左右鏡像
- *    會讓開頭落在格線裡面幾十 px，看起來像隨便放的。
- * 3. **字體大小完全照抄 friend_max**，自己挑一個會立刻看出是外面貼上去的。
+ * ⚠ **跟著語言走**。改版前的對照組 `Friends 171/200` 每種語言都是英文，
+ * 所以 v2 寫死英文；改版後的對照組變成 `好友人數: 1/15`（FriendUITexts 有翻譯），
+ * 旁邊的標籤也都是翻譯過的。格式照抄它：「標籤: N/M」。
  *
- * ⚠ **`Presents` 每種語言都是英文，不翻譯。** 它的對照組 `Friends 171/200`
- * 在 ja/en/kr/scn/tcn 全部都是英文（實測：那個字串在建構子裡寫死）。
- * 翻成中文的話左邊中文、右邊英文，一眼就看得出左邊是外面加的。
+ * ⚠⚠ **面板上只放這一行，不放說明。** 說明走 hover tooltip（使用者 2026-09-12
+ * 直接要求的）。
  *
- * ⚠⚠ **面板上只放這一行，不放說明。** 說明走 hover tooltip。好友面板
- * 528×408 裡已經塞了分頁、格線、排序、分頁器，多一句完整說明會擠掉原本的
- * 資訊，而且一眼就像外掛。這是使用者 2026-09-12 直接要求的。
+ * ## ⚠ 面板與 socket 都會換人
  *
- * ## ⚠ 面板是**每次開都重新 new 的**
- *
- * `open_panel()` 裡 `this.friend_panel = new b(this, i, s)` —— 玩家每開一次
- * 好友面板就是一個新物件，我們掛上去的東西會跟著舊物件一起被 destroy。
- * 跟 `patch-lobby` 盯 `channel_panel` 同一個問題，解法也一樣：輪詢（500ms）
- * 盯著 `friend_panel` 換人沒有，換了就重掛。
- *
- * ⚠ 分頁切換（`refresh_tab`）只重建 `panel.tab`，**不重建 panel**，所以我們
- * 掛在 panel 上的東西撐得過切分頁 —— 這正是要掛在 panel 而不是 tab 上的理由。
- *
- * ## ⚠ 只在 present 分頁顯示
- *
- * `panel.tab_name === "present"` 才畫。玩家從右下角 FRIENDLIST 鈕開的同一個
- * 面板（`tab_name === "friend"`）不該出現贈送次數 —— 那裡沒有東西可以送。
+ * - Friend 場景每次 launch 都 new 一個 `friend_panel`，掛上去的東西跟著舊面板
+ *   一起 destroy → 輪詢（500ms）盯著換人沒有，換了就重掛。
+ * - Quest 場景每次 init 都 new 一條 socket → 同一個輪詢也盯著 socket，換了就
+ *   把監聽搬過去（跟 patch-quest-treasure 一樣）。
+ * - 只在 `Friend.is_quest_present === true` 時畫。右下角 FRIENDLIST 鈕開的是同一個
+ *   面板，那裡沒有東西可以送。
  *
  * ⚠⚠ **注入腳本裡的註解不能有反引號。** 整段腳本住在一個 template literal
- * 裡，一個沒跳脫的反引號會讓字串提早結束（`patch-lobby` 與 `match-room` 都
- * 記過同一件事）。所以詳細的東西寫在這個檔頭 —— 它在字串外面。
+ * 裡，一個沒跳脫的反引號會讓字串提早結束。所以詳細的東西寫在這個檔頭。
  */
 
 import { embedJson } from "./embed.js";
@@ -126,34 +95,43 @@ const FLAG = "__ulrPresent";
 /**
  * 腳本版本。**改動注入腳本裡任何一行就 +1**，修 bug 也算。
  *
- * 這支跟 `patch-lobby` 一樣是「先拆再裝」，所以不靠版本號決定要不要重裝；
- * 版本號是回報用的 —— 玩家回報怪狀況時一眼看得出他頁面上跑的是哪一版。
+ * engine 看到頁面上的版本跟這個不一樣就重裝，所以這個數字一定要跟著動。
  */
-export const PRESENT_SCRIPT_VERSION = 2;
+export const PRESENT_SCRIPT_VERSION = 4;
 
-/** 盯著 `friend_panel` 換人沒有的間隔。跟 patch-lobby 一樣 500ms。 */
+/** 盯著 `friend_panel` 與 Quest socket 換人沒有的間隔。跟 patch-lobby 一樣 500ms。 */
 export const DEFAULT_PRESENT_POLL_MS = 500;
 
 /**
- * 顯示用的分母預設值。
+ * 每日上限。
  *
- * ⚠ **這只是「伺服器還沒講話時拿來墊的數字」，不是真相。** 真相是
- * `pre_remain`，而分母伺服器沒有明講 —— 所以腳本看到 `pre_remain` 比它大時
- * 會把分母頂上去（官方哪天調成 10，畫面會自己變成 `剩10/10` 而不是
- * 一個永遠說謊的 `/5`）。
+ * ⚠ **這是改版前 `pre_remain` 的滿值，改版後伺服器沒有再講過。** 數到超過它
+ * 還送得出去，腳本會把分母頂上去。
  */
 export const DEFAULT_PRESENT_MAX = 5;
 
 /**
- * 好友格線左緣的面板局部座標 —— **這一格的左邊要跟第一張好友卡切齊**。
+ * 每日重置：台灣時間（UTC+8）03:00，見檔頭。
  *
- * 值是 2026-09-12 從跑著的客戶端量的（present 分頁的 `list_background`：
- * `Rectangle x=-232 y=-132 w=464 h=264`，origin 0，所以左緣就是 -232）。
- *
- * ⚠ 這只是**後路**。正常路徑是當場去讀 `panel.tab.list_background.x` ——
- * 官方調整格線時我們跟著動，而寫死的數字會靜靜地偏掉幾 px。
+ * 腳本把「現在」平移 `8 - 3 = 5` 小時再取 UTC 日期 —— 台灣 03:00（UTC 19:00）
+ * 平移後剛好是 UTC 午夜，日期就在那一刻跳。
  */
-const GRID_LEFT_X = -232;
+export const PRESENT_RESET_TAIPEI_HOUR = 3;
+const TAIPEI_UTC_OFFSET_HOURS = 8;
+
+/** localStorage 鍵的前綴。後面接角色名與註冊時間。 */
+export const PRESENT_STORAGE_PREFIX = "ulr.present.";
+
+/** 面板右緣往內縮多少。照抄左邊「顯示方法」離面板左緣的距離（124 - 116）。 */
+const RIGHT_MARGIN = 8;
+
+/**
+ * 量好的後路（2026-10-09 實測）：面板右緣 644、按鈕列 y=527。
+ *
+ * ⚠ 正常路徑是當場去讀 `panel_base` 與 `panel_filter_label` —— 官方調整時跟著動。
+ */
+const FALLBACK_RIGHT = 644;
+const FALLBACK_ROW_Y = 527;
 
 export interface PresentPatchOptions {
   pollIntervalMs?: number;
@@ -164,11 +142,11 @@ export interface PresentPatchOptions {
 export interface PresentStatus {
   installed: boolean;
   version: number | null;
-  /** 目前讀到的剩餘次數。`null` = 還沒讀到（不在任務畫面、或 fetch 還沒回來）。 */
+  /** 目前算出來的剩餘次數。`null` = 還認不出是哪個角色（沒登入）。 */
   remain: number | null;
   /** 目前用的分母。 */
   max: number;
-  /** 字真的畫出來了沒（＝面板開著而且在 present 分頁）。 */
+  /** 字真的畫出來了沒（＝贈送用的好友面板開著）。 */
   mounted: boolean;
   /** 還在等玩家打開贈送面板。**不是錯誤**（跟 `patch-lobby` 同一個欄位）。 */
   waiting: boolean;
@@ -180,24 +158,29 @@ export interface PresentStatus {
 // ---------------------------------------------------------------------------
 
 /**
- * 面板上那一行。`__N__` 是剩餘、`__MAX__` 是上限。
+ * 面板上那一行的標籤。後面接 ` N/M`。
  *
- * ⚠ **每種語言都是這一句，不翻譯。** 它的對照組是遊戲自己的 `friend_max`
- * ——`Friends 171/200` 在 ja/en/kr/scn/tcn **全部都是英文**（實測客戶端，
- * 那個字串在建構子裡寫死）。跟著用英文，兩行才是同一種東西；翻成中文的話
- * 左邊是中文、右邊是英文，一眼就看得出左邊是外面加的。
- *
- * ⚠ 不加標點、不加單位、不加說明。說明在 {@link TOOLTIP}。
+ * 格式照抄對照組 `好友人數: 1/15`（FriendUITexts.friend_length 是「好友人數:」）。
+ * ≤8 字，說明在 {@link TOOLTIP}。
  */
-const LABEL = "Presents __N__/__MAX__";
+const LABEL: Record<string, string> = {
+  ja: "残り送信:",
+  en: "Gifts left:",
+  kr: "남은 선물:",
+  scn: "剩余赠送:",
+  tcn: "剩餘贈送:",
+};
 
-/** hover 才出現的說明。面板上放不下的話都放這裡。 */
+/**
+ * hover 才出現的說明。⚠ 要講清楚是插件在本機自己數的、**不是官方伺服器給的數字**
+ * （改版後伺服器不講了，見檔頭）—— 別台裝置送的不算。兩行，第一行說是什麼。
+ */
 const TOOLTIP: Record<string, string> = {
-  ja: "本日残りのクエスト送信回数",
-  en: "Quest gifts left today",
-  kr: "오늘 남은 퀘스트 전송 횟수",
-  scn: "今日剩余赠送任务次数",
-  tcn: "今日剩餘贈送任務次數",
+  ja: "本日の残り送信回数（この端末で記録）\n公式サーバーの値ではなく、他の端末で送った分は含みません",
+  en: "Quest gifts left today, counted on this device.\nNot from the official server; gifts sent elsewhere are not included.",
+  kr: "오늘 남은 퀘스트 전송 횟수 (이 기기에서 기록)\n공식 서버 값이 아니며, 다른 기기에서 보낸 것은 포함되지 않습니다",
+  scn: "今日剩余赠送次数（本机记录）\n不是官方服务器提供的数字，其他设备送出的不计入",
+  tcn: "今日剩餘贈送次數（本機記錄）\n不是官方伺服器提供的數字，其他裝置送出的不計入",
 };
 
 // ---------------------------------------------------------------------------
@@ -223,9 +206,21 @@ const SHARED = `
   /** 開著的好友面板，而且是從 PRESENT 鈕進來的那一種。其餘一律 null。 */
   function presentPanel() {
     var sc = sceneOf("Friend");
-    var panel = sc && sc.friend_panel;
+    if (!sc || sc.is_quest_present !== true) return null;
+    var panel = sc.friend_panel;
     if (!panel || panel.active === false) return null;
-    return panel.tab_name === "present" ? panel : null;
+    return panel;
+  }
+
+  function unhookSocket(st) {
+    var S = st.sock;
+    st.sock = null;
+    try {
+      if (S && typeof S.off === "function") {
+        S.off("quest_pre", st.onPre);
+        S.off("quest_error", st.onError);
+      }
+    } catch (e) {}
   }
 `;
 
@@ -239,9 +234,13 @@ export function buildPresentPatchScript(options: PresentPatchOptions = {}): stri
     version: PRESENT_SCRIPT_VERSION,
     pollIntervalMs: options.pollIntervalMs ?? DEFAULT_PRESENT_POLL_MS,
     max: options.max ?? DEFAULT_PRESENT_MAX,
+    dayOffsetMs: (TAIPEI_UTC_OFFSET_HOURS - PRESENT_RESET_TAIPEI_HOUR) * 3600 * 1000,
+    storagePrefix: PRESENT_STORAGE_PREFIX,
     label: LABEL,
     tooltip: TOOLTIP,
-    gridLeft: GRID_LEFT_X,
+    margin: RIGHT_MARGIN,
+    fallbackRight: FALLBACK_RIGHT,
+    fallbackRowY: FALLBACK_ROW_Y,
   };
 
   return `(function () {
@@ -254,14 +253,8 @@ export function buildPresentPatchScript(options: PresentPatchOptions = {}): stri
     var st = window[FLAG];
     if (!st) return;
     try { if (st.timer !== null && st.timer !== undefined) clearInterval(st.timer); } catch (e) {}
-    try {
-      // ⚠ Friend 場景是長命的（換畫面不會 destroy），監聽留著會在下一次安裝時
-      // 變成兩份，於是送一次扣兩次。
-      if (st.codeHandler) {
-        var fs = sceneOf("Friend");
-        if (fs && fs.events) fs.events.off("quest_present_code", st.codeHandler);
-      }
-    } catch (e) {}
+    // ⚠ 不拆的話重裝後監聽變兩份，送一次記兩次。
+    unhookSocket(st);
     detach(st);
     delete window[FLAG];
   }
@@ -279,54 +272,94 @@ export function buildPresentPatchScript(options: PresentPatchOptions = {}): stri
   }
 
   // -------------------------------------------------------------------------
-  // 取值
+  // 記錄（localStorage，一個角色一筆）
   // -------------------------------------------------------------------------
 
-  /** 進任務畫面前的快照。Lobby 存的是完整的 db_quest 回應。 */
-  function cachedRemain() {
+  /** 伺服器的「今天」。台灣時間 03:00 換日，見檔頭。 */
+  function today() {
+    return new Date(Date.now() + CFG.dayOffsetMs).toISOString().slice(0, 10);
+  }
+
+  /** 角色名＋註冊時間。player_id 每次登入都換，不能拿來當鍵。 */
+  function accountKey() {
     try {
-      var lb = sceneOf("Lobby");
-      var q = lb && lb.quest;
-      var v = q && q.pre_remain;
-      return typeof v === "number" ? v : null;
+      var reg = window.game && window.game.registry;
+      var p = reg && (typeof reg.get === "function" ? reg.get("player") : reg.list && reg.list.player);
+      if (!p || typeof p.player_name !== "string" || p.player_name.length === 0) return null;
+      return CFG.storagePrefix + p.player_name + "|" + String(p.regist_at || "");
     } catch (e) { return null; }
   }
 
-  /** 跟伺服器要最新的。read-only，跟遊戲自己載入時做的是同一個 fetch。 */
-  function refresh(st) {
-    if (st.fetching) return;
-    var q = sceneOf("Quest");
-    var sock = q && q.socket;
-    if (!sock || typeof sock.fetch !== "function" || !q.id) {
-      // 還沒進任務畫面 —— 先用大廳那份快照墊著，不算錯誤。
-      if (st.remain === null) {
-        var c = cachedRemain();
-        if (c !== null) { adopt(st, c); paint(st); }
-      }
-      return;
-    }
-    st.fetching = true;
+  /** 讀出今天的記錄。換日了就是一筆新的。 */
+  function load(key) {
+    var rec = null;
     try {
-      Promise.resolve(sock.fetch("db_quest", q.id)).then(function (r) {
-        st.fetching = false;
-        var v = r && r.pre_remain;
-        if (typeof v === "number") { adopt(st, v); st.reason = null; }
-        else st.reason = "db_quest 回應裡沒有 pre_remain";
-        paint(st);
-      }, function (e) {
-        st.fetching = false;
-        st.reason = "db_quest 問不到：" + String((e && e.message) || e);
-      });
-    } catch (e) {
-      st.fetching = false;
-      st.reason = String((e && e.message) || e);
+      var raw = window.localStorage.getItem(key);
+      if (raw) rec = JSON.parse(raw);
+    } catch (e) { rec = null; }
+    var day = today();
+    if (!rec || rec.day !== day || typeof rec.sent !== "number") {
+      return { day: day, sent: 0, full: false };
     }
+    return { day: day, sent: rec.sent, full: rec.full === true };
   }
 
-  /** 收下一個剩餘值。⚠ 分母跟著頂上去，見 DEFAULT_PRESENT_MAX 的說明。 */
-  function adopt(st, remain) {
-    st.remain = remain < 0 ? 0 : remain;
-    if (st.remain > st.max) st.max = st.remain;
+  function save(key, rec) {
+    try { window.localStorage.setItem(key, JSON.stringify(rec)); } catch (e) {}
+  }
+
+  /** 從記錄算出要顯示的數字。 */
+  function compute(st) {
+    var key = accountKey();
+    if (key === null) { st.remain = null; return; }
+    var rec = load(key);
+    if (rec.sent > st.max) st.max = rec.sent;
+    st.remain = rec.full ? 0 : Math.max(0, st.max - rec.sent);
+  }
+
+  // -------------------------------------------------------------------------
+  // 聽官方本來就會收到的兩個封包
+  // -------------------------------------------------------------------------
+
+  /** quest_pre 的回覆。false 是沒送成（原因另外走 quest_error），其餘都是送成了。 */
+  function onPre(st, ok) {
+    if (ok === false) return;
+    var key = accountKey();
+    if (key === null) return;
+    var rec = load(key);
+    if (rec.full) {
+      // 記成滿了卻又送得出去 —— 伺服器已經換日了，從這一次重新數。
+      rec.sent = 1;
+      rec.full = false;
+    } else {
+      rec.sent += 1;
+    }
+    save(key, rec);
+    compute(st);
+    paint(st);
+  }
+
+  /** 伺服器說今天不能再送了 —— 以它為準，直接歸零。 */
+  function onError(st, code) {
+    if (code !== "PRESENT_LIMIT") return;
+    var key = accountKey();
+    if (key === null) return;
+    var rec = load(key);
+    rec.full = true;
+    save(key, rec);
+    compute(st);
+    paint(st);
+  }
+
+  /** Quest 場景每次 init 都 new 一條 socket：跟著換。 */
+  function hookSocket(st) {
+    var Q = sceneOf("Quest");
+    var S = Q ? Q.socket : null;
+    if (!S || typeof S.on !== "function" || st.sock === S) return;
+    unhookSocket(st);
+    S.on("quest_pre", st.onPre);
+    S.on("quest_error", st.onError);
+    st.sock = S;
   }
 
   // -------------------------------------------------------------------------
@@ -334,113 +367,85 @@ export function buildPresentPatchScript(options: PresentPatchOptions = {}): stri
   // -------------------------------------------------------------------------
 
   function labelText(st) {
-    return CFG.label
-      .replace("__N__", String(st.remain))
-      .replace("__MAX__", String(st.max));
-  }
-
-  /** 好友格線的左緣。讀得到就讀，讀不到才用量好的那個數字。 */
-  function gridLeft(panel) {
-    try {
-      var bg = panel.tab && panel.tab.list_background;
-      if (bg && typeof bg.x === "number") return bg.x;
-    } catch (e) {}
-    return CFG.gridLeft;
+    return pick(CFG.label, gameLang()) + " " + st.remain + "/" + st.max;
   }
 
   function paint(st) {
     if (!st.text) return;
     try {
       st.text.setText(st.remain === null ? "" : labelText(st));
-      // 送完了就變紅。這是唯一的額外資訊，而且不佔字數。
-      st.text.setColor(st.remain === 0 ? "#a01010" : "black");
+      // 送完了就變紅。這是唯一的額外資訊，而且不佔字數。底是深色的，紅要亮一點。
+      st.text.setColor(st.remain === 0 ? "#ff7070" : "#ffffff");
     } catch (e) {}
   }
 
+  /** 面板右緣與按鈕列的 y。讀得到就讀，讀不到才用量好的數字。 */
+  function anchor(panel) {
+    var right = CFG.fallbackRight;
+    var y = CFG.fallbackRowY;
+    try {
+      var pb = panel.panel_base;
+      if (pb && typeof pb.getBottomRight === "function") right = pb.getBottomRight().x;
+    } catch (e) {}
+    try {
+      var lb = panel.panel_filter_label || panel.panel_sort_label || panel.panel_display_label;
+      if (lb && typeof lb.y === "number") y = lb.y;
+    } catch (e) {}
+    return { x: right - CFG.margin, y: y };
+  }
+
   /**
-   * 把字掛到面板上。
+   * 把字掛到面板下方那條按鈕列的右端。
    *
-   * ⚠ **y 跟 friend_max 同一條基線，x 切齊好友格線的左緣**（origin 靠左）。
-   * 不是 friend_max 的左右鏡像 —— 那會讓開頭落在格線裡面幾十 px，看起來像
-   * 隨便放的。字體那幾個值是從遊戲自己的 friend_max 抄的，不要自己挑。
+   * ⚠ 面板是 rexContainerLite，add 會保留物件現在的世界座標 —— 所以直接用
+   * 世界座標建立再 add（2026-10-09 實測：建在 636,527，add 之後還是 636,527）。
    */
   function mount(st, panel) {
     var sc = sceneOf("Friend");
     if (!sc) return;
-    var src = panel.friend_max;
-    var style = {
-      fontFamily: "font_light",
-      fontSize: 10,
-      resolution: 2,
-      color: "black",
-      padding: { bottom: 3 }
-    };
-    if (src && src.style) {
-      // 官方哪天改了字體，跟著改 —— 兩行是一對，字體要一樣。
-      if (src.style.fontFamily) style.fontFamily = src.style.fontFamily;
-      if (src.style.fontSize) style.fontSize = src.style.fontSize;
+    var style = { fontFamily: "font_light", fontSize: 12, resolution: 2 };
+    var src = panel.FONT_LABEL;
+    if (src && typeof src === "object") {
+      // 字體照抄旁邊的「顯示方法／排列／搜尋」，不自己挑。
+      style = { fontFamily: src.fontFamily || style.fontFamily, fontSize: src.fontSize || style.fontSize, resolution: src.resolution || 2 };
     }
-    var x = gridLeft(panel);
-    var y = src && typeof src.y === "number" ? src.y : -140;
+    var at = anchor(panel);
 
-    var text = sc.add.text(x, y, "", style).setOrigin(0, 1);
+    var text = sc.add.text(at.x, at.y, "", style).setOrigin(1, 0.5);
     panel.add(text);
     st.mine.push(text);
     st.text = text;
 
-    mountTooltip(st, panel, text, x, y);
+    mountTooltip(st, panel, text, at.x, at.y);
     paint(st);
   }
 
-  /** hover 才出現的說明。面板上不留任何常駐說明文字。 */
+  /** hover 才出現的說明，開在字的上方（下面就是面板邊緣）。 */
   function mountTooltip(st, panel, text, x, y) {
     var sc = sceneOf("Friend");
-    var lang = gameLang();
-    var tip = sc.add.container(x, y + 4);
-    var label = sc.add.text(0, 0, pick(CFG.tooltip, lang), {
+    var tip = sc.add.container(x, y - 10);
+    var label = sc.add.text(0, 0, pick(CFG.tooltip, gameLang()), {
       fontFamily: "font_light", fontSize: 11, resolution: 2, color: "#ffffff",
       padding: { left: 5, right: 5, top: 3, bottom: 4 }
-    }).setOrigin(0, 0);
-    var back = sc.add.rectangle(0, 0, label.width, label.height, 0, 0.85).setOrigin(0, 0);
+    }).setOrigin(1, 1);
+    var back = sc.add.rectangle(0, 0, label.width, label.height, 0, 0.85).setOrigin(1, 1);
     tip.add(back);
     tip.add(label);
     tip.setVisible(false);
+    try { tip.setDepth(10); } catch (e) {}
     panel.add(tip);
-    // ⚠ 要壓在好友格線上面，否則會被下一頁重畫的卡片蓋掉。
-    try { panel.bringToTop(tip); } catch (e) {}
     st.mine.push(tip);
     st.tip = tip;
 
     try {
       text.setInteractive({ useHandCursor: false });
       text.on("pointerover", function () {
-        try { tip.setVisible(true); panel.bringToTop(tip); } catch (e) {}
+        try { tip.setVisible(true); } catch (e) {}
       });
       text.on("pointerout", function () {
         try { tip.setVisible(false); } catch (e) {}
       });
     } catch (e) {}
-  }
-
-  // -------------------------------------------------------------------------
-  // 送出之後
-  // -------------------------------------------------------------------------
-
-  /**
-   * Quest 把伺服器的回覆轉發到 Friend 的事件上，我們順便聽一耳朵。
-   *
-   * ⚠ 只有 0（成功）才扣。3/4 是「這一次根本沒送成」，次數沒有被消耗。
-   */
-  function onCode(st, code) {
-    if (code === 0 && typeof st.remain === "number" && st.remain > 0) {
-      st.remain -= 1;
-      paint(st);
-    } else if (code === 5) {
-      st.remain = 0;
-      paint(st);
-    }
-    // 本機遞減只是為了讓數字立刻動。真相一律回去問伺服器。
-    refresh(st);
   }
 
   // -------------------------------------------------------------------------
@@ -451,20 +456,19 @@ export function buildPresentPatchScript(options: PresentPatchOptions = {}): stri
     var st = window[FLAG];
     if (!st) return;
     try {
+      hookSocket(st);
       var panel = presentPanel();
       if (panel === null) {
-        // 面板關了、或切到別的分頁 —— 收掉，但**留著 st.remain**，下次開得快。
         if (st.panel !== null) detach(st);
         return;
       }
       if (st.panel !== panel) {
         detach(st);
         st.panel = panel;
+        // 每次開面板都重讀一次 —— 可能已經換日了。
+        compute(st);
         mount(st, panel);
-        // 每次開面板都重問一次 —— 玩家可能在別台機器上送過。
-        refresh(st);
       }
-      if (st.remain === null && !st.fetching) refresh(st);
     } catch (e) {
       st.reason = String((e && e.message) || e);
     }
@@ -476,29 +480,21 @@ export function buildPresentPatchScript(options: PresentPatchOptions = {}): stri
     version: CFG.version,
     max: CFG.max,
     remain: null,
-    fetching: false,
     mine: [],
     text: null,
     tip: null,
     panel: null,
+    sock: null,
     timer: null,
-    codeHandler: null,
+    onPre: null,
+    onError: null,
     reason: null
   };
+  st.onPre = function (ok) { onPre(st, ok); };
+  st.onError = function (code) { onError(st, code); };
   window[FLAG] = st;
 
-  // 先用大廳那份快照墊著，玩家一開面板就有數字。
-  var cached = cachedRemain();
-  if (cached !== null) adopt(st, cached);
-
-  try {
-    var fs = sceneOf("Friend");
-    if (fs && fs.events) {
-      st.codeHandler = function (code) { onCode(st, code); };
-      fs.events.on("quest_present_code", st.codeHandler);
-    }
-  } catch (e) {}
-
+  compute(st);
   st.timer = setInterval(tick, CFG.pollIntervalMs);
   tick();
 
@@ -550,12 +546,7 @@ export const PRESENT_UNINSTALL_EXPRESSION = `(function () {
     var st = window[FLAG];
     if (!st) return "not-installed";
     try { if (st.timer !== null && st.timer !== undefined) clearInterval(st.timer); } catch (e) {}
-    try {
-      if (st.codeHandler) {
-        var fs = sceneOf("Friend");
-        if (fs && fs.events) fs.events.off("quest_present_code", st.codeHandler);
-      }
-    } catch (e) {}
+    unhookSocket(st);
     var items = st.mine || [];
     for (var i = 0; i < items.length; i++) {
       try { if (items[i] && items[i].destroy) items[i].destroy(); } catch (e) {}

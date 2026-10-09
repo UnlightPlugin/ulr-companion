@@ -5,31 +5,30 @@
  * `buildPresentPatchScript()` 產出來的**那一串字**原封不動 `new Function`
  * 起來跑。不重寫一份等價實作 —— 那只會證明我看懂了自己寫的東西。
  *
- * 假環境照 2026-09-12 從跑著的客戶端挖出來的形狀寫：
+ * 假環境照 2026-10-09 從改版後的客戶端挖出來的形狀寫：
  *
  * ```js
- *   // 面板（b）的 constructor：
- *   this.friend_max = t.add.text(180, -140, "Friends 171/200",
- *     { fontFamily: "font_light", fontSize: 10, resolution: 2, color: "black" })
- *     .setOrigin(0, 1);
- *   this.tab_name = "present" | "friend" | "request" | "search" | "none";
+ *   // Friend 場景：PRESENT 鈕是 scene.launch("Friend", { is_quest_present: true })
+ *   this.is_quest_present = t.is_quest_present;
+ *   this.friend_panel = new f(this, 380, 340);       // rexContainerLite，世界座標
+ *   //   panel_base 528x408 → 右緣 644；panel_filter_label y=527
+ *   //   FONT_LABEL = { fontFamily: "font_light", fontSize: 12, resolution: 2 }
  *
- *   // Quest.create() 把伺服器的回覆轉發到 Friend 的事件上：
- *   x.events.emit("quest_present_code", s);   // 0 成功 … 5 今天不能再送
- *
- *   // 次數本身是伺服器送的，客戶端從來沒讀過：
- *   await socket.fetch("db_quest", id) → { …, pre_id, pre_remain }
+ *   // 送出（Friend 面板的確認框 OK）：
+ *   if (!1 === await s.socket.fetch("quest_pre", quest_pid, friend_code, stamp)) …
+ *   // 失敗原因另外走 Quest.socket 的 quest_error 事件（PRESENT_LIMIT …）
  * ```
  *
- * 這支要抓的坑：
+ * 伺服器**不再告訴我們剩幾次**（db_quest 的 pre_remain 改版後不見了），所以
+ * 這支是自己數的。要抓的坑：
  *
  * 1. 面板每開一次都是新物件 —— 掛在舊物件上的東西會跟著死
- * 2. 重裝時 `quest_present_code` 的監聽會變兩份 → 送一次扣兩次
- * 3. 只有 code 0 才扣（3/4 是「根本沒送成」，次數沒被消耗）
- * 4. 開頭要切齊好友格線左緣 —— 取 friend_max 的左右鏡像會偏進格線裡面
+ * 2. Quest 的 socket 每次進任務畫面都換 —— 監聽要跟著搬
+ * 3. 重裝時監聽變兩份 → 送一次記兩次
+ * 4. 換日要歸零；伺服器說滿了要歸零；滿了卻又送成功＝伺服器已換日
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildPresentPatchScript,
   parsePresentStatus,
@@ -71,6 +70,7 @@ class FakeObject extends FakeEmitter {
   originX = 0;
   originY = 0;
   interactive = false;
+  depth = 0;
   constructor(
     public type: string,
     public x: number,
@@ -85,6 +85,10 @@ class FakeObject extends FakeEmitter {
   }
   setVisible(v: boolean): this {
     this.visible = v;
+    return this;
+  }
+  setDepth(d: number): this {
+    this.depth = d;
     return this;
   }
   setInteractive(): this {
@@ -128,49 +132,46 @@ class FakeContainer extends FakeObject {
     this.list.push(child);
     return this;
   }
-  bringToTop(child: FakeObject): this {
-    this.list = this.list.filter((o) => o !== child).concat(child);
-    return this;
+}
+
+/**
+ * 好友面板。⚠ 每次 launch Friend 都是一個新的 —— 這正是坑 1。
+ *
+ * rexContainerLite：add 保留子物件的世界座標，所以假的 add 也不動座標。
+ */
+class FakePanel extends FakeContainer {
+  active = true;
+  FONT_LABEL = { fontFamily: "font_light", fontSize: 12, resolution: 2 };
+  // 實測：panel_base 在 380,340、528x408 → 右緣 644
+  panel_base: { getBottomRight(): { x: number; y: number } } | undefined = {
+    getBottomRight: () => ({ x: 644, y: 544 }),
+  };
+  panel_filter_label: FakeText | undefined = new FakeText(400, 527, "搜尋", {});
+  constructor() {
+    super(380, 340);
   }
 }
 
-/** 分頁。`refresh_tab` 每次都重建它，但**面板本身不重建**。 */
-interface FakeTab {
-  /** 好友格線的底圖。實測 present 分頁：`x=-232 y=-132 w=464 h=264`，origin 0。 */
-  list_background: { x: number };
-}
+class FakeSocket extends FakeEmitter {}
 
-/** 好友面板。⚠ 每次 `open_panel()` 都是一個新的 —— 這正是坑 1。 */
-class FakePanel extends FakeContainer {
-  friend_max: FakeText;
-  tab: FakeTab = { list_background: { x: -232 } };
-  active = true;
-  constructor(public tab_name: string) {
-    super(380, 300);
-    // 照抄客戶端：x=180, y=-140, origin(0,1)
-    this.friend_max = new FakeText(180, -140, "Friends 171/200", {
-      fontFamily: "font_light",
-      fontSize: 10,
-      color: "black",
-    }).setOrigin(0, 1) as FakeText;
+class FakeStorage {
+  data = new Map<string, string>();
+  getItem(k: string): string | null {
+    return this.data.get(k) ?? null;
+  }
+  setItem(k: string, v: string): void {
+    this.data.set(k, v);
   }
 }
 
 interface FakeWindow {
-  game: { scene: { keys: Record<string, unknown> } };
+  game: {
+    scene: { keys: Record<string, unknown> };
+    registry: { get(k: string): unknown };
+  };
   lang: string;
+  localStorage: FakeStorage;
   [key: string]: unknown;
-}
-
-interface FakeGame {
-  window: FakeWindow;
-  friend: { events: FakeEmitter; friend_panel: FakePanel | null; add: FakeFactory };
-  /** 伺服器現在說還剩幾次。`null` = fetch 會 reject。 */
-  serverRemain: number | null;
-  /** `db_quest` 被問了幾次。 */
-  fetches: number;
-  openPanel(tab: string): FakePanel;
-  closePanel(): void;
 }
 
 interface FakeFactory {
@@ -179,34 +180,39 @@ interface FakeFactory {
   rectangle(x: number, y: number, w: number, h: number, color: number, alpha: number): FakeObject;
 }
 
-/**
- * @param lobbyRemain 大廳那份 db_quest 快照。`null` = 沒有（玩家還沒進過大廳）。
- * @param quest `false` = Quest 場景不在（＝問不到伺服器，只能靠快照）。
- */
-function makeGame(options: { lobbyRemain?: number | null; quest?: boolean } = {}): FakeGame {
-  const lobbyRemain = options.lobbyRemain === undefined ? 5 : options.lobbyRemain;
-  const hasQuest = options.quest !== false;
+interface FakeGame {
+  window: FakeWindow;
+  friend: { is_quest_present: boolean; friend_panel: FakePanel | null; add: FakeFactory };
+  quest: { socket: FakeSocket };
+  storage: FakeStorage;
+  player: { player_name: string; regist_at: string } | null;
+  openPanel(present?: boolean): FakePanel;
+  closePanel(): void;
+  /** 伺服器回 quest_pre（官方 fetch 收到的那一個）。 */
+  reply(ok: boolean): void;
+  /** 伺服器推 quest_error。 */
+  error(code: string): void;
+}
 
+function makeGame(): FakeGame {
   const factory: FakeFactory = {
     text: (x, y, t, style) => new FakeText(x, y, t, { ...style }),
     container: (x, y) => new FakeContainer(x, y),
     rectangle: (x, y) => new FakeObject("Rectangle", x, y),
   };
+  const storage = new FakeStorage();
 
   const game: FakeGame = {
-    serverRemain: 5,
-    fetches: 0,
-    friend: { events: new FakeEmitter(), friend_panel: null, add: factory },
+    friend: { is_quest_present: true, friend_panel: null, add: factory },
+    quest: { socket: new FakeSocket() },
+    storage,
+    player: { player_name: "不要樂奈", regist_at: "2025-04-24T01:57:22.000Z" },
     window: null as unknown as FakeWindow,
-    openPanel(tab: string) {
+    openPanel(present = true) {
       // ⚠ 舊面板連同我們掛上去的東西一起 destroy —— 客戶端就是這樣。
-      const old = game.friend.friend_panel;
-      if (old) {
-        for (const child of old.list) child.destroy();
-        old.destroy();
-        old.active = false;
-      }
-      const panel = new FakePanel(tab);
+      game.closePanel();
+      game.friend.is_quest_present = present;
+      const panel = new FakePanel();
       game.friend.friend_panel = panel;
       return panel;
     },
@@ -214,29 +220,27 @@ function makeGame(options: { lobbyRemain?: number | null; quest?: boolean } = {}
       const old = game.friend.friend_panel;
       if (old) {
         for (const child of old.list) child.destroy();
+        old.destroy();
         old.active = false;
       }
       game.friend.friend_panel = null;
     },
-  };
-
-  const quest = {
-    id: "player-id",
-    socket: {
-      fetch(name: string, id: string) {
-        if (name !== "db_quest") return Promise.reject(new Error("unexpected " + name));
-        game.fetches += 1;
-        if (game.serverRemain === null) return Promise.reject(new Error("斷線"));
-        return Promise.resolve({ map: 5, pre_id: 3, pre_remain: game.serverRemain, id });
-      },
+    reply(ok) {
+      game.quest.socket.emit("quest_pre", ok);
+    },
+    error(code) {
+      game.quest.socket.emit("quest_error", code);
     },
   };
 
-  const keys: Record<string, unknown> = { Friend: game.friend };
-  if (hasQuest) keys.Quest = quest;
-  if (lobbyRemain !== null) keys.Lobby = { quest: { map: 5, pre_remain: lobbyRemain } };
-
-  game.window = { game: { scene: { keys } }, lang: "tcn" };
+  game.window = {
+    game: {
+      scene: { keys: { Friend: game.friend, Quest: game.quest } },
+      registry: { get: (k: string) => (k === "player" ? game.player : undefined) },
+    },
+    lang: "tcn",
+    localStorage: storage,
+  };
   return game;
 }
 
@@ -244,8 +248,8 @@ function makeGame(options: { lobbyRemain?: number | null; quest?: boolean } = {}
  * 腳本交給 `setInterval` 的那支輪詢。**測試手動代打它，而不是用重裝假裝。**
  *
  * ⚠ 用重裝當輪詢會把一整類 bug 測不到：重裝每次都從乾淨狀態開始，而輪詢是
- * **帶著上一輪的 `st` 跑的** —— 「面板換人了要重掛」「面板關了要收掉但記著
- * 次數」全都在那個狀態差上。
+ * **帶著上一輪的 `st` 跑的** —— 「面板換人了要重掛」「socket 換了要搬監聽」
+ * 全都在那個狀態差上。
  */
 let poll: (() => void) | null = null;
 
@@ -284,22 +288,13 @@ function tick(): void {
   poll!();
 }
 
-/** 讓 Promise 的 then 跑完。 */
-async function flush(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
-}
-
 function status(game: FakeGame) {
   return parsePresentStatus(run(game, PRESENT_STATUS_EXPRESSION));
 }
 
 function ourText(game: FakeGame): FakeText | undefined {
   const panel = game.friend.friend_panel;
-  return panel?.list.find(
-    (o): o is FakeText => o instanceof FakeText && !o.destroyed && o !== panel.friend_max,
-  );
+  return panel?.list.find((o): o is FakeText => o instanceof FakeText && !o.destroyed);
 }
 
 function tooltip(game: FakeGame): FakeContainer | undefined {
@@ -307,85 +302,43 @@ function tooltip(game: FakeGame): FakeContainer | undefined {
   return panel?.list.find((o): o is FakeContainer => o instanceof FakeContainer && !o.destroyed);
 }
 
+const KEY = "ulr.present.不要樂奈|2025-04-24T01:57:22.000Z";
+
 // ---------------------------------------------------------------------------
 
 describe("好友面板的贈送次數", () => {
-  it("present 分頁上畫出剩餘次數，開頭切齊好友格線左緣", async () => {
+  it("畫在下方按鈕列的右端，字體照抄旁邊的標籤", () => {
     const game = makeGame();
-    game.serverRemain = 4;
-    game.openPanel("present");
+    game.openPanel();
     install(game);
-    await flush();
-
-    const text = ourText(game);
-    expect(text).toBeDefined();
-    const panel = game.friend.friend_panel!;
-    // 跟 friend_max 同一條基線 —— 兩行是一對。
-    expect(text!.y).toBe(panel.friend_max.y);
-    // ⚠ 開頭切齊格線左緣，**不是** friend_max 的左右鏡像。
-    expect(text!.x).toBe(panel.tab.list_background.x);
-    expect(text!.x).not.toBe(-panel.friend_max.x);
-    expect(text!.originX).toBe(0);
-    expect(text!.originY).toBe(1);
-    // 字體照抄，不自己挑。
-    expect(text!.style.fontFamily).toBe(panel.friend_max.style.fontFamily);
-    expect(text!.style.fontSize).toBe(panel.friend_max.style.fontSize);
-  });
-
-  it("讀不到格線時退回量好的座標，而不是擺到面板中間", async () => {
-    const game = makeGame();
-    game.serverRemain = 4;
-    const panel = game.openPanel("present");
-    // 分頁還沒建好（refresh_tab 之前的那一瞬間）。
-    panel.tab = undefined as unknown as FakeTab;
-    install(game);
-    await flush();
-
-    expect(ourText(game)!.x).toBe(-232);
-  });
-
-  it("面板上只有計數那一行，沒有標點也沒有說明", async () => {
-    const game = makeGame();
-    game.serverRemain = 4;
-    game.openPanel("present");
-    install(game);
-    await flush();
-
-    const shown = ourText(game)!.text;
-    expect(shown).toBe("Presents 4/5");
-    expect(shown).not.toMatch(/[（）()。，、：:]/);
-    // 純 ASCII —— 對照組 Friends 171/200 在每種語言也都是英文。
-    expect(shown).toMatch(/^[\x20-\x7e]+$/);
-  });
-
-  it("說明只出現在 tooltip，而且預設是收起來的", async () => {
-    const game = makeGame();
-    game.openPanel("present");
-    install(game);
-    await flush();
-
-    const tip = tooltip(game);
-    expect(tip).toBeDefined();
-    expect(tip!.visible).toBe(false);
 
     const text = ourText(game)!;
-    expect(text.interactive).toBe(true);
-    text.emit("pointerover");
-    expect(tip!.visible).toBe(true);
-    text.emit("pointerout");
-    expect(tip!.visible).toBe(false);
-
-    // 說明字**只在** tooltip 裡，面板上那一格不帶任何說明。
-    const tipText = tip!.list.find((o): o is FakeText => o instanceof FakeText)!;
-    expect(tipText.text).toBe("今日剩餘贈送任務次數");
-    expect(text.text).not.toContain("贈送");
+    expect(text).toBeDefined();
+    // 右緣 644 往內 8，跟「搜尋」同一條線
+    expect(text.x).toBe(636);
+    expect(text.y).toBe(527);
+    expect(text.originX).toBe(1);
+    expect(text.originY).toBe(0.5);
+    expect(text.style.fontFamily).toBe("font_light");
+    expect(text.style.fontSize).toBe(12);
+    expect(text.text).toBe("剩餘贈送: 5/5");
   });
 
-  it("不是 present 分頁就完全不畫", async () => {
+  it("讀不到面板的底圖與標籤時退回量好的座標", () => {
     const game = makeGame();
-    game.openPanel("friend");
+    const panel = game.openPanel();
+    panel.panel_base = undefined;
+    panel.panel_filter_label = undefined;
     install(game);
-    await flush();
+
+    expect(ourText(game)!.x).toBe(636);
+    expect(ourText(game)!.y).toBe(527);
+  });
+
+  it("從 FRIENDLIST 鈕開的面板完全不畫", () => {
+    const game = makeGame();
+    game.openPanel(false);
+    install(game);
 
     expect(ourText(game)).toBeUndefined();
     expect(status(game).mounted).toBe(false);
@@ -393,226 +346,243 @@ describe("好友面板的贈送次數", () => {
     expect(status(game).reason).toBeNull();
   });
 
-  it("次數取自伺服器的 pre_remain，不是自己數的", async () => {
-    const game = makeGame({ lobbyRemain: 5 });
-    game.serverRemain = 2;
-    game.openPanel("present");
-    install(game);
-    await flush();
-
-    expect(game.fetches).toBeGreaterThan(0);
-    expect(ourText(game)!.text).toBe("Presents 2/5");
-    expect(status(game).remain).toBe(2);
-  });
-
-  it("Quest 場景不在時用大廳那份快照墊著", async () => {
-    const game = makeGame({ quest: false, lobbyRemain: 3 });
-    game.openPanel("present");
-    install(game);
-    await flush();
-
-    expect(game.fetches).toBe(0);
-    expect(ourText(game)!.text).toBe("Presents 3/5");
-    // 問不到伺服器不算錯誤 —— 快照就是拿來墊這個空檔的。
-    expect(status(game).reason).toBeNull();
-  });
-
-  it("送出成功才扣，AP 不足或對方滿了都不扣", async () => {
+  it("送成功才扣；quest_pre 回 false 不扣", () => {
     const game = makeGame();
-    game.serverRemain = 5;
-    game.openPanel("present");
+    game.openPanel();
     install(game);
-    await flush();
-    expect(ourText(game)!.text).toBe("Presents 5/5");
 
-    // 3 = AP 不足、4 = 對方任務欄滿 —— 這一次根本沒送成。
-    game.friend.events.emit("quest_present_code", 3);
-    game.friend.events.emit("quest_present_code", 4);
-    await flush();
-    expect(ourText(game)!.text).toBe("Presents 5/5");
+    game.reply(false);
+    expect(status(game).remain).toBe(5);
 
-    // 0 = 送成了。伺服器同時也少一次。
-    game.serverRemain = 4;
-    game.friend.events.emit("quest_present_code", 0);
-    await flush();
-    expect(ourText(game)!.text).toBe("Presents 4/5");
+    game.reply(true);
+    expect(status(game).remain).toBe(4);
+    expect(ourText(game)!.text).toBe("剩餘贈送: 4/5");
   });
 
-  it("伺服器說今天不能再送就直接歸零，而且變紅", async () => {
+  it("面板送完會關掉，再開時數字還在（存在 localStorage）", () => {
     const game = makeGame();
-    game.serverRemain = 1;
-    game.openPanel("present");
+    game.openPanel();
     install(game);
-    await flush();
-    expect(ourText(game)!.style.color).toBe("black");
 
-    game.serverRemain = 0;
-    game.friend.events.emit("quest_present_code", 5);
-    await flush();
+    // 官方：送成功 → 好友面板關掉
+    game.reply(true);
+    game.closePanel();
+    tick();
+    expect(status(game).mounted).toBe(false);
 
-    expect(ourText(game)!.text).toBe("Presents 0/5");
-    expect(ourText(game)!.style.color).toBe("#a01010");
+    game.reply(true);
+    game.openPanel();
+    tick();
+    expect(ourText(game)!.text).toBe("剩餘贈送: 3/5");
+
+    // 重載頁面（＝重裝）也記得
+    install(game);
+    expect(status(game).remain).toBe(3);
+    expect(JSON.parse(game.storage.getItem(KEY)!).sent).toBe(2);
   });
 
-  it("重裝不會讓監聽變兩份（送一次只扣一次）", async () => {
+  it("伺服器說今天不能再送就直接歸零，而且變紅", () => {
     const game = makeGame();
-    game.serverRemain = 5;
-    game.openPanel("present");
+    game.openPanel();
     install(game);
-    await flush();
+    expect(ourText(game)!.style.color).toBe("#ffffff");
 
+    game.error("PRESENT_RECEIVER_FULL");
+    expect(status(game).remain).toBe(5);
+
+    game.error("PRESENT_LIMIT");
+    expect(ourText(game)!.text).toBe("剩餘贈送: 0/5");
+    expect(ourText(game)!.style.color).toBe("#ff7070");
+  });
+
+  it("記成滿了卻又送成功 —— 伺服器已經換日，從 1 重新數", () => {
+    const game = makeGame();
+    game.openPanel();
     install(game);
-    install(game);
-    await flush();
 
-    expect(game.friend.events.count("quest_present_code")).toBe(1);
-
-    // 伺服器那邊先不動，才看得出本機扣了幾次。
-    game.friend.events.emit("quest_present_code", 0);
+    game.error("PRESENT_LIMIT");
+    game.reply(true);
     expect(status(game).remain).toBe(4);
   });
 
-  it("面板重開會重新掛上去（舊的跟著舊面板一起死）", async () => {
+  it("換日了就從頭數", () => {
     const game = makeGame();
-    game.serverRemain = 5;
-    const first = game.openPanel("present");
+    game.storage.setItem(KEY, JSON.stringify({ day: "2000-01-01", sent: 5, full: true }));
+    game.openPanel();
     install(game);
-    await flush();
-    const firstText = ourText(game)!;
-    expect(firstText.destroyed).toBe(false);
 
-    game.closePanel();
-    game.openPanel("present");
-    // ⚠ 這裡是**輪詢**發現面板換人了，不是重裝 —— 玩家不會為了看數字去重連。
+    expect(ourText(game)!.text).toBe("剩餘贈送: 5/5");
+  });
+
+  it("台灣時間 03:00 換日：02:59 送的算前一天", () => {
+    vi.useFakeTimers();
+    try {
+      // 台灣 10/10 02:59 ＝ UTC 10/09 18:59
+      vi.setSystemTime(new Date("2026-10-09T18:59:00Z"));
+      const game = makeGame();
+      game.openPanel();
+      install(game);
+      game.reply(true);
+      game.reply(true);
+      expect(status(game).remain).toBe(3);
+
+      // 台灣 03:00 —— 伺服器換日
+      vi.setSystemTime(new Date("2026-10-09T19:00:00Z"));
+      game.openPanel();
+      tick();
+      expect(ourText(game)!.text).toBe("剩餘贈送: 5/5");
+
+      // 台灣當天 23:30（日本時間已經過午夜）—— 還是同一天
+      game.reply(true);
+      vi.setSystemTime(new Date("2026-10-10T15:30:00Z"));
+      game.openPanel();
+      tick();
+      expect(ourText(game)!.text).toBe("剩餘贈送: 4/5");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("數到超過上限還送得出去，分母跟著頂上去", () => {
+    const game = makeGame();
+    game.openPanel();
+    install(game);
+    for (let i = 0; i < 6; i++) game.reply(true);
+
+    expect(status(game).max).toBe(6);
+    expect(status(game).remain).toBe(0);
+  });
+
+  it("不同角色分開記", () => {
+    const game = makeGame();
+    game.openPanel();
+    install(game);
+    game.reply(true);
+
+    game.player = { player_name: "燈皇", regist_at: "2024-01-01T00:00:00.000Z" };
+    game.openPanel();
     tick();
-    await flush();
+    expect(ourText(game)!.text).toBe("剩餘贈送: 5/5");
+  });
+
+  it("還沒登入時不畫假數字", () => {
+    const game = makeGame();
+    game.player = null;
+    game.openPanel();
+    install(game);
+
+    expect(status(game).remain).toBeNull();
+    expect(ourText(game)!.text).toBe("");
+  });
+
+  it("Quest 的 socket 換了，監聽跟著搬過去", () => {
+    const game = makeGame();
+    game.openPanel();
+    install(game);
+    const old = game.quest.socket;
+
+    game.quest.socket = new FakeSocket();
+    tick();
+    expect(old.count("quest_pre")).toBe(0);
+    expect(old.count("quest_error")).toBe(0);
+    expect(game.quest.socket.count("quest_pre")).toBe(1);
+
+    game.reply(true);
+    expect(status(game).remain).toBe(4);
+  });
+
+  it("重裝不會讓監聽變兩份（送一次只扣一次）", () => {
+    const game = makeGame();
+    game.openPanel();
+    install(game);
+    install(game);
+    install(game);
+
+    expect(game.quest.socket.count("quest_pre")).toBe(1);
+    expect(game.quest.socket.count("quest_error")).toBe(1);
+    game.reply(true);
+    expect(status(game).remain).toBe(4);
+  });
+
+  it("面板重開會重新掛上去（舊的跟著舊面板一起死）", () => {
+    const game = makeGame();
+    const first = game.openPanel();
+    install(game);
+    const firstText = ourText(game)!;
+
+    game.openPanel();
+    // ⚠ 這裡是**輪詢**發現面板換人了，不是重裝。
+    tick();
 
     expect(firstText.destroyed).toBe(true);
     expect(first.active).toBe(false);
     const second = ourText(game)!;
     expect(second).not.toBe(firstText);
-    expect(second.text).toBe("Presents 5/5");
+    expect(second.text).toBe("剩餘贈送: 5/5");
   });
 
-  it("面板關了就收掉，但次數記著 —— 再開時不必先空一下", async () => {
-    const game = makeGame({ lobbyRemain: null });
-    game.serverRemain = 2;
-    game.openPanel("present");
-    install(game);
-    await flush();
-    expect(status(game).remain).toBe(2);
-
-    game.closePanel();
-    tick();
-    expect(status(game).mounted).toBe(false);
-    // 收掉的是畫面，不是知道的事。
-    expect(status(game).remain).toBe(2);
-
-    // ⚠ 再開時伺服器改口了（玩家在別台機器上送過）—— 以伺服器為準。
-    game.serverRemain = 1;
-    game.openPanel("present");
-    tick();
-    // 先畫記著的那個數字（不空一下），fetch 回來才改口。
-    expect(ourText(game)!.text).toBe("Presents 2/5");
-    await flush();
-    expect(ourText(game)!.text).toBe("Presents 1/5");
-  });
-
-  it("切到別的分頁會收掉，切回 present 再出現", async () => {
+  it("說明只出現在 tooltip，而且預設是收起來的", () => {
     const game = makeGame();
-    game.serverRemain = 5;
-    const panel = game.openPanel("present");
+    game.openPanel();
     install(game);
-    await flush();
-    expect(ourText(game)).toBeDefined();
 
-    // refresh_tab 只換 panel.tab，面板本身不重建。
-    panel.tab_name = "friend";
-    tick();
-    expect(ourText(game)).toBeUndefined();
+    const tip = tooltip(game)!;
+    expect(tip.visible).toBe(false);
 
-    panel.tab_name = "present";
-    tick();
-    await flush();
-    expect(ourText(game)!.text).toBe("Presents 5/5");
+    const text = ourText(game)!;
+    expect(text.interactive).toBe(true);
+    text.emit("pointerover");
+    expect(tip.visible).toBe(true);
+    text.emit("pointerout");
+    expect(tip.visible).toBe(false);
+
+    const tipText = tip.list.find((o): o is FakeText => o instanceof FakeText)!;
+    // 講清楚是本機數的、不是官方伺服器給的；換行要真的是換行（嵌進腳本沒被吃掉）
+    expect(tipText.text).toBe(
+      "今日剩餘贈送次數（本機記錄）\n不是官方伺服器提供的數字，其他裝置送出的不計入",
+    );
   });
 
-  it("伺服器給的數字比預設上限大時，分母跟著頂上去", async () => {
-    const game = makeGame({ lobbyRemain: null });
-    game.serverRemain = 8;
-    game.openPanel("present");
-    install(game);
-    await flush();
-
-    expect(ourText(game)!.text).toBe("Presents 8/8");
-    expect(status(game).max).toBe(8);
-  });
-
-  it("db_quest 問不到時把原因帶回來，但不畫假數字", async () => {
-    const game = makeGame({ lobbyRemain: null });
-    game.serverRemain = null;
-    game.openPanel("present");
-    install(game);
-    await flush();
-
-    expect(status(game).remain).toBeNull();
-    expect(status(game).reason).toContain("db_quest");
-    expect(ourText(game)!.text).toBe("");
+  it("面板上那一行跟著語言走，格式照抄「好友人數: 1/15」而且很短", () => {
+    for (const [lang, expected] of [
+      ["ja", "残り送信: 5/5"],
+      ["en", "Gifts left: 5/5"],
+      ["kr", "남은 선물: 5/5"],
+      ["scn", "剩余赠送: 5/5"],
+      ["tcn", "剩餘贈送: 5/5"],
+    ] as const) {
+      const game = makeGame();
+      game.window.lang = lang;
+      game.openPanel();
+      install(game);
+      const shown = ourText(game)!.text;
+      expect(shown).toBe(expected);
+      expect(shown.split(":")[0]!.length).toBeLessThanOrEqual(11);
+    }
   });
 
   it("狀態帶著版本號，而且沒裝的時候說得出來", () => {
     const game = makeGame();
     expect(status(game).installed).toBe(false);
 
-    game.openPanel("present");
+    game.openPanel();
     install(game);
     expect(status(game).installed).toBe(true);
     expect(status(game).version).toBe(PRESENT_SCRIPT_VERSION);
   });
 
-  it("拆得乾淨：物件、監聽、旗標都不留", async () => {
+  it("拆得乾淨：物件、監聽、旗標都不留", () => {
     const game = makeGame();
-    game.openPanel("present");
+    game.openPanel();
     install(game);
-    await flush();
     const text = ourText(game)!;
 
     expect(run(game, PRESENT_UNINSTALL_EXPRESSION)).toBe("ok");
     expect(text.destroyed).toBe(true);
-    expect(game.friend.events.count("quest_present_code")).toBe(0);
+    expect(game.quest.socket.count("quest_pre")).toBe(0);
+    expect(game.quest.socket.count("quest_error")).toBe(0);
     expect(game.window.__ulrPresent).toBeUndefined();
     expect(run(game, PRESENT_UNINSTALL_EXPRESSION)).toBe("not-installed");
-  });
-
-  it("每種語言都一樣是英文 —— 跟右邊的 Friends 同一種東西", async () => {
-    for (const lang of ["ja", "en", "kr", "scn", "tcn"] as const) {
-      const game = makeGame();
-      game.window.lang = lang;
-      game.serverRemain = 4;
-      game.openPanel("present");
-      install(game);
-      await flush();
-      // ⚠ 對照組 friend_max 在每種語言都是英文（客戶端寫死的），跟著它走。
-      expect(ourText(game)!.text).toBe("Presents 4/5");
-    }
-  });
-
-  it("tooltip 才跟著語言走", async () => {
-    for (const [lang, expected] of [
-      ["ja", "本日残りのクエスト送信回数"],
-      ["en", "Quest gifts left today"],
-      ["kr", "오늘 남은 퀘스트 전송 횟수"],
-      ["scn", "今日剩余赠送任务次数"],
-      ["tcn", "今日剩餘贈送任務次數"],
-    ] as const) {
-      const game = makeGame();
-      game.window.lang = lang;
-      game.openPanel("present");
-      install(game);
-      await flush();
-      const tipText = tooltip(game)!.list.find((o): o is FakeText => o instanceof FakeText)!;
-      expect(tipText.text).toBe(expected);
-    }
   });
 
   it("讀不懂的回應當成沒裝，原文帶在 reason 裡", () => {
