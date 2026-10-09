@@ -7,7 +7,8 @@ export default tseslint.config(
     // ⚠ `.wrangler/` 是 wrangler 的產物（打包後的 bundle 與本機狀態）。
     // 不擋的話 lint 會去檢查那份 bundle，然後對著 Cloudflare 的全域
     // （Response、WebSocketPair…）報一整排 no-undef。
-    ignores: ["**/dist/**", "**/node_modules/**", "**/.wrangler/**", "**/*.json"],
+    // tools/.probe-* 是對著跑著的遊戲查東西的一次性腳本（/probe-game），不進版控、不該擋發版。
+    ignores: ["**/dist/**", "**/node_modules/**", "**/.wrangler/**", "**/*.json", "tools/.probe-*"],
   },
   {
     // scripts/ 底下是給 Node 直接跑的建置腳本，不是 package 的一部分。

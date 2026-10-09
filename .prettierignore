@@ -8,3 +8,7 @@ packages/rule-schema/test-vectors/canonical.json
 
 # wrangler 的產物（apps/link-worker）
 .wrangler/
+
+# 對著跑著的遊戲查東西的一次性探測腳本（/probe-game）：不進版控、不該擋發版
+tools/.probe-*
+tools/.shot-*
