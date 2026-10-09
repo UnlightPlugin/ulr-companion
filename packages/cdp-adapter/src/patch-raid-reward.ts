@@ -41,12 +41,13 @@
  * | 模式   | 行為                                                       |
  * | ------ | ---------------------------------------------------------- |
  * | `all`  | 官方原樣，一頁一頁按                                       |
- * | `once` | 我們畫**一張**摘要面板列出這一批所有渦的結算與獎勵，一顆 OK；|
- * |        | 面板上有一個「按 OK 後照樣顯示官方詳細畫面」的開關          |
+ * | `once` | 我們畫**一張**摘要面板列出這一批所有渦的結算與獎勵，一顆 OK  |
  * | `none` | 什麼都不畫；托盤記錄檔照樣記一行                            |
  *
- * 模式可以在托盤設定，也可以在摘要面板上直接切（三個字樣點一下），切了會
- * 回報托盤存起來。
+ * 模式只在托盤設定。摘要面板 2026-10-05 照玩家要求重做：照官方結算頁的底圖、立繪、
+ * 字型與格子條排，每個渦的**每一樣**獎勵都畫官方卡面（不截「還有幾個」），超過一頁
+ * 用官方翻頁鈕。舊版面板上的模式切換與「OK 後顯示官方詳細畫面」開關拿掉了 ——
+ * 「不像遊戲裡的東西」，而且一次性通知本來就是要按一下就結束。
  *
  * ## 掛法
  *
@@ -56,8 +57,7 @@
  *
  * - `all`：畫面方法照跑，演完回報一行。
  * - `none`：畫面方法變空的，官方一路 fetch → 回報領取 → 重讀，一閃就過。
- * - `once`：同 none，官方跑完後畫摘要；勾了詳細就把收集到的渦用官方畫面方法
- *   再演一次（純演出，領取早就回報過了）。
+ * - `once`：同 none，官方跑完後畫摘要。
  *
  * ⚠ 獎勵長 `{ id, type, slot, value }`，名字照官方模組私有的 `NR()` 自己查
  * （`CharaCards`／`WeaponCards`／`EventCards`／`AvatarItems`／`AvatarParts`）。
@@ -68,11 +68,12 @@
  */
 
 import { embedJson } from "./embed.js";
+import { WEBPACK_REQUIRE_SNIPPET } from "./patch-penalty.js";
 
 const FLAG = "__ulrRaidReward";
 
 /** 腳本版本。**改動注入腳本裡任何一行就 +1**，修 bug 也算。 */
-export const RAID_REWARD_SCRIPT_VERSION = 7;
+export const RAID_REWARD_SCRIPT_VERSION = 8;
 
 export type RaidRewardMode = "all" | "once" | "none";
 
@@ -84,99 +85,60 @@ export function isRaidRewardMode(v: unknown): v is RaidRewardMode {
   return v === "all" || v === "once" || v === "none";
 }
 
-/** 摘要面板上的字。 */
+/**
+ * 摘要面板上的字。獎勵分類與「發現者」優先用官方 RaidUITexts.result 的（label_reward_founder…），
+ * 這裡的是讀不到時的退路。名次照官方排行頁的「[N Pts.]」。
+ */
 export const RAID_REWARD_LABELS: Record<
   string,
   {
-    title: string;
     rank: string;
     founder: string;
-    defeat: string;
     rewardFounder: string;
     rewardParticipate: string;
     rewardDefeat: string;
     rewardRank: string;
-    detail: string;
-    modeAll: string;
-    modeOnce: string;
-    modeNone: string;
-    more: string;
   }
 > = {
   ja: {
-    title: "渦 撃退結果",
-    rank: "__RANK__位 ・ __DMG__ pts.",
+    rank: "__RANK__位  [__DMG__Pts.]",
     founder: "発見者",
-    defeat: "撃破者",
-    rewardFounder: "発見",
-    rewardParticipate: "参加",
-    rewardDefeat: "撃破",
-    rewardRank: "順位",
-    detail: "OK の後に公式の詳細画面も表示",
-    modeAll: "毎回表示",
-    modeOnce: "まとめて1回",
-    modeNone: "表示しない",
-    more: "…他 __N__ 件",
+    rewardFounder: "発見報酬",
+    rewardParticipate: "参加報酬",
+    rewardDefeat: "撃破報酬",
+    rewardRank: "ランキング報酬",
   },
   en: {
-    title: "Vortex results",
-    rank: "#__RANK__ ・ __DMG__ pts.",
+    rank: "#__RANK__  [__DMG__Pts.]",
     founder: "Discoverer",
-    defeat: "Defeated by",
     rewardFounder: "Discovery",
     rewardParticipate: "Participation",
     rewardDefeat: "Victory",
-    rewardRank: "Position",
-    detail: "Show the official detail pages after OK",
-    modeAll: "Show all",
-    modeOnce: "Summary once",
-    modeNone: "Never",
-    more: "…and __N__ more",
+    rewardRank: "Ranking",
   },
   kr: {
-    title: "소용돌이 격퇴 결과",
-    rank: "__RANK__위 ・ __DMG__ pts.",
+    rank: "__RANK__위  [__DMG__Pts.]",
     founder: "발견자",
-    defeat: "격퇴자",
-    rewardFounder: "발견",
-    rewardParticipate: "참가",
-    rewardDefeat: "격퇴",
-    rewardRank: "랭킹",
-    detail: "OK 후 공식 상세 화면도 표시",
-    modeAll: "모두 표시",
-    modeOnce: "요약 1회",
-    modeNone: "표시 안 함",
-    more: "…외 __N__건",
+    rewardFounder: "발견 보상",
+    rewardParticipate: "참가 보상",
+    rewardDefeat: "격퇴 보상",
+    rewardRank: "랭킹 보상",
   },
   scn: {
-    title: "漩涡击破结算",
-    rank: "第 __RANK__ 名 ・ __DMG__ pts.",
+    rank: "第 __RANK__ 名  [__DMG__Pts.]",
     founder: "发现者",
-    defeat: "击破者",
-    rewardFounder: "发现",
-    rewardParticipate: "参加",
-    rewardDefeat: "击破",
-    rewardRank: "排名",
-    detail: "按 OK 后照样显示官方详细画面",
-    modeAll: "全部通知",
-    modeOnce: "只通知一次",
-    modeNone: "不再通知",
-    more: "…还有 __N__ 个",
+    rewardFounder: "发现奖励",
+    rewardParticipate: "参加奖励",
+    rewardDefeat: "击破奖励",
+    rewardRank: "排行榜奖励",
   },
   tcn: {
-    title: "渦擊破結算",
-    rank: "第 __RANK__ 名 ・ __DMG__ pts.",
+    rank: "第 __RANK__ 名  [__DMG__Pts.]",
     founder: "發現者",
-    defeat: "擊破者",
-    rewardFounder: "發現",
-    rewardParticipate: "參加",
-    rewardDefeat: "擊破",
-    rewardRank: "排名",
-    detail: "按 OK 後照樣顯示官方詳細畫面",
-    modeAll: "全部通知",
-    modeOnce: "只通知一次",
-    modeNone: "不再通知",
-    more: "…還有 __N__ 個",
+    rewardFounder: "發現獎勵",
+    rewardParticipate: "參加獎勵",
+    rewardDefeat: "擊破獎勵",
+    rewardRank: "排行榜獎勵",
   },
 };
 
@@ -307,12 +269,12 @@ export function buildRaidRewardPatchScript(options: RaidRewardPatchOptions): str
     rewardTypes: { chara: 1, slot: 2, avatarItem: 3, avatarPart: 4, gem: 5 },
     slotWeapon: 0,
     slotEvent: 2,
-    maxShown: 6,
     ledgerWatch: options.ledgerWatch ?? RAID_LEDGER_WATCH,
   };
 
   return `(function () {
   "use strict";
+  ${WEBPACK_REQUIRE_SNIPPET}
   var CFG = JSON.parse(${embedJson(config)});
   var FLAG = ${JSON.stringify(FLAG)};
   var FONT = "font_light";
@@ -529,96 +491,220 @@ export function buildRaidRewardPatchScript(options: RaidRewardPatchOptions): str
     try { if (L.setHandler) G.registry.events.off("setdata", L.setHandler); } catch (e) {}
   }
 
-  // ---- 摘要面板 -------------------------------------------------------------
+  // ---- 摘要面板：官方結算頁的底圖與排法 ---------------------------------------
+  //
+  // 2026-10-05 讀的官方 create_reward_init／image／rank：
+  //   底圖 raid_result_panel（576x336，標題 DEFEATED CORE! 烤在圖上）、立繪 result_panel_overlay
+  //   （獎勵頁 setCrop(0,0,116,336) 只留左邊人物）、OK raid_panel_ok 在 (380,488)；
+  //   標籤 font_heavy 12 黑描邊 3、內容 font_light 12、格子白 8% 圓角條；
+  //   獎勵卡用 $T.create_card(scene, id, type, slot, x, y)；翻頁 btn_arrow-2 在 (320,456)/(440,456)，
+  //   中間「1 / N」，到頭繞回去。
+  // 一列一個渦：左邊渦名／名次／發現者，右邊這個渦拿到的每一樣獎勵的卡面（縮小、數量標在右下），
+  // 卡面滑上去出分類＋名字。一頁 4 個渦，全部都列 —— 不截「還有幾個」。
+  var P = { x: 380, y: 340, w: 576, h: 336 };
+  var PL = P.x - P.w / 2, PT = P.y - P.h / 2;
+  var ROW = { left: PL + 120, right: PL + P.w - 16, top: PT + 44, h: 56, gap: 2, per: 4 };
+  var INFO_X = PL + 128, INFO_W = 168;
+  var CARD = { x0: PL + 304, h: 48, step: 36, gap: 6 };
+  var REWARD_KEYS = ["founder", "participate", "defeat", "rank"];
+
+  /** 官方畫卡的那一支（webpack 模組裡的 $T）。模組 id 每次發版都變，掃特徵字串；找一次記著。 */
+  function cardFactory(st) {
+    if (st.T !== undefined) return st.T;
+    st.T = null;
+    try {
+      var req = typeof ulrWebpackRequire === "function" ? ulrWebpackRequire() : null;
+      if (req === null) return null;
+      for (var id in req.m) {
+        var src;
+        try { src = String(req.m[id]); } catch (e) { continue; }
+        if (src.indexOf("create_card(") === -1 || src.indexOf("TG_BASE_UP") === -1) continue;
+        var mod;
+        try { mod = req(id); } catch (e) { continue; }
+        for (var k in mod) {
+          if (mod[k] && typeof mod[k] === "object" && typeof mod[k].create_card === "function") { st.T = mod[k]; return st.T; }
+        }
+      }
+    } catch (e) {}
+    return null;
+  }
+  /** 官方 RaidUITexts.result 的字（獎勵分類、發現者）；讀不到用自己的。 */
+  function uiText(sc, key, fallback) {
+    try {
+      var t = sc.cache.json.get("RaidUITexts");
+      var v = t && t.result ? t.result[key] : null;
+      if (typeof v === "string" && v) return v;
+    } catch (e) {}
+    return fallback;
+  }
+  function labelStyle() { return { fontFamily: "font_heavy", fontSize: 12, resolution: 2 }; }
+  function valueStyle() { return { fontFamily: FONT, fontSize: 12, resolution: 2 }; }
+  /** 放不下就截成「...」（官方是捲動字，面板上捲來捲去太吵） */
+  function fit(t, maxW) {
+    var full = String(t.text), n = full.length;
+    while (n > 1 && t.width > maxW) { n--; t.setText(full.substring(0, n) + "..."); }
+    return t;
+  }
   function closePanel(st) {
     if (!st.panel) return;
+    destroyAll(st.panel.body);
     destroyAll(st.panel.objs);
     st.panel = null;
   }
-  function showSummary(st, sc, entries) {
+  /** 滑上去才出來的說明：黑底小字，貼在目標上方。 */
+  function hoverTip(sc, target, text, depth, holder) {
+    var tip = [];
+    target.on("pointerover", function () {
+      destroyAll(tip);
+      var tt = sc.add.text(target.x, target.y - target.height / 2 - 3, text, { fontFamily: FONT, fontSize: 11, color: "white", resolution: 2 }).setOrigin(0.5, 1).setDepth(depth + 1);
+      var bg = sc.rexUI.add.roundRectangle(tt.x, tt.y - tt.height / 2, tt.width + 10, tt.height + 6, 2, 0x000000, 0.85).setDepth(depth);
+      tip.push(bg, tt);
+      holder.push(bg, tt);
+    });
+    target.on("pointerout", function () { destroyAll(tip); });
+  }
+  /** 一個渦的獎勵攤平：[{ code, label }]，照官方頁的順序（發現→參加→擊破→排行）。 */
+  function rewardList(sc, rw) {
+    var labels = {
+      founder: uiText(sc, "label_reward_founder", L().rewardFounder),
+      participate: uiText(sc, "label_reward_participate", L().rewardParticipate),
+      defeat: uiText(sc, "label_reward_defeat", L().rewardDefeat),
+      rank: uiText(sc, "label_reward_rank", L().rewardRank)
+    };
+    var out = [];
+    for (var k = 0; k < REWARD_KEYS.length; k++) {
+      var arr = rw && Array.isArray(rw[REWARD_KEYS[k]]) ? rw[REWARD_KEYS[k]] : [];
+      for (var i = 0; i < arr.length; i++) if (arr[i] && typeof arr[i] === "object") out.push({ code: arr[i], label: labels[REWARD_KEYS[k]], group: k });
+    }
+    return out;
+  }
+  /** 一列的卡面。官方 create_card 找不到時退回寫名字（獎勵一樣都不能漏）。 */
+  function drawRewards(st, sc, list, cy, D, body) {
+    var right = ROW.right - 6;
+    if (!list.length) {
+      body.push(sc.add.text(CARD.x0, cy, "-", valueStyle()).setOrigin(0, 0.5).setDepth(D + 2));
+      return;
+    }
+    var T = cardFactory(st);
+    if (T === null) {
+      var names = list.map(function (r) { return itemName(sc, r.code); });
+      body.push(sc.add.text(CARD.x0, cy, names.join(" / "), { fontFamily: FONT, fontSize: 11, resolution: 2, wordWrap: { width: right - CARD.x0 } }).setOrigin(0, 0.5).setDepth(D + 2));
+      return;
+    }
+    var scale = CARD.h / 240, cw = Math.round(168 * scale);
+    // 分類之間多空一點；放不下就把間距縮到疊在一起（像手牌）
+    var groups = 0;
+    for (var g = 1; g < list.length; g++) if (list[g].group !== list[g - 1].group) groups++;
+    var room = right - CARD.x0 - cw - groups * CARD.gap;
+    var step = list.length > 1 ? Math.min(CARD.step, room / (list.length - 1)) : CARD.step;
+    var x = CARD.x0 + cw / 2;
+    for (var i = 0; i < list.length; i++) {
+      var r = list[i];
+      if (i > 0) x += step + (r.group !== list[i - 1].group ? CARD.gap : 0);
+      var c = r.code, card = null;
+      try { card = T.create_card(sc, c.id, c.type, c.slot, x, cy, {}); } catch (e) { card = null; }
+      var name = itemName(sc, c);
+      if (card) {
+        card.setScale(scale).setDepth(D + 2 + i * 0.01);
+        body.push(card);
+        // 數量標在卡的右下角（縮小的卡面上看不清）
+        if (c.value > 1 || c.type === CFG.rewardTypes.gem) {
+          body.push(sc.add.text(x + cw / 2 + 1, cy + CARD.h / 2 + 1, "x" + c.value, valueStyle()).setOrigin(1, 1).setStroke("black", 3).setDepth(D + 3));
+        }
+      } else {
+        body.push(sc.add.text(x, cy, name, { fontFamily: FONT, fontSize: 10, resolution: 2, wordWrap: { width: cw } }).setOrigin(0.5, 0.5).setDepth(D + 2));
+      }
+      var hit = sc.add.zone(x, cy, cw, CARD.h).setDepth(D + 4).setInteractive();
+      hoverTip(sc, hit, r.label + "  " + name, D + 6, body);
+      body.push(hit);
+    }
+  }
+  function drawRow(st, sc, e, raw, top, D, body) {
+    var cy = top + ROW.h / 2;
+    body.push(sc.rexUI.add.roundRectangle(ROW.left, top, ROW.right - ROW.left, ROW.h, 2, 0xffffff, 0.08).setOrigin(0, 0).setDepth(D + 2));
+    var name = e.prf && e.prf !== e.boss ? "\\uff62" + e.prf + "\\uff63" + e.boss : e.boss || e.prf;
+    body.push(fit(sc.add.text(INFO_X, top + 12, name, labelStyle()).setStroke("black", 3).setOrigin(0, 0.5).setDepth(D + 3), INFO_W));
+    var rank = e.rank === null ? "-" : L().rank.replace("__RANK__", e.rank.toLocaleString()).replace("__DMG__", e.dmg === null ? "-" : e.dmg.toLocaleString());
+    body.push(fit(sc.add.text(INFO_X, top + 29, rank, valueStyle()).setOrigin(0, 0.5).setDepth(D + 3), INFO_W));
+    var founder = uiText(sc, "label_founder", L().founder) + "  " + e.founder;
+    body.push(fit(sc.add.text(INFO_X, top + 45, founder, { fontFamily: FONT, fontSize: 10, color: "#bdbdbd", resolution: 2 }).setOrigin(0, 0.5).setDepth(D + 3), INFO_W));
+    drawRewards(st, sc, rewardList(sc, raw && raw.raid_reward), cy, D, body);
+  }
+  /** 底下的翻頁列：照官方排行頁（btn_arrow-2、「1 / N」、到頭繞回去）。只有一頁就不畫。 */
+  function addPager(sc, D, objs, pages, onPage) {
+    if (pages <= 1) return;
+    var y = PT + 284, page = 0;
+    var cur = sc.add.text(P.x - 20, y, "1", valueStyle()).setOrigin(0.5, 0.5).setDepth(D + 2);
+    objs.push(sc.add.text(P.x, y, "/", valueStyle()).setOrigin(0.5, 0.5).setDepth(D + 2), cur,
+      sc.add.text(P.x + 20, y, String(pages), valueStyle()).setOrigin(0.5, 0.5).setDepth(D + 2));
+    var tex = sc.textures.exists("btn_arrow-2") ? "btn_arrow-2" : sc.textures.exists("btn_arrow") ? "btn_arrow" : null;
+    [[-1, P.x - 60, 1], [1, P.x + 60, 0]].forEach(function (a) {
+      var dir = a[0], btn;
+      if (tex !== null) {
+        btn = sc.add.image(a[1], y, tex, 0).setOrigin(a[2], 0.5).setFlipX(dir > 0);
+        btn.on("pointerover", function () { btn.setTexture(tex, 1); });
+        btn.on("pointerout", function () { btn.setTexture(tex, 0); });
+      } else {
+        btn = sc.add.text(a[1], y, dir < 0 ? "\\u2039" : "\\u203a", labelStyle()).setOrigin(a[2], 0.5);
+      }
+      btn.setDepth(D + 3).setInteractive({ useHandCursor: true });
+      btn.on("pointerup", function () {
+        try { if (sc.ulse01) sc.ulse01.play(); } catch (e) {}
+        page = (page + dir + pages) % pages;
+        cur.setText(String(page + 1));
+        onPage(page);
+      });
+      objs.push(btn);
+    });
+  }
+  function fadeIn(sc, list) {
+    if (!sc.tweens || typeof sc.tweens.add !== "function") return;
+    var targets = list.filter(function (o) { return alive(o) && o.type !== "Zone"; });
+    for (var i = 0; i < targets.length; i++) { targets[i].y -= 8; targets[i].setAlpha(0); }
+    sc.tweens.add({ targets: targets, alpha: 1, y: "+=8", duration: 300, ease: "Power3" });
+  }
+  /** 一張面板列完這一批所有渦，一顆 OK。raw 是官方給的原始清單（獎勵碼畫卡面用）。 */
+  function showSummary(st, sc, entries, raw) {
     return new Promise(function (resolve) {
       closePanel(st);
       var D = 2500;
-      var objs = [];
-      var zone = sc.add.zone(380, 340, 760, 680).setDepth(D).setInteractive();
-      objs.push(zone);
-      var W = 520, cx = 380, top = 120, left = cx - W / 2 + 20;
-      var y = top;
-      objs.push(sc.add.text(left, y, L().title + "  (" + entries.length + ")", { fontFamily: "font_bold", fontSize: 15, resolution: 2, color: "#ffffff" }).setOrigin(0, 0).setDepth(D + 2));
-      y += 26;
-      var shown = Math.min(entries.length, CFG.maxShown);
-      for (var i = 0; i < shown; i++) {
-        var e = entries[i];
-        var head = "\\u300c" + e.prf + "\\u300d " + e.boss;
-        if (e.rank !== null) head += "   " + L().rank.replace("__RANK__", e.rank).replace("__DMG__", (e.dmg === null ? "-" : e.dmg.toLocaleString()));
-        objs.push(sc.add.text(left, y, head, { fontFamily: "font_bold", fontSize: 12, resolution: 2, color: "#ffe066" }).setOrigin(0, 0).setDepth(D + 2));
-        y += 16;
-        var parts = [];
-        if (e.rewards.founder.length) parts.push(L().rewardFounder + " " + e.rewards.founder.join(", "));
-        if (e.rewards.participate.length) parts.push(L().rewardParticipate + " " + e.rewards.participate.join(", "));
-        if (e.rewards.defeat.length) parts.push(L().rewardDefeat + " " + e.rewards.defeat.join(", "));
-        if (e.rewards.rank.length) parts.push(L().rewardRank + " " + e.rewards.rank.join(", "));
-        var line = sc.add.text(left + 12, y, parts.join("   "), { fontFamily: FONT, fontSize: 11, resolution: 2, color: "#e8e0d0", wordWrap: { width: W - 52 } }).setOrigin(0, 0).setDepth(D + 2);
-        objs.push(line);
-        y += Math.max(15, line.height + 2);
-        var meta = L().founder + " " + e.founder + (e.defeat ? "   " + L().defeat + " " + e.defeat : "");
-        objs.push(sc.add.text(left + 12, y, meta, { fontFamily: FONT, fontSize: 10, resolution: 2, color: "#9a9a9a" }).setOrigin(0, 0).setDepth(D + 2));
-        y += 18;
+      var objs = [], body = [];
+      objs.push(sc.add.zone(380, 340, 760, 680).setDepth(D).setInteractive());
+      if (sc.textures.exists("raid_result_panel")) objs.push(sc.add.image(P.x, P.y, "raid_result_panel").setDepth(D + 1));
+      else objs.push(sc.rexUI.add.roundRectangle(P.x, P.y, P.w, P.h, 2, 0x313134, 1).setDepth(D + 1).setStrokeStyle(1, 0x444447));
+      if (sc.textures.exists("result_panel_overlay")) {
+        var over = sc.add.image(P.x, P.y, "result_panel_overlay").setDepth(D + 1);
+        if (typeof over.setCrop === "function") over.setCrop(0, 0, 116, P.h);
+        objs.push(over);
       }
-      if (entries.length > shown) {
-        objs.push(sc.add.text(left, y, L().more.replace("__N__", entries.length - shown), { fontFamily: FONT, fontSize: 11, resolution: 2, color: "#9a9a9a" }).setOrigin(0, 0).setDepth(D + 2));
-        y += 18;
-      }
-      y += 6;
-      // 「按 OK 後照樣顯示官方詳細畫面」開關
-      var box = sc.rexUI.add.roundRectangle(left + 7, y + 7, 12, 12, 2, 0x000000, 0).setStrokeStyle(1.5, 0xdddddd).setDepth(D + 2);
-      var tickT = sc.add.text(left + 7, y + 6, "\\u2713", { fontFamily: "sans-serif", fontSize: 11, resolution: 2, color: "#ffe066" }).setOrigin(0.5, 0.5).setDepth(D + 3).setVisible(st.detail);
-      var detailT = sc.add.text(left + 20, y + 7, L().detail, { fontFamily: FONT, fontSize: 11, resolution: 2, color: "#e8e0d0" }).setOrigin(0, 0.5).setDepth(D + 2);
-      var hit = sc.add.zone(left, y, 300, 14).setOrigin(0, 0).setDepth(D + 3).setInteractive({ useHandCursor: true });
-      hit.on("pointerup", function () { st.detail = !st.detail; tickT.setVisible(st.detail); });
-      objs.push(box, tickT, detailT, hit);
-      y += 22;
-      // 模式切換：三個字樣
-      var modes = [["all", L().modeAll], ["once", L().modeOnce], ["none", L().modeNone]];
-      var mx = left;
-      var modeTexts = [];
-      var paint = function () {
-        for (var k = 0; k < modeTexts.length; k++) {
-          var on = modeTexts[k].__mode === st.mode;
-          modeTexts[k].setColor(on ? "#ffe066" : "#8a8a8a");
+      var pages = Math.max(1, Math.ceil(entries.length / ROW.per));
+      var draw = function (page) {
+        destroyAll(body);
+        for (var j = 0; j < ROW.per; j++) {
+          var q = page * ROW.per + j;
+          if (q >= entries.length) break;
+          drawRow(st, sc, entries[q], raw[q], ROW.top + j * (ROW.h + ROW.gap), D, body);
         }
       };
-      for (var m = 0; m < modes.length; m++) {
-        var mt = sc.add.text(mx, y, (m === 0 ? "" : "\\u30fb ") + modes[m][1], { fontFamily: FONT, fontSize: 11, resolution: 2, color: "#8a8a8a" }).setOrigin(0, 0).setDepth(D + 3).setInteractive({ useHandCursor: true });
-        mt.__mode = modes[m][0];
-        mt.on("pointerup", (function (mode) { return function () { st.mode = mode; paint(); report({ type: "raid-reward-mode", mode: mode }); }; })(modes[m][0]));
-        modeTexts.push(mt);
-        objs.push(mt);
-        mx += mt.width + 10;
-      }
-      paint();
-      y += 24;
-      var H = (y - top) + 60;
-      var cy = top - 16 + H / 2;
-      objs.push(sc.rexUI.add.roundRectangle(cx, cy, W, H, 6, 0x0c0c10, 0.95).setDepth(D + 1).setStrokeStyle(2, 0x8a7a55));
-      // OK 鈕：用官方結算頁那顆 raid_panel_ok（改版前是 panel_ok）
-      var okTex = sc.textures.exists("raid_panel_ok") ? "raid_panel_ok" : sc.textures.exists("panel_ok") ? "panel_ok" : null;
       var ok;
-      if (okTex !== null) {
-        ok = sc.add.image(cx, cy + H / 2 - 24, okTex, 0).setDepth(D + 3).setInteractive({ useHandCursor: true });
-        ok.on("pointerover", function () { ok.setTexture(okTex, 1); });
-        ok.on("pointerout", function () { ok.setTexture(okTex, 0); });
+      if (sc.textures.exists("raid_panel_ok")) {
+        ok = sc.add.image(P.x, PT + 316, "raid_panel_ok", 0).setDepth(D + 3).setInteractive({ useHandCursor: true });
+        ok.on("pointerover", function () { ok.setTexture("raid_panel_ok", 1); });
+        ok.on("pointerout", function () { ok.setTexture("raid_panel_ok", 0); });
+        ok.on("pointerdown", function () { ok.setTexture("raid_panel_ok", 0); });
       } else {
-        ok = sc.add.text(cx, cy + H / 2 - 24, "OK", { fontFamily: "font_bold", fontSize: 16, resolution: 2, color: "#ffffff" }).setOrigin(0.5, 0.5).setDepth(D + 3).setStroke("black", 3).setInteractive({ useHandCursor: true });
+        ok = sc.add.text(P.x, PT + 316, "OK", { fontFamily: "font_heavy", fontSize: 15, color: "white", resolution: 2 }).setOrigin(0.5, 0.5).setDepth(D + 3).setStroke("black", 3).setInteractive({ useHandCursor: true });
       }
       ok.on("pointerup", function () {
         try { if (sc.ulse01) sc.ulse01.play(); } catch (e) {}
-        var detail = st.detail;
         closePanel(st);
-        resolve(detail);
+        resolve();
       });
       objs.push(ok);
-      st.panel = { objs: objs };
+      st.panel = { objs: objs, body: body };
+      draw(0);
+      addPager(sc, D, objs, pages, draw);
+      fadeIn(sc, objs.concat(body));
     });
   }
 
@@ -628,7 +714,7 @@ export function buildRaidRewardPatchScript(options: RaidRewardPatchOptions): str
   var METHODS = [MAIN].concat(PAGES);
 
   /** 官方流程跑完之後：回報一行、記下收到了、照模式畫摘要／重播官方畫面。 */
-  function afterBatch(st, sc, batch, orig) {
+  function afterBatch(st, sc, batch) {
     if (batch.list.length === 0) { ledgerFlush(st); return Promise.resolve(); }
     var entries = [], failed = 0;
     try { entries = summarize(sc, batch.list, batch.received); } catch (e) { entries = []; failed = batch.list.length; }
@@ -652,17 +738,9 @@ export function buildRaidRewardPatchScript(options: RaidRewardPatchOptions): str
       if (seen.length > 200) seen.splice(0, seen.length - 200);
     } catch (e) {}
     if (batch.mode !== "once") return Promise.resolve();
-    return showSummary(st, sc, entries).then(function (detail) {
-      // 面板開著時切成「不再通知」要蓋過之前打的勾：勾是記在 st 上跨批留著的，
-      // 不看模式的話玩家按了不再通知、OK 後官方面板照樣一頁頁跳（2026-09-13 實機）
-      if (st.mode === "none" || !detail) return undefined;
-      // 重播官方畫面。領取在官方流程裡已經回報過了，這裡純演出、不送東西
-      var chain = Promise.resolve();
-      batch.list.forEach(function (e) {
-        PAGES.forEach(function (name) { chain = chain.then(function () { return orig[name].call(sc, e); }); });
-      });
-      return chain.then(function () { return undefined; });
-    });
+    // 整理失敗（entries 是空的）就不畫：領取早就回報了，記錄檔也有一行
+    if (entries.length !== batch.list.length) return Promise.resolve();
+    return showSummary(st, sc, entries, batch.list);
   }
 
   function hook(st) {
@@ -737,7 +815,7 @@ export function buildRaidRewardPatchScript(options: RaidRewardPatchOptions): str
           asks.push({ at: Date.now(), n: batch.list.length });
           if (asks.length > 300) asks.splice(0, asks.length - 300);
         } catch (e) {}
-        return afterBatch(st, self, batch, orig).then(function () { return r; });
+        return afterBatch(st, self, batch).then(function () { return r; });
       }, function (err) {
         done();
         ledgerFlush(st);
@@ -770,7 +848,7 @@ export function buildRaidRewardPatchScript(options: RaidRewardPatchOptions): str
   }
 
   restore();
-  var st = { version: CFG.version, mode: CFG.mode, detail: false, panel: null, proto: null, timer: null, reason: null, ledger: null, batching: false };
+  var st = { version: CFG.version, mode: CFG.mode, panel: null, proto: null, timer: null, reason: null, ledger: null, batching: false, T: undefined };
   window[FLAG] = st;
   // Raid 場景類別在遊戲一起來就註冊了，但「先開插件再開遊戲」時還沒有 —— 等它。
   var hooked = hook(st);
@@ -814,7 +892,9 @@ export const RAID_REWARD_UNINSTALL_EXPRESSION = `(function () {
     var st = window["${FLAG}"];
     if (!st) return "not-installed";
     try { if (st.timer !== null && st.timer !== undefined) clearInterval(st.timer); } catch (e) {}
-    if (st.panel) { st.panel.objs.forEach(function (o) { try { if (o && o.scene) o.destroy(); } catch (e) {} }); }
+    if (st.panel) {
+      (st.panel.body || []).concat(st.panel.objs).forEach(function (o) { try { if (o && o.scene) o.destroy(); } catch (e) {} });
+    }
     var L = st.ledger, G = window.game;
     if (L && G && G.registry) {
       for (var k in L.handlers) { try { G.registry.events.off("changedata-" + k, L.handlers[k]); } catch (e) {} }

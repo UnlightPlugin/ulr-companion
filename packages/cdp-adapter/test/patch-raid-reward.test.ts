@@ -11,7 +11,6 @@ import {
   buildRaidRewardPatchScript,
   buildRaidRewardSetModeExpression,
   isRaidItemDeltaReport,
-  isRaidRewardModeReport,
   isRaidRewardReport,
   parseRaidRewardStatus,
   RAID_REWARD_SCRIPT_VERSION,
@@ -58,6 +57,14 @@ class Obj {
   setStroke = this.chain;
   setStrokeStyle = this.chain;
   setColor = this.chain;
+  setAlpha = this.chain;
+  setScale = this.chain;
+  setFlipX = this.chain;
+  setCrop = this.chain;
+  setText(t: string): this {
+    this.text = t;
+    return this;
+  }
   setVisible(v: boolean): this {
     this.visible = v;
     return this;
@@ -88,7 +95,10 @@ class Scene {
   queue: unknown[] = [];
   afterFlow: (() => void) | null = null;
   ulse01 = { play: () => undefined };
-  textures = { exists: (k: string) => k === "raid_panel_ok" };
+  textures = {
+    exists: (k: string) =>
+      ["raid_panel_ok", "btn_arrow-2", "raid_result_panel", "result_panel_overlay"].includes(k),
+  };
   cache = { json: { get: (k: string) => CACHE[k] } };
   socket = {
     fetch: (ev: string, ...args: unknown[]): Promise<unknown> => {
@@ -154,6 +164,31 @@ function makeWindow() {
     [BINDING]: (payload: string) => reports.push(JSON.parse(payload)),
   };
   return { window, raid, reports };
+}
+
+/**
+ * 假的 webpack 模組表：官方畫卡的 $T.create_card（特徵字串 create_card( 與 TG_BASE_UP）。
+ * 回傳每次畫卡的參數。
+ */
+function withCards(window: Record<string, unknown>): unknown[][] {
+  const calls: unknown[][] = [];
+  const T = {
+    create_card: (sc: Scene, id: number, type: number, slot: number) => {
+      calls.push([id, type, slot]);
+      return sc.make("card");
+    },
+  };
+  const req = Object.assign((_id: string) => ({ $T: T }), {
+    m: { 42: "function(){ create_card(e){} TG_BASE_UP }" },
+  });
+  // ulrWebpackRequire 認的是陣列：推進去的 chunk 第三格會拿到 require
+  const chunks: unknown[] = [];
+  chunks.push = (chunk: unknown) => {
+    ((chunk as unknown[])[2] as (r: unknown) => void)(req);
+    return 0;
+  };
+  window.webpackChunkunlight = chunks;
+  return calls;
 }
 
 function run(window: Record<string, unknown>, expression: string): string {
@@ -269,7 +304,7 @@ describe("渦擊破結算的 OK 面板", () => {
     expect(reports.length).toBe(1);
   });
 
-  it("once：官方流程先跑完，再一張摘要、一顆 OK；沒勾詳細就不演官方畫面", async () => {
+  it("once：官方流程先跑完，再一張官方底圖的摘要、一顆 OK；官方畫面不演", async () => {
     const { window, raid } = makeWindow();
     run(window, buildRaidRewardPatchScript({ bindingName: BINDING, mode: "once" }));
     raid.queue = [REWARD, { ...REWARD, profound_id: 102, raid_name: "zzz", raid_monster_id: 501 }];
@@ -277,69 +312,97 @@ describe("渦擊破結算的 OK 面板", () => {
     await flush();
     expect(raid.receives()).toEqual([101, 102]);
     expect(parseRaidRewardStatus(run(window, RAID_REWARD_STATUS_EXPRESSION)).open).toBe(true);
+    const keys = raid.alive().map((o) => o.texture.key);
+    expect(keys).toContain("raid_result_panel");
+    expect(keys).toContain("result_panel_overlay");
     const texts = raid
       .alive()
       .filter((o) => o.kind === "text")
       .map((o) => o.text);
-    expect(texts).toContain("渦擊破結算  (2)");
-    expect(texts.some((t) => t.startsWith("「H59pGlAk1F2y」 黑死獸"))).toBe(true);
-    expect(texts.some((t) => t.startsWith("「zzz」 妖精"))).toBe(true);
+    expect(texts).toContain("｢H59pGlAk1F2y｣黑死獸");
+    expect(texts).toContain("｢zzz｣妖精");
+    expect(texts).toContain("第 21 名  [8,201Pts.]");
+    expect(texts).toContain("發現者  無名者EX");
+    // 只有一頁：不畫翻頁鈕；面板上沒有切模式／打勾的東西
+    expect(keys).not.toContain("btn_arrow-2");
+    expect(raid.alive().filter((o) => o.kind === "zone")).toHaveLength(1);
     okButton(raid).emit("pointerup");
     await p;
     expect(raid.pages).toEqual([]);
     expect(raid.alive().length).toBe(0);
   });
 
-  it("once：勾了「顯示官方詳細畫面」按 OK 後重播官方畫面，不再多送領取", async () => {
+  it("每一樣獎勵都畫官方卡面，數量標在卡上，滑上去出分類與名字", async () => {
     const { window, raid } = makeWindow();
+    const cards = withCards(window);
     run(window, buildRaidRewardPatchScript({ bindingName: BINDING, mode: "once" }));
     raid.queue = [REWARD];
     const p = call(raid);
     await flush();
-    // 開關那一格是一個 zone，點一下打勾
-    const detailHit = raid.alive().filter((o) => o.kind === "zone")[1]!;
-    detailHit.emit("pointerup");
+    // 發現 1＋參加 1＋排行 2，照官方頁的順序
+    expect(cards).toEqual([
+      [6, 2, 0],
+      [7, 3, 0],
+      [1, 1, 0],
+      [0, 5, 0],
+    ]);
+    expect(raid.alive().filter((o) => o.kind === "card")).toHaveLength(4);
+    const texts = () =>
+      raid
+        .alive()
+        .filter((o) => o.kind === "text")
+        .map((o) => o.text);
+    expect(texts()).toEqual(expect.arrayContaining(["x2", "x30"]));
+    expect(texts()).not.toContain("x1");
+    const hits = raid.alive().filter((o) => o.kind === "zone" && o.handlers.has("pointerover"));
+    hits[1]!.emit("pointerover");
+    expect(texts()).toContain("參加獎勵  古代妙藥 x2");
+    hits[1]!.emit("pointerout");
+    expect(texts()).not.toContain("參加獎勵  古代妙藥 x2");
     okButton(raid).emit("pointerup");
     await p;
-    expect(raid.pages).toEqual(["init", "image", "rank"]);
-    expect(raid.receives()).toEqual([101]);
-  });
-
-  it("面板上切模式：回報托盤、之後的結算照新模式走", async () => {
-    const { window, raid, reports } = makeWindow();
-    run(window, buildRaidRewardPatchScript({ bindingName: BINDING, mode: "once" }));
-    raid.queue = [REWARD];
-    const p = call(raid);
-    await flush();
-    const none = raid.alive().find((o) => o.__mode === "none")!;
-    none.emit("pointerup");
-    expect(reports.some((r) => isRaidRewardModeReport(r) && r.mode === "none")).toBe(true);
-    okButton(raid).emit("pointerup");
-    await p;
-    expect(parseRaidRewardStatus(run(window, RAID_REWARD_STATUS_EXPRESSION)).mode).toBe("none");
-    await call(raid);
     expect(raid.alive().length).toBe(0);
-    expect(raid.pages).toEqual([]);
-    expect(raid.receives()).toEqual([101, 101]);
   });
 
-  it("勾了詳細、又在面板上切成不再通知：OK 後不演官方畫面", async () => {
+  it("畫卡的找不到：獎勵改寫名字，一樣都不漏；沒有獎勵的渦寫「-」", async () => {
     const { window, raid } = makeWindow();
     run(window, buildRaidRewardPatchScript({ bindingName: BINDING, mode: "once" }));
-    raid.queue = [REWARD];
+    const empty = { founder: [], participate: [], defeat: [], rank: [] };
+    raid.queue = [REWARD, { ...REWARD, profound_id: 102, raid_reward: empty }];
     const p = call(raid);
     await flush();
-    raid
+    const texts = raid
       .alive()
-      .filter((o) => o.kind === "zone")[1]!
-      .emit("pointerup");
-    raid
-      .alive()
-      .find((o) => o.__mode === "none")!
-      .emit("pointerup");
+      .filter((o) => o.kind === "text")
+      .map((o) => o.text);
+    expect(texts).toContain("勇者短劍 x1 / 古代妙藥 x2 / L1 艾伯李斯特 x1 / 30GEM");
+    expect(texts).toContain("-");
     okButton(raid).emit("pointerup");
     await p;
-    expect(raid.pages).toEqual([]);
+  });
+
+  it("超過一頁：官方翻頁鈕、到頭繞回去，所有渦都看得到", async () => {
+    const { window, raid } = makeWindow();
+    run(window, buildRaidRewardPatchScript({ bindingName: BINDING, mode: "once" }));
+    raid.queue = [1, 2, 3, 4, 5].map((n) => ({ ...REWARD, profound_id: n, raid_name: `渦${n}` }));
+    const p = call(raid);
+    await flush();
+    const names = () =>
+      raid
+        .alive()
+        .filter((o) => o.kind === "text" && o.text.startsWith("｢"))
+        .map((o) => o.text);
+    expect(names()).toEqual(["｢渦1｣黑死獸", "｢渦2｣黑死獸", "｢渦3｣黑死獸", "｢渦4｣黑死獸"]);
+    const arrows = raid.alive().filter((o) => o.texture.key === "btn_arrow-2");
+    expect(arrows).toHaveLength(2);
+    arrows[1]!.emit("pointerup");
+    expect(names()).toEqual(["｢渦5｣黑死獸"]);
+    arrows[1]!.emit("pointerup");
+    expect(names()[0]).toBe("｢渦1｣黑死獸");
+    arrows[0]!.emit("pointerup");
+    expect(names()).toEqual(["｢渦5｣黑死獸"]);
+    okButton(raid).emit("pointerup");
+    await p;
     expect(raid.alive().length).toBe(0);
   });
 
