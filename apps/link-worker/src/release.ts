@@ -66,13 +66,13 @@ export interface SignedRelease {
 // Release notes 有寫。詳見 docs/release.md §2。
 export const CURRENT_RELEASE: SignedRelease | null = {
   manifest: {
-    version: "2.1.1",
-    url: "https://github.com/UnlightPlugin/ulr-companion/releases/download/v2.1.1/ULR-Companion-2.1.1-win.zip",
-    sha256: "b87d1a4bd8b5752f4285cb68eef27b10410599370265e0d735ddb51ad7160da5",
-    notes: "渦 BOSS 被動（硬化、夜霧…）標在渦房清單與 SUPPORT",
+    version: "2.2.0",
+    url: "https://github.com/UnlightPlugin/ulr-companion/releases/download/v2.2.0/ULR-Companion-2.2.0-win.zip",
+    sha256: "a267082a4518039a6fb7822fa76ba674f4396b5a6850c04634e5d0b301c71384",
+    notes: "好友限定的渦不再公開；投降、獎勵遊戲、任務確認框的新開關；贈送次數改插件自己數",
   },
   signature:
-    "6f6ZzRMJMdQCYt8kBtPq2aBgsPoGPWHvDUpzyuCzfKkeQpdLlpYn6yRXPF+y/dMDWls+OC2r6Q9rIysjoF62AA==",
+    "+bfVzepbl+eQrY+A8pw9Bb9J6VxzqP9u0naZZP9wWEDkkKoOQ7mx2NeqN3sJO3iqf803QBLlRnkPOeVXBHdrCQ==",
 };
 
 // 發版時把上面那行換成 `npm run release:sign` 印出來的那一段（形狀如下，
