@@ -59,6 +59,8 @@ interface FakeObj {
   height: number;
   originX: number;
   text?: string;
+  /** add.text 的樣式（字色等）。 */
+  style?: { color?: string };
   depth?: number;
   scene: object | undefined;
   handlers: Record<string, Handler[]>;
@@ -271,8 +273,8 @@ function makeGame(channel: FakeMatch["channel"] = DUEL): FakeGame {
         added.push(o);
         return o;
       }) as never,
-      text: ((x: number, y: number, t: string) => {
-        const o = obj("Text", x, y);
+      text: ((x: number, y: number, t: string, style?: { color?: string }) => {
+        const o = obj("Text", x, y, style ? { style } : {});
         o.setText(t);
         added.push(o);
         return o;
@@ -697,10 +699,12 @@ describe("等待視窗", () => {
       setState(game, { counts: null, matching: true, badge: "★ COST 48 · 夾擠式罰C" });
       const badge = game.added.find((o) => o.text === "★ COST 48 · 夾擠式罰C" && o.scene);
       expect(badge).toBeDefined();
-      // 跟著搬過的框：水平置中、上緣 + badgeY
+      // 跟著搬過的框當標題：靠框左緣、上緣 + badgeY；白色標題帶上要黑字
       const p = game.sc.wait_panel!;
-      expect(badge!.x).toBe(p.x);
+      expect(badge!.x).toBe(WAIT_LAYOUT.left);
+      expect(badge!.x).toBe(p.x - p.width / 2);
       expect(badge!.y).toBe(WAIT_LAYOUT.top + WAIT_LAYOUT.badgeY);
+      expect(badge!.style?.color).toBe("black");
       setState(game, { counts: null, matching: false });
       expect(badge!.scene).toBeUndefined();
     } finally {
@@ -892,7 +896,8 @@ describe("等待視窗搬到右下空白", () => {
       expect(p.width).toBe(167);
       expect(p.x - p.width / 2).toBe(L.left);
       expect(game.sc.btn_cancel!.x).toBe(p.x);
-      expect(badge.x).toBe(p.x);
+      // 標記是靠左的標題，跟著撐寬後的左緣
+      expect(badge.x).toBe(L.left);
     } finally {
       uninstallAll(game);
     }

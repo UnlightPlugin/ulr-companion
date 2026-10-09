@@ -132,8 +132,9 @@ export const DEFAULT_LOBBY_POLL_MS = 500;
  *
  * 6 = 2026-09-23 改版後的大廳（Match 場景上的 channel_match／channel_length）。
  * 7 = 等待中可以點房間看牌組；退頻道時拆掉翻頁鍵與頁碼字（官方漏拆）。
+ * 8 = 等待視窗的標記行改成框標題（黑字、標題帶裡），白字壓在白底上看不見。
  */
-export const LOBBY_SCRIPT_VERSION = 7;
+export const LOBBY_SCRIPT_VERSION = 8;
 
 const FLAG = "__ulrLobby";
 
@@ -170,8 +171,11 @@ export const WAIT_LAYOUT = {
   textY: 49.5,
   timerY: 72,
   cancelBottom: 15.5,
-  /** 插件標記那一行（迪城）。官方框裡的位置是上緣 +30。 */
-  badgeY: 30,
+  /**
+   * 插件標記那一行（迪城）：當成框的標題，放在淺色標題帶正中。
+   * 照官方 Confirm 框（同一張 panel_gene）的標題：靠左、上緣 +16。
+   */
+  badgeY: 16,
 } as const;
 
 export interface LobbyStatus {
@@ -535,8 +539,10 @@ export function buildLobbyPatchScript(options: LobbyPatchOptions): string {
   /**
    * 等待視窗上那一行（★ COST 48 · 規則名）。
    *
-   * 位置在面板上半部（上緣 + badgeY）：逐字波浪、計時、Cancel 都在下半部，
-   * 上緣到波浪之間那一段是空的。框被搬過（placeWait），所以位置跟著框算。
+   * 當成框的標題，畫在淺色標題帶裡（上緣 + badgeY）。字型、黑字、左邊 padding 10、
+   * 靠左都照官方 Confirm 框的標題 —— ⚠ 標題帶是白的，白字會看不見（以前是
+   * font_light 白字置中在 +30，剛好壓在標題帶與深色底的交界上）。
+   * 框被搬過（placeWait），所以位置跟著框算。
    */
   function ensureBadge(st, sc) {
     var text = st.state && typeof st.state.badge === "string" && st.state.badge.length > 0
@@ -545,13 +551,14 @@ export function buildLobbyPatchScript(options: LobbyPatchOptions): string {
     if (text === null || !p) { dropBadge(st); return; }
     if (st.badge && st.badge.scene && st.badge.text === text) return;
     dropBadge(st);
-    st.badge = sc.add.text(p.x, 0, text, { fontFamily: "font_light", fontSize: 12, resolution: 2 })
-      .setOrigin(0.5, 0.5).setDepth(51);
+    st.badge = sc.add.text(0, 0, text, {
+      fontFamily: "font_heavy", fontSize: 15, resolution: 2, color: "black", padding: { left: 10 },
+    }).setOrigin(0, 0.5).setDepth(51);
     try {
       var need = st.badge.width + 32;
       if (p.width < need) { p.width = need; placeWait(sc); }
     } catch (e) {}
-    st.badge.setPosition(p.x, p.y - p.height / 2 + CFG.waitLayout.badgeY);
+    st.badge.setPosition(p.x - p.width / 2, p.y - p.height / 2 + CFG.waitLayout.badgeY);
   }
 
   function dropBadge(st) {
