@@ -31,6 +31,7 @@ import {
   isBonusItemOrder,
   isBonusItemPlace,
   isCharaPickerMode,
+  isQuestPanelMode,
   isRaidRewardMode,
   isRenderMode,
   isSizeMode,
@@ -41,6 +42,7 @@ import type {
   BonusItemPlace,
   CharaPickerMode,
   DisplayState,
+  QuestPanelMode,
   RaidRewardMode,
 } from "@ulr/cdp-adapter";
 
@@ -361,6 +363,18 @@ export interface Profile {
   questPassShortcut: boolean;
   /** 任務地圖的寶箱標註：每格旁邊畫寶箱實際是什麼。預設關（官方原樣）。 */
   questTreasureMarks: boolean;
+  /**
+   * 任務踩到寶箱時的「獲得寶箱」面板：`show` 照官方、`auto` 看一下就自動按 OK、
+   * `hide` 不顯示直接關。預設 `show`。
+   */
+  questRewardPanel: QuestPanelMode;
+  /**
+   * 任務結束的兩個確認框（任務成功／失敗、結束時拿到的新任務）。跟寶箱面板分開
+   * （玩家 2026-10-08：「任務結束的兩個確認框，功能和寶箱確認框選項分開」）。預設 `show`。
+   */
+  questEndPanel: QuestPanelMode;
+  /** 任務打完怪物跳過結算、直接回任務地圖（有獎勵遊戲的照官方）。預設關。 */
+  questSkipResult: boolean;
   /** 迪城的水捷徑：FRIENDLIST 上方疊精靈／古代／魔女（一點就用）。預設關，跟另外兩房一樣。 */
   dietItemShortcut: boolean;
   /**
@@ -656,6 +670,10 @@ export function normalizeProfile(raw: unknown): Profile | null {
     questStackShortcut: r["questStackShortcut"] === true,
     questPassShortcut: r["questPassShortcut"] === true,
     questTreasureMarks: r["questTreasureMarks"] === true,
+    // 舊設定檔沒有這兩欄 → 照官方。
+    questRewardPanel: isQuestPanelMode(r["questRewardPanel"]) ? r["questRewardPanel"] : "show",
+    questEndPanel: isQuestPanelMode(r["questEndPanel"]) ? r["questEndPanel"] : "show",
+    questSkipResult: r["questSkipResult"] === true,
     // 舊設定檔沒有這兩欄 → 水捷徑關（官方原樣）、GEM UP 開（純顯示）。
     dietItemShortcut: r["dietItemShortcut"] === true,
     dietGemUp: r["dietGemUp"] !== false,
@@ -746,6 +764,9 @@ export function defaultProfile(kind: ClientKind = "desktop"): Profile {
     questStackShortcut: false,
     questPassShortcut: false,
     questTreasureMarks: false,
+    questRewardPanel: "show",
+    questEndPanel: "show",
+    questSkipResult: false,
     dietItemShortcut: false,
     dietGemUp: true,
     dietSurrenderNoConfirm: false,

@@ -49,6 +49,63 @@
  * （unit_chara，站在 128+96*欄, 129+72*列）站的那一格是 HighLow 才算，其他來源的獎勵遊戲
  * （對戰）不記。記到就經 binding 回報 { type: "quest-bonus", sample }。
  *
+ * ## 寶箱面板與任務結束的確認框：自動按 OK／不顯示（玩家 2026-10-08）
+ *
+ * 兩組分開設（玩家：「任務結束的兩個確認框，功能和寶箱確認框選項分開」），各自
+ * show（照官方）／auto（看一下就替玩家按）／hide（不顯示直接關），也跟標註分開。
+ * 2026-10-08 從 bundle 讀的官方流程：
+ *
+ * ```js
+ *   // 踩到寶箱：Quest.quest_reward()
+ *   await update_data("chara_card"), update_data("player")
+ *   quest_reward_base  = add.image(380, 330, "quest_result_item").setAlpha(0)   // 淡入 500ms
+ *   quest_reward_ok    = add.image(380, 470, "search_ok", 0).setInteractive()
+ *   quest_reward_image = $T.create_card(...)                                    // 500ms 後翻開、播 ulse23
+ *   await new Promise(r => quest_reward_ok.on("pointerup", () => { 淡出 300ms → 全拆 → r() }))
+ *   // 接著 refresh_quest_land：quest_end_result 不是 null 就 await quest_end()
+ *
+ *   // 任務結束：Quest.quest_end()（「任務成功／失敗」）
+ *   quest_end_base = add.image(380, 330, "quest_result_suc" 或 "quest_result_fail").setAlpha(0)
+ *   quest_end_ok   = add.image(380, 382, "search_ok", 0)       // 淡入 300ms，onComplete 才 setInteractive
+ *   await pointerup → 淡出 300ms → 拆 → 接著 play_quest_story()
+ *
+ *   // 新任務：socket "quest_added" → show_quest_found_dialog(id)（跟搜尋到任務同一個框）
+ *   quest_found_bg / quest_found_dialog / quest_found_ok_btn / quest_found_ok_text   // 沒有 tween，按了就拆
+ * ```
+ *
+ * 三個 OK **都不送任何請求**，只是拆面板。所以跟獎勵遊戲的「結束後直接回去」一樣，
+ * 替玩家 emit("pointerup")，走官方同一條路。
+ *
+ * - 面板是在兩格之間建的（socket 回應後的 microtask），掛 game 的 prestep：下一格的 tween 與
+ *   render 之前就看到它
+ * - auto：面板照常淡入（結束面板要等官方 setInteractive），rewardAutoMs／endAutoMs 後替玩家按
+ * - hide：當格停掉淡入與翻卡（不播音效）、藏起來、按 OK，官方的淡出 tween 當場跑完
+ *   （onComplete 拆面板、放行後面的流程）。一格都不會畫出來
+ * - 只按「還按得下去」的 OK：玩家自己先按了，官方會 disableInteractive（input 還在、enabled
+ *   false），再 emit 一次會讓 onComplete 拆兩次而炸掉。結束面板淡入時 input 是 null，不算按過
+ * - 新任務框只跳「任務剛結束時 quest_added 帶來的」：同一刻收到 quest_added（自己在 socket 上
+ *   多掛一個 listener 記時間），而且 quest_end 收到不久或結束面板還開著。搜尋找到任務（socket
+ *   "quest_found"）同一個框照常顯示
+ *
+ * ## 打完怪物跳過結算（玩家 2026-10-08：「打完怪物後，跳過結算，直接回到任務地圖」）
+ *
+ * 任務戰鬥打完，MainA 會 scene.start("Result")。Result（2026-10-08 讀的）：
+ *
+ * ```js
+ *   create() { await call_win/lose/draw/timeup()   // 勝負字樣＋立繪，約 3 秒
+ *              await (bonusgame === false ? result_end_nornal() : result_end_bonus())  // 數字逐項淡入，OK
+ *              events.once("shutdown", shutdown) }
+ *   OK → result_scene_end()：lvup 不是 null 先播升級；鏡頭（含 BackA）淡出 700ms 後 stop；
+ *        Quest 在睡就叫醒、fetch db_quest／db_quest_cleared、refresh_quest_land（＝回任務地圖）
+ * ```
+ *
+ * 在 Result 實例上包 create：Quest 在睡（＝任務戰鬥）、沒有獎勵遊戲時，不跑那兩段動畫，
+ * 掛好 shutdown 直接叫官方的 result_scene_end —— 回地圖、重拿任務資料都是官方原樣，
+ * 不多送請求。沒升級就把 Result 與 BackA 的鏡頭先藏起來（官方本來就淡到 0 再 stop），
+ * 地圖在下一格直接露出來；有升級照常看得到升級動畫。
+ * 有獎勵遊戲的不碰：Bonus 疊在 Result 上，結束時 result_end_bonus_quit 會改 Result 的
+ * gem_card 等欄位，收掉 create 那些欄位就不存在了。
+ *
  * ⚠⚠ **注入腳本裡的註解不能有反引號。** 整段腳本住在一個 template literal 裡。
  */
 
@@ -60,11 +117,29 @@ import { QUEST_TREASURE_TABLE } from "./quest-treasure-data.js";
 const FLAG = "__ulrQuestTreasure";
 
 /** 腳本版本。**改動注入腳本裡任何一行就 +1**，修 bug 也算。 */
-export const QUEST_TREASURE_SCRIPT_VERSION = 4;
+export const QUEST_TREASURE_SCRIPT_VERSION = 6;
+
+/** 確認框怎麼處理：`show` 照官方、`auto` 看一下就自動按 OK、`hide` 不顯示直接關。 */
+export type QuestPanelMode = "show" | "auto" | "hide";
+
+/** 哪一組確認框：`reward` 寶箱內容、`end` 任務結束（成功／失敗＋新任務）。 */
+export type QuestPanelPart = "reward" | "end";
+
+export const QUEST_PANEL_MODES: readonly QuestPanelMode[] = ["show", "auto", "hide"];
+
+export function isQuestPanelMode(v: unknown): v is QuestPanelMode {
+  return v === "show" || v === "auto" || v === "hide";
+}
 
 export interface QuestTreasurePatchOptions {
   /** 標註開不開。 */
   enabled: boolean;
+  /** 寶箱內容面板怎麼處理。預設 `show`（照官方）。 */
+  reward?: QuestPanelMode;
+  /** 任務結束的確認框（成功／失敗、新任務）怎麼處理。預設 `show`。 */
+  end?: QuestPanelMode;
+  /** 任務打完怪物跳過結算、直接回任務地圖。預設關。 */
+  skipResult?: boolean;
   /** 回報學到的開始星數用的 binding。沒給就只標不學。 */
   bindingName?: string;
   /** 已經學到的開始星數（每個等級的最小／最大 step）。 */
@@ -83,6 +158,18 @@ export interface QuestTreasureStatus {
   marks: number;
   /** 這次裝上之後回報了幾筆開始星數。 */
   learned: number;
+  /** 寶箱內容面板的處理方式。 */
+  reward: QuestPanelMode;
+  /** 任務結束確認框的處理方式。 */
+  end: QuestPanelMode;
+  /** 這次裝上之後替玩家按了幾次寶箱面板的 OK。 */
+  rewardPressed: number;
+  /** 這次裝上之後替玩家按了幾次任務結束確認框的 OK。 */
+  endPressed: number;
+  /** 打完怪物跳過結算開著沒。 */
+  skipResult: boolean;
+  /** 這次裝上之後跳過了幾次結算。 */
+  resultSkips: number;
   reason: string | null;
 }
 
@@ -90,6 +177,16 @@ export function buildQuestTreasurePatchScript(options: QuestTreasurePatchOptions
   const config = {
     version: QUEST_TREASURE_SCRIPT_VERSION,
     enabled: options.enabled,
+    reward: options.reward ?? "show",
+    end: options.end ?? "show",
+    skipResult: options.skipResult === true,
+    // auto：面板淡入 500ms、卡片 500ms 後翻開 250ms，翻完再留一下才按
+    rewardAutoMs: 1500,
+    // auto：結束面板從可以按（淡入完）起算、新任務框從出現起算
+    endAutoMs: 1200,
+    // 新任務框：quest_added 跟框出現差多少內算同一件事；quest_end 收到後多久內算「剛結束」
+    addedMs: 2000,
+    endWindowMs: 60000,
     pollMs: 500,
     findEveryMs: 2000,
     // 格子（map_base，origin 0.5,0）的右邊：卡片中心相對 land_base 的位置。
@@ -422,6 +519,162 @@ export function buildQuestTreasurePatchScript(options: QuestTreasurePatchOptions
     if (w.__ulrHad) B.initialize = w.__ulrOrig; else delete B.initialize;
   }
 
+  // ---- 寶箱面板與任務結束的確認框：自動按 OK／不顯示 ------------------------------
+  /** 官方的 tween 一支只跑完一次（complete 沒擋重複，onComplete 跑兩次會拆兩次）。 */
+  function finishTweens(Q, parts) {
+    var done = [];
+    var list = [];
+    try { list = Q.tweens.getTweensOf(parts) || []; } catch (e) {}
+    for (var i = 0; i < list.length; i++) {
+      var t = list[i];
+      if (!t || done.indexOf(t) !== -1) continue;
+      done.push(t);
+      try { if (!(t.isPendingRemove && t.isPendingRemove()) && !(t.isDestroyed && t.isDestroyed())) t.complete(); } catch (e) {}
+    }
+  }
+  /** 這顆 OK 還沒被按過。玩家按過的話官方已經 disableInteractive（input 還在、enabled false）。 */
+  function pressable(ok) {
+    return alive(ok) && !ok.__ulrQuestPressed && !(ok.input && ok.input.enabled === false);
+  }
+  /** 第一次看到這顆 OK 的時刻。 */
+  function firstSeen(st, key, ok) {
+    var s = st.seen[key];
+    if (!s || s.ok !== ok) s = st.seen[key] = { ok: ok, at: Date.now() };
+    return s.at;
+  }
+  function press(Q, mode, ok, parts) {
+    var hide = mode === "hide";
+    if (hide) {
+      // 淡入、翻卡（含 ulse23）當格停掉，藏起來
+      try { Q.tweens.killTweensOf(parts); } catch (e) {}
+      for (var i = 0; i < parts.length; i++) { try { parts[i].setVisible(false); } catch (e) {} }
+    }
+    ok.__ulrQuestPressed = true;
+    ok.emit("pointerup");
+    // 官方的淡出：看不到的話直接跑完（onComplete 拆面板、放行後面的流程）
+    if (hide) finishTweens(Q, parts);
+  }
+  function rewardStep(st, Q) {
+    var ok = Q.quest_reward_ok;
+    if (!pressable(ok)) return;
+    var at = firstSeen(st, "reward", ok);
+    if (st.reward === "auto" && Date.now() - at < CFG.rewardAutoMs) return;
+    press(Q, st.reward, ok, [Q.quest_reward_base, ok, Q.quest_reward_image].filter(alive));
+    st.rewardPressed++;
+  }
+  function endStep(st, Q) {
+    var ok = Q.quest_end_ok;
+    if (pressable(ok)) {
+      // auto：等官方淡入完 setInteractive 才開始算
+      var ready = !!(ok.input && ok.input.enabled);
+      var at = firstSeen(st, ready ? "endReady" : "end", ok);
+      if (st.end !== "auto" || (ready && Date.now() - at >= CFG.endAutoMs)) {
+        press(Q, st.end, ok, [Q.quest_end_base, ok].filter(alive));
+        st.endPressed++;
+      }
+    }
+    // 新任務框疊在結束面板上面：同一格也看（hide 才不會閃一格）
+    var btn = Q.quest_found_ok_btn;
+    if (!pressable(btn)) return;
+    var seenAt = firstSeen(st, "found", btn);
+    // 只跳任務剛結束時 quest_added 帶來的那個；搜尋到任務的同一個框照常顯示
+    var added = st.addedAt > 0 && Math.abs(seenAt - st.addedAt) <= CFG.addedMs;
+    var ended = alive(Q.quest_end_ok) || (st.endAt > 0 && Date.now() - st.endAt <= CFG.endWindowMs);
+    if (!added || !ended) return;
+    if (st.end === "auto" && Date.now() - seenAt < CFG.endAutoMs) return;
+    press(Q, st.end, btn, [Q.quest_found_bg, Q.quest_found_dialog, btn, Q.quest_found_ok_text].filter(alive));
+    st.endPressed++;
+  }
+  function panelStep(st) {
+    if (window[FLAG] !== st || (st.reward === "show" && st.end === "show")) return;
+    var Q = questScene();
+    if (Q === null) return;
+    if (st.reward !== "show") rewardStep(st, Q);
+    if (st.end !== "show") endStep(st, Q);
+  }
+  function hookStep(st) {
+    var G = window.game;
+    if (!G || !G.events || st.stepGame === G) return;
+    unhookStep(st);
+    G.events.on("prestep", st.onStep);
+    st.stepGame = G;
+  }
+  function unhookStep(st) {
+    var G = st.stepGame;
+    st.stepGame = null;
+    try { if (G && G.events) G.events.off("prestep", st.onStep); } catch (e) {}
+  }
+  // Quest 場景每次 init 都 new 一條 socket：跟著換
+  function hookSocket(st) {
+    var G = window.game;
+    var Q = G && G.scene && G.scene.keys ? G.scene.keys.Quest : null;
+    var S = Q ? Q.socket : null;
+    if (!S || typeof S.on !== "function" || st.sock === S) return;
+    unhookSocket(st);
+    S.on("quest_added", st.onAdded);
+    S.on("quest_end", st.onEnded);
+    st.sock = S;
+  }
+  function unhookSocket(st) {
+    var S = st.sock;
+    st.sock = null;
+    try { if (S) { S.off("quest_added", st.onAdded); S.off("quest_end", st.onEnded); } } catch (e) {}
+  }
+
+  // ---- 打完怪物跳過結算 ------------------------------------------------------------
+  function camAlpha(sc, a) {
+    try { if (sc && sc.cameras && sc.cameras.main) sc.cameras.main.setAlpha(a); } catch (e) {}
+  }
+  /** 任務戰鬥（Quest 在睡）、沒有獎勵遊戲。 */
+  function questResult(R) {
+    var K = window.game.scene.keys;
+    var p = R.result_params;
+    try { return !!(p && p.bonusgame === false && K.Quest && K.Quest.scene.isSleeping()); } catch (e) { return false; }
+  }
+  function skipResult(st, R) {
+    // 官方 create 最後掛的那一個；result_scene_end 最後會 stop 自己
+    R.events.once("shutdown", R.shutdown, R);
+    var lv = R.result_params.lvup !== null && R.result_params.lvup !== undefined;
+    if (!lv) {
+      camAlpha(R, 0);
+      var back = window.game.scene.keys.BackA;
+      try { if (back && back.scene.isActive()) camAlpha(back, 0); } catch (e) {}
+    }
+    st.resultSkips++;
+    return R.result_scene_end();
+  }
+  function hookResult(st) {
+    var G = window.game;
+    var R = G && G.scene && G.scene.keys ? G.scene.keys.Result : null;
+    if (!R) return;
+    var cur = R.create;
+    if (typeof cur !== "function" || cur.__ulrQuestTreasure === st) return;
+    var had = Object.prototype.hasOwnProperty.call(R, "create");
+    var w = function () {
+      try {
+        if (window[FLAG] === st && st.skipResult && typeof this.result_scene_end === "function" && questResult(this)) {
+          return skipResult(st, this);
+        }
+      } catch (e) {
+        st.reason = "跳過結算：" + String((e && e.message) || e);
+      }
+      return cur.apply(this, arguments);
+    };
+    w.__ulrQuestTreasure = st;
+    w.__ulrOrig = cur;
+    w.__ulrHad = had;
+    R.create = w;
+    st.resultHooked = R;
+  }
+  function unhookResult(st) {
+    var R = st.resultHooked;
+    st.resultHooked = null;
+    if (!R) return;
+    var w = R.create;
+    if (!w || w.__ulrQuestTreasure !== st) return;
+    if (w.__ulrHad) R.create = w.__ulrOrig; else delete R.create;
+  }
+
   function tick(st) {
     if (window[FLAG] !== st) return;
     try {
@@ -430,6 +683,9 @@ export function buildQuestTreasurePatchScript(options: QuestTreasurePatchOptions
         st.T = findCards();
       }
       hookBonus(st);
+      hookStep(st);
+      hookSocket(st);
+      hookResult(st);
       sync(st);
     } catch (e) {
       st.reason = String((e && e.message) || e);
@@ -443,6 +699,9 @@ export function buildQuestTreasurePatchScript(options: QuestTreasurePatchOptions
     try { clear(old); } catch (e) {}
     try { unhook(old); } catch (e) {}
     try { unhookBonus(old); } catch (e) {}
+    try { unhookStep(old); } catch (e) {}
+    try { unhookSocket(old); } catch (e) {}
+    try { unhookResult(old); } catch (e) {}
     delete window[FLAG];
   }
 
@@ -463,15 +722,37 @@ export function buildQuestTreasurePatchScript(options: QuestTreasurePatchOptions
     bonusHooked: null,
     lastBonus: null,
     learned: 0,
+    reward: CFG.reward,
+    end: CFG.end,
+    seen: {},
+    rewardPressed: 0,
+    endPressed: 0,
+    skipResult: CFG.skipResult,
+    resultSkips: 0,
+    resultHooked: null,
+    addedAt: 0,
+    endAt: 0,
+    stepGame: null,
+    onStep: null,
+    sock: null,
+    onAdded: null,
+    onEnded: null,
     reason: null
   };
+  st.onStep = function () {
+    try { panelStep(st); } catch (e) { st.reason = "確認框：" + String((e && e.message) || e); }
+  };
+  st.onAdded = function (id) { if (id !== null && id !== undefined) st.addedAt = Date.now(); };
+  st.onEnded = function () { st.endAt = Date.now(); };
   window[FLAG] = st;
   st.clear = function () { clear(st); };
-  st.unhook = function () { unhook(st); unhookBonus(st); };
+  st.unhook = function () { unhook(st); unhookBonus(st); unhookStep(st); unhookSocket(st); unhookResult(st); };
   tick(st);
   st.timer = setInterval(function () { tick(st); }, CFG.pollMs);
   return JSON.stringify({ installed: true, version: st.version, enabled: st.enabled, found: st.T !== null,
-    onMap: st.anchor !== null, marks: st.marks, learned: st.learned, reason: st.reason });
+    onMap: st.anchor !== null, marks: st.marks, learned: st.learned, reward: st.reward, end: st.end,
+    rewardPressed: st.rewardPressed, endPressed: st.endPressed, skipResult: st.skipResult,
+    resultSkips: st.resultSkips, reason: st.reason });
 })()`;
 }
 
@@ -480,7 +761,9 @@ export const QUEST_TREASURE_STATUS_EXPRESSION = `(function () {
     var st = window["${FLAG}"];
     if (!st) return JSON.stringify({ installed: false });
     return JSON.stringify({ installed: true, version: st.version, enabled: st.enabled, found: st.T !== null,
-      onMap: st.anchor !== null, marks: st.marks, learned: st.learned || 0, reason: st.reason });
+      onMap: st.anchor !== null, marks: st.marks, learned: st.learned || 0, reward: st.reward || "show",
+      end: st.end || "show", rewardPressed: st.rewardPressed || 0, endPressed: st.endPressed || 0,
+      skipResult: st.skipResult === true, resultSkips: st.resultSkips || 0, reason: st.reason });
   } catch (e) {
     return JSON.stringify({ installed: false, reason: String((e && e.message) || e) });
   }
@@ -494,6 +777,34 @@ export function buildQuestTreasureSetExpression(on: boolean): string {
     if (!st) return "not-installed";
     st.enabled = ${on ? "true" : "false"};
     if (!st.enabled && typeof st.clear === "function") st.clear();
+    return "ok";
+  } catch (e) {
+    return "error:" + String((e && e.message) || e);
+  }
+})()`;
+}
+
+/** 換一組確認框的處理方式，下一格生效。回 `"ok"` 或 `"not-installed"`。 */
+export function buildQuestPanelSetExpression(part: QuestPanelPart, mode: QuestPanelMode): string {
+  return `(function () {
+  try {
+    var st = window["${FLAG}"];
+    if (!st) return "not-installed";
+    st[${JSON.stringify(part)}] = ${JSON.stringify(mode)};
+    return "ok";
+  } catch (e) {
+    return "error:" + String((e && e.message) || e);
+  }
+})()`;
+}
+
+/** 開關「打完怪物跳過結算」，下一場生效。回 `"ok"` 或 `"not-installed"`。 */
+export function buildQuestSkipResultExpression(on: boolean): string {
+  return `(function () {
+  try {
+    var st = window["${FLAG}"];
+    if (!st) return "not-installed";
+    st.skipResult = ${on ? "true" : "false"};
     return "ok";
   } catch (e) {
     return "error:" + String((e && e.message) || e);
@@ -544,6 +855,12 @@ export function parseQuestTreasureStatus(raw: string): QuestTreasureStatus {
       onMap: false,
       marks: 0,
       learned: 0,
+      reward: "show",
+      end: "show",
+      rewardPressed: 0,
+      endPressed: 0,
+      skipResult: false,
+      resultSkips: 0,
       reason: `頁面回了讀不懂的東西：${raw.slice(0, 120)}`,
     };
   }
@@ -556,6 +873,12 @@ export function parseQuestTreasureStatus(raw: string): QuestTreasureStatus {
     onMap: o.onMap === true,
     marks: typeof o.marks === "number" ? o.marks : 0,
     learned: typeof o.learned === "number" ? o.learned : 0,
+    reward: isQuestPanelMode(o.reward) ? o.reward : "show",
+    end: isQuestPanelMode(o.end) ? o.end : "show",
+    rewardPressed: typeof o.rewardPressed === "number" ? o.rewardPressed : 0,
+    endPressed: typeof o.endPressed === "number" ? o.endPressed : 0,
+    skipResult: o.skipResult === true,
+    resultSkips: typeof o.resultSkips === "number" ? o.resultSkips : 0,
     reason: typeof o.reason === "string" ? o.reason : null,
   };
 }

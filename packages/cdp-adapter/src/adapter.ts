@@ -142,10 +142,16 @@ import {
   ITEM_PANEL_UNINSTALL_EXPRESSION,
   parseItemPanelStatus,
 } from "./patch-item-panel.js";
-import type { QuestTreasureStatus } from "./patch-quest-treasure.js";
+import type {
+  QuestPanelMode,
+  QuestPanelPart,
+  QuestTreasureStatus,
+} from "./patch-quest-treasure.js";
 import type { QuestBonusReport, QuestBonusStats } from "./quest-bonus.js";
 import { isQuestBonusReport } from "./quest-bonus.js";
 import {
+  buildQuestPanelSetExpression,
+  buildQuestSkipResultExpression,
   buildQuestTreasurePatchScript,
   buildQuestTreasureSetBonusExpression,
   buildQuestTreasureSetExpression,
@@ -1765,15 +1771,22 @@ export class CdpAdapter {
   // ── 任務地圖的寶箱標註 ──────────────────────────────────────────────────
 
   /**
-   * 任務地圖每格旁邊畫寶箱的實際內容；順便學 HighLow 格的開始星數（`onQuestBonus`）。
+   * 任務地圖每格旁邊畫寶箱的實際內容；順便學 HighLow 格的開始星數（`onQuestBonus`）；
+   * 寶箱面板與任務結束的確認框照 `panels` 自動按 OK 或不顯示。
    * 腳本自己輪詢等玩家開任務地圖；不送請求。
    */
   async installQuestTreasurePatch(
     enabled: boolean,
     bonusStats: QuestBonusStats = {},
+    panels: { reward?: QuestPanelMode; end?: QuestPanelMode; skipResult?: boolean } = {},
   ): Promise<QuestTreasureStatus> {
     const raw = await this.evaluate<string>(
-      buildQuestTreasurePatchScript({ enabled, bindingName: REPORT_BINDING_NAME, bonusStats }),
+      buildQuestTreasurePatchScript({
+        enabled,
+        bindingName: REPORT_BINDING_NAME,
+        bonusStats,
+        ...panels,
+      }),
     );
     return parseQuestTreasureStatus(raw);
   }
@@ -1796,6 +1809,16 @@ export class CdpAdapter {
   /** 開關標註。回 `"ok"` 或 `"not-installed"`。 */
   async setQuestTreasure(on: boolean): Promise<string> {
     return await this.evaluate<string>(buildQuestTreasureSetExpression(on));
+  }
+
+  /** 換一組確認框（寶箱／任務結束）的處理方式。回 `"ok"` 或 `"not-installed"`。 */
+  async setQuestPanel(part: QuestPanelPart, mode: QuestPanelMode): Promise<string> {
+    return await this.evaluate<string>(buildQuestPanelSetExpression(part, mode));
+  }
+
+  /** 開關「打完怪物跳過結算」。回 `"ok"` 或 `"not-installed"`。 */
+  async setQuestSkipResult(on: boolean): Promise<string> {
+    return await this.evaluate<string>(buildQuestSkipResultExpression(on));
   }
 
   async uninstallQuestTreasurePatch(): Promise<string> {

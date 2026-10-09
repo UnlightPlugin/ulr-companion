@@ -120,6 +120,8 @@ import type {
   QuestBonusReport,
   QuestBonusSample,
   QuestShortcutPart,
+  QuestPanelMode,
+  QuestPanelPart,
   QuestTreasureStatus,
   LobbyQuickPressed,
   LobbyReport,
@@ -1398,6 +1400,45 @@ export class ArbiterEngine {
       .catch(() => undefined);
   }
 
+  /** 寶箱面板／任務結束確認框：照官方、自動按 OK、不顯示。托盤從配置推進來。 */
+  #questPanels: Record<QuestPanelPart, QuestPanelMode> = { reward: "show", end: "show" };
+
+  get questPanels(): Readonly<Record<QuestPanelPart, QuestPanelMode>> {
+    return this.#questPanels;
+  }
+
+  /** 換一組確認框的處理方式。立刻推到頁面上（頁面沒裝就整支補裝）。 */
+  setQuestPanel(part: QuestPanelPart, mode: QuestPanelMode): void {
+    this.#questPanels = { ...this.#questPanels, [part]: mode };
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    void adapter
+      .setQuestPanel(part, mode)
+      .then((r) => (r === "not-installed" ? this.#syncQuestTreasure() : undefined))
+      .catch(() => undefined);
+  }
+
+  /** 任務打完怪物跳過結算。托盤從配置推進來。 */
+  #questSkipResult = false;
+
+  get questSkipResult(): boolean {
+    return this.#questSkipResult;
+  }
+
+  setQuestSkipResult(on: boolean): void {
+    this.#questSkipResult = on;
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    void adapter
+      .setQuestSkipResult(on)
+      .then((r) => (r === "not-installed" ? this.#syncQuestTreasure() : undefined))
+      .catch(() => undefined);
+  }
+
+  #questPatchPanels() {
+    return { ...this.#questPanels, skipResult: this.#questSkipResult };
+  }
+
   /** 寶箱標註那支現在在頁面上的狀態。沒接上遊戲時是 `null`；沒裝或舊版就當場補裝。 */
   async questTreasureStatus(): Promise<QuestTreasureStatus | null> {
     const adapter = this.#adapter;
@@ -1408,13 +1449,14 @@ export class ArbiterEngine {
       return await adapter.installQuestTreasurePatch(
         this.#questTreasure,
         summarizeQuestBonus(this.#questBonus),
+        this.#questPatchPanels(),
       );
     } catch {
       return null;
     }
   }
 
-  /** 寶箱標註（＋學 HighLow 開始星數）。**每次接上遊戲與遊戲重載後都會自己叫一次。** */
+  /** 寶箱標註（＋學 HighLow 開始星數、確認框）。**每次接上遊戲與遊戲重載後都會自己叫一次。** */
   async #syncQuestTreasure(): Promise<void> {
     const adapter = this.#adapter;
     if (adapter === null) return;
@@ -1422,6 +1464,7 @@ export class ArbiterEngine {
       const status = await adapter.installQuestTreasurePatch(
         this.#questTreasure,
         summarizeQuestBonus(this.#questBonus),
+        this.#questPatchPanels(),
       );
       if (!status.installed) this.#log(`· 寶箱標註還沒裝上：${status.reason ?? "原因不明"}`);
     } catch (err) {

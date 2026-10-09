@@ -74,6 +74,7 @@ import {
   isBonusItemOrder,
   isBonusItemPlace,
   isCharaPickerMode,
+  isQuestPanelMode,
   isRaidRewardMode,
   resolveDebugPort,
   ROOM_ERROR_AP_SHORT,
@@ -94,6 +95,7 @@ import type {
   DuelAffordability,
   HiddenStageStatus,
   ItemPanelStatus,
+  QuestPanelMode,
   QuestTreasureStatus,
   LobbyQuickPressed,
   LobbyTierCount,
@@ -879,11 +881,14 @@ async function raidPageState(): Promise<RaidPageState> {
   };
 }
 
-/** 任務那一頁要畫的東西：物品捷徑與寶箱標註的開關＋兩支注入腳本的狀態。 */
+/** 任務那幾頁要畫的東西：物品捷徑、寶箱標註、確認框的設定＋兩支注入腳本的狀態。 */
 interface QuestPageState {
   stackShortcut: boolean;
   passShortcut: boolean;
   treasureMarks: boolean;
+  rewardPanel: QuestPanelMode;
+  endPanel: QuestPanelMode;
+  skipResult: boolean;
   items: ItemPanelStatus | null;
   treasure: QuestTreasureStatus | null;
   /** 學到的 HighLow 開始星數：每一級的最小／最大 step、幾筆。 */
@@ -895,6 +900,9 @@ async function questPageState(): Promise<QuestPageState> {
     stackShortcut: profile.questStackShortcut,
     passShortcut: profile.questPassShortcut,
     treasureMarks: profile.questTreasureMarks,
+    rewardPanel: profile.questRewardPanel,
+    endPanel: profile.questEndPanel,
+    skipResult: profile.questSkipResult,
     items: (await engine?.itemPanelStatus().catch(() => null)) ?? null,
     treasure: (await engine?.questTreasureStatus().catch(() => null)) ?? null,
     bonus: summarizeQuestBonus(engine?.questBonusSamples ?? readQuestBonus()),
@@ -5072,6 +5080,34 @@ app.whenReady().then(() => {
       if (!ephemeral) store = updateProfile(profile.id, { questTreasureMarks: on });
       engine?.setQuestTreasure(on);
       log(on ? "· 任務地圖寶箱標註已開啟" : "· 任務地圖寶箱標註已關閉");
+      pushState();
+    }
+    return questPageState();
+  });
+
+  ipcMain.handle(
+    "ulr:quest-panel",
+    async (_event, part: unknown, mode: unknown): Promise<QuestPageState> => {
+      if ((part === "reward" || part === "end") && isQuestPanelMode(mode)) {
+        const patch = part === "reward" ? { questRewardPanel: mode } : { questEndPanel: mode };
+        profile = { ...profile, ...patch };
+        if (!ephemeral) store = updateProfile(profile.id, patch);
+        engine?.setQuestPanel(part, mode);
+        const what = part === "reward" ? "寶箱面板" : "任務結束確認框";
+        const how = mode === "auto" ? "自動按 OK" : mode === "hide" ? "不顯示" : "照官方";
+        log(`· 任務${what}：${how}`);
+        pushState();
+      }
+      return questPageState();
+    },
+  );
+
+  ipcMain.handle("ulr:quest-skip-result", async (_event, on: unknown): Promise<QuestPageState> => {
+    if (typeof on === "boolean") {
+      profile = { ...profile, questSkipResult: on };
+      if (!ephemeral) store = updateProfile(profile.id, { questSkipResult: on });
+      engine?.setQuestSkipResult(on);
+      log(on ? "· 任務打完怪物：跳過結算" : "· 任務打完怪物：照官方看結算");
       pushState();
     }
     return questPageState();

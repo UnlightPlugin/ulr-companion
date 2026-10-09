@@ -386,15 +386,24 @@ export {
 export type { QuestBonusReport, QuestBonusSample, QuestBonusStats } from "./quest-bonus.js";
 
 export {
+  buildQuestPanelSetExpression,
+  buildQuestSkipResultExpression,
   buildQuestTreasurePatchScript,
   buildQuestTreasureSetBonusExpression,
   buildQuestTreasureSetExpression,
+  isQuestPanelMode,
   parseQuestTreasureStatus,
+  QUEST_PANEL_MODES,
   QUEST_TREASURE_SCRIPT_VERSION,
   QUEST_TREASURE_STATUS_EXPRESSION,
   QUEST_TREASURE_UNINSTALL_EXPRESSION,
 } from "./patch-quest-treasure.js";
-export type { QuestTreasurePatchOptions, QuestTreasureStatus } from "./patch-quest-treasure.js";
+export type {
+  QuestPanelMode,
+  QuestPanelPart,
+  QuestTreasurePatchOptions,
+  QuestTreasureStatus,
+} from "./patch-quest-treasure.js";
 export { QUEST_TREASURE_TABLE } from "./quest-treasure-data.js";
 export type { QuestTreasureEntry } from "./quest-treasure-data.js";
 

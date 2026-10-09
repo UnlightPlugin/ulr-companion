@@ -151,6 +151,10 @@ contextBridge.exposeInMainWorld("ulr", {
     itemShortcut: (part: "stack" | "passes", on: boolean) =>
       ipcRenderer.invoke("ulr:quest-item-shortcut", part, on),
     treasure: (on: boolean) => ipcRenderer.invoke("ulr:quest-treasure", on),
+    /** `part`：`reward` 寶箱面板、`end` 任務結束確認框；`mode`：`show`／`auto`／`hide`。 */
+    panel: (part: "reward" | "end", mode: "show" | "auto" | "hide") =>
+      ipcRenderer.invoke("ulr:quest-panel", part, mode),
+    skipResult: (on: boolean) => ipcRenderer.invoke("ulr:quest-skip-result", on),
   },
 
   /** 迪特赫姆：物品捷徑、GEM UP、投降的開關與狀態（隱藏地圖走 `stages`）。 */

@@ -15,11 +15,16 @@
  * 6. Exp（OwnCard）：牌頭同角色、等級 -1 的 L 卡，R 當 L，最低 L1（玩家實測）
  * 7. High Low：標等級，學到的開始星數標在下一行
  * 8. 學開始星數：Bonus.initialize 之前記 bonus_data.step，等級看人物站的那一格；非 HighLow 不記
+ * 9. 寶箱面板／任務結束確認框（兩組分開）：auto 等一下才按、hide 當格藏起來按掉、玩家先按了
+ *    不再按（官方 onComplete 拆兩次會炸）；搜尋找到任務的框不跳；拆除把 prestep 與 socket 的
+ *    listener 拿掉。假的官方流程照 2026-10-08 從 bundle 讀的 quest_reward／quest_end 寫
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   appendQuestBonusSample,
+  buildQuestPanelSetExpression,
+  buildQuestSkipResultExpression,
   buildQuestTreasurePatchScript,
   buildQuestTreasureSetBonusExpression,
   buildQuestTreasureSetExpression,
@@ -135,9 +140,241 @@ const CHARA_CARDS = [
   { id: 24, chara: "cc003", level: 4, rarity: 5, kind: 0 },
 ];
 
+type Fn = (...a: unknown[]) => unknown;
+
+class Emitter {
+  l: Record<string, Fn[]> = {};
+  on(e: string, f: Fn) {
+    (this.l[e] ??= []).push(f);
+    return this;
+  }
+  off(e: string, f: Fn) {
+    this.l[e] = (this.l[e] ?? []).filter((x) => x !== f);
+    return this;
+  }
+  once(e: string, f: Fn, ctx?: unknown) {
+    const w: Fn = (...a) => {
+      this.off(e, w);
+      return f.apply(ctx, a);
+    };
+    return this.on(e, w);
+  }
+  emit(e: string, ...a: unknown[]) {
+    for (const f of [...(this.l[e] ?? [])]) f(...a);
+    return true;
+  }
+  count(e: string) {
+    return (this.l[e] ?? []).length;
+  }
+}
+
+/** 面板上的圖（OK 鈕要能 on／emit、有 input）。 */
+class Pic extends Obj {
+  ev = new Emitter();
+  input: { enabled: boolean } | null = null;
+  visible = true;
+  on(e: string, f: Fn) {
+    this.ev.on(e, f);
+    return this;
+  }
+  emit(e: string) {
+    return this.ev.emit(e);
+  }
+  setVisible(v: boolean) {
+    this.visible = v;
+    return this;
+  }
+  setInteractive() {
+    if (this.input) this.input.enabled = true;
+    else this.input = { enabled: true };
+    return this;
+  }
+  disableInteractive() {
+    if (this.input) this.input.enabled = false;
+    return this;
+  }
+}
+
+/** Phaser 3.87 的 tween：complete() 沒擋重複、直接叫 onComplete。 */
+class FakeTween {
+  state: "run" | "pending" | "dead" = "run";
+  constructor(
+    public targets: unknown[],
+    public onComplete?: () => void,
+  ) {}
+  isPendingRemove() {
+    return this.state === "pending";
+  }
+  isDestroyed() {
+    return this.state === "dead";
+  }
+  complete() {
+    this.state = "pending";
+    this.onComplete?.();
+  }
+  destroy() {
+    this.state = "dead";
+  }
+}
+class FakeTweens {
+  list: FakeTween[] = [];
+  add(cfg: { targets: unknown; onComplete?: () => void }) {
+    const t = new FakeTween(
+      Array.isArray(cfg.targets) ? cfg.targets : [cfg.targets],
+      cfg.onComplete,
+    );
+    this.list.push(t);
+    return t;
+  }
+  of(targets: unknown[]) {
+    return this.list.filter(
+      (t) => t.state !== "dead" && t.targets.some((x) => targets.includes(x)),
+    );
+  }
+  getTweensOf(targets: unknown[]) {
+    return this.of(targets);
+  }
+  killTweensOf(targets: unknown[]) {
+    for (const t of this.of(targets)) t.destroy();
+  }
+  /** 時間過去、跑著的 tween 都跑完。 */
+  finish() {
+    for (const t of [...this.list]) if (t.state === "run") t.complete();
+  }
+  running() {
+    return this.list.filter((t) => t.state === "run").length;
+  }
+}
+
+class Cam {
+  alpha = 1;
+  setAlpha(a: number) {
+    this.alpha = a;
+    return this;
+  }
+}
+
+/** 官方 Result：create 跑勝負字樣與數字動畫，OK 才 result_scene_end（回地圖）。 */
+class ResultScene {
+  events = new Emitter();
+  cameras = { main: new Cam() };
+  log: string[] = [];
+  result_params: { result: string; bonusgame: boolean; lvup: number | null } = {
+    result: "win",
+    bonusgame: false,
+    lvup: null,
+  };
+  create() {
+    this.log.push("call_win", "result_end_nornal");
+    this.events.once("shutdown", this.shutdown, this);
+    return Promise.resolve();
+  }
+  shutdown() {
+    this.log.push("shutdown");
+  }
+  result_scene_end() {
+    this.log.push("result_scene_end");
+    return Promise.resolve();
+  }
+}
+class BackScene {
+  scene = { isActive: () => true };
+  cameras = { main: new Cam() };
+}
+
 class QuestScene {
-  scene = { isActive: () => this.active, isSleeping: () => false };
+  scene = { isActive: () => this.active, isSleeping: () => this.sleeping };
   active = true;
+  sleeping = false;
+  tweens = new FakeTweens();
+  socket = new Emitter();
+  sounds: string[] = [];
+  quest_reward_base: Pic | null = null;
+  quest_reward_ok: Pic | null = null;
+  quest_reward_image: Pic | null = null;
+  quest_end_result: string | null = null;
+  quest_end_base: Pic | null = null;
+  quest_end_ok: Pic | null = null;
+  quest_found_bg: Pic | null = null;
+  quest_found_dialog: Pic | null = null;
+  quest_found_ok_btn: Pic | null = null;
+  quest_found_ok_text: Pic | null = null;
+  found: number[] = [];
+
+  constructor() {
+    this.socket.on("quest_end", (r) => (this.quest_end_result = r as string));
+    this.socket.on("quest_added", (id) => {
+      if (id !== null) void this.show_quest_found_dialog(id as number);
+    });
+    this.socket.on("quest_found", (id) => void this.show_quest_found_dialog(id as number));
+  }
+
+  /** 官方 quest_reward（update_data 那段省略）：淡入、翻卡，等 OK 淡出 300ms 後全拆。 */
+  quest_reward(): Promise<boolean> {
+    const base = (this.quest_reward_base = new Pic(this, 380, 330));
+    const ok = (this.quest_reward_ok = new Pic(this, 380, 470).setInteractive());
+    const image = (this.quest_reward_image = new Pic(this, 380, 332));
+    this.tweens.add({ targets: [base, ok] });
+    this.tweens.add({ targets: image, onComplete: () => this.sounds.push("ulse23") });
+    return new Promise((res) => {
+      ok.disableInteractive();
+      ok.on("pointerup", () => {
+        ok.disableInteractive();
+        this.tweens.add({
+          targets: [base, ok, image],
+          onComplete: () => {
+            // 官方直接 this.quest_reward_base.destroy()：拆兩次會炸
+            this.quest_reward_base!.destroy();
+            this.quest_reward_ok!.destroy();
+            this.quest_reward_image!.destroy();
+            this.quest_reward_base = this.quest_reward_ok = this.quest_reward_image = null;
+            res(true);
+          },
+        });
+      });
+      ok.setInteractive();
+    });
+  }
+
+  /** 官方 quest_end：淡入完才 setInteractive，等 OK 淡出後拆。 */
+  quest_end(): Promise<boolean> {
+    const base = (this.quest_end_base = new Pic(this, 380, 330));
+    const ok = (this.quest_end_ok = new Pic(this, 380, 382));
+    this.tweens.add({ targets: [base, ok], onComplete: () => ok.setInteractive() });
+    return new Promise((res) => {
+      ok.on("pointerup", () => {
+        ok.disableInteractive();
+        this.tweens.add({
+          targets: [base, ok],
+          onComplete: () => {
+            this.quest_end_base!.destroy();
+            this.quest_end_ok!.destroy();
+            this.quest_end_base = this.quest_end_ok = null;
+            res(true);
+          },
+        });
+      });
+    });
+  }
+
+  /** 官方 show_quest_found_dialog：沒有 tween，按了就拆。 */
+  show_quest_found_dialog(id: number): Promise<boolean> {
+    this.found.push(id);
+    this.quest_found_bg = new Pic(this).setInteractive();
+    this.quest_found_dialog = new Pic(this);
+    const btn = (this.quest_found_ok_btn = new Pic(this).setInteractive());
+    this.quest_found_ok_text = new Pic(this);
+    return new Promise((res) => {
+      btn.on("pointerup", () => {
+        this.sounds.push("ulse01");
+        this.quest_found_bg!.destroy();
+        this.quest_found_dialog!.destroy();
+        this.quest_found_ok_btn!.destroy();
+        this.quest_found_ok_text!.destroy();
+        res(true);
+      });
+    });
+  }
   cache = {
     json: {
       get: (k: string) =>
@@ -209,7 +446,11 @@ class BonusScene {
   }
 }
 
-function setup(Q: QuestScene, B: BonusScene = new BonusScene()) {
+function setup(
+  Q: QuestScene,
+  B: BonusScene = new BonusScene(),
+  more: Record<string, unknown> = {},
+) {
   const chunks: unknown[] = [];
   const req = Object.assign(
     (id: string) => (id === "9" ? { $T: { create_card: createCard } } : {}),
@@ -229,11 +470,14 @@ function setup(Q: QuestScene, B: BonusScene = new BonusScene()) {
     return 0;
   };
   const reports: unknown[] = [];
+  const events = new Emitter();
   const window: Record<string, unknown> = {
     webpackChunkunlight: chunks,
-    game: { scene: { keys: { Quest: Q, Bonus: B } } },
+    game: { scene: { keys: { Quest: Q, Bonus: B, ...more } }, events },
     __ulrReport: (s: string) => reports.push(JSON.parse(s)),
   };
+  /** 下一格開始（Phaser 的 game.step 先發 prestep）。 */
+  const frame = () => events.emit("prestep");
   type Runner = (...a: unknown[]) => string;
   const run = (expression: string): string => {
     // eslint-disable-next-line no-new-func
@@ -241,7 +485,7 @@ function setup(Q: QuestScene, B: BonusScene = new BonusScene()) {
     return (fn as Runner)(window, setInterval, clearInterval);
   };
   const st = () => window["__ulrQuestTreasure"] as { mine: Obj[]; marks: number };
-  return { run, st, reports, B };
+  return { run, st, reports, B, frame, events };
 }
 
 const BINDING = { bindingName: "__ulrReport" };
@@ -513,6 +757,254 @@ describe("學 High Low 的開始星數", () => {
       parseQuestBonusSamples({ samples: [mk(4, 27), { level: 9, step: 1 }, "x", mk(1, 5)] }),
     ).toEqual([mk(4, 27), mk(1, 5)]);
     expect(parseQuestBonusSamples(null)).toEqual([]);
+  });
+});
+
+describe("寶箱面板與任務結束的確認框", () => {
+  const status = (run: (e: string) => string) =>
+    parseQuestTreasureStatus(run(QUEST_TREASURE_STATUS_EXPRESSION));
+
+  it("預設照官方：什麼都不按", async () => {
+    const Q = new QuestScene();
+    const { run, frame } = setup(Q);
+    run(buildQuestTreasurePatchScript({ enabled: false }));
+    void Q.quest_reward();
+    Q.socket.emit("quest_end", "win");
+    void Q.quest_end();
+    vi.advanceTimersByTime(5000);
+    frame();
+    expect(Q.quest_reward_ok?.scene).toBe(Q);
+    expect(Q.quest_end_ok?.scene).toBe(Q);
+    expect(status(run)).toMatchObject({ reward: "show", end: "show", rewardPressed: 0 });
+    run(QUEST_TREASURE_UNINSTALL_EXPRESSION);
+  });
+
+  it("寶箱 hide：下一格前就停掉淡入與翻卡、藏起來、按掉，淡出當場跑完、放行後面", async () => {
+    const Q = new QuestScene();
+    const { run, frame } = setup(Q);
+    run(buildQuestTreasurePatchScript({ enabled: false, reward: "hide" }));
+    const done = vi.fn();
+    void Q.quest_reward().then(done);
+    const parts = [Q.quest_reward_base!, Q.quest_reward_ok!, Q.quest_reward_image!];
+    frame();
+    expect(parts.every((o) => !o.visible && o.scene === undefined)).toBe(true);
+    expect(Q.quest_reward_ok).toBeNull();
+    // 翻卡的 tween 被停掉：不播 ulse23
+    expect(Q.sounds).toEqual([]);
+    expect(Q.tweens.running()).toBe(0);
+    await Promise.resolve();
+    expect(done).toHaveBeenCalledWith(true);
+    expect(status(run).rewardPressed).toBe(1);
+    // 任務結束那組沒開：不碰
+    Q.socket.emit("quest_end", "win");
+    void Q.quest_end();
+    frame();
+    expect(Q.quest_end_ok?.scene).toBe(Q);
+    run(QUEST_TREASURE_UNINSTALL_EXPRESSION);
+  });
+
+  it("寶箱 auto：照常顯示，1.5 秒後才按；官方的淡出照跑", () => {
+    const Q = new QuestScene();
+    const { run, frame } = setup(Q);
+    run(buildQuestTreasurePatchScript({ enabled: false, reward: "auto" }));
+    void Q.quest_reward();
+    const ok = Q.quest_reward_ok!;
+    frame();
+    vi.advanceTimersByTime(1400);
+    frame();
+    expect(ok.input?.enabled).toBe(true);
+    vi.advanceTimersByTime(200);
+    frame();
+    expect(ok.input?.enabled).toBe(false);
+    expect(ok.visible).toBe(true);
+    // 淡出還在跑（看得到收起來），跑完才拆
+    expect(Q.quest_reward_ok).toBe(ok);
+    Q.tweens.finish();
+    expect(Q.quest_reward_ok).toBeNull();
+    run(QUEST_TREASURE_UNINSTALL_EXPRESSION);
+  });
+
+  it("玩家自己先按了就不再按（官方 onComplete 拆兩次會炸）", () => {
+    const Q = new QuestScene();
+    const { run, frame } = setup(Q);
+    run(buildQuestTreasurePatchScript({ enabled: false, reward: "auto" }));
+    void Q.quest_reward();
+    frame();
+    Q.quest_reward_ok!.emit("pointerup");
+    vi.advanceTimersByTime(2000);
+    expect(() => frame()).not.toThrow();
+    expect(() => Q.tweens.finish()).not.toThrow();
+    expect(Q.quest_reward_ok).toBeNull();
+    expect(status(run)).toMatchObject({ rewardPressed: 0, reason: null });
+    run(QUEST_TREASURE_UNINSTALL_EXPRESSION);
+  });
+
+  it("任務結束 hide：QUEST CLEAR 與結束時 quest_added 給的新任務框都不顯示", async () => {
+    const Q = new QuestScene();
+    const { run, frame } = setup(Q);
+    run(buildQuestTreasurePatchScript({ enabled: false, end: "hide" }));
+    vi.advanceTimersByTime(600);
+    Q.socket.emit("quest_end", "win");
+    Q.socket.emit("quest_added", 12);
+    const done = vi.fn();
+    void Q.quest_end().then(done);
+    const base = Q.quest_end_base!;
+    frame();
+    expect(base.visible).toBe(false);
+    expect(Q.quest_end_ok).toBeNull();
+    expect(Q.quest_found_ok_btn?.scene).toBeUndefined();
+    await Promise.resolve();
+    expect(done).toHaveBeenCalledWith(true);
+    expect(status(run)).toMatchObject({ end: "hide", endPressed: 2, rewardPressed: 0 });
+    run(QUEST_TREASURE_UNINSTALL_EXPRESSION);
+  });
+
+  it("任務結束 auto：等官方淡入完能按了，再 1.2 秒才按", () => {
+    const Q = new QuestScene();
+    const { run, frame } = setup(Q);
+    run(buildQuestTreasurePatchScript({ enabled: false, end: "auto" }));
+    Q.socket.emit("quest_end", "win");
+    void Q.quest_end();
+    const ok = Q.quest_end_ok!;
+    vi.advanceTimersByTime(3000);
+    frame();
+    // 淡入還沒完：input 是 null，不算按過也不按
+    expect(ok.input).toBeNull();
+    Q.tweens.finish();
+    expect(ok.input?.enabled).toBe(true);
+    frame();
+    vi.advanceTimersByTime(1100);
+    frame();
+    expect(ok.input?.enabled).toBe(true);
+    vi.advanceTimersByTime(200);
+    frame();
+    expect(ok.input?.enabled).toBe(false);
+    expect(status(run).endPressed).toBe(1);
+    run(QUEST_TREASURE_UNINSTALL_EXPRESSION);
+  });
+
+  it("搜尋找到任務的框照常顯示；沒在結束任務時的 quest_added 也不跳", () => {
+    const Q = new QuestScene();
+    const { run, frame } = setup(Q);
+    run(buildQuestTreasurePatchScript({ enabled: false, end: "hide" }));
+    vi.advanceTimersByTime(600);
+    Q.socket.emit("quest_found", 33);
+    frame();
+    expect(Q.quest_found_ok_btn?.scene).toBe(Q);
+    Q.quest_found_ok_btn!.emit("pointerup");
+    Q.socket.emit("quest_added", 34);
+    frame();
+    expect(Q.quest_found_ok_btn?.scene).toBe(Q);
+    Q.quest_found_ok_btn!.emit("pointerup");
+    // 任務結束超過一分鐘後才來的也不跳
+    Q.socket.emit("quest_end", "win");
+    vi.advanceTimersByTime(61_000);
+    Q.socket.emit("quest_added", 35);
+    frame();
+    expect(Q.quest_found_ok_btn?.scene).toBe(Q);
+    expect(Q.found).toEqual([33, 34, 35]);
+    expect(status(run).endPressed).toBe(0);
+    run(QUEST_TREASURE_UNINSTALL_EXPRESSION);
+  });
+
+  it("執行期換模式；拆除拿掉 prestep 與 socket 的 listener；換了新 socket 跟著換", () => {
+    const Q = new QuestScene();
+    const { run, frame, events } = setup(Q);
+    run(buildQuestTreasurePatchScript({ enabled: false }));
+    expect(events.count("prestep")).toBe(1);
+    expect(Q.socket.count("quest_added")).toBe(2);
+    expect(run(buildQuestPanelSetExpression("reward", "hide"))).toBe("ok");
+    void Q.quest_reward();
+    frame();
+    expect(Q.quest_reward_ok).toBeNull();
+    // Quest 場景重進：init 會 new 一條 socket
+    const oldSock = Q.socket;
+    Q.socket = new Emitter();
+    vi.advanceTimersByTime(600);
+    expect(oldSock.count("quest_added")).toBe(1);
+    expect(Q.socket.count("quest_added")).toBe(1);
+    // 重裝只留一份
+    run(buildQuestTreasurePatchScript({ enabled: false, end: "auto" }));
+    expect(events.count("prestep")).toBe(1);
+    expect(status(run)).toMatchObject({ reward: "show", end: "auto" });
+    run(QUEST_TREASURE_UNINSTALL_EXPRESSION);
+    expect(events.count("prestep")).toBe(0);
+    expect(Q.socket.count("quest_added")).toBe(0);
+    expect(run(buildQuestPanelSetExpression("end", "hide"))).toBe("not-installed");
+  });
+});
+
+describe("打完怪物跳過結算", () => {
+  const make = () => {
+    const Q = new QuestScene();
+    Q.sleeping = true; // 任務戰鬥中 Quest 在睡
+    const R = new ResultScene();
+    const back = new BackScene();
+    const env = setup(Q, new BonusScene(), { Result: R, BackA: back });
+    return { Q, R, back, ...env };
+  };
+
+  it("任務戰鬥、沒有獎勵遊戲：不跑動畫，直接走官方 result_scene_end，鏡頭先藏", async () => {
+    const { R, back, run } = make();
+    run(buildQuestTreasurePatchScript({ enabled: false, skipResult: true }));
+    await R.create();
+    expect(R.log).toEqual(["result_scene_end"]);
+    expect(R.cameras.main.alpha).toBe(0);
+    expect(back.cameras.main.alpha).toBe(0);
+    // 官方 create 最後掛的 shutdown 照掛
+    R.events.emit("shutdown");
+    expect(R.log).toEqual(["result_scene_end", "shutdown"]);
+    expect(parseQuestTreasureStatus(run(QUEST_TREASURE_STATUS_EXPRESSION))).toMatchObject({
+      skipResult: true,
+      resultSkips: 1,
+    });
+    run(QUEST_TREASURE_UNINSTALL_EXPRESSION);
+  });
+
+  it("有升級：一樣跳過，但鏡頭不藏（升級動畫看得到）", async () => {
+    const { R, back, run } = make();
+    R.result_params.lvup = 138;
+    run(buildQuestTreasurePatchScript({ enabled: false, skipResult: true }));
+    await R.create();
+    expect(R.log).toEqual(["result_scene_end"]);
+    expect(R.cameras.main.alpha).toBe(1);
+    expect(back.cameras.main.alpha).toBe(1);
+    run(QUEST_TREASURE_UNINSTALL_EXPRESSION);
+  });
+
+  it("有獎勵遊戲、不是任務戰鬥（Quest 沒在睡）、開關關著：照官方", async () => {
+    const { Q, R, run } = make();
+    run(buildQuestTreasurePatchScript({ enabled: false, skipResult: true }));
+    R.result_params.bonusgame = true;
+    await R.create();
+    expect(R.log).toEqual(["call_win", "result_end_nornal"]);
+    R.log = [];
+    R.result_params.bonusgame = false;
+    Q.sleeping = false;
+    await R.create();
+    expect(R.log).toEqual(["call_win", "result_end_nornal"]);
+    R.log = [];
+    Q.sleeping = true;
+    expect(run(buildQuestSkipResultExpression(false))).toBe("ok");
+    await R.create();
+    expect(R.log).toEqual(["call_win", "result_end_nornal"]);
+    R.log = [];
+    run(buildQuestSkipResultExpression(true));
+    await R.create();
+    expect(R.log).toEqual(["result_scene_end"]);
+    run(QUEST_TREASURE_UNINSTALL_EXPRESSION);
+  });
+
+  it("拆除把 Result.create 還原；重裝只包一層", () => {
+    const { R, run } = make();
+    const orig = R.create;
+    run(buildQuestTreasurePatchScript({ enabled: false, skipResult: true }));
+    run(buildQuestTreasurePatchScript({ enabled: false, skipResult: true }));
+    const w = R.create as unknown as { __ulrOrig: unknown };
+    expect(w.__ulrOrig).toBe(orig);
+    run(QUEST_TREASURE_UNINSTALL_EXPRESSION);
+    expect(R.create).toBe(orig);
+    expect(Object.prototype.hasOwnProperty.call(R, "create")).toBe(false);
   });
 });
 
