@@ -38,9 +38,15 @@ export const DEFAULT_RAID_FEED_URL = `${SERVICE_ORIGIN}${RAID_FEED_PATH}`;
 
 const feedKey = (founder: string, foundAt: number) => `${founder}@${foundAt}`;
 
+/**
+ * SUPPORT 的列 → 上傳的形狀，帶著 `founderFriend`：雲端只拿 `false` 的新增（僅限好友的渦會列在
+ * 好友的 SUPPORT）。好友開的、帳本上還沒有的，`RaidFeedSync` 根本不傳（見那裡）。
+ */
 export function supportToFeed(rows: readonly RaidSupportRow[]): RaidFeedIn[] {
-  return rows.map((r) => ({
+  return rows.map(({ friend, ...r }) => ({
     ...r,
+    // 舊版頁面沒有這一欄：當作可能是好友
+    founderFriend: friend ?? null,
     rarity: null,
     level: null,
     stage: null,
@@ -74,6 +80,7 @@ export function ownToFeed(rows: readonly RaidSnapshotRow[]): RaidFeedIn[] {
       // 開打時看到的 BOSS 狀態；沒打過（statesAt 是 null）就不帶
       states: r.statesAt !== null ? r.states : null,
       statesAt: r.statesAt,
+      onlyFriend: r.meta?.onlyFriend ?? null,
     });
   }
   return out;
@@ -103,7 +110,11 @@ export function publishedToFeed(rows: readonly RaidPublishedRow[]): RaidFeedIn[]
 
 /**
  * 要補給帳本的：帳本缺了自己知道的 ★／stage／區塊（區塊拿去查 ulrmap 獎勵表）、
- * 自己看到的 BOSS 狀態比帳本上的新、或自己看到它死了而帳本還不知道。
+ * 自己看到的 BOSS 狀態比帳本上的新、自己看到它死了而帳本還不知道、或清單上它是僅限好友
+ * （雲端會撤下；撤下後 GET 不再列它，不會一直傳）。
+ *
+ * 帳本上沒有的只傳一種：好友的 SUPPORT 看過（`seenInSupport`，當時不能新增）、加入後清單上
+ * 不是僅限好友 —— 雲端拿它新增（見 `@ulr/arbiter-link/raid-feed` 檔頭）。
  */
 export function pickOwnToFill(
   own: readonly RaidFeedIn[],
@@ -112,14 +123,16 @@ export function pickOwnToFill(
   const byKey = new Map(feed.map((v) => [feedKey(v.founder, v.foundAt), v]));
   return own.filter((r) => {
     const v = byKey.get(feedKey(r.founder, r.foundAt));
-    if (v === undefined) return false;
+    // 帳本沒有（或撤下了、GET 不列）：好友的 SUPPORT 看過、加入後不是僅限好友 = 公開，傳上去新增
+    if (v === undefined) return r.seenInSupport === true && r.onlyFriend === false;
     // 只補缺的、不蓋別人的（兩個人看到的 stage 不一樣時，每輪互蓋只會讓訊息一直被改）
     return (
       (r.stage !== null && v.stage === null) ||
       (r.rarity !== null && v.rarity === null) ||
       (r.mapIndex !== null && (v.mapIndex ?? null) === null) ||
       (r.statesAt !== null && r.statesAt > (v.statesAt ?? -1)) ||
-      (r.hp !== null && r.hp <= 0 && !(v.hp !== null && v.hp <= 0))
+      (r.hp !== null && r.hp <= 0 && !(v.hp !== null && v.hp <= 0)) ||
+      r.onlyFriend === true
     );
   });
 }
@@ -172,6 +185,26 @@ export class RaidFeedSync {
   #lastSupport: string | null = null;
   /** 傳成功過的公開（發現者＋發現時刻） */
   #sentPublished = new Set<string>();
+  /**
+   * 在 SUPPORT 看過、但發現者是好友（可能僅限好友、雲端不新增）的渦 → 到期時刻。加入後清單上
+   * 讀到 `only_friend: false` 就拿它證明公開。只放記憶體：托盤重開就忘（通常看到就加入了）。
+   */
+  #friendSeen = new Map<string, number>();
+
+  /** 記下好友的 SUPPORT 列；到期的丟掉。 */
+  #rememberFriendSeen(support: readonly RaidSupportRow[], now: number): void {
+    for (const [k, limit] of this.#friendSeen) if (limit <= now) this.#friendSeen.delete(k);
+    for (const r of support) {
+      if (r.friend !== false) this.#friendSeen.set(feedKey(r.founder, r.foundAt), r.limit);
+    }
+  }
+
+  /** 自己的清單 → 上傳的形狀，好友的 SUPPORT 看過的標上 `seenInSupport`。 */
+  #ownToFeed(own: readonly RaidSnapshotRow[]): RaidFeedIn[] {
+    return ownToFeed(own).map((r) =>
+      this.#friendSeen.has(feedKey(r.founder, r.foundAt)) ? { ...r, seenInSupport: true } : r,
+    );
+  }
 
   constructor(
     private readonly fetchImpl: FetchLike = fetch as unknown as FetchLike,
@@ -190,6 +223,7 @@ export class RaidFeedSync {
   ): Promise<RaidFeedSyncResult> {
     let sentSupport = 0;
     let sentOwn = 0;
+    this.#rememberFriendSeen(support, Date.now());
     // 自己按送出公開的：傳過的不再傳
     const fresh = upload
       ? published.filter((r) => !this.#sentPublished.has(feedKey(r.founder, r.foundAt)))
@@ -214,10 +248,19 @@ export class RaidFeedSync {
         const present = ownToFeed(own)
           .filter((r) => !(r.hp !== null && r.hp <= 0) && inFeed.has(feedKey(r.founder, r.foundAt)))
           .map((r) => ({ founder: r.founder, foundAt: r.foundAt }));
+        // 好友開的、帳本上還沒有的不傳（可能僅限好友）。雲端也會擋，但改版前的 Worker 不認
+        // founderFriend、照樣新增 —— 這裡先擋，插件比 Worker 早上線也不會漏。只附鍵，
+        // 免得整份判打倒時被當成不見了。GET 失敗不知道帳本有什麼：好友的全部不傳。
+        const safe: RaidSupportRow[] = [];
+        for (const r of support) {
+          const k = feedKey(r.founder, r.foundAt);
+          if (r.friend === false || inFeed.has(k)) safe.push(r);
+          else present.push({ founder: r.founder, foundAt: r.foundAt });
+        }
         const complete = fetched !== null && support.length <= MAX_RAID_FEED_PER_POST;
-        if (await this.#post("support", supportToFeed(support), { complete, present })) {
+        if (await this.#post("support", supportToFeed(safe), { complete, present })) {
           this.#lastSupport = sig;
-          sentSupport = support.length;
+          sentSupport = safe.length;
           // 新渦進帳本了，再讀一次，自己清單才補得到它們
           fetched = (await get()) ?? fetched;
         }
@@ -225,7 +268,7 @@ export class RaidFeedSync {
     }
     const feed = fetched ?? [];
     if (upload) {
-      const fill = pickOwnToFill(ownToFeed(own), feed);
+      const fill = pickOwnToFill(this.#ownToFeed(own), feed);
       if (fill.length > 0 && (await this.#post("own", fill))) sentOwn = fill.length;
     }
     return { map: feedToPublicMap(feed), support: sentSupport, own: sentOwn };

@@ -150,6 +150,8 @@ const raid = (over: Partial<RaidFeedIn> = {}): RaidFeedIn => ({
   mapIndex: null,
   states: null,
   statesAt: null,
+  // 上傳的人不是發現者的好友（SUPPORT 只有這種能新增渦）
+  founderFriend: false,
   ...over,
 });
 

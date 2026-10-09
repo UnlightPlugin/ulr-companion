@@ -45,7 +45,7 @@ const CHARA_CARDS = [
  *   fetch(t, ...e) { return new Promise(s => { this.once(t, (...t) => s(t.length < 2 ? t[0] : t)); this.emit(t, ...e); }); }
  * 伺服器的回應用同名事件回來。
  */
-function setup(supportRows: unknown[]) {
+function setup(supportRows: unknown[], friends: unknown = [{ player_name: "Kotoma" }]) {
   const sent: unknown[][] = [];
   class Sock {
     #listeners = new Map<string, (...a: unknown[]) => void>();
@@ -83,6 +83,7 @@ function setup(supportRows: unknown[]) {
     game: {
       scene: { keys: { Raid: raid } },
       cache: { json: { get: (k: string) => (k === "CharaCards" ? CHARA_CARDS : null) } },
+      registry: { get: (k: string) => (k === "friend" ? friends : undefined) },
     },
     [RAID_SUPPORT_REPORT_BINDING]: (json: string) => reports.push(JSON.parse(json)),
   } as Record<string, unknown>;
@@ -112,6 +113,7 @@ const EXPECTED = {
   hpMax: 1200,
   memberLength: 33,
   memberLimit: 100,
+  friend: false,
 };
 
 describe("RAID_SUPPORT_SNAPSHOT_EXPRESSION", () => {
@@ -135,6 +137,23 @@ describe("RAID_SUPPORT_SNAPSHOT_EXPRESSION", () => {
     const out = read();
     expect(out).not.toContain("ABCDEFGHIJKL");
     expect(parseRaidSupportSnapshot(out)).toEqual([EXPECTED]);
+  });
+
+  it("發現者是好友的列標 friend（僅限好友的渦會列在好友的 SUPPORT）；讀不到好友名單是 null", async () => {
+    const rows = [ROW(), ROW({ founder_name: "Kotoma" }), ROW({ founder_name: "constructor" })];
+    const a = setup(rows);
+    a.read();
+    await a.raid.create_raid_support();
+    expect(parseRaidSupportSnapshot(a.read()).map((r) => [r.founder, r.friend])).toEqual([
+      ["燈皇", false],
+      ["Kotoma", true],
+      ["constructor", false],
+    ]);
+
+    const b = setup([ROW()], null);
+    b.read();
+    await b.raid.create_raid_support();
+    expect(parseRaidSupportSnapshot(b.read())[0]?.friend).toBeNull();
   });
 
   it("打渦腳本在渦房裡直接 R.socket.fetch 的也抓得到", async () => {

@@ -153,6 +153,14 @@ export class RaidFeedRoom extends DurableObject<RaidFeedEnv> {
     // 狀態到期的訊息也要重畫（沒人帶新的狀態來，就把過期的拿掉）
     await this.#save(book, book.expireStates(now));
     for (const m of book.dirtyMessages()) {
+      // 剩下的全是僅限好友的渦：整則刪掉（刪不掉也照樣當沒發過，之後證明公開會補發新的一則）
+      if (book.isHidden(m)) {
+        if (webhook !== "") await deleteDiscord(webhook, m.id);
+        const dropped = book.dropMessage(m.id);
+        await this.#save(book, { raids: dropped.raids, messages: [] });
+        await this.ctx.storage.delete(dropped.messages.map((id) => `${MESSAGE_PREFIX}${id}`));
+        continue;
+      }
       const content = book.renderMessage(m, role, now);
       // 改不了（訊息被刪、webhook 換了）就算了：碎片只是少標一個
       if (content !== null && webhook !== "") await editDiscord(webhook, m.id, content);
@@ -256,6 +264,18 @@ async function editDiscord(webhook: string, messageId: string, content: string):
     if (!res.ok) console.log(`raid-feed: Discord PATCH ${res.status}`);
   } catch (e) {
     console.log(`raid-feed: Discord PATCH 失敗 ${e instanceof Error ? e.name : "?"}`);
+  }
+}
+
+/** 刪一則（裡面的渦後來發現是僅限好友）。已經被手動刪掉的 404 也算刪了。 */
+async function deleteDiscord(webhook: string, messageId: string): Promise<void> {
+  try {
+    const url = new URL(webhook);
+    url.pathname = `${url.pathname.replace(/\/$/, "")}/messages/${messageId}`;
+    const res = await fetch(url, { method: "DELETE" });
+    if (!res.ok && res.status !== 404) console.log(`raid-feed: Discord DELETE ${res.status}`);
+  } catch (e) {
+    console.log(`raid-feed: Discord DELETE 失敗 ${e instanceof Error ? e.name : "?"}`);
   }
 }
 

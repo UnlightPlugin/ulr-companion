@@ -29,6 +29,18 @@ Discord 的公開渦通知照舊，但**不要 VPS、不要小號、不要登入
 
 - **只有 ① 能新增渦。** ② 裡有 `only_friend` 的渦，拿它新增等於把好友限定的渦公告出去。
   ② 送上來的渦若看板上沒有（沒在 SUPPORT 出現過），Worker 直接丟掉。
+- **① 也只有「不是發現者好友」看到的才能新增**（2026-10-09）。官方公告：「若發現者將參加資格設定為
+  ｢僅限好友｣，非該玩家好友時將不會顯示該Raid」——好友的 SUPPORT 會列出僅限好友的渦，列上又沒有參加資格欄位。
+  頁面拿 `registry.get("friend")` 的名字比對，每列帶 `founderFriend`；`true`、`null`（讀不到好友名單）、
+  沒帶（舊版插件）都只更新帳本上已經有的渦。先僅限好友、後來改公開的，等非好友看到再發。
+  發現者自己按送出（`publish`）照舊能新增（頁面只記「無限制」的）。
+- **好友看到之後加入了，看清單的 `only_friend`**。加入者讀到的是真的值（2026-10-09 驗過：燈皇是 Kotoma 的好友、
+  不是發現者，讀到 Kotoma 沒公開的玄帝 `true`、公開的龍鯉 `false`）。托盤記著「在好友的 SUPPORT 看過」的渦
+  （只放記憶體），加入後讀到 `false` 就以 `own` 帶 `onlyFriend: false, seenInSupport: true` 傳上去新增。
+  `false` 一定要配「在 SUPPORT 看過」：沒按送出的渦也是 `false`。
+- **公開後才改成僅限好友的，靠 ② 撤下**：清單上 `only_friend: true` 就標 `friendOnly`——沒發的不發、
+  發了的從那則拿掉一行（整則都是就刪訊息，裡面的渦當作沒發過）、GET 不列、整份 SUPPORT 判打倒時跳過。
+  之後又證明公開（上面三種），就放回來（訊息還在加回那一行，被刪了補發新的一則）。
 - **碎片不用 map_index 公式。** `raid-public.ts` 記著 2026-09-25 兩筆實測 map_index 公式都錯、
   stage 都對；`infer_fragment.py` 又說 40/40 全對。有矛盾就不用。依序：
   1. 玩家實際看到的 stage（開打時）
@@ -62,7 +74,10 @@ Discord 的公開渦通知照舊，但**不要 VPS、不要小號、不要登入
     "level": 1,                  // 或 null
     "hp": 12000, "hpMax": 20000,
     "memberLimit": 100,          // 或 null；判斷渦 I／IV 用
-    "stage": 3                   // 只有 own 會有；或 null
+    "stage": 3,                  // 只有 own 會有；或 null
+    "founderFriend": false,      // 只有 support：上傳的人是不是發現者的好友（只有 false 能新增）
+    "onlyFriend": null,          // 只有 own：清單的參加資格（true 撤下；false 要配下一欄才算公開）
+    "seenInSupport": null        // 只有 own：上傳的人在好友的 SUPPORT 看過它（＝送出了）
   }]
 }
 ```

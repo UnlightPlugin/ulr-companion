@@ -26,6 +26,18 @@
  * 能新增的只有 `support`（SUPPORT 公開清單）與 `publish`（發現者自己按「送出」、參加資格「無限制」）。
  * 自己的清單裡有好友限定／輸入渦碼加入的渦，拿它新增等於把它公告出去。`own` 只補帳本上已經有的渦。
  *
+ * **`support` 也只有「不是發現者好友」的人看到的才能新增**（2026-10-09）：僅限好友的渦會列在
+ * 發現者好友的 SUPPORT 裡，列上沒有參加資格欄位。上傳的人是好友（`founderFriend` 不是 `false`，
+ * 舊版插件不帶也算）的那一列只更新帳本上已經有的渦。先僅限好友、後來改公開的渦，等非好友看到再發。
+ *
+ * 好友看到之後加入了：清單上的 `only_friend` 是真的值（2026-10-09 驗過：燈皇是 Kotoma 的好友、
+ * 不是發現者，讀到 Kotoma 沒公開的玄帝是 `true`）。所以 `own` 帶 `onlyFriend: false` 而且
+ * `seenInSupport`（在 SUPPORT 出現過＝送出了；沒送出的渦也是 false）也能新增。
+ *
+ * 反過來，公開之後才改成僅限好友的：有人清單上讀到 `onlyFriend: true`（`own`）就把它撤下
+ * （`friendOnly`）——還沒發的不發、發了的從訊息拿掉那一行（整則都是就刪訊息）、GET 也不列。
+ * 之後又證明公開（上面三種），再放回來。
+ *
  * ## 信任
  *
  * 暫時完全信任（2026-10-03 決定）：只做形狀驗證，限流在 Worker。
@@ -100,6 +112,18 @@ export interface RaidFeedIn {
    */
   states: RaidFeedState[] | null;
   statesAt: number | null;
+  /**
+   * `support` 才有：上傳的人是不是發現者的好友。只有 `false` 能新增渦；`null`／沒帶（讀不到好友
+   * 名單、舊版插件）當作是好友。
+   */
+  founderFriend?: boolean | null;
+  /**
+   * `own` 才有：清單上的參加資格（加入者讀到的是真的值，2026-10-09 驗過）。`true` 撤下；
+   * `false` 要配 {@link seenInSupport} 才算公開（沒按送出的渦也是 false）
+   */
+  onlyFriend?: boolean | null;
+  /** `own` 才有：上傳的人之前在 SUPPORT 看過它（好友看到、當時不能新增的那種）＝發現者按過送出 */
+  seenInSupport?: boolean | null;
 }
 
 /** 一個 BOSS 狀態。`type` 是帶等級的整字（`movD9`）；`until` 是到期時刻 ms，`count` 是詛咒那種層數。 */
@@ -143,6 +167,8 @@ export interface RaidFeedEntry extends RaidFeedIn {
   /** 上一次查的是哪一組（{@link rewardLookupKey}）、什麼時候 */
   lookupKey?: string | null;
   lookupAt?: number | null;
+  /** 有人清單上讀到它是僅限好友：不發、訊息不畫、GET 不列 */
+  friendOnly?: boolean;
 }
 
 /** 一則 Discord 訊息裡有哪些渦（改訊息時整則重畫）。 */
@@ -221,6 +247,9 @@ export function normalizeRaidFeedUpload(body: unknown, now: number): RaidFeedUpl
       stage: int(r.stage, 1, 100),
       mapIndex: int(r.mapIndex, 1, 99),
       ...statesOf(r.states, r.statesAt, now),
+      founderFriend: typeof r.founderFriend === "boolean" ? r.founderFriend : null,
+      onlyFriend: typeof r.onlyFriend === "boolean" ? r.onlyFriend : null,
+      seenInSupport: r.seenInSupport === true ? true : null,
     });
   }
   const support = b.source === "support";
@@ -623,12 +652,18 @@ export class RaidFeedBook {
    */
   ingest(upload: RaidFeedUpload, now: number): RaidFeedChanges {
     const changes: RaidFeedChanges = { raids: [], messages: [] };
-    for (const r of upload.raids) {
+    for (const { founderFriend, onlyFriend, seenInSupport, ...r } of upload.raids) {
       const id = raidFeedId(r);
       const old = this.#raids.get(id);
+      // 這一筆證明它是公開的：非好友在 SUPPORT 看到、發現者按送出（頁面只記「無限制」的）、
+      // 或好友在 SUPPORT 看過（＝送出了）、加入後清單上不是僅限好友
+      const proven =
+        upload.source === "publish" ||
+        (upload.source === "support" && founderFriend === false) ||
+        (upload.source === "own" && onlyFriend === false && seenInSupport === true);
       if (old === undefined) {
-        // 只有公開的能新增：SUPPORT、發現者自己按送出（自己的清單裡有好友限定的渦）
-        if (upload.source === "own") continue;
+        // 只有證明公開的能新增（自己的清單、好友的 SUPPORT 都可能有僅限好友的渦）
+        if (!proven) continue;
         // 已經死掉的不公告。渦幾都發（舊 bot 不發渦 I；2026-10-04 改成公開的一律發）
         const skip = r.hp !== null && r.hp <= 0;
         this.#raids.set(id, {
@@ -640,6 +675,11 @@ export class RaidFeedBook {
         });
         changes.raids.push(id);
         continue;
+      }
+      if (upload.source === "own" && onlyFriend === true && old.friendOnly !== true) {
+        this.#hide(id, old, changes);
+      } else if (proven && old.friendOnly === true) {
+        this.#unhide(id, old, changes);
       }
       const before = raidFeedFragment(old);
       const next: RaidFeedEntry = { ...old, seenAt: now, limit: r.limit };
@@ -678,6 +718,7 @@ export class RaidFeedBook {
         old.status === "skipped" &&
         old.messageId === null &&
         old.failed !== true &&
+        old.friendOnly !== true &&
         !isDead &&
         next.limit > now;
       if (repost) next.status = "pending";
@@ -718,7 +759,8 @@ export class RaidFeedBook {
   #markGone(upload: RaidFeedUpload, now: number, changes: RaidFeedChanges): void {
     const seen = new Set([...upload.raids, ...upload.present].map(raidFeedId));
     for (const [id, r] of this.#raids) {
-      if (seen.has(id)) continue;
+      // 僅限好友的：非好友的 SUPPORT 本來就看不到
+      if (seen.has(id) || r.friendOnly === true) continue;
       if (r.hp !== null && r.hp <= 0) continue;
       if (r.limit <= now || r.foundAt > now - RAID_FEED_GONE_GRACE_MS) continue;
       if (r.memberLength !== null && r.memberLimit !== null && r.memberLength >= r.memberLimit) {
@@ -728,6 +770,24 @@ export class RaidFeedBook {
       changes.raids.push(id);
       this.#markDirty(r, changes);
     }
+  }
+
+  /** 讀到它僅限好友：還沒發的不發；發了的那則訊息重畫（拿掉這一行，整則都是就刪，見 {@link isHidden}）。 */
+  #hide(id: string, r: RaidFeedEntry, changes: RaidFeedChanges): void {
+    r.friendOnly = true;
+    if (r.status === "pending") r.status = "skipped";
+    changes.raids.push(id);
+    this.#markDirty(r, changes);
+  }
+
+  /**
+   * 又證明是公開的了：放回來。訊息還在就重畫把那一行加回去；訊息被刪了（`messageId` 是 null）
+   * 交給 `ingest` 的補發。
+   */
+  #unhide(id: string, r: RaidFeedEntry, changes: RaidFeedChanges): void {
+    delete r.friendOnly;
+    changes.raids.push(id);
+    this.#markDirty(r, changes);
   }
 
   /** HP 變了：離上次改超過一分鐘就馬上改，不然排在上次改之後一分鐘。 */
@@ -842,11 +902,42 @@ export class RaidFeedBook {
     return [...this.#messages.values()].filter((m) => m.dirty);
   }
 
-  /** 整則重畫（帳本上已經丟掉的渦就少一行）。 */
+  /** 整則重畫（帳本上已經丟掉的渦、僅限好友的渦就少一行）。 */
   renderMessage(m: RaidFeedMessage, roleId: string | null, now?: number): string | null {
-    const raids = m.raids.map((id) => this.#raids.get(id)).filter((r) => r !== undefined);
+    const raids = m.raids
+      .map((id) => this.#raids.get(id))
+      .filter((r): r is RaidFeedEntry => r !== undefined && r.friendOnly !== true);
     if (raids.length === 0) return null;
     return formatRaidFeedBatch(raids, m.mention ? roleId : null, now);
+  }
+
+  /**
+   * 這則訊息剩下的渦全是僅限好友的：要整則刪掉（不能留一則空的或只剩標題）。
+   * 帳本上已經丟掉的（到期了）不算，那種是自然結束，訊息留著。
+   */
+  isHidden(m: RaidFeedMessage): boolean {
+    const raids = m.raids.map((id) => this.#raids.get(id)).filter((r) => r !== undefined);
+    return raids.length > 0 && raids.every((r) => r.friendOnly === true);
+  }
+
+  /**
+   * Discord 上那則刪掉了：裡面的渦當作沒發過（之後證明公開會補發新的一則）。
+   * 回傳要存檔的渦；訊息本身要從 storage 刪（`messages`）。
+   */
+  dropMessage(id: string): RaidFeedChanges {
+    const changes: RaidFeedChanges = { raids: [], messages: [] };
+    const m = this.#messages.get(id);
+    if (m === undefined) return changes;
+    for (const rid of m.raids) {
+      const r = this.#raids.get(rid);
+      if (r === undefined || r.messageId !== id) continue;
+      r.messageId = null;
+      r.status = "skipped";
+      changes.raids.push(rid);
+    }
+    this.#messages.delete(id);
+    changes.messages.push(id);
+    return changes;
   }
 
   /** 丟掉到期的渦與不會再改的訊息。回傳被丟的 id（要從 storage 刪）。 */
@@ -944,7 +1035,8 @@ export class RaidFeedBook {
   list(now: number): RaidFeedView[] {
     const out: RaidFeedView[] = [];
     for (const r of this.#raids.values()) {
-      if (r.limit <= now) continue;
+      // 僅限好友的不給讀（GET 是公開的）
+      if (r.limit <= now || r.friendOnly === true) continue;
       out.push({
         founder: r.founder,
         foundAt: r.foundAt,

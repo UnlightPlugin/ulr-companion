@@ -4,12 +4,13 @@
 
 import type { RaidFeedView } from "@ulr/arbiter-link/raid-feed";
 import type { RaidSnapshotRow, RaidSupportRow } from "@ulr/cdp-adapter";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   feedToPublicMap,
   ownToFeed,
   pickOwnToFill,
   RaidFeedSync,
+  supportToFeed,
 } from "../src/raid-feed-client.js";
 import type { FetchLike } from "../src/raid-public.js";
 
@@ -27,6 +28,8 @@ const supportRow: RaidSupportRow = {
   hpMax: 1200,
   memberLength: 33,
   memberLimit: 100,
+  // 發現者不是自己的好友（好友開的見「僅限好友」那幾組）
+  friend: false,
 };
 
 const ownRow = (over: Partial<RaidSnapshotRow> = {}): RaidSnapshotRow => ({
@@ -102,6 +105,112 @@ describe("pickOwnToFill", () => {
 
   it("帳本上已經有別人的 stage 就不蓋", () => {
     expect(pickOwnToFill(ownToFeed([ownRow()]), [view({ stage: 4, rarity: 1 })])).toEqual([]);
+  });
+
+  it("清單上是僅限好友：別的都不缺也傳（雲端撤下）；false 不傳", () => {
+    const full = view({ stage: 3, rarity: 1 });
+    const meta = (onlyFriend: boolean) =>
+      ({ onlyFriend }) as unknown as NonNullable<RaidSnapshotRow["meta"]>;
+    const hidden = ownToFeed([ownRow({ meta: meta(true) })]);
+    expect(hidden[0]?.onlyFriend).toBe(true);
+    expect(pickOwnToFill(hidden, [full])).toHaveLength(1);
+    expect(pickOwnToFill(ownToFeed([ownRow({ meta: meta(false) })]), [full])).toEqual([]);
+  });
+});
+
+describe("好友的 SUPPORT 看過、加入後才知道公開", () => {
+  const meta = (onlyFriend: boolean) =>
+    ({ onlyFriend }) as unknown as NonNullable<RaidSnapshotRow["meta"]>;
+  // 記著的渦到期就丟：時鐘放在渦還活著的時候
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(FOUND + 1000);
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("好友的 SUPPORT 看過、清單上 false：帳本沒有也傳（seenInSupport）；沒看過的不傳", async () => {
+    const w = fakeWorker([]);
+    const sync = new RaidFeedSync(w.impl, "https://x/raid-feed");
+    await sync.sync([{ ...supportRow, friend: true }], [], true);
+    await sync.sync([], [ownRow({ meta: meta(false) })], true);
+    const ownPosts = w.calls.filter((c) => c.method === "POST" && c.body?.source === "own");
+    expect(ownPosts).toHaveLength(1);
+    expect(ownPosts[0]?.body?.raids?.[0]).toMatchObject({
+      founder: "燈皇",
+      onlyFriend: false,
+      seenInSupport: true,
+    });
+
+    const w2 = fakeWorker([]);
+    const fresh = new RaidFeedSync(w2.impl, "https://x/raid-feed");
+    await fresh.sync([{ ...supportRow, friend: false }], [ownRow({ meta: meta(false) })], true);
+    expect(w2.calls.filter((c) => c.body?.source === "own")).toEqual([]);
+  });
+
+  it("清單上 true：不傳去新增", async () => {
+    const w = fakeWorker([]);
+    const sync = new RaidFeedSync(w.impl, "https://x/raid-feed");
+    await sync.sync([{ ...supportRow, friend: true }], [ownRow({ meta: meta(true) })], true);
+    expect(w.calls.filter((c) => c.body?.source === "own")).toEqual([]);
+  });
+});
+
+describe("好友開的、帳本上還沒有的 SUPPORT 列不傳（改版前的 Worker 不認 founderFriend）", () => {
+  const friendRow = { ...supportRow, founder: "Kotoma", friend: true };
+  // 舊版頁面：沒有 friend 這一欄
+  const { friend: _f, ...noFriend } = supportRow;
+  const oldPage: RaidSupportRow = { ...noFriend, founder: "舊版" };
+
+  it("不傳那一列，只把鍵放進 present（不被判成打倒）；非好友的照傳", async () => {
+    const w = fakeWorker([]);
+    const r = await new RaidFeedSync(w.impl, "https://x/raid-feed").sync(
+      [supportRow, friendRow, oldPage],
+      [],
+      true,
+    );
+    expect(r.support).toBe(1);
+    const body = w.calls.find((c) => c.body?.source === "support")?.body as {
+      raids?: { founder: string }[];
+      present?: unknown[];
+    };
+    expect(body.raids?.map((x) => x.founder)).toEqual(["燈皇"]);
+    expect(JSON.stringify(body.raids)).not.toContain("Kotoma");
+    expect(body.present).toEqual([
+      { founder: "Kotoma", foundAt: FOUND },
+      { founder: "舊版", foundAt: FOUND },
+    ]);
+  });
+
+  it("帳本上已經有（已經證明公開）的：照傳，更新 HP", async () => {
+    const w = fakeWorker([view({ founder: "Kotoma" })]);
+    await new RaidFeedSync(w.impl, "https://x/raid-feed").sync([friendRow], [], true);
+    const body = w.calls.find((c) => c.body?.source === "support")?.body;
+    expect(body?.raids).toHaveLength(1);
+  });
+
+  it("GET 失敗：好友的一列都不傳", async () => {
+    const calls: { source?: string; raids?: unknown[] }[] = [];
+    const impl: FetchLike = async (_url, init) => {
+      if ((init?.method ?? "GET") === "GET") return { ok: false, json: async () => null };
+      calls.push(JSON.parse(init?.body ?? "null"));
+      return { ok: true, json: async () => ({ accepted: 1 }) };
+    };
+    await new RaidFeedSync(impl, "https://x/raid-feed").sync([friendRow], [], true);
+    // 沒有能傳的列就不 POST；有的話也不會有 Kotoma
+    expect(calls.flatMap((c) => (c.source === "support" ? (c.raids ?? []) : []))).toEqual([]);
+  });
+});
+
+describe("SUPPORT 的好友標記", () => {
+  it("friend → founderFriend；舊版頁面沒有就是 null（雲端當作可能僅限好友）", () => {
+    expect(supportToFeed([{ ...supportRow, friend: true }])[0]).toMatchObject({
+      founderFriend: true,
+    });
+    expect(supportToFeed([{ ...supportRow, friend: false }])[0]?.founderFriend).toBe(false);
+    const { friend: _, ...oldRow } = supportRow;
+    const [old] = supportToFeed([oldRow]);
+    expect(old?.founderFriend).toBeNull();
+    expect(old).not.toHaveProperty("friend");
   });
 });
 

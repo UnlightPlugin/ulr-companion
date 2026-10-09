@@ -40,6 +40,8 @@ const support = (over: Record<string, unknown> = {}) => ({
   hpMax: 1200,
   memberLength: 33,
   memberLimit: 100,
+  // 上傳的人不是發現者的好友（只有這種能新增，見「僅限好友」那一組）
+  founderFriend: false,
   ...over,
 });
 
@@ -72,6 +74,7 @@ const raid = (over: Partial<RaidFeedIn> = {}): RaidFeedIn => ({
   mapIndex: null,
   states: null,
   statesAt: null,
+  founderFriend: false,
   ...over,
 });
 
@@ -740,5 +743,147 @@ describe("渦幾（BOSS 代碼）與自己公開", () => {
 
   it("壞的代碼不收", () => {
     expect(parse("support", [support({ mons: "<script>" })]).raids[0]?.mons).toBeNull();
+  });
+});
+
+describe("僅限好友（2026-10-09：僅限好友的渦會列在發現者好友的 SUPPORT）", () => {
+  const later = NOW + RAID_FEED_BATCH_MS;
+
+  it("好友看到的、舊版插件（沒帶）、讀不到好友名單的：都不新增，GET 也不列", () => {
+    const book = new RaidFeedBook();
+    book.ingest(
+      parse("support", [
+        support({ founderFriend: true }),
+        support({ founder: "B", founderFriend: null }),
+        support({ founder: "C", founderFriend: undefined }),
+      ]),
+      NOW,
+    );
+    expect(book.size).toBe(0);
+    expect(book.dueBatch(later)).toEqual([]);
+    expect(book.list(NOW)).toEqual([]);
+  });
+
+  it("先好友看到、後來非好友看到（先僅限好友、後來改公開）：那時才發", () => {
+    const book = new RaidFeedBook();
+    book.ingest(parse("support", [support({ founderFriend: true })]), NOW);
+    book.ingest(parse("support", [support()]), NOW + 1000);
+    expect(book.dueBatch(later + 1000).map((r) => r.founder)).toEqual(["燈皇"]);
+  });
+
+  it("帳本上已經有的：好友看到的照樣更新 HP", () => {
+    const book = new RaidFeedBook();
+    book.ingest(parse("support", [support()]), NOW);
+    book.ingest(parse("support", [support({ founderFriend: true, hp: 100 })]), NOW + 1000);
+    expect(book.list(NOW + 1000)[0]?.hp).toBe(100);
+  });
+
+  it("好友看過、加入後 onlyFriend:false（2026-10-09 驗過加入者讀到真值）：新增", () => {
+    const book = new RaidFeedBook();
+    book.ingest(parse("own", [own({ onlyFriend: false, seenInSupport: true })]), NOW);
+    expect(book.dueBatch(later).map((r) => [r.founder, r.stage])).toEqual([["燈皇", 3]]);
+  });
+
+  it("onlyFriend:false 沒在 SUPPORT 看過（可能沒送出）、在 SUPPORT 看過但不知道參加資格、是 true：都不新增", () => {
+    const book = new RaidFeedBook();
+    book.ingest(
+      parse("own", [
+        own({ onlyFriend: false }),
+        own({ founder: "B", onlyFriend: null, seenInSupport: true }),
+        own({ founder: "C", onlyFriend: true, seenInSupport: true }),
+      ]),
+      NOW,
+    );
+    expect(book.size).toBe(0);
+  });
+
+  it("撤下之後，好友看過＋加入後又讀到 false（改回公開）：放回來", () => {
+    const book = new RaidFeedBook();
+    book.ingest(parse("support", [support()]), NOW);
+    book.ingest(parse("own", [own({ onlyFriend: true })]), NOW + 1000);
+    expect(book.list(NOW + 1000)).toEqual([]);
+    book.ingest(parse("own", [own({ onlyFriend: false, seenInSupport: true })]), NOW + 2000);
+    expect(book.list(NOW + 2000)).toHaveLength(1);
+    expect(book.dueBatch(later + 2000)).toHaveLength(1);
+  });
+
+  it("還沒發就讀到 onlyFriend:true：不發、GET 不列；onlyFriend:false 不算數", () => {
+    const book = new RaidFeedBook();
+    book.ingest(parse("support", [support()]), NOW);
+    book.ingest(parse("own", [own({ onlyFriend: false })]), NOW + 1000);
+    expect(book.list(NOW + 1000)).toHaveLength(1);
+    const c = book.ingest(parse("own", [own({ onlyFriend: true })]), NOW + 2000);
+    expect(c.raids).toEqual([raidFeedId(support())]);
+    expect(book.dueBatch(later + 2000)).toEqual([]);
+    expect(book.list(NOW + 2000)).toEqual([]);
+    // 好友的 SUPPORT 再看到也不會補發
+    book.ingest(parse("support", [support({ founderFriend: true })]), NOW + 3000);
+    expect(book.dueBatch(later + 3000)).toEqual([]);
+  });
+
+  it("發了之後才讀到：同一則還有別的渦就拿掉那一行，整則都是就刪", () => {
+    const book = new RaidFeedBook();
+    book.ingest(parse("support", [support(), support({ founder: "B" })]), NOW);
+    const ids = [raidFeedId(support()), raidFeedId(support({ founder: "B" }))];
+    const m = book.markPosted(ids, "m1", false, later);
+    book.rendered(m, later);
+
+    book.ingest(parse("own", [own({ onlyFriend: true })]), later + 1000);
+    expect(book.dirtyMessages()).toEqual([m]);
+    expect(book.isHidden(m)).toBe(false);
+    expect(book.renderMessage(m, null, later + 1000)).toBe("🆕 B ❓蟲🐛 284/1200｜濁濫");
+    book.rendered(m, later + 1000);
+
+    book.ingest(parse("own", [own({ founder: "B", onlyFriend: true })]), later + 2000);
+    expect(book.isHidden(m)).toBe(true);
+    const dropped = book.dropMessage("m1");
+    expect(dropped.messages).toEqual(["m1"]);
+    expect(dropped.raids.sort()).toEqual([...ids].sort());
+    expect(book.message("m1")).toBeUndefined();
+  });
+
+  it("到期被丟掉的渦不算僅限好友：訊息不刪", () => {
+    const book = new RaidFeedBook();
+    book.ingest(parse("support", [support()]), NOW);
+    const m = book.markPosted([raidFeedId(support())], "m1", false, later);
+    book.prune(support().limit + RAID_FEED_KEEP_AFTER_LIMIT_MS);
+    expect(book.isHidden(m)).toBe(false);
+  });
+
+  it("撤下之後非好友又看到（改回公開）：訊息還在就加回那一行，被刪了就補發", () => {
+    const book = new RaidFeedBook();
+    book.ingest(parse("support", [support(), support({ founder: "B" })]), NOW);
+    const m = book.markPosted(
+      [raidFeedId(support()), raidFeedId(support({ founder: "B" }))],
+      "m1",
+      false,
+      later,
+    );
+    book.rendered(m, later);
+    book.ingest(parse("own", [own({ onlyFriend: true })]), later + 1000);
+    book.rendered(m, later + 1000);
+    book.ingest(parse("support", [support()]), later + 2000);
+    expect(book.dirtyMessages()).toEqual([m]);
+    expect(book.list(later + 2000)).toHaveLength(2);
+
+    const solo = new RaidFeedBook();
+    solo.ingest(parse("support", [support()]), NOW);
+    const m2 = solo.markPosted([raidFeedId(support())], "m2", false, later);
+    solo.rendered(m2, later);
+    solo.ingest(parse("own", [own({ onlyFriend: true })]), later + 1000);
+    solo.dropMessage("m2");
+    solo.ingest(parse("support", [support()]), later + 2000);
+    expect(solo.dueBatch(later + 2000).map((r) => r.founder)).toEqual(["燈皇"]);
+  });
+
+  it("新鮮的整份 SUPPORT 裡沒有僅限好友的渦：不當作打倒", () => {
+    const book = new RaidFeedBook();
+    book.ingest(parse("support", [support({ foundAt: NOW - HOUR })]), NOW - HOUR);
+    book.ingest(parse("own", [own({ foundAt: NOW - HOUR, onlyFriend: true })]), NOW - HOUR);
+    const u = normalizeRaidFeedUpload({ source: "support", raids: [], complete: true }, NOW);
+    if (u === null) throw new Error("rejected");
+    book.ingest(u, NOW);
+    // 自己清單補的 325，不是 0
+    expect(book.raid(raidFeedId(support({ foundAt: NOW - HOUR })))?.hp).toBe(325);
   });
 });

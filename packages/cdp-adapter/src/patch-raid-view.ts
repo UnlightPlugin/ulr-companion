@@ -571,6 +571,12 @@ export interface RaidSnapshotMeta {
   expectCoin: boolean;
   expectSrc: string | null;
   expectItems: string[];
+  /**
+   * 清單的 `only_friend`（參加資格「僅限好友」）。加入者讀到的也是真的值（2026-10-09：好友讀到
+   * Kotoma 沒公開的玄帝是 true）。`false` 只說「不是僅限好友」，沒按送出的也是 false —— 公開渦通知
+   * 要配「在 SUPPORT 看過」才當公開。舊版頁面沒有
+   */
+  onlyFriend?: boolean | null;
 }
 
 export type RaidPublicMap = Record<string, RaidPublicInfo>;
@@ -2996,7 +3002,8 @@ export const RAID_VIEW_SNAPSHOT_EXPRESSION = `(function () {
       var meta = { name: String(r.name || ""), monsterId: num(r.monster_id), level: num(r.level), mapIndex: num(r.map_index),
         category: typeof r.category === "string" ? r.category : null, point: num(r.player_point), stage: num(tk.stage),
         expectFrag: typeof tk.expectFrag === "string" ? tk.expectFrag : null, expectCoin: tk.expectCoin === true,
-        expectSrc: typeof tk.expectSrc === "string" ? tk.expectSrc : null, expectItems: Array.isArray(tk.expectItems) ? tk.expectItems : [] };
+        expectSrc: typeof tk.expectSrc === "string" ? tk.expectSrc : null, expectItems: Array.isArray(tk.expectItems) ? tk.expectItems : [],
+        onlyFriend: typeof r.only_friend === "boolean" ? r.only_friend : null };
       out.push({ code: typeof r.code === "string" ? r.code : null, founder: typeof r.founder === "string" ? r.founder : null,
         tl: null, rarity: num(r.rarity), stage: sg && typeof sg.stage === "number" ? sg.stage : null, mons: monsOf(r.monster_id),
         hp: num(r.hp), hpMax: num(r.hp_max), limit: r.limit, states: states, statesAt: bs ? num(bs.at) : null,

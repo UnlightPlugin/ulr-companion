@@ -33,6 +33,14 @@
  *
  * 不送任何請求：只記別人本來就在問的那份回應。
  *
+ * ## ⚠ SUPPORT 不等於公開：好友看得到「僅限好友」的渦（2026-10-09）
+ *
+ * 官方公告：「若發現者將參加資格設定為｢僅限好友｣，非該玩家好友時將不會顯示該Raid」—— 反過來說，
+ * **好友的 SUPPORT 會列出僅限好友的渦**，列上又沒有參加資格欄位。所以每列附上「發現者是不是我的
+ * 好友」（`registry.get("friend")` 的 `player_name`；燈皇 156 個好友、沒有重名），雲端只拿
+ * **不是好友**看到的那幾列新增渦（`@ulr/arbiter-link/raid-feed`）。
+ * 2026-10-09 實機：燈皇那份 SUPPORT 11 筆有 10 筆是好友開的，之前全部被當成公開發出去了。
+ *
  * ## 自己開、自己公開的渦（2026-10-03）
  *
  * 發現者按渦碼視窗的「送出」→ 確認 OK，官方送 `socket.emit("raid_code_send", profound_id)`
@@ -71,6 +79,11 @@ export interface RaidSupportRow {
   hpMax: number | null;
   memberLength: number | null;
   memberLimit: number | null;
+  /**
+   * 發現者是不是自己的好友（`registry.friend` 裡有這個名字）。好友的渦可能是「僅限好友」，
+   * 雲端不拿它新增（見檔頭）。讀不到好友名單是 null，當作「可能是」。舊版頁面沒有這一欄。
+   */
+  friend?: boolean | null;
 }
 
 /** 發現者自己按「送出」公開的渦（只有參加資格「無限制」的）。 */
@@ -194,6 +207,15 @@ export const RAID_SUPPORT_SNAPSHOT_EXPRESSION = `(function () {
     var at = latest.at;
     if (typeof at !== "number" || Date.now() - at > ${RAID_SUPPORT_MAX_AGE_MS}) return JSON.stringify({ rows: [], stale: true });
     var list = latest.rows;
+    // 好友名單：讀不到（還沒載）就是 null，每列的 friend 也是 null（雲端當作可能是好友限定）
+    var friends = null;
+    try {
+      var fl = G.registry.get("friend");
+      if (Array.isArray(fl)) {
+        friends = {};
+        for (var f = 0; f < fl.length; f++) if (fl[f] && typeof fl[f].player_name === "string") friends[fl[f].player_name] = true;
+      }
+    } catch (e) {}
     var out = [];
     for (var i = 0; i < list.length; i++) {
       var r = list[i];
@@ -201,7 +223,8 @@ export const RAID_SUPPORT_SNAPSHOT_EXPRESSION = `(function () {
       // 渦碼（profound_code）不拿
       out.push({ founder: r.founder_name, foundAt: r.profound_date, limit: r.limit,
         name: typeof r.raid_name === "string" ? r.raid_name : null, monsterId: num(r.monster_id), mons: monsOf(r.monster_id),
-        hp: num(r.hp), hpMax: num(r.hp_max), memberLength: num(r.member_length), memberLimit: num(r.member_limit) });
+        hp: num(r.hp), hpMax: num(r.hp_max), memberLength: num(r.member_length), memberLimit: num(r.member_limit),
+        friend: friends === null ? null : friends[r.founder_name] === true });
     }
     return JSON.stringify({ rows: out, fetchedAt: at });
   } catch (e) {
