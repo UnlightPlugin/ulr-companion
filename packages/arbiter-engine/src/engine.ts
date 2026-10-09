@@ -146,6 +146,7 @@ import type {
   RaidRewardModeReport,
   RaidRewardReport,
   RaidRewardStatus,
+  BattleSurrenderOptions,
   RaidSurrenderReport,
   RaidSurrenderStatus,
   RaidViewStatus,
@@ -1040,10 +1041,31 @@ export class ArbiterEngine {
     try {
       const status = await adapter.raidSurrenderStatus();
       if (status.installed && status.version === RAID_SURRENDER_SCRIPT_VERSION) return status;
-      return await adapter.installRaidSurrenderPatch();
+      return await adapter.installRaidSurrenderPatch(this.#battleSurrender);
     } catch {
       return null;
     }
+  }
+
+  /**
+   * 投降的兩個開關（迪城不確認、鈕放 MENU 外面）。托盤從配置推進來。
+   * 住在渦戰投降那支 —— 它是對戰 MENU 的唯一擁有者。
+   */
+  #battleSurrender: BattleSurrenderOptions = { dietNoConfirm: false, outside: false };
+
+  get battleSurrender(): BattleSurrenderOptions {
+    return { ...this.#battleSurrender };
+  }
+
+  /** 換投降的開關。立刻推到頁面上（頁面沒裝或是舊版就整支補裝）。 */
+  setBattleSurrender(options: BattleSurrenderOptions): void {
+    this.#battleSurrender = { ...options };
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    void adapter
+      .setRaidSurrenderOptions(this.#battleSurrender)
+      .then((r) => (r === "not-installed" ? this.#syncRaidSurrender() : undefined))
+      .catch(() => undefined);
   }
 
   /**
@@ -1056,7 +1078,7 @@ export class ArbiterEngine {
     const adapter = this.#adapter;
     if (adapter === null) return;
     try {
-      const status = await adapter.installRaidSurrenderPatch();
+      const status = await adapter.installRaidSurrenderPatch(this.#battleSurrender);
       if (!status.installed) this.#log(`· 渦戰投降鈕還沒裝上：${status.reason ?? "原因不明"}`);
     } catch (err) {
       this.#log(`✗ 渦戰投降鈕注入失敗：${describe(err)}`);

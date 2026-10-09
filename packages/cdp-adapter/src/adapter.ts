@@ -161,9 +161,15 @@ import {
   isCardArtReport,
   parseCardArtStatus,
 } from "./patch-card-art.js";
-import type { RaidSurrenderReport, RaidSurrenderStatus } from "./patch-raid-surrender.js";
+import type {
+  BattleSurrenderOptions,
+  RaidSurrenderReport,
+  RaidSurrenderStatus,
+} from "./patch-raid-surrender.js";
 import {
   buildRaidSurrenderPatchScript,
+  buildRaidSurrenderSetOptionsExpression,
+  DEFAULT_BATTLE_SURRENDER,
   isRaidSurrenderReport,
   parseRaidSurrenderStatus,
   RAID_SURRENDER_STATUS_EXPRESSION,
@@ -1603,11 +1609,18 @@ export class CdpAdapter {
    * `mounted` 幾乎一定是 `false`（玩家不在渦戰裡），那不是失敗 —— 腳本自己
    * 輪詢等玩家開打。
    */
-  async installRaidSurrenderPatch(): Promise<RaidSurrenderStatus> {
+  async installRaidSurrenderPatch(
+    surrender: BattleSurrenderOptions = DEFAULT_BATTLE_SURRENDER,
+  ): Promise<RaidSurrenderStatus> {
     const raw = await this.evaluate<string>(
-      buildRaidSurrenderPatchScript({ bindingName: REPORT_BINDING_NAME }),
+      buildRaidSurrenderPatchScript({ bindingName: REPORT_BINDING_NAME, surrender }),
     );
     return parseRaidSurrenderStatus(raw);
+  }
+
+  /** 換投降的兩個開關（迪城不確認、鈕放外面）。回 `"ok"` 或 `"not-installed"`。 */
+  async setRaidSurrenderOptions(surrender: BattleSurrenderOptions): Promise<string> {
+    return await this.evaluate<string>(buildRaidSurrenderSetOptionsExpression(surrender));
   }
 
   async raidSurrenderStatus(): Promise<RaidSurrenderStatus> {

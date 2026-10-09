@@ -153,12 +153,15 @@ contextBridge.exposeInMainWorld("ulr", {
     treasure: (on: boolean) => ipcRenderer.invoke("ulr:quest-treasure", on),
   },
 
-  /** 迪特赫姆：物品捷徑與 GEM UP 的開關與狀態（隱藏地圖走 `stages`）。 */
+  /** 迪特赫姆：物品捷徑、GEM UP、投降的開關與狀態（隱藏地圖走 `stages`）。 */
   diet: {
     state: () => ipcRenderer.invoke("ulr:diet-state"),
     /** `part`：`dietStack` 水捷徑、`gemUp` GEM UP。 */
     toggle: (part: "dietStack" | "gemUp", on: boolean) =>
       ipcRenderer.invoke("ulr:diet-toggle", part, on),
+    /** `part`：`noConfirm` 迪城投降不確認、`outside` 投降鈕放 MENU 外面（渦、亞城也算）。 */
+    surrender: (part: "noConfirm" | "outside", on: boolean) =>
+      ipcRenderer.invoke("ulr:surrender-option", part, on),
   },
 
   /** 獎勵遊戲：物品捷徑的三選一、差距大時先用哪一種、狀態。 */

@@ -426,16 +426,21 @@ export type { CardFrameExtractResult, ExtractedCardFrame } from "./card-art-extr
 
 export {
   buildRaidSurrenderPatchScript,
+  buildRaidSurrenderSetOptionsExpression,
+  DEFAULT_BATTLE_SURRENDER,
   DEFAULT_RAID_SURRENDER_POLL_MS,
   isRaidSurrenderReport,
   parseRaidSurrenderStatus,
+  PVP_BATTLE_RULES,
   RAID_SURRENDER_ICON,
   RAID_SURRENDER_RULE,
   RAID_SURRENDER_SCRIPT_VERSION,
   RAID_SURRENDER_STATUS_EXPRESSION,
   RAID_SURRENDER_UNINSTALL_EXPRESSION,
+  SURRENDER_OUTSIDE_DY,
 } from "./patch-raid-surrender.js";
 export type {
+  BattleSurrenderOptions,
   RaidSurrenderPatchOptions,
   RaidSurrenderReport,
   RaidSurrenderStatus,

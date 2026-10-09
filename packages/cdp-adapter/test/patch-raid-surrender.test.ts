@@ -27,11 +27,15 @@
  * 3. 連按只走一次；打完的那一場（is_complete）不走
  * 4. 圖示不在就不加鈕（不會畫出一顆破圖）
  * 5. 拆掉後 menu_buttons 還原成普通屬性，選單回到官方那樣
+ * 6. 對人戰（2026-10-05）：迪城 duel 才不確認（亞城、channel 留著迪城的渦戰照舊）；
+ *    鈕放外面時 MENU 不列、MENU 正下方一顆 —— 渦是我們那顆、對人戰走官方確認流程；
+ *    找不到官方確認那支就不畫、MENU 照官方；開關當場生效、拆掉不留
  */
 
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
   buildRaidSurrenderPatchScript,
+  buildRaidSurrenderSetOptionsExpression,
   isRaidSurrenderReport,
   JUMP_PERSISTENT_SCENES,
   parseRaidSurrenderStatus,
@@ -56,10 +60,27 @@ class FakeEmitter {
     this.handlers.set(name, list);
     return this;
   }
-  off(name?: string): this {
+  once(name: string, fn: Handler): this {
+    const wrap: Handler = (...args) => {
+      this.off(name, wrap);
+      fn(...args);
+    };
+    (wrap as { inner?: Handler }).inner = fn;
+    return this.on(name, wrap);
+  }
+  off(name?: string, fn?: Handler): this {
     if (name === undefined) this.handlers.clear();
-    else this.handlers.delete(name);
+    else if (fn === undefined) this.handlers.delete(name);
+    else {
+      const list = (this.handlers.get(name) ?? []).filter(
+        (h) => h !== fn && (h as { inner?: Handler }).inner !== fn,
+      );
+      this.handlers.set(name, list);
+    }
     return this;
+  }
+  count(name: string): number {
+    return this.handlers.get(name)?.length ?? 0;
   }
   emit(name: string, ...args: unknown[]): void {
     for (const h of [...(this.handlers.get(name) ?? [])]) h(...args);
@@ -69,6 +90,9 @@ class FakeEmitter {
 /** 官方的選單按鈕類別：Container，圖示 MenuIcons / name_out，按完 emit("click")。 */
 class FakeMenuButton extends FakeEmitter {
   scene: FakeScene | null;
+  depth = 0;
+  /** 照實機：button_icon 是 MenuIcons 的 Image，frame.name = name_out。 */
+  button_icon: { frame: { name: string } };
   constructor(
     scene: FakeScene,
     public x: number,
@@ -77,6 +101,11 @@ class FakeMenuButton extends FakeEmitter {
   ) {
     super();
     this.scene = scene;
+    this.button_icon = { frame: { name: `${icon}_out` } };
+  }
+  setDepth(d: number): this {
+    this.depth = d;
+    return this;
   }
   destroy(): void {
     this.scene = null;
@@ -126,6 +155,8 @@ class FakeScene {
   socket: FakeSocket | null = null;
   /** 官方 surrender 開的確認框次數。 */
   confirms = 0;
+  /** Match 場景的頻道物件（迪城：quick／event 都 false）。 */
+  channel: Record<string, unknown> | null = null;
 
   constructor(key: string) {
     this.sys = { settings: { key, status: 8 } };
@@ -140,13 +171,17 @@ class FakeScene {
     this.is_complete = false;
     this.socket = new FakeSocket();
     const pvp = rule === "duel" || rule === "ranked";
-    const b = new FakeMenuButton(this, 734, 98, "menu");
+    const b = new FakeMenuButton(this, 734, 98, "menu").setDepth(50);
     b.on("click", () => {
       this.menu_buttons = [];
       this.menu_buttons.push(new FakeMenuButton(this, 0, 0, "help"));
       if (pvp) {
         const s = new FakeMenuButton(this, 0, 0, "surrender");
-        s.on("click", () => void this.confirms++);
+        s.on("click", () => {
+          this.ulse01.play();
+          this.menu_list!.menu_remove();
+          void officialConfirm(this);
+        });
         this.menu_buttons.push(s);
         this.menu_buttons.push(new FakeMenuButton(this, 0, 0, "friend"));
       }
@@ -171,6 +206,49 @@ class FakeScene {
     if (!b) throw new Error(`選單裡沒有 ${icon}`);
     return b;
   }
+
+  /** 官方 MainA 的原型方法："win" 以外畫「你投降了」框、等玩家按 ok。 */
+  surrenderDialogs: string[] = [];
+  show_surrender_result(result: string): Promise<void> {
+    this.surrenderDialogs.push(result === "win" ? "opponent_surrender" : "player_surrender");
+    return Promise.resolve();
+  }
+
+  /** 官方 MainA.game_result 投降那一段：等框關掉才 start Result。 */
+  async gameResult(G: FakeGame, code: "surrender" | "normal", result: string): Promise<void> {
+    this.is_complete = true;
+    if (code === "surrender") await this.show_surrender_result(result);
+    G.at("Result").startResult();
+  }
+
+  // Phaser 的時鐘、補間、鏡頭（快轉與藏鏡頭用）
+  time = { timeScale: 1 };
+  tweens = { timeScale: 1 };
+  cameras = {
+    main: {
+      alpha: 1,
+      setAlpha(a: number) {
+        this.alpha = a;
+      },
+    },
+  };
+
+  // ---- Result 場景 ----
+  result_ok: FakeMenuButton | null = null;
+  /** 結算 OK 被按（pointerup）的次數。 */
+  resultOkPressed = 0;
+  /** 官方 Result：start → create（建 OK）→ OK 淡入完 emit result_ok_shown。 */
+  startResult(): void {
+    this.events.emit("start");
+    this.sys.settings.status = 5;
+    const ok = new FakeMenuButton(this, 667, 621, "result_ok");
+    ok.on("pointerup", () => void this.resultOkPressed++);
+    this.result_ok = ok;
+    this.events.emit("create");
+  }
+  showResultOk(): void {
+    this.events.emit("result_ok_shown");
+  }
 }
 
 class FakeGame {
@@ -193,6 +271,7 @@ class FakeGame {
     const keys: Record<string, FakeScene> = {};
     for (const k of [
       "Lobby",
+      "Match",
       "Raid",
       "Raid_MatchBoot",
       "MainA",
@@ -203,6 +282,8 @@ class FakeGame {
       "Loader",
       "MainAAssets",
       "Bug",
+      "Result",
+      "Bonus",
     ]) {
       keys[k] = new FakeScene(k);
     }
@@ -228,17 +309,54 @@ class FakeGame {
   }
 }
 
+/** 官方確認框按 ok 了沒（確認那支照這個決定送不送）。 */
+let CONFIRM_OK = false;
+beforeEach(() => {
+  CONFIRM_OK = false;
+});
+
+/**
+ * 官方的投降確認流程（2026-10-05 實機讀的模組 3480 的 XF：確認框 → ok 才 emit）。
+ * 插件靠函式原始碼裡的 surrender_confirm ＋ emit("surrender" 認它，這兩段字要留著。
+ */
+async function officialConfirm(e: FakeScene) {
+  const text = "surrender_confirm";
+  e.confirms += text.length > 0 ? 1 : 0;
+  if (CONFIRM_OK) e.socket!.emit("surrender", e.room_id);
+}
+
+/** webpack 的 chunk 陣列：push 一個 entry 會把 require 交給它的第三個元素。 */
+function webpackChunks(): unknown[] {
+  const req = Object.assign((id: string) => (id === "3480" ? { XF: officialConfirm } : {}), {
+    m: {
+      "1": function other() {
+        return "nothing";
+      },
+      "3480": function battleDialogModule() {
+        return 'surrender_confirm socket.emit("surrender", room_id)';
+      },
+    },
+  });
+  const chunks: unknown[] = [];
+  chunks.push = (entry: unknown) => {
+    (entry as [unknown, unknown, (r: unknown) => void])[2](req);
+    return 0;
+  };
+  return chunks;
+}
+
 interface FakeWindow {
   game: FakeGame;
   [key: string]: unknown;
 }
 
-function makeWindow(): { window: FakeWindow; reports: unknown[] } {
+function makeWindow(withWebpack = true): { window: FakeWindow; reports: unknown[] } {
   const reports: unknown[] = [];
   const window: FakeWindow = {
     game: new FakeGame(),
     [BINDING]: (payload: string) => reports.push(JSON.parse(payload)),
   };
+  if (withWebpack) window["webpackChunkunlight"] = webpackChunks();
   return { window, reports };
 }
 
@@ -261,9 +379,9 @@ function run(window: FakeWindow, expression: string): string {
   );
 }
 
-function install(window: FakeWindow): string {
+function install(window: FakeWindow, surrender = { dietNoConfirm: false, outside: false }): string {
   poll = null;
-  return run(window, buildRaidSurrenderPatchScript({ bindingName: BINDING }));
+  return run(window, buildRaidSurrenderPatchScript({ bindingName: BINDING, surrender }));
 }
 
 function tick(): void {
@@ -297,6 +415,9 @@ describe("buildRaidSurrenderPatchScript", () => {
       installed: true,
       version: RAID_SURRENDER_SCRIPT_VERSION,
       mounted: true,
+      dietNoConfirm: false,
+      outside: false,
+      outsideShown: false,
       reason: null,
     });
     // 再開一次選單還是只有一顆。
@@ -404,8 +525,271 @@ describe("buildRaidSurrenderPatchScript", () => {
       installed: false,
       version: null,
       mounted: false,
+      dietNoConfirm: false,
+      outside: false,
+      outsideShown: false,
       reason: null,
     });
+  });
+});
+
+describe("對人戰的投降與鈕放外面", () => {
+  const DIET = { channel: 2, quick: false, event: false };
+  const ALEX = { channel: 1, quick: true, event: false };
+
+  function duel(window: FakeWindow, channel: Record<string, unknown>, rule = "duel"): FakeScene {
+    window.game.at("Match").channel = channel;
+    const m = window.game.at("MainA");
+    m.enterBattle(rule);
+    tick();
+    return m;
+  }
+  const outside = (window: FakeWindow) =>
+    (window["__ulrRaidSurrender"] as { out: FakeMenuButton | null }).out;
+  const emits = (m: FakeScene) => m.socket!.log.filter((l) => l[0] === "emit");
+
+  it("迪城 duel＋不確認：MENU 裡的投降按下去直接送那一個，不跳確認框", () => {
+    const { window } = makeWindow();
+    install(window, { dietNoConfirm: true, outside: false });
+    const m = duel(window, DIET);
+    expect(m.openMenu()).toEqual(["help", "surrender", "friend"]);
+    const list = m.menu_list!;
+    m.menuItem("surrender").emit("click");
+    expect(m.confirms).toBe(0);
+    expect(emits(m)).toEqual([["emit", "surrender", "room-32chars"]]);
+    expect(list.removed).toBe(1);
+    expect(window.game.started).toEqual([]);
+  });
+
+  it("⚠ 不確認只在迪城的 duel：亞城、迪城的 ranked 照官方跳確認", () => {
+    const { window } = makeWindow();
+    install(window, { dietNoConfirm: true, outside: false });
+    const alex = duel(window, ALEX);
+    alex.openMenu();
+    alex.menuItem("surrender").emit("click");
+    expect(alex.confirms).toBe(1);
+    expect(emits(alex)).toEqual([]);
+
+    const ranked = duel(window, DIET, "ranked");
+    ranked.openMenu();
+    ranked.menuItem("surrender").emit("click");
+    expect(ranked.confirms).toBe(2);
+    expect(emits(ranked)).toEqual([]);
+  });
+
+  it("⚠ channel 還留著迪城的渦戰：還是我們那顆、直接回渦房，不送 surrender", () => {
+    const { window } = makeWindow();
+    window.game.at("Match").channel = DIET;
+    const m = window.game.raidBattle();
+    const battle = m.socket!;
+    install(window, { dietNoConfirm: true, outside: false });
+    expect(m.openMenu()).toEqual(["help", "surrender"]);
+    m.menuItem("surrender").emit("click");
+    expect(battle.log.filter((l) => l[0] === "emit")).toEqual([
+      ["emit", "leaveRoom", "room-32chars"],
+    ]);
+    expect(window.game.started).toEqual([{ key: "Raid", data: undefined }]);
+  });
+
+  it("渦＋鈕放外面：MENU 只剩 help，MENU 正下方一顆；按下去直接回渦房", () => {
+    const { window } = makeWindow();
+    const m = window.game.raidBattle();
+    install(window, { dietNoConfirm: false, outside: true });
+    const b = outside(window)!;
+    expect([b.icon, b.x, b.y, b.depth]).toEqual(["surrender", 734, 132, 50]);
+    expect(status(window)).toMatchObject({ outside: true, outsideShown: true, mounted: true });
+    expect(m.openMenu()).toEqual(["help"]);
+    b.emit("click");
+    expect(m.confirms).toBe(0);
+    expect(window.game.started).toEqual([{ key: "Raid", data: undefined }]);
+    // 走了（is_complete）下一輪就收
+    tick();
+    expect(b.scene).toBeNull();
+    expect(outside(window)).toBeNull();
+  });
+
+  it("亞城＋鈕放外面：MENU 不列投降（不留空格）；外面那顆走官方確認流程", () => {
+    const { window } = makeWindow();
+    install(window, { dietNoConfirm: false, outside: true });
+    const m = duel(window, ALEX);
+    const b = outside(window)!;
+    expect([b.x, b.y]).toEqual([734, 132]);
+    expect(m.openMenu()).toEqual(["help", "friend"]);
+    b.emit("click");
+    expect(m.confirms).toBe(1);
+    // 送出是官方確認框按 ok 之後的事
+    expect(emits(m)).toEqual([]);
+  });
+
+  it("迪城＋鈕放外面＋不確認：外面那顆直接送", () => {
+    const { window } = makeWindow();
+    install(window, { dietNoConfirm: true, outside: true });
+    const m = duel(window, DIET);
+    outside(window)!.emit("click");
+    expect(m.confirms).toBe(0);
+    expect(emits(m)).toEqual([["emit", "surrender", "room-32chars"]]);
+  });
+
+  it("找不到官方確認那支：對人戰不畫外面那顆、MENU 照官方；渦照畫", () => {
+    const { window } = makeWindow(false);
+    install(window, { dietNoConfirm: false, outside: true });
+    const m = duel(window, ALEX);
+    expect(outside(window)).toBeNull();
+    expect(m.openMenu()).toEqual(["help", "surrender", "friend"]);
+
+    window.game.raidBattle();
+    tick();
+    expect(outside(window)!.icon).toBe("surrender");
+  });
+
+  it("任務戰（官方沒投降）不畫外面那顆", () => {
+    const { window } = makeWindow();
+    install(window, { dietNoConfirm: true, outside: true });
+    const m = duel(window, DIET, "quest");
+    expect(outside(window)).toBeNull();
+    expect(m.openMenu()).toEqual(["help"]);
+  });
+
+  it("開關當場生效；拆掉不留外面那顆；下一場（新的 MENU 鈕）重掛", () => {
+    const { window } = makeWindow();
+    install(window);
+    const m = duel(window, ALEX);
+    expect(outside(window)).toBeNull();
+    const set = (outsideOn: boolean) =>
+      run(
+        window,
+        buildRaidSurrenderSetOptionsExpression({ dietNoConfirm: false, outside: outsideOn }),
+      );
+    expect(set(true)).toBe("ok");
+    const first = outside(window)!;
+    expect(first.scene).toBe(m);
+    expect(m.openMenu()).toEqual(["help", "friend"]);
+    expect(set(false)).toBe("ok");
+    expect(first.scene).toBeNull();
+    expect(m.openMenu()).toEqual(["help", "surrender", "friend"]);
+
+    set(true);
+    const second = outside(window)!;
+    m.enterBattle("duel");
+    tick();
+    const third = outside(window)!;
+    expect(third).not.toBe(second);
+    expect(second.scene).toBeNull();
+
+    expect(run(window, RAID_SURRENDER_UNINSTALL_EXPRESSION)).toBe("ok");
+    expect(third.scene).toBeNull();
+  });
+
+  it("不確認送出之後直接到獎勵遊戲：不跳「你投降了」、收尾快轉、結算藏起來 OK 自動按", async () => {
+    const { window } = makeWindow();
+    install(window, { dietNoConfirm: true, outside: false });
+    const G = window.game;
+    const m = duel(window, DIET);
+    const R = G.at("Result");
+    const B = G.at("Bonus");
+    m.openMenu();
+    m.menuItem("surrender").emit("click");
+
+    // game_result：框直接過、MainA 收尾快轉
+    m.is_complete = true;
+    await m.show_surrender_result("lose");
+    expect(m.surrenderDialogs).toEqual([]);
+    expect([m.time.timeScale, m.tweens.timeScale]).toEqual([50, 50]);
+
+    // Result：MainA 還原；結算藏鏡頭＋快轉，OK 一出來就按
+    R.startResult();
+    expect([m.time.timeScale, m.tweens.timeScale]).toEqual([1, 1]);
+    expect([R.cameras.main.alpha, R.time.timeScale, R.tweens.timeScale]).toEqual([0, 50, 50]);
+    expect(R.resultOkPressed).toBe(0);
+    R.showResultOk();
+    expect(R.resultOkPressed).toBe(1);
+
+    // 獎勵遊戲疊在 Result 上：一開始就把 Result 還原
+    B.events.emit("start");
+    expect([R.cameras.main.alpha, R.time.timeScale, R.tweens.timeScale]).toEqual([1, 1, 1]);
+    // 獎勵遊戲結束後那顆 OK 照常由玩家按
+    R.showResultOk();
+    expect(R.resultOkPressed).toBe(1);
+    R.leave();
+    expect(R.events.count("result_ok_shown")).toBe(0);
+    expect(R.events.count("create")).toBe(0);
+    expect(B.events.count("start")).toBe(0);
+  });
+
+  it("沒有獎勵遊戲：OK 自動按（回大廳），Result 收掉時鏡頭與速度還原", async () => {
+    const { window } = makeWindow();
+    install(window, { dietNoConfirm: true, outside: false });
+    const G = window.game;
+    const m = duel(window, DIET);
+    const R = G.at("Result");
+    m.openMenu();
+    m.menuItem("surrender").emit("click");
+    await m.gameResult(G, "surrender", "lose");
+    R.showResultOk();
+    expect(R.resultOkPressed).toBe(1);
+    R.leave();
+    expect([R.cameras.main.alpha, R.time.timeScale, m.time.timeScale]).toEqual([1, 1, 1]);
+    expect(G.at("Bonus").events.count("start")).toBe(0);
+  });
+
+  it("⚠ 只跳過自己不確認送出的那一房：對手投降、官方確認框送的、下一場都照官方", async () => {
+    const { window } = makeWindow();
+    install(window, { dietNoConfirm: true, outside: false });
+    const G = window.game;
+    const R = G.at("Result");
+
+    // 對手投降（我們沒送）
+    const m = duel(window, DIET);
+    await m.gameResult(G, "surrender", "win");
+    expect(m.surrenderDialogs).toEqual(["opponent_surrender"]);
+
+    // 亞城走官方確認框
+    CONFIRM_OK = true;
+    const alex = duel(window, ALEX);
+    alex.openMenu();
+    alex.menuItem("surrender").emit("click");
+    await alex.gameResult(G, "surrender", "lose");
+    expect(alex.surrenderDialogs).toEqual(["opponent_surrender", "player_surrender"]);
+
+    // 送了，但這一場是別的收尾（沒經過「你投降了」）：結算不自動按
+    const third = duel(window, DIET);
+    third.openMenu();
+    third.menuItem("surrender").emit("click");
+    await third.gameResult(G, "normal", "lose");
+    R.showResultOk();
+    expect(R.resultOkPressed).toBe(0);
+    // 下一場（新 room_id）就算以投降收尾也不吃上一場的標記
+    third.enterBattle("duel", "another-room");
+    await third.gameResult(G, "surrender", "lose");
+    expect(third.surrenderDialogs.at(-1)).toBe("player_surrender");
+  });
+
+  it("拆掉：show_surrender_result 回到原型、沒觸發的結算鉤子一起收", async () => {
+    const { window } = makeWindow();
+    install(window, { dietNoConfirm: true, outside: false });
+    const G = window.game;
+    const m = duel(window, DIET);
+    expect(Object.prototype.hasOwnProperty.call(m, "show_surrender_result")).toBe(true);
+    m.openMenu();
+    m.menuItem("surrender").emit("click");
+    await m.gameResult(G, "surrender", "lose");
+    expect(G.at("Result").events.count("result_ok_shown")).toBe(1);
+
+    const R = G.at("Result");
+    expect(R.cameras.main.alpha).toBe(0);
+
+    expect(run(window, RAID_SURRENDER_UNINSTALL_EXPRESSION)).toBe("ok");
+    expect(Object.prototype.hasOwnProperty.call(m, "show_surrender_result")).toBe(false);
+    expect(R.events.count("result_ok_shown")).toBe(0);
+    expect(R.events.count("shutdown")).toBe(0);
+    expect([R.cameras.main.alpha, R.time.timeScale]).toEqual([1, 1]);
+  });
+
+  it("沒裝時換開關回 not-installed（引擎會整支補裝）", () => {
+    const { window } = makeWindow();
+    expect(
+      run(window, buildRaidSurrenderSetOptionsExpression({ dietNoConfirm: true, outside: true })),
+    ).toBe("not-installed");
   });
 });
 
@@ -425,6 +809,9 @@ describe("isRaidSurrenderReport / parseRaidSurrenderStatus", () => {
       installed: true,
       version: 1,
       mounted: true,
+      dietNoConfirm: false,
+      outside: false,
+      outsideShown: false,
       reason: null,
     });
   });

@@ -368,6 +368,13 @@ export interface Profile {
    * 預設開 —— 只是顯示、沒有加成時什麼都不畫（玩家 2026-09-26：在迪城和小號互刷賺 GEM）。
    */
   dietGemUp: boolean;
+  /** 迪城對戰按投降不跳確認框，直接投降。預設關（照官方跳確認）。玩家 2026-10-05。 */
+  dietSurrenderNoConfirm: boolean;
+  /**
+   * 對戰的投降鈕放在 MENU 外面（MENU 正下方）。預設關（留在 MENU 裡）。
+   * ⚠ 放在迪特赫姆那一頁，但**渦、亞城也算**（玩家 2026-10-05）—— 渦的是插件自己那顆。
+   */
+  surrenderOutside: boolean;
   /**
    * 獎勵遊戲的物品捷徑：猜錯時畫一顆建議用的道具（石楠／四葉草／跳越星），
    * 一點就用。預設關，跟另外三房一樣（玩家 2026-09-27：「物品捷徑功能開關」）。
@@ -638,6 +645,8 @@ export function normalizeProfile(raw: unknown): Profile | null {
     // 舊設定檔沒有這兩欄 → 水捷徑關（官方原樣）、GEM UP 開（純顯示）。
     dietItemShortcut: r["dietItemShortcut"] === true,
     dietGemUp: r["dietGemUp"] !== false,
+    dietSurrenderNoConfirm: r["dietSurrenderNoConfirm"] === true,
+    surrenderOutside: r["surrenderOutside"] === true,
     // 舊設定檔沒有這三欄 → 關（官方原樣）、石楠5 優先、畫在上方。
     bonusItemShortcut: r["bonusItemShortcut"] === true,
     bonusItemOrder: isBonusItemOrder(r["bonusItemOrder"])
@@ -720,6 +729,8 @@ export function defaultProfile(kind: ClientKind = "desktop"): Profile {
     questTreasureMarks: false,
     dietItemShortcut: false,
     dietGemUp: true,
+    dietSurrenderNoConfirm: false,
+    surrenderOutside: false,
     bonusItemShortcut: false,
     bonusItemOrder: DEFAULT_BONUS_ITEM_ORDER,
     bonusItemPlace: DEFAULT_BONUS_ITEM_PLACE,

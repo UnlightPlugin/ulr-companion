@@ -87,6 +87,7 @@ import type {
   CardArtStatus,
   CharaPickerMode,
   CharaPickerReport,
+  BattleSurrenderOptions,
   LobbyStandReport,
   DeckEditReport,
   DeckSnapshot,
@@ -99,6 +100,7 @@ import type {
   MatchContext,
   RaidRewardMode,
   RaidRewardStatus,
+  RaidSurrenderStatus,
   RaidViewStatus,
   RoomGateReport,
 } from "@ulr/cdp-adapter";
@@ -899,18 +901,31 @@ async function questPageState(): Promise<QuestPageState> {
   };
 }
 
-/** 迪特赫姆那兩頁（物品捷徑、GEM UP）要畫的東西：兩個開關＋物品欄那支的狀態。 */
+/**
+ * 迪特赫姆那幾頁（物品捷徑、GEM UP、投降）要畫的東西：開關＋物品欄那支的狀態＋
+ * 投降那支（渦戰投降鈕的注入腳本，對戰 MENU 歸它管）的狀態。
+ */
 interface DietPageState {
   itemShortcut: boolean;
   gemUp: boolean;
+  surrenderNoConfirm: boolean;
+  surrenderOutside: boolean;
   items: ItemPanelStatus | null;
+  surrender: RaidSurrenderStatus | null;
+}
+
+function battleSurrenderOptions(): BattleSurrenderOptions {
+  return { dietNoConfirm: profile.dietSurrenderNoConfirm, outside: profile.surrenderOutside };
 }
 
 async function dietPageState(): Promise<DietPageState> {
   return {
     itemShortcut: profile.dietItemShortcut,
     gemUp: profile.dietGemUp,
+    surrenderNoConfirm: profile.dietSurrenderNoConfirm,
+    surrenderOutside: profile.surrenderOutside,
     items: (await engine?.itemPanelStatus().catch(() => null)) ?? null,
+    surrender: (await engine?.raidSurrenderStatus().catch(() => null)) ?? null,
   };
 }
 
@@ -4408,6 +4423,7 @@ app.whenReady().then(() => {
   engine.setQuestItemShortcut("passes", profile.questPassShortcut);
   engine.setDietOverlay("dietStack", profile.dietItemShortcut);
   engine.setDietOverlay("gemUp", profile.dietGemUp);
+  engine.setBattleSurrender(battleSurrenderOptions());
   engine.setBonusItemShortcut(profile.bonusItemShortcut);
   engine.setBonusItemOrder(profile.bonusItemOrder);
   engine.setBonusItemPlace(profile.bonusItemPlace);
@@ -4929,6 +4945,23 @@ app.whenReady().then(() => {
         engine?.setDietOverlay(part, on);
         const name = part === "dietStack" ? "物品捷徑" : "GEM UP";
         log(on ? `· 迪城${name}已開啟` : `· 迪城${name}已關閉`);
+        pushState();
+      }
+      return dietPageState();
+    },
+  );
+
+  ipcMain.handle(
+    "ulr:surrender-option",
+    // `part`：`noConfirm` 迪城投降不確認、`outside` 投降鈕放 MENU 外面（渦、亞城也算）。
+    async (_event, part: unknown, on: unknown): Promise<DietPageState> => {
+      if ((part === "noConfirm" || part === "outside") && typeof on === "boolean") {
+        const key = part === "noConfirm" ? "dietSurrenderNoConfirm" : "surrenderOutside";
+        profile = { ...profile, [key]: on };
+        if (!ephemeral) store = updateProfile(profile.id, { [key]: on });
+        engine?.setBattleSurrender(battleSurrenderOptions());
+        if (part === "noConfirm") log(on ? "· 迪城投降改成直接投降" : "· 迪城投降照官方跳確認");
+        else log(on ? "· 投降鈕放到 MENU 外面" : "· 投降鈕收回 MENU 裡");
         pushState();
       }
       return dietPageState();

@@ -1092,6 +1092,9 @@
             { id: "hidden", label: "隱藏地圖" },
             { id: "ditem", label: "物品捷徑" },
             { id: "gemup", label: "GEM UP" },
+            // 投降（玩家 2026-10-05）：不確認只在迪城；鈕放外面渦、亞城也算
+            // 2026-10-06：直接投降時「你投降了」框不跳、結算畫面略過，直接到獎勵遊戲
+            { id: "surrender", label: "投降" },
           ],
         },
         { id: "bonus", label: "獎勵", subs: [{ id: "bitem", label: "物品捷徑" }] },
@@ -4081,7 +4084,8 @@
       // 兩塊都住在物品欄那支注入腳本裡，狀態不在 snapshot 裡，開著才輪詢。
       let dstate = null;
       let dietTimer = null;
-      const onDietPage = () => tab === "diet" && (sub === "ditem" || sub === "gemup");
+      const onDietPage = () =>
+        tab === "diet" && (sub === "ditem" || sub === "gemup" || sub === "surrender");
 
       function startDietPolling() {
         if (dietTimer !== null) return;
@@ -4161,6 +4165,48 @@
             </label>
           </div>`;
         return head("GEM UP", "在迪城刷 GEM 時看得到加成還剩多久。") + state + toggle;
+      };
+
+      function surrenderText(v) {
+        if (v === null) return "還沒接上遊戲 —— 開了遊戲就會自己裝上";
+        if (!v.installed) return "還沒裝上" + (v.reason ? "：" + v.reason : "");
+        if (v.reason) return "有狀況：" + v.reason;
+        if (!v.dietNoConfirm && !v.outside) return "照官方（渦的投降鈕在 MENU 裡）";
+        if (v.outsideShown) return "生效中：投降鈕在 MENU 下方";
+        return "生效中，等下一場對戰";
+      }
+      const SURRENDER_CONFIRM_TIP =
+        "直接投降時按一下就送出，跟官方確認框按 ok 送的是同一個請求，插件不多送任何東西。" +
+        "之後「你投降了」那個框不跳、結算畫面整個略過，直接進獎勵遊戲（沒有獎勵遊戲就回大廳）；" +
+        "獎勵遊戲玩完後那顆 OK 照常自己按。" +
+        "只在迪城的對戰；亞城照官方跳確認。渦的投降鈕本來就不確認、直接回渦房。";
+      const SURRENDER_PLACE_TIP =
+        "外面那顆跟 MENU 同一種鈕、貼在 MENU 正下方，MENU 裡就不再列投降。" +
+        "迪城、亞城按下去走官方的投降流程（確認框也是官方的；迪城又選了直接投降就不問）；" +
+        "渦是插件那顆，按下去直接回渦房。";
+
+      PAGES["diet/surrender"] = () => {
+        const s = dstate;
+        const state = `<div class="card">
+            <div class="row"><span class="dim">狀態</span><span>${esc(surrenderText(s?.surrender ?? null))}</span></div>
+          </div>`;
+        const opt = (group, current, value, label, hint) => `<label class="toggle">
+            <input type="radio" name="${group}" value="${value}" ${current === value ? "checked" : ""} />
+            <span><b>${label}</b><div class="hint">${hint}</div></span>
+          </label>`;
+        const confirm = s?.surrenderNoConfirm ? "direct" : "confirm";
+        const place = s?.surrenderOutside ? "outside" : "menu";
+        const confirmCard = `<div class="card">
+            <div class="row"><span class="dim">迪城按投降時${info(SURRENDER_CONFIRM_TIP)}</span><span></span></div>
+            ${opt("surrenderConfirm", confirm, "confirm", "跳出確認框", "照官方：問「你投降嗎?」，按 ok 才投降。")}
+            ${opt("surrenderConfirm", confirm, "direct", "直接投降", "不跳確認框，按下去就投降，直接轉到獎勵遊戲。只在迪城。")}
+          </div>`;
+        const placeCard = `<div class="card">
+            <div class="row"><span class="dim">投降鈕放在哪${info(SURRENDER_PLACE_TIP)}</span><span></span></div>
+            ${opt("surrenderPlace", place, "menu", "收在 MENU 裡", "右上 MENU 打開才看得到（渦的那顆也在 MENU 裡）。")}
+            ${opt("surrenderPlace", place, "outside", "放在外面", "MENU 正下方多一顆投降鈕。渦、迪城、亞城都算。")}
+          </div>`;
+        return head("投降", "投降少按幾下。") + state + confirmCard + placeCard;
       };
 
       // --- 獎勵 › 物品捷徑 ---------------------------------------------------
@@ -4865,6 +4911,14 @@
         if (t.id === "dietStackOn" || t.id === "dietGemUpOn") {
           const part = t.id === "dietStackOn" ? "dietStack" : "gemUp";
           return void window.ulr.diet.toggle(part, t.checked).then((s) => {
+            dstate = s;
+            renderBody();
+          });
+        }
+        if ((t.name === "surrenderConfirm" || t.name === "surrenderPlace") && t.checked) {
+          const part = t.name === "surrenderConfirm" ? "noConfirm" : "outside";
+          const on = t.value === "direct" || t.value === "outside";
+          return void window.ulr.diet.surrender(part, on).then((s) => {
             dstate = s;
             renderBody();
           });
