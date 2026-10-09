@@ -141,7 +141,9 @@ process，這個視窗問不到。自己那一列才是引擎的真實狀態。
 把 `CharaCardImages` 圖集的那一格指到新圖（2026-09-23 改版前叫 `cc_front`），畫面上的官方卡面
 （`circleMaskImage`）照官方遮罩參數重畫。空框是插件內建的（`apps/tray/assets/card-frames/`，
 168×240 從 631 張卡統計、336×480 用 AI 放大，產生方式見 `scripts/extract-card-frames.ts`），
-開機時複製到 `cards\空框\168x240\`、`336x480\`。
+開機時複製到 `cards\空框\168x240\`、`336x480\`。預設 MOD（`apps/tray/assets/card-mods/`，
+目前是史塔夏 R1、音音夢 R4）開機時放進 `cards\`，`cards\.defaults.json` 記放過哪些：
+玩家刪掉的不補回來、改過的或同名的自己的檔不碰，沒動過的跟著內建換版。
 
 任務的兩頁都是開關（預設關）。物品捷徑跟渦房那個同一支腳本（`patch-item-panel.ts`）：
 FRIENDLIST 正上方疊水與沙漏（水沙捷徑）、下方中間放通行證（通行證捷徑），兩塊各自開關。寶箱標註（`patch-quest-treasure.ts`）在

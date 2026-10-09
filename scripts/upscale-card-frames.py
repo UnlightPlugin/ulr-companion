@@ -29,8 +29,9 @@ from PIL import Image
 from scipy import ndimage
 from spandrel import ModelLoader
 
-if len(sys.argv) != 2:
-    sys.exit("用法：python scripts/upscale-card-frames.py <realesr-animevideov3.pth>")
+if len(sys.argv) not in (2, 3):
+    sys.exit("用法：python scripts/upscale-card-frames.py <realesr-animevideov3.pth> [檔名開頭，例如 R]")
+prefix = sys.argv[2] if len(sys.argv) == 3 else ""
 
 root = Path(__file__).resolve().parent.parent / "apps" / "tray" / "assets" / "card-frames"
 src, dst = root / "168x240", root / "336x480"
@@ -57,7 +58,7 @@ def u8(a: np.ndarray) -> np.ndarray:
     return a.round().clip(0, 255).astype(np.uint8)
 
 
-for p in sorted(src.glob("*.png")):
+for p in sorted(src.glob(f"{prefix}*.png")):
     img = np.array(Image.open(p).convert("RGBA"))
     h, w = img.shape[:2]
     size = (w * 2, h * 2)

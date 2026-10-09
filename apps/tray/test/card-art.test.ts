@@ -13,6 +13,7 @@ import type { CardArtFs } from "../src/card-art.js";
 import {
   countBlanks,
   installBundledBlanks,
+  installDefaultMods,
   pngSize,
   resolveCardFrame,
   scanCardArtDir,
@@ -181,6 +182,82 @@ describe("installBundledBlanks", () => {
         bundled: 0,
       });
       expect(existsSync(join(base, "空框"))).toBe(false);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("installDefaultMods", () => {
+  function setup() {
+    const base = mkdtempSync(join(tmpdir(), "ulr-mods-"));
+    const bundle = join(base, "bundle");
+    const cards = join(base, "mods", "cards");
+    mkdirSync(bundle, { recursive: true });
+    writeFileSync(join(bundle, "史塔夏_R1.png"), "史塔夏-v1");
+    writeFileSync(join(bundle, "音音夢_R4.png"), "音音夢-v1");
+    return { base, bundle, cards };
+  }
+
+  it("第一次全部放好，第二次什麼都不寫", () => {
+    const { base, bundle, cards } = setup();
+    try {
+      expect(installDefaultMods(bundle, cards)).toEqual({ written: 2, bundled: 2 });
+      expect(readFileSync(join(cards, "史塔夏_R1.png"), "utf8")).toBe("史塔夏-v1");
+      expect(installDefaultMods(bundle, cards).written).toBe(0);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("玩家刪掉的不補回來", () => {
+    const { base, bundle, cards } = setup();
+    try {
+      installDefaultMods(bundle, cards);
+      rmSync(join(cards, "史塔夏_R1.png"));
+      expect(installDefaultMods(bundle, cards).written).toBe(0);
+      expect(existsSync(join(cards, "史塔夏_R1.png"))).toBe(false);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("玩家本來就有的同名檔、改過的檔都不碰", () => {
+    const { base, bundle, cards } = setup();
+    try {
+      mkdirSync(cards, { recursive: true });
+      writeFileSync(join(cards, "音音夢_R4.png"), "玩家自己的");
+      expect(installDefaultMods(bundle, cards).written).toBe(1);
+      expect(readFileSync(join(cards, "音音夢_R4.png"), "utf8")).toBe("玩家自己的");
+      writeFileSync(join(cards, "史塔夏_R1.png"), "玩家改的");
+      writeFileSync(join(bundle, "史塔夏_R1.png"), "史塔夏-v2");
+      expect(installDefaultMods(bundle, cards).written).toBe(0);
+      expect(readFileSync(join(cards, "史塔夏_R1.png"), "utf8")).toBe("玩家改的");
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("沒動過的、內建換版了就換成新版", () => {
+    const { base, bundle, cards } = setup();
+    try {
+      installDefaultMods(bundle, cards);
+      writeFileSync(join(bundle, "史塔夏_R1.png"), "史塔夏-v2");
+      expect(installDefaultMods(bundle, cards).written).toBe(1);
+      expect(readFileSync(join(cards, "史塔夏_R1.png"), "utf8")).toBe("史塔夏-v2");
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("找不到內建那一份回 bundled 0，什麼都不寫", () => {
+    const base = mkdtempSync(join(tmpdir(), "ulr-mods-"));
+    try {
+      expect(installDefaultMods(join(base, "nope"), join(base, "cards"))).toEqual({
+        written: 0,
+        bundled: 0,
+      });
+      expect(existsSync(join(base, "cards"))).toBe(false);
     } finally {
       rmSync(base, { recursive: true, force: true });
     }

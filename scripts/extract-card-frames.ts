@@ -12,7 +12,7 @@
  *
  * CDP 埠：桌面版看 `%APPDATA%\UNLIGHT Revive\DevToolsActivePort`（有空格；連字號那個是舊資料夾） 第一行。
  *
- * ⚠ **對戰中不要跑。** 統計在頁面主執行緒上算 3~4 秒，整個遊戲會凍住；
+ * ⚠ **對戰中不要跑。** 統計在頁面主執行緒上算 7~8 秒，整個遊戲會凍住；
  * 腳本看到戰鬥場景就拒絕。
  */
 
@@ -42,9 +42,13 @@ const outDir = join(
 
 const targets = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()) as {
   type: string;
+  url: string;
   webSocketDebuggerUrl: string;
 }[];
-const page = targets.find((t) => t.type === "page");
+// 2026-09-23 改版後桌面版的遊戲是獨立的 iframe target，外殼 page 上沒有 window.game
+const page =
+  targets.find((t) => t.type === "iframe" && t.url.includes("playunlight")) ??
+  targets.find((t) => t.type === "page");
 if (page === undefined) throw new Error("那個埠上沒有頁面");
 
 const ws = new WebSocket(page.webSocketDebuggerUrl, { perMessageDeflate: false });

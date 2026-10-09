@@ -270,6 +270,75 @@ export function installBundledBlanks(bundleDir: string, blanksDir: string): Blan
   return { written, bundled: files.length };
 }
 
+/** `mods\cards\` 裡記內建 MOD 放過哪些檔、放的是哪一版。 */
+const DEFAULT_MODS_STAMP = ".defaults.json";
+
+export interface DefaultModsInstall {
+  /** 這次寫進去的檔數。 */
+  written: number;
+  /** 內建的總檔數。0 = 找不到內建那一份。 */
+  bundled: number;
+}
+
+/**
+ * **把打包進插件的預設卡面 MOD 放到玩家的 `mods\cards\`。**
+ *
+ * 跟空框不一樣，這些是「作品」不是底稿，所以規則反過來：
+ *
+ * - 沒放過的檔才放（`.defaults.json` 記每個檔放過的那一版指紋）
+ * - **玩家刪掉的不補回來** —— 刪檔就是玩家關掉這張 MOD 的方法
+ * - 玩家沒動過、內建那一份換版了 → 換成新版
+ * - 玩家改過、或本來就有同名的自己的檔 → 不碰
+ */
+export function installDefaultMods(bundleDir: string, cardsDir: string): DefaultModsInstall {
+  let names: string[];
+  try {
+    names = readdirSync(bundleDir).filter((f) => /\.png$/i.test(f));
+  } catch {
+    return { written: 0, bundled: 0 };
+  }
+  if (names.length === 0) return { written: 0, bundled: 0 };
+
+  const stampPath = join(cardsDir, DEFAULT_MODS_STAMP);
+  let placed: Record<string, string> = {};
+  try {
+    const raw: unknown = JSON.parse(readFileSync(stampPath, "utf8"));
+    if (raw !== null && typeof raw === "object") placed = raw as Record<string, string>;
+  } catch {
+    // 第一次裝，或檔壞了 —— 當作都沒放過
+  }
+  const sha1 = (b: Buffer): string => createHash("sha1").update(b).digest("hex");
+
+  let written = 0;
+  let changed = false;
+  for (const name of names.sort()) {
+    const data = readFileSync(join(bundleDir, name));
+    const want = sha1(data);
+    const path = join(cardsDir, name);
+    const before = placed[name];
+    if (!existsSync(path)) {
+      if (before !== undefined) continue; // 玩家刪掉的
+    } else {
+      const have = sha1(readFileSync(path));
+      if (have === want) {
+        if (before !== want) {
+          placed[name] = want;
+          changed = true;
+        }
+        continue;
+      }
+      if (before !== have) continue; // 玩家自己的或改過的
+    }
+    mkdirSync(cardsDir, { recursive: true });
+    writeFileSync(path, data);
+    placed[name] = want;
+    written++;
+    changed = true;
+  }
+  if (changed) writeFileSync(stampPath, `${JSON.stringify(placed, null, 2)}\n`, "utf8");
+  return { written, bundled: names.length };
+}
+
 /** `空框\` 底下每種尺寸各有幾張。 */
 export function countBlanks(blanksDir: string): Record<string, number> {
   const out: Record<string, number> = {};

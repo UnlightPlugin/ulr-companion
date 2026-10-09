@@ -164,6 +164,7 @@ import {
   countBlanks,
   ensureCardArtDir,
   installBundledBlanks,
+  installDefaultMods,
   readCardNames,
   resolveCardFrame,
   scanCardArtDir,
@@ -821,6 +822,20 @@ function installBlanks(): void {
     else if (r.written > 0) log(`· 卡面替換：空框放好 ${r.written} 張（${CARD_ART_BLANKS_PATH}）`);
   } catch (err) {
     log(`✗ 空框寫不進資料夾：${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/**
+ * 內建的預設卡面 MOD 複製到玩家資料夾。開機一次；玩家刪掉的不補回來
+ * （規則見 `installDefaultMods`）。要在第一次 `reloadCardArt` 之前跑。
+ */
+function installCardMods(): void {
+  try {
+    const r = installDefaultMods(join(__dirname, "assets", "card-mods"), CARD_ART_DIR);
+    if (r.bundled === 0) log("✗ 插件裡找不到內建的卡面 MOD（assets/card-mods）");
+    else if (r.written > 0) log(`· 卡面替換：預設 MOD 放好 ${r.written} 張（${CARD_ART_DIR}）`);
+  } catch (err) {
+    log(`✗ 預設卡面 MOD 寫不進資料夾：${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -4335,6 +4350,7 @@ app.whenReady().then(() => {
   lobbyStandPushed = null;
   pushLobbyStand();
   // 卡面替換：資料夾裡的 PNG 交給引擎，接上遊戲時裝；之後盯著資料夾。
+  installCardMods();
   reloadCardArt(true);
   installBlanks();
   watchCardArtDir();

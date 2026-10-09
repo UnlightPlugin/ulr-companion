@@ -29,6 +29,9 @@
  * 2026-09-15 用 Python 對 281 張 R 卡驗過：拿算出來的框疊回史塔夏的 HD 原圖，
  * 跟官方卡面逐像素差平均 16/255；肉眼看不出差別。
  *
+ * 回歸在人物區貼邊的幾格會留下半透明痕跡（2026-10-05 玩家回報 R3 框「內部還有很多
+ * 痕跡」）。人物區是乾淨的矩形，所以 R 框最後用五個等級的共識清一次，只留血滴滴痕。
+ *
  * ## L 卡不一樣：底下不是插畫，是壁紙
  *
  * L 卡的人物是去背的，站在一張灰色藤蔓壁紙上 —— 而那張壁紙**就是** `ccframe_base`
@@ -36,8 +39,12 @@
  *
  * - `底`：壁紙 + 框，不透明。逐像素取眾數（同一像素大部分卡都露出壁紙，眾數就是
  *   壁紙；人物永遠蓋住的正中央眾數不可靠，那幾格直接用 ccframe_base 補）
- * - `框`：疊在人物**上面**的那層。直條跟同等級的 R 卡完全一樣（實測），拿 R 的；
- *   頂端的銀牌用 底 的像素；底部標籤列 L 跟 R 不同，用全部 350 張 L 卡回歸
+ * - `框`：疊在人物**上面**的那層。直條的**形狀**跟同等級的 R 卡一樣，但**顏色**
+ *   不一樣 —— R 卡直條兩側與右邊框是金線，L 卡是銀灰（2026-10-04 玩家回報「L1 有
+ *   金邊」才發現，之前整段抄 R 的）。所以結構拿 R、不透明像素的顏色拿 L 卡中位數；
+ *   人物區（x 15~163、到 y 220）L 卡是乾淨的矩形，R 框在裡面的半透明一律清掉；
+ *   底部標籤列（y 221 起）L 跟 R 不同，用全部 350 張 L 卡回歸。之前從 y 200 就交給
+ *   回歸，L 卡底部常露出壁紙、變化小，被誤判成一片半透明灰
  *
  * 十個等級的直條顏色各不相同（L1=R1 銀、L3=R3 藍、L5=R5 金……），所以每個
  * 等級各出一份，共 15 張：R1~R5 各一張框、L1~L5 各一張底一張框。
@@ -46,7 +53,7 @@
  *
  * 圖集 19 MB 的 webp 在頁面上已經解碼好了（`texture.source[0].image`），
  * 畫進 canvas 就能 getImageData；搬回 Node 要自己解 webp。WebGL 能上傳這張
- * 圖就表示它沒被 CORS 污染，canvas 讀得到。整支在頁面上跑 2~4 秒。
+ * 圖就表示它沒被 CORS 污染，canvas 讀得到。整支在頁面上跑 7~8 秒（2026-10-04 加了 L 卡的眾數與中位數後）。
  *
  * ⚠⚠ **腳本裡的註解不能有反引號。** 整段住在 template literal 裡。
  */
@@ -284,10 +291,36 @@ export const CARD_FRAME_EXTRACT_EXPRESSION = `(function () {
     for (lv = 1; lv <= 5; lv++) {
       var rs = group("_r0" + lv);
       if (rs.length < 8) return fail("R" + lv + " 只找到 " + rs.length + " 張卡，不夠統計");
-      var RL = layer(rs);
-      rLayers[lv] = RL;
-      files.push({ name: "R" + lv + "_框.png", dataUrl: toPng(layerToRgba(RL)) });
+      rLayers[lv] = layer(rs);
     }
+    /* R 框的人物區（x 15~163、y 39~220，2026-10-05 量）是乾淨的矩形，但回歸在貼邊
+       那幾格會留下半透明的痕跡：插畫在邊緣常常偏暗，跟「旁邊的插畫」相關性高，
+       被當成框。五個等級的框形狀完全一樣，所以拿共識判斷 —— 矩形裡五張都有的只有
+       左上角等級血滴的滴痕（y 39~43、x 35 以內），其餘都只出現在一兩個等級，是雜訊。
+       滴痕：至少三個等級有就留，不透明度取五張的中位數、缺的等級借其他等級的平均色。
+       輸出用複本，L 框還是拿原始的 rLayers 當結構。 */
+    var RX0 = 15, RX1 = 163, RY0 = 39, RY1 = 220;
+    var rOut = {}, rp, rl;
+    for (lv = 1; lv <= 5; lv++) rOut[lv] = { a: rLayers[lv].a.slice(), F: rLayers[lv].F.slice() };
+    for (rp = 0; rp < P; rp++) {
+      var ry = (rp / W) | 0, rx = rp - ry * W;
+      if (ry < RY0 || ry > RY1 || rx < RX0 || rx > RX1) continue;
+      var rn2 = 0, ras = [], rsum = [0, 0, 0], rw = 0;
+      for (rl = 1; rl <= 5; rl++) {
+        var ra = rLayers[rl].a[rp];
+        ras.push(ra);
+        if (ra > 0) { rn2++; rw += ra; for (var rc = 0; rc < 3; rc++) rsum[rc] += ra * rLayers[rl].F[rp * 3 + rc]; }
+      }
+      var drip = ry <= 43 && rx <= 35 && rn2 >= 3;
+      var ram = drip ? median(ras) : 0;
+      for (rl = 1; rl <= 5; rl++) {
+        var O = rOut[rl];
+        O.a[rp] = ram;
+        if (!ram) { O.F[rp * 3] = O.F[rp * 3 + 1] = O.F[rp * 3 + 2] = 0; }
+        else if (rLayers[rl].a[rp] <= 0) for (var rc2 = 0; rc2 < 3; rc2++) O.F[rp * 3 + rc2] = rsum[rc2] / rw;
+      }
+    }
+    for (lv = 1; lv <= 5; lv++) files.push({ name: "R" + lv + "_框.png", dataUrl: toPng(layerToRgba(rOut[lv])) });
     var lGroups = {};
     for (lv = 1; lv <= 5; lv++) {
       var ls = group("_0" + lv);
@@ -296,41 +329,104 @@ export const CARD_FRAME_EXTRACT_EXPRESSION = `(function () {
       for (var i2 = 0; i2 < ls.length; i2++) lPool.push(ls[i2]);
     }
     var LL = layer(lPool);
-    /* R 框裡「非不透明」的列的範圍：頂端銀牌以上、底部標籤以下都在這之外 */
-    var R1 = rLayers[1], rowSemi = new Uint8Array(H);
-    for (var y2 = 0; y2 < H; y2++) {
-      var n = 0;
-      for (var x2 = 0; x2 < W; x2++) if (R1.a[y2 * W + x2] < 1) n++;
-      rowSemi[y2] = n > W / 2 ? 1 : 0;
+    /* 跨卡標準差（三色平均）與中位數 */
+    function stats(samples, withMedian) {
+      var N = samples.length, sd = new Float32Array(P), med = withMedian ? new Float32Array(P * 3) : null;
+      var col = new Float32Array(N);
+      for (var p = 0; p < P; p++) {
+        var s = 0;
+        for (var c = 0; c < 3; c++) {
+          var m = 0, m2 = 0;
+          for (var i = 0; i < N; i++) { var v = samples[i][p * 4 + c]; m += v; m2 += v * v; col[i] = v; }
+          m /= N; m2 /= N;
+          s += Math.sqrt(Math.max(0, m2 - m * m));
+          if (med) med[p * 3 + c] = median(col);
+        }
+        sd[p] = s / 3;
+      }
+      return { sd: sd, med: med };
     }
-    var TOP = 0; while (TOP < H && !rowSemi[TOP]) TOP++;
-    var BOTTOM = 200;
+    var sdAll = stats(lPool, false).sd;
+    /* HP 標籤列的上緣：R1 框在中線上第一個不透明度 > 0 的列（2026-10-04 量是 221，
+       以上人物是清楚的、以下是半透明暗條） */
+    var R1 = rLayers[1], BAR = 0;
+    for (var y2 = 150; y2 < H && !BAR; y2++) if (R1.a[y2 * W + (W >> 1)] > 0) BAR = y2;
+    if (!BAR) BAR = 221;
+    /* 最近的「R 框透明」像素（多源 BFS）：半透明像素回歸時拿它當底下的估計 */
+    var transp = new Uint8Array(P), nearT = new Int32Array(P), tq = new Int32Array(P), th = 0, tt2 = 0, pp;
+    for (pp = 0; pp < P; pp++) {
+      transp[pp] = ((pp / W) | 0) < BAR && R1.a[pp] === 0 ? 1 : 0;
+      nearT[pp] = transp[pp] ? pp : -1;
+      if (transp[pp]) tq[tt2++] = pp;
+    }
+    while (th < tt2) {
+      var tc = tq[th++], tcy = (tc / W) | 0, tcx = tc - tcy * W;
+      var tnb = [tcy > 0 ? tc - W : -1, tcy < H - 1 ? tc + W : -1, tcx > 0 ? tc - 1 : -1, tcx < W - 1 ? tc + 1 : -1];
+      for (var tk = 0; tk < 4; tk++) { var tn = tnb[tk]; if (tn >= 0 && nearT[tn] < 0) { nearT[tn] = nearT[tc]; tq[tt2++] = tn; } }
+    }
+    /* 壁紙不在（2026-09-23 改版後就是）：用全部 L 卡的眾數，張數多正中央比較乾淨 */
+    var wallMode = wall ? null : modeImage(lPool).rgb;
     for (lv = 1; lv <= 5; lv++) {
-      /* 眾數：頂端銀牌那幾列永遠露出來，眾數就是它 */
-      var M = modeImage(lGroups[lv]);
-      /* 框（疊在人物上面那層）：直條拿同等級 R 的、銀牌拿眾數、底部標籤列拿 L 回歸 */
+      var Ls = lGroups[lv], NL = Ls.length;
+      var ST = stats(Ls, true), med = ST.med, sd = ST.sd;
+      /* 框（疊在人物上面那層）。2026-10-04 對著改版後的 350 張 L 卡重做：
+         - 結構（哪裡不透明、哪裡半透明）在標籤列以上照同等級 R 框，標籤列照 L 回歸
+         - 顏色不能照抄 R：R 卡外緣（直條兩側、右邊框）是金線，L 卡是銀灰。
+           不透明像素一律用這個等級 L 卡的中位數
+         - 人物區是乾淨的矩形（x 15~163、銀牌下緣到標籤列上緣，每格跨卡都在變）：
+           R 框右側的半透明漸層、零星雜點都是 R 卡自己的，L 卡沒有，一律透明。
+           x<36 的銀牌下緣是 Lv 血滴的滴痕，那是真的
+         - 剩下的半透明像素（直條中間那條細線等）用 L 卡重新回歸 */
       var RL2 = rLayers[lv];
-      var over = layerToRgba(RL2);
-      var p3, yy2;
+      var la = new Float32Array(P), lF = new Float32Array(P * 3), p3, yy2, xx2, c2, i3;
+      for (p3 = 0; p3 < P; p3++) {
+        var src = ((p3 / W) | 0) < BAR ? RL2 : LL;
+        la[p3] = src.a[p3];
+        lF[p3 * 3] = src.F[p3 * 3]; lF[p3 * 3 + 1] = src.F[p3 * 3 + 1]; lF[p3 * 3 + 2] = src.F[p3 * 3 + 2];
+      }
+      for (p3 = 0; p3 < P; p3++) {
+        yy2 = (p3 / W) | 0; xx2 = p3 - yy2 * W;
+        if (yy2 >= 39 && yy2 < BAR && xx2 >= 15 && xx2 <= 163 && (yy2 >= 44 || xx2 >= 36) && sdAll[p3] > 8) la[p3] = 0;
+      }
       for (p3 = 0; p3 < P; p3++) {
         yy2 = (p3 / W) | 0;
-        if (yy2 < TOP) {
-          if (RL2.a[p3] >= 1) { over[p3 * 4] = M.rgb[p3 * 3]; over[p3 * 4 + 1] = M.rgb[p3 * 3 + 1]; over[p3 * 4 + 2] = M.rgb[p3 * 3 + 2]; }
-        } else if (yy2 >= BOTTOM) {
-          over[p3 * 4] = LL.F[p3 * 3]; over[p3 * 4 + 1] = LL.F[p3 * 3 + 1]; over[p3 * 4 + 2] = LL.F[p3 * 3 + 2];
-          over[p3 * 4 + 3] = Math.round(LL.a[p3] * 255);
+        if (yy2 >= BAR || la[p3] <= 0 || la[p3] >= 1 || nearT[p3] < 0) continue;
+        var q4 = nearT[p3], ksum2 = 0, kn = 0, mb2 = [0, 0, 0], mo2 = [0, 0, 0];
+        for (c2 = 0; c2 < 3; c2++) {
+          var sb = 0, so = 0;
+          for (i3 = 0; i3 < NL; i3++) { sb += Ls[i3][q4 * 4 + c2]; so += Ls[i3][p3 * 4 + c2]; }
+          sb /= NL; so /= NL; mb2[c2] = sb; mo2[c2] = so;
+          var cv2 = 0, vb2 = 0;
+          for (i3 = 0; i3 < NL; i3++) { var db = Ls[i3][q4 * 4 + c2] - sb; cv2 += db * (Ls[i3][p3 * 4 + c2] - so); vb2 += db * db; }
+          if (vb2 / NL > 1) { ksum2 += cv2 / vb2; kn++; }
         }
+        /* 底下幾乎不動就算不出 alpha：照 R 的 alpha，顏色由中位數反推 */
+        var al3 = kn && sd[p3] >= 3 ? Math.min(1, Math.max(0, 1 - ksum2 / kn)) : la[p3];
+        var tgt = kn && sd[p3] >= 3 ? mo2 : [med[p3 * 3], med[p3 * 3 + 1], med[p3 * 3 + 2]];
+        la[p3] = al3;
+        if (al3 > 1e-3) for (c2 = 0; c2 < 3; c2++) lF[p3 * 3 + c2] = Math.min(255, Math.max(0, (tgt[c2] - (1 - al3) * mb2[c2]) / al3));
+      }
+      var over = new Uint8ClampedArray(P * 4);
+      for (p3 = 0; p3 < P; p3++) {
+        yy2 = (p3 / W) | 0;
+        if (la[p3] < 0.1) la[p3] = 0;
+        else if (la[p3] > 0.97) la[p3] = 1;
+        var frameZone = yy2 >= BAR || !transp[p3];
+        if (la[p3] >= 1 || (frameZone && la[p3] > 0 && sd[p3] < 3)) {
+          la[p3] = 1;
+          lF[p3 * 3] = med[p3 * 3]; lF[p3 * 3 + 1] = med[p3 * 3 + 1]; lF[p3 * 3 + 2] = med[p3 * 3 + 2];
+        }
+        if (la[p3] > 0) for (c2 = 0; c2 < 3; c2++) over[p3 * 4 + c2] = lF[p3 * 3 + c2];
+        over[p3 * 4 + 3] = Math.round(la[p3] * 255);
       }
       files.push({ name: "L" + lv + "_框.png", dataUrl: toPng(over) });
-      /* 底（不透明）：銀牌以上用眾數，其餘 = 框疊在壁紙上。壁紙不在就退回眾數
-         （人物永遠蓋住的正中央會是雜點，所以上面有 warn）。 */
+      /* 底（不透明）= 框疊在壁紙上；外框區跨卡不變的像素直接用真卡中位數 */
       var base = new Uint8ClampedArray(P * 4);
       for (p3 = 0; p3 < P; p3++) {
-        yy2 = (p3 / W) | 0;
-        var al2 = over[p3 * 4 + 3] / 255;
-        for (var c2 = 0; c2 < 3; c2++) {
-          var under = wall ? wall[p3 * 4 + c2] : M.rgb[p3 * 3 + c2];
-          base[p3 * 4 + c2] = (yy2 < TOP || !wall) ? M.rgb[p3 * 3 + c2] : al2 * over[p3 * 4 + c2] + (1 - al2) * under;
+        var al2 = la[p3], exact = al2 > 0 && sd[p3] < 6;
+        for (c2 = 0; c2 < 3; c2++) {
+          var under = wall ? wall[p3 * 4 + c2] : wallMode[p3 * 3 + c2];
+          base[p3 * 4 + c2] = exact ? med[p3 * 3 + c2] : al2 * lF[p3 * 3 + c2] + (1 - al2) * under;
         }
         base[p3 * 4 + 3] = 255;
       }
