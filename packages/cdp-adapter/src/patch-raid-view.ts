@@ -128,7 +128,7 @@ import type { RaidLearnedTable } from "./raid-learned.js";
 const FLAG = "__ulrRaidView";
 
 /** 腳本版本。**改動注入腳本裡任何一行就 +1**，修 bug 也算。 */
-export const RAID_VIEW_SCRIPT_VERSION = 30;
+export const RAID_VIEW_SCRIPT_VERSION = 31;
 
 /** ⑪ 塞進官方 RaidUITexts.error 的鍵（官方的 raid_error 拿鍵查字）。 */
 export const RAID_CODE_NO_REPLY_KEY = "ULR_CODE_NO_REPLY";

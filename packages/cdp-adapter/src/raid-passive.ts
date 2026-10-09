@@ -45,5 +45,9 @@ export const RAID_PASSIVE_RULES: readonly RaidPassiveRule[] = [
   { id: 140, short: "磁暴", hpAtMost: [1, 2] },
 ];
 
-/** 被動標籤的字色（跟 BOSS 狀態的紅／綠分開：被動是固定的，不是誰上的）。 */
-export const RAID_PASSIVE_COLOR = "#ffd166";
+/**
+ * 被動標籤的字色：白字黑描邊，跟旁邊的剩餘時間、狀態層數同一套。
+ * 2026-10-05 以前是黃字（#ffd166），玩家退件：「不要用黃字，用白字或遊戲已有的風格」。
+ * 遊戲裡的被動條 card_passive 是卡面上 158x28 的漸層條，縮到清單列高看不清，沒用。
+ */
+export const RAID_PASSIVE_COLOR = "#ffffff";
