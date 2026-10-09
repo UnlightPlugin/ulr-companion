@@ -28,6 +28,26 @@
  * 伺服器回了 `false` 卻沒送錯誤事件的那種卡法（handler 只在成功時才開點擊）這支看不到：
  * 沒有例外可聽。遇到再說。
  *
+ * ## 對戰結束留下的暫停階段場景（2026-10-08 實機）
+ *
+ * 官方 949.js 的 game_result()（對戰結束）：
+ *
+ * ```js
+ *   for (階段場景) if (isActive()) { tweens.killAll(); scene.pause() }      // ① 先暫停
+ *   BackA.game_end(...)
+ *   for (階段場景) if (isActive()) { 鏡頭淡出 1 秒 → scene.stop() }          // ② 再收掉
+ * ```
+ *
+ * 暫停之後 isActive() 是 false，② 一個都收不到 —— 對手在某個階段中途投降／斷線時，
+ * 那個階段場景（實例是 DrawPhaseA）就一直停在 PAUSED。暫停的場景 Phaser 照樣每格畫。
+ * 回大廳時 UL_LOADER.clean() 把對戰的貼圖（phase_draw…）卸掉，之後每格畫到它就 throw
+ * 「texture error (removed while still in use)」：畫面只畫到一半，最上層的東西（match_error
+ * 的「AP不足」框）出不來，框底下吃點擊的全畫面底照樣在 → 玩家看到大廳「卡住」。
+ *
+ * 這支每秒看一次：對戰主場景（MainA）已經不在了（沒在跑、沒暫停、沒睡）而官方那張名單裡
+ * 還有暫停著的，就替官方把 ② 做完（scene.stop）。MainA 還在（含它自己被暫停）一律不動，
+ * 對戰中的暫停是官方的事。不多送任何請求。
+ *
  * ⚠⚠ **注入腳本裡的註解不能有反引號。** 整段腳本住在一個 template literal 裡。
  */
 
@@ -36,17 +56,43 @@ import { embedJson } from "./embed.js";
 const FLAG = "__ulrInputRescue";
 
 /** 腳本版本。**改動注入腳本裡任何一行就 +1**，修 bug 也算。 */
-export const INPUT_RESCUE_SCRIPT_VERSION = 1;
+export const INPUT_RESCUE_SCRIPT_VERSION = 2;
 
 /** 戰鬥主場景。它開著時不動任何場景的點擊。 */
 export const INPUT_RESCUE_BATTLE_SCENE = "MainA";
 
+/**
+ * 官方 game_result() 結束時要收掉的那張名單（949.js，2026-10-08 照抄）。
+ * 只收這些：名單外的場景暫停著可能是別的功能在用。
+ */
+export const BATTLE_LEFTOVER_SCENES = [
+  "MovePhaseA",
+  "DrawPhaseA",
+  "AttackPhaseA",
+  "AtkDicerollA",
+  "AtkResultA",
+  "DefensePhaseA",
+  "DefDiceRollA",
+  "DefResultA",
+  "BattlePlayerAvatar",
+  "BattleOpponentAvatar",
+  "ChangePhaseA",
+] as const;
+
+/** 多久看一次殘留的暫停場景。 */
+const LEFTOVER_SWEEP_MS = 1000;
+
 /** 解開了一次。 */
 export interface InputRescueReport {
   type: "input-rescue";
-  /** 逾時的請求名（raid_code_input、shop_buy…） */
+  /**
+   * 沒給＝請求逾時、打開了點擊。
+   * `battle-leftover`＝對戰結束後官方沒收掉的暫停階段場景，替它收掉了。
+   */
+  kind?: "battle-leftover";
+  /** 逾時的請求名（raid_code_input、shop_buy…）；battle-leftover 時是 game_result */
   event: string;
-  /** 被打開的場景 */
+  /** 被打開（或被收掉）的場景 */
   scenes: string[];
 }
 
@@ -84,6 +130,8 @@ export function buildInputRescuePatchScript(options: InputRescuePatchOptions): s
     version: INPUT_RESCUE_SCRIPT_VERSION,
     bindingName: options.bindingName,
     battleScene: INPUT_RESCUE_BATTLE_SCENE,
+    leftoverScenes: [...BATTLE_LEFTOVER_SCENES],
+    sweepMs: LEFTOVER_SWEEP_MS,
   };
 
   return `(function () {
@@ -122,6 +170,40 @@ export function buildInputRescuePatchScript(options: InputRescuePatchOptions): s
     return out;
   }
 
+  function paused(sc) {
+    try { return !!(sc && sc.scene && sc.scene.isPaused()); } catch (e) { return false; }
+  }
+  /** 對戰主場景還在（跑著、暫停、睡著都算）。 */
+  function battleAlive(sc) {
+    try { return !!(sc && sc.scene && (sc.scene.isActive() || sc.scene.isPaused() || sc.scene.isSleeping())); } catch (e) { return true; }
+  }
+  /** 對戰已經結束、官方名單裡還暫停著的場景替官方收掉。回收掉了哪些。 */
+  function sweepLeftovers() {
+    var G = window.game;
+    if (!G || !G.scene || !G.scene.keys) return [];
+    var K = G.scene.keys;
+    if (!K[CFG.battleScene] || battleAlive(K[CFG.battleScene])) return [];
+    var out = [];
+    for (var i = 0; i < CFG.leftoverScenes.length; i++) {
+      var key = CFG.leftoverScenes[i];
+      var sc = K[key];
+      if (!paused(sc)) continue;
+      try { sc.scene.stop(); out.push(key); } catch (e) {}
+    }
+    return out;
+  }
+  function onSweep(st) {
+    if (window[FLAG] !== st) return;
+    try {
+      var stopped = sweepLeftovers();
+      if (stopped.length === 0) return;
+      st.leftovers++;
+      report({ type: "input-rescue", kind: "battle-leftover", event: "game_result", scenes: stopped });
+    } catch (e) {
+      st.reason = String((e && e.message) || e);
+    }
+  }
+
   function onRejection(st, ev) {
     var name = timedOutEvent(ev ? ev.reason : null);
     if (name === null) return;
@@ -143,11 +225,12 @@ export function buildInputRescuePatchScript(options: InputRescuePatchOptions): s
     var st = window[FLAG];
     if (!st) return;
     try { if (st.handler) window.removeEventListener("unhandledrejection", st.handler); } catch (e) {}
+    try { if (st.timer) clearInterval(st.timer); } catch (e) {}
     delete window[FLAG];
   }
 
   restore();
-  var st = { version: CFG.version, handler: null, rescues: 0, reason: null };
+  var st = { version: CFG.version, handler: null, timer: null, rescues: 0, leftovers: 0, reason: null };
   if (typeof window.addEventListener === "function") {
     st.handler = function (ev) { try { onRejection(st, ev); } catch (e) {} };
     window.addEventListener("unhandledrejection", st.handler);
@@ -155,6 +238,8 @@ export function buildInputRescuePatchScript(options: InputRescuePatchOptions): s
     st.reason = "window.addEventListener 不存在";
   }
   window[FLAG] = st;
+  st.timer = setInterval(function () { onSweep(st); }, CFG.sweepMs);
+  onSweep(st);
   return JSON.stringify({ installed: true, version: st.version, rescues: st.rescues, reason: st.reason });
 })()`;
 }
@@ -175,6 +260,7 @@ export const INPUT_RESCUE_UNINSTALL_EXPRESSION = `(function () {
     var st = window["${FLAG}"];
     if (!st) return "not-installed";
     try { if (st.handler) window.removeEventListener("unhandledrejection", st.handler); } catch (e) {}
+    try { if (st.timer) clearInterval(st.timer); } catch (e) {}
     delete window["${FLAG}"];
     return "ok";
   } catch (e) {

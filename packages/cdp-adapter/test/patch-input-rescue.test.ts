@@ -11,6 +11,7 @@
  * 3. 戰鬥中（MainA 開著）什麼都不做
  * 4. 晚一拍才看：渦碼那支先開了點擊就不重複、不回報
  * 5. 重裝只留一個監聽；拆掉收監聽
+ * 6. 對戰結束留下的暫停階段場景：MainA 不在了才收、只收官方名單裡的、MainA 還在（含暫停）不動
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -29,6 +30,8 @@ const BINDING = "__ulrCompanionReport";
 
 class Scene {
   input = { enabled: true };
+  paused = false;
+  stopped = 0;
   constructor(
     public active = true,
     public sleeping = false,
@@ -36,7 +39,20 @@ class Scene {
   scene = {
     isActive: () => this.active,
     isSleeping: () => this.sleeping,
+    isPaused: () => this.paused,
+    stop: () => {
+      this.stopped++;
+      this.paused = false;
+      this.active = false;
+    },
   };
+}
+
+/** 官方 game_result 暫停之後收不到的樣子：沒在跑、暫停著。 */
+function pausedScene(): Scene {
+  const sc = new Scene(false);
+  sc.paused = true;
+  return sc;
 }
 
 function setup(scenes: Record<string, Scene>) {
@@ -92,7 +108,7 @@ describe("畫面解鎖", () => {
     reject(TIMEOUT("shop_buy"));
     // 晚一拍才動
     expect(shop.input.enabled).toBe(false);
-    vi.runAllTimers();
+    vi.runOnlyPendingTimers();
     expect(shop.input.enabled).toBe(true);
     expect(quest.input.enabled).toBe(false);
     expect(sleepy.input.enabled).toBe(false);
@@ -106,7 +122,7 @@ describe("畫面解鎖", () => {
     const { run, reject, reports } = setup({ Raid: raid });
     run(buildInputRescuePatchScript({ bindingName: BINDING }));
     reject("Cannot read properties of undefined (reading 'clear')");
-    vi.runAllTimers();
+    vi.runOnlyPendingTimers();
     expect(raid.input.enabled).toBe(false);
     expect(reports).toEqual([]);
   });
@@ -118,7 +134,7 @@ describe("畫面解鎖", () => {
     const { run, reject, reports } = setup({ MainA: main, MovePhaseA: phase });
     run(buildInputRescuePatchScript({ bindingName: BINDING }));
     reject(TIMEOUT("raid_start"));
-    vi.runAllTimers();
+    vi.runOnlyPendingTimers();
     expect(phase.input.enabled).toBe(false);
     expect(reports).toEqual([]);
   });
@@ -133,7 +149,7 @@ describe("畫面解鎖", () => {
       raid.input.enabled = true;
     });
     reject(TIMEOUT("raid_code_input"));
-    vi.runAllTimers();
+    vi.runOnlyPendingTimers();
     expect(reports).toEqual([]);
   });
 
@@ -145,7 +161,7 @@ describe("畫面解鎖", () => {
     expect(listeners.size).toBe(1);
     shop.input.enabled = false;
     reject(TIMEOUT("shop_buy"));
-    vi.runAllTimers();
+    vi.runOnlyPendingTimers();
     expect(parseInputRescueStatus(run(INPUT_RESCUE_STATUS_EXPRESSION))).toEqual({
       installed: true,
       version: INPUT_RESCUE_SCRIPT_VERSION,
@@ -164,9 +180,87 @@ describe("畫面解鎖", () => {
     run(buildInputRescuePatchScript({ bindingName: BINDING }));
     reject(TIMEOUT("shop_buy"));
     run(INPUT_RESCUE_UNINSTALL_EXPRESSION);
-    vi.runAllTimers();
+    vi.runOnlyPendingTimers();
     expect(shop.input.enabled).toBe(false);
     expect(reports).toEqual([]);
+  });
+
+  it("對戰結束（MainA 收掉了）還暫停著的階段場景：替官方收掉，回報收了哪些", () => {
+    const main = new Scene(false);
+    const draw = pausedScene();
+    const move = new Scene(false);
+    const { run, reports } = setup({
+      MainA: main,
+      DrawPhaseA: draw,
+      MovePhaseA: move,
+      Match: new Scene(),
+    });
+    run(buildInputRescuePatchScript({ bindingName: BINDING }));
+    // 裝上當下就看一次
+    expect(draw.stopped).toBe(1);
+    expect(move.stopped).toBe(0);
+    expect(reports).toEqual([
+      {
+        type: "input-rescue",
+        kind: "battle-leftover",
+        event: "game_result",
+        scenes: ["DrawPhaseA"],
+      },
+    ]);
+    expect(isInputRescueReport(reports[0])).toBe(true);
+    // 收過了就不再回報
+    vi.advanceTimersByTime(3000);
+    expect(reports).toHaveLength(1);
+    run(INPUT_RESCUE_UNINSTALL_EXPRESSION);
+  });
+
+  it("下一場結束又留下來：巡查一秒內收掉", () => {
+    const main = new Scene(false);
+    const atk = new Scene(false);
+    const { run, reports } = setup({ MainA: main, AttackPhaseA: atk });
+    run(buildInputRescuePatchScript({ bindingName: BINDING }));
+    expect(reports).toEqual([]);
+    atk.paused = true;
+    vi.advanceTimersByTime(1000);
+    expect(atk.stopped).toBe(1);
+    expect(reports).toHaveLength(1);
+    run(INPUT_RESCUE_UNINSTALL_EXPRESSION);
+  });
+
+  it("⚠ MainA 還在（跑著、或自己也被暫停）：階段場景暫停是官方的事，不動", () => {
+    const main = new Scene();
+    const draw = pausedScene();
+    const { run, reports } = setup({ MainA: main, DrawPhaseA: draw });
+    run(buildInputRescuePatchScript({ bindingName: BINDING }));
+    vi.advanceTimersByTime(3000);
+    expect(draw.stopped).toBe(0);
+    main.active = false;
+    main.paused = true;
+    vi.advanceTimersByTime(3000);
+    expect(draw.stopped).toBe(0);
+    expect(reports).toEqual([]);
+    run(INPUT_RESCUE_UNINSTALL_EXPRESSION);
+  });
+
+  it("名單外的暫停場景不動；還沒載入對戰（沒有 MainA）也不動", () => {
+    const other = pausedScene();
+    const draw = pausedScene();
+    const { run } = setup({ Bonus: other, DrawPhaseA: draw });
+    run(buildInputRescuePatchScript({ bindingName: BINDING }));
+    vi.advanceTimersByTime(3000);
+    expect([other.stopped, draw.stopped]).toEqual([0, 0]);
+    run(INPUT_RESCUE_UNINSTALL_EXPRESSION);
+  });
+
+  it("拆掉之後巡查停掉", () => {
+    const main = new Scene(false);
+    const draw = new Scene(false);
+    const { run } = setup({ MainA: main, DrawPhaseA: draw });
+    run(buildInputRescuePatchScript({ bindingName: BINDING }));
+    run(INPUT_RESCUE_UNINSTALL_EXPRESSION);
+    draw.paused = true;
+    vi.advanceTimersByTime(3000);
+    expect(draw.stopped).toBe(0);
   });
 
   it("認逾時訊息的規則跟官方 fetch 的字一樣", () => {

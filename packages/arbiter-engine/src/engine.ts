@@ -1160,6 +1160,12 @@ export class ArbiterEngine {
 
   /** 官方某個請求等不到伺服器回覆、把畫面鎖住了，已經解開。那個操作本身沒成功。 */
   #onInputRescue(report: InputRescueReport): void {
+    if (report.kind === "battle-leftover") {
+      this.#log(
+        `⟳ 上一場對戰結束時官方沒收掉的畫面（${report.scenes.join("、")}）已經收掉 —— 不收的話貼圖卸掉後大廳會畫不完、看起來像卡住`,
+      );
+      return;
+    }
     this.#log(
       `⟳ 遊戲的 ${report.event} 請求伺服器沒回、畫面被鎖住，已經解開（${report.scenes.join("、")}）；那個操作沒有成功，要的話再做一次`,
     );
