@@ -4442,7 +4442,6 @@ app.whenReady().then(() => {
   });
 
   titleButton = new TitleButton({
-    rendererDir: join(__dirname, "renderer"),
     onClick: () => void refreshGame("標題列按鈕"),
     log,
     env: (() => {
