@@ -1205,6 +1205,14 @@ export class ArbiterEngine {
   #bonusItem = false;
   #bonusOrder: BonusItemOrder = DEFAULT_BONUS_ITEM_ORDER;
   #bonusPlace: BonusItemPlace = DEFAULT_BONUS_ITEM_PLACE;
+  /** 獎勵遊戲的 High／Low 跟下一個卡片、得到卡片一起顯示。同上。 */
+  #bonusHighLow = false;
+  /** 獎勵遊戲跳過擲骰動畫。同上。 */
+  #bonusFast = false;
+  /** 獎勵遊戲用道具救起來之後快轉。同上。 */
+  #bonusRescueFast = false;
+  /** 獎勵遊戲結束後不看第二次結算。同上。 */
+  #bonusSkipEnd = false;
 
   get itemShortcut(): boolean {
     return this.#itemShortcut;
@@ -1253,6 +1261,46 @@ export class ArbiterEngine {
     this.#pushItemPanelPart("bonusItem", on);
   }
 
+  get bonusHighLow(): boolean {
+    return this.#bonusHighLow;
+  }
+
+  /** 開關獎勵遊戲的 High／Low 一起顯示。同上。 */
+  setBonusHighLow(on: boolean): void {
+    this.#bonusHighLow = on;
+    this.#pushItemPanelPart("bonusHighLow", on);
+  }
+
+  get bonusFast(): boolean {
+    return this.#bonusFast;
+  }
+
+  /** 開關獎勵遊戲跳過擲骰動畫。同上。 */
+  setBonusFast(on: boolean): void {
+    this.#bonusFast = on;
+    this.#pushItemPanelPart("bonusFast", on);
+  }
+
+  get bonusRescueFast(): boolean {
+    return this.#bonusRescueFast;
+  }
+
+  /** 開關獎勵遊戲用道具救起來之後快轉。同上。 */
+  setBonusRescueFast(on: boolean): void {
+    this.#bonusRescueFast = on;
+    this.#pushItemPanelPart("bonusRescueFast", on);
+  }
+
+  get bonusSkipEnd(): boolean {
+    return this.#bonusSkipEnd;
+  }
+
+  /** 開關獎勵遊戲結束後不看第二次結算。同上。 */
+  setBonusSkipEnd(on: boolean): void {
+    this.#bonusSkipEnd = on;
+    this.#pushItemPanelPart("bonusSkipEnd", on);
+  }
+
   /** 換獎勵遊戲差距大時先用哪一種道具。同上。 */
   setBonusItemOrder(order: BonusItemOrder): void {
     this.#bonusOrder = order;
@@ -1294,6 +1342,10 @@ export class ArbiterEngine {
       bonusItem: this.#bonusItem,
       bonusOrder: this.#bonusOrder,
       bonusPlace: this.#bonusPlace,
+      bonusHighLow: this.#bonusHighLow,
+      bonusFast: this.#bonusFast,
+      bonusRescueFast: this.#bonusRescueFast,
+      bonusSkipEnd: this.#bonusSkipEnd,
     };
   }
 

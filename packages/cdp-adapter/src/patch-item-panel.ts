@@ -139,6 +139,69 @@
  * 什麼都不做的替身。按過一次就不再畫（同一顆 btn_item；蓋著的那顆留著跟官方鈕一起淡出），
  * 伺服器說不能用（回 false、場景沒鎖輸入）才放回來。
  *
+ * ## ⑩ 獎勵遊戲：High／Low 跟「下一個卡片」「得到卡片」一起顯示（可開關，玩家 2026-10-06）
+ *
+ * 官方（2026-10-06 從跑著的客戶端讀的）：四顆大鈕是菱形四格 —— 上 High（334,74）、
+ * 下 Low（334,194）、左 下一個卡片（265,143）、右 得到卡片（385,143）。
+ *
+ * ```js
+ *   check_bonus_next()      // 按「下一個卡片」
+ *     t = await socket.fetch("bonus_next")      // 底數
+ *     淡出 next／get → 建 btn_high／btn_low → dice_value 換成 num_t → 淡入 → 解鎖輸入
+ *   bonus_prediction("high"|"low")              // 按 High／Low
+ *     socket.fetch("bonus_prediction", 選的)
+ * ```
+ *
+ * bonus_next 回的就是 bonus_data.dice_current（上一擲的結果；2026-10-06 實機：擲 5+2、
+ * 按下一個卡片後底數 7＝dice_current）。⚠ 但猜對之後、按「下一個卡片」之前，畫面上的大
+ * 數字還停在**上一回的底數**（dice_previous）—— 官方要按了才換。所以這支：
+ *
+ * - 「下一個卡片／得到卡片」兩顆在、High／Low 還沒建時，用官方 bonus_high／bonus_low 圖
+ *   在上下兩格各畫一顆（滑上、按下換格照官方；透明度跟著下一個卡片淡入淡出），
+ *   大數字換成 dice_current（按「下一個卡片」本來也會換成它）
+ * - 按下去：叫場景自己的 check_bonus_next()，回來的數字跟玩家剛剛看到的一樣才接著叫
+ *   bonus_prediction(選的)；不一樣就停在官方的 High／Low 畫面讓玩家重選 ——
+ *   **絕不在玩家沒看過底數時下注**。請求跟手動按兩下一模一樣，不多送
+ *
+ * ## ⑪ 跳過擲骰動畫（可開關，玩家 2026-10-06：「動畫不要那麼多」）
+ *
+ * 官方一回合（2026-10-06 讀的）：next 淡出入 300＋300 → 猜：沒選的那顆淡出 700、等 500 →
+ * launch BonusDice、**固定等 2000** → BonusResult 成功字樣 300、停 1500、收 300 → 卡片滑 700。
+ * 骰子是 three.js＋cannon 的 3D 物理：BonusDice.update 每個畫面格 world.step(1/30)，
+ * 停了（每顆 isFinished2）就不再推。結果是先定的 —— DiceManager.prepareValues 掛在
+ * postStep 上，**第一步**就把整段模擬跑完、照伺服器給的點數換骰面、放回起點，之後重播。
+ *
+ * - 一回合開始（我們的 High／Low 被按、或官方 bonus_prediction 被叫）：Bonus 與
+ *   BonusResult 的時鐘＋補間 ×10；BonusDice 實例上包 randomDiceThrow，擲出去當下用
+ *   同樣的 updatePhysics 一路推到停 —— 跟官方每格推一步走的是同一條軌跡，只是不播
+ * - 輸入解鎖（bonus_success／bonus_fail 畫完）就還原；逾時 30 秒也還原
+ * - 不碰請求，結果是伺服器給的、骰面是官方自己換的
+ *
+ * ## ⑪-2 用道具救起來之後快轉（可開關，玩家 2026-10-08：「用花救援之後下一步能加快嗎」）
+ *
+ * 猜錯 → 用石楠／四葉草／跳越星（物品欄或 ⑨ 的捷徑，都走 use_bonus_item）之後，官方
+ * （2026-10-08 讀的）：use_avatar_item 回來才鎖輸入、兩顆鈕淡出 700 → 伺服器推
+ *
+ * - bonus_skip（石楠、跳越星＝算猜對）：重讀 db_bonusgame → 成功字樣 300、**停 1500**、收 300
+ *   → bonus_success（卡片滑 700）→ 解鎖輸入
+ * - bonus_restart（四葉草＝重投）：High／Low 淡出 350 → check_bonus_next（重拿底數、淡出入 300＋300）
+ *   → 解鎖輸入，玩家重猜（那一回合歸 ⑪ 管）
+ *
+ * 包實例上的 use_bonus_item：叫下去當下 Bonus 與 BonusResult 的時鐘＋補間 ×10，跟 ⑪ 同一套
+ * 收法（輸入解鎖或逾時 30 秒就還原）。use_avatar_item 還沒回來時官方輸入還開著，那段標
+ * pending 不算畫完；伺服器回 false（不能用）就照常解鎖、跟著還原。只快演出，不碰請求
+ *
+ * ## ⑫ 結束後不看第二次結算（可開關，玩家 2026-10-06：「直接回到迪特赫姆」）
+ *
+ * 得到卡片（check_bonus_get：GET 字樣、淡出 700、等 1000、捲動 700）與結束遊戲
+ * （check_bonus_quit：淡出 700）最後都叫 Result.result_end_bonus_quit(exp, gem, 卡exp, 卡gem, lvup)：
+ * 同步建 OK、字淡入；OK 的 pointerup 收 Bonus → result_scene_end()（有升級先播升級）→
+ * 淡出、stop、叫醒睡著的房間（Match／Quest／Raid）。
+ *
+ * - Bonus／Result 實例上包這三支：兩段動畫快轉；第二次結算 OK 一建好當場 emit pointerup，
+ *   沒升級時藏鏡頭＋快轉；**有升級（lvup 不是 null）不藏不快轉**，升級動畫照常看得到
+ * - 時鐘在場景 shutdown 時還原（Phaser 的 Clock 換場景不會自己重設），鏡頭也是
+ *
  * ## 找面板類別
  *
  * 模組 id 每次改版都會變，跟 patch-penalty 一樣從 webpack 的模組表掃特徵字串
@@ -154,7 +217,7 @@ import { WEBPACK_REQUIRE_SNIPPET } from "./patch-penalty.js";
 const FLAG = "__ulrItemPanel";
 
 /** 腳本版本。**改動注入腳本裡任何一行就 +1**，修 bug 也算。 */
-export const ITEM_PANEL_SCRIPT_VERSION = 8;
+export const ITEM_PANEL_SCRIPT_VERSION = 10;
 
 /** 官方 AvatarItem.APRestoreID（2026-09-26）：精靈、古代、魔女、特製蘑菇萃取液、聖杯的碎片。 */
 export const AP_RESTORE_ITEM_IDS = [1, 2, 3, 38, 133] as const;
@@ -258,6 +321,14 @@ export interface ItemPanelPatchOptions {
   bonusOrder?: BonusItemOrder;
   /** 獎勵遊戲的捷徑畫在哪。沒給＝上方。 */
   bonusPlace?: BonusItemPlace;
+  /** 獎勵遊戲的 High／Low 跟下一個卡片、得到卡片一起顯示。沒給＝關。 */
+  bonusHighLow?: boolean;
+  /** 獎勵遊戲跳過擲骰動畫（骰子直接停在結果、其餘動畫快轉）。沒給＝關。 */
+  bonusFast?: boolean;
+  /** 獎勵遊戲猜錯後用道具救起來，接下來的演出（成功字樣、卡片滑、重拿底數）快轉。沒給＝關。 */
+  bonusRescueFast?: boolean;
+  /** 獎勵遊戲按得到卡片／結束遊戲之後不看第二次結算，直接回房間。沒給＝關。 */
+  bonusSkipEnd?: boolean;
 }
 
 /** 任務房捷徑的兩塊：水沙、通行證。 */
@@ -266,8 +337,9 @@ export type QuestShortcutPart = "stack" | "passes";
 /** 迪城的兩塊：水捷徑、GEM UP。 */
 export type DietPart = "dietStack" | "gemUp";
 
-/** 獎勵遊戲那一塊。 */
-export type BonusPart = "bonusItem";
+/** 獎勵遊戲的五塊：物品捷徑、High／Low 一起顯示、跳過擲骰動畫、救起來後快轉、結束後不看第二次結算。 */
+export type BonusPart =
+  "bonusItem" | "bonusHighLow" | "bonusFast" | "bonusRescueFast" | "bonusSkipEnd";
 
 /** 可以單獨開關的每一塊（渦房那個另有一支）。 */
 export type ItemPanelPart = QuestShortcutPart | DietPart | BonusPart;
@@ -305,6 +377,12 @@ export interface ItemPanelStatus {
   inBonus: boolean;
   /** 畫著的那一顆是哪個道具；沒畫就是 null。 */
   bonusPick: number | null;
+  bonusHighLow: boolean;
+  /** High／Low 現在跟下一個卡片一起畫著。 */
+  highLowShown: boolean;
+  bonusFast: boolean;
+  bonusRescueFast: boolean;
+  bonusSkipEnd: boolean;
   reason: string | null;
 }
 
@@ -418,6 +496,26 @@ export function buildItemPanelPatchScript(options: ItemPanelPatchOptions): strin
     bonusAboveY: 111,
     bonusAboveScale: 0.75,
     bonusAboveAngle: 45,
+    // ⑩ High／Low：官方的圖與位置（create_btn_high／create_btn_low）
+    highLowOn: options.bonusHighLow === true,
+    highTex: "bonus_high",
+    lowTex: "bonus_low",
+    highX: 334,
+    highY: 74,
+    lowX: 334,
+    lowY: 194,
+    diceTex: "bonus_dice_num",
+    highLowBusyMs: 15000,
+    // ⑪ 跳過擲骰動畫：一回合的遊戲時鐘與補間快轉、骰子當場推到停
+    bonusFastOn: options.bonusFast === true,
+    bonusFastSpeed: 10,
+    bonusFastMaxMs: 30000,
+    // 物理一步 1/30 秒；從 20 高掉下來加彈跳一般一百多步，900 步＝30 秒
+    diceMaxSteps: 900,
+    // ⑪-2 用道具救起來之後快轉（倍率、逾時跟 ⑪ 同一組）
+    bonusRescueFastOn: options.bonusRescueFast === true,
+    // ⑫ 結束後不看第二次結算
+    bonusSkipEndOn: options.bonusSkipEnd === true,
   };
 
   return `(function () {
@@ -1125,6 +1223,318 @@ export function buildItemPanelPatchScript(options: ItemPanelPatchOptions): strin
     st.b.cover = cover;
   }
 
+  // ---- ⑩ 獎勵遊戲：High／Low 跟下一個卡片一起顯示 ---------------------------------
+  // 下一個卡片、得到卡片兩顆在，官方 High／Low 還沒建才畫
+  function decideScene() {
+    var G = window.game;
+    var B = G && G.scene && G.scene.keys ? G.scene.keys.Bonus : null;
+    if (!running(B)) return null;
+    if (!alive(B.btn_next) || !alive(B.btn_get) || alive(B.btn_high) || alive(B.btn_low)) return null;
+    if (typeof B.check_bonus_next !== "function" || typeof B.bonus_prediction !== "function") return null;
+    if (!alive(B.dice_value)) return null;
+    var d = B.bonus_data;
+    if (!d || typeof d.dice_current !== "number") return null;
+    var T = B.textures;
+    if (!T || !T.exists(CFG.highTex) || !T.exists(CFG.lowTex)) return null;
+    return B;
+  }
+  function diceFrame(B) {
+    try { return B.dice_value.frame.name; } catch (e) { return null; }
+  }
+  function clearHighLowButtons(st) {
+    var h = st.h;
+    if (h.follow) {
+      try { h.follow.events.off("update", h.follow.fn); } catch (e) {}
+      h.follow = null;
+    }
+    for (var i = 0; i < h.mine.length; i++) safeDestroy(h.mine[i]);
+    h.mine = [];
+    h.scene = null;
+    h.anchor = null;
+  }
+  // putBack：關掉時大數字放回官方原本那格（還是我們換上去的那格才放）
+  function detachHighLow(st, putBack) {
+    clearHighLowButtons(st);
+    var dv = st.h.dice;
+    st.h.dice = null;
+    if (!putBack || !dv || !alive(dv.o)) return;
+    try { if (dv.o.frame.name === dv.to) dv.o.setTexture(CFG.diceTex, dv.from); } catch (e) {}
+  }
+  // 大數字換成 dice_current（按下一個卡片本來也會換成它；猜對後官方還停在上一回的底數）
+  function showBase(st, B) {
+    var want = "num_" + B.bonus_data.dice_current;
+    var cur = diceFrame(B);
+    if (cur === want) return;
+    var T = B.textures.get(CFG.diceTex);
+    if (!T || typeof T.has !== "function" || !T.has(want)) return;
+    if (!st.h.dice || st.h.dice.o !== B.dice_value) st.h.dice = { o: B.dice_value, from: cur, to: want };
+    else st.h.dice.to = want;
+    B.dice_value.setTexture(CFG.diceTex, want);
+  }
+  function drawHighLow(st, B) {
+    var next = B.btn_next;
+    // 跟官方 create_btn_high／create_btn_low 一樣：滑上換格、按下換回、放開才算按
+    var mk = function (key, x, y, pick) {
+      var b = B.add.image(x, y, key, 0).setOrigin(0, 0).setInteractive();
+      b.on("pointerover", function () { b.setTexture(key, 1); });
+      b.on("pointerout", function () { b.setTexture(key, 0); });
+      b.on("pointerdown", function () { b.setTexture(key, 0); });
+      b.on("pointerup", function () { b.setTexture(key, 1); chooseHighLow(st, B, pick); });
+      return b;
+    };
+    st.h.mine = [mk(CFG.highTex, CFG.highX, CFG.highY, "high"), mk(CFG.lowTex, CFG.lowX, CFG.lowY, "low")];
+    // 透明度、顯示跟著下一個卡片（淡入、按過淡出）
+    var follow = function () {
+      if (!alive(next)) return;
+      for (var i = 0; i < st.h.mine.length; i++) {
+        var o = st.h.mine[i];
+        if (!alive(o)) continue;
+        if (o.alpha !== next.alpha) o.setAlpha(next.alpha);
+        if (o.visible !== next.visible) o.setVisible(next.visible);
+      }
+    };
+    follow();
+    if (B.events && typeof B.events.on === "function") {
+      B.events.on("update", follow);
+      st.h.follow = { events: B.events, fn: follow };
+    }
+    st.h.scene = B;
+    st.h.anchor = next;
+  }
+  // 走官方：check_bonus_next（＝按下一個卡片）→ 底數跟剛剛看到的一樣才 bonus_prediction（＝按 High／Low）
+  function chooseHighLow(st, B, pick) {
+    if (window[FLAG] !== st || st.h.busy) return;
+    if (B.input && B.input.enabled === false) return;
+    if (decideScene() !== B) return;
+    var seen = diceFrame(B);
+    st.h.busy = true;
+    st.h.busyAt = Date.now();
+    if (!st.h.fast && st.bonusFast) fastOn(st, B, "round");
+    for (var i = 0; i < st.h.mine.length; i++) { try { st.h.mine[i].disableInteractive(); } catch (e) {} }
+    try { if (B.ulse17) B.ulse17.play(); } catch (e) {}
+    var done = function () {
+      st.h.busy = false;
+      clearHighLowButtons(st);
+      st.h.dice = null;
+      if (window[FLAG] !== st) return;
+      // 伺服器沒給底數（官方什麼都不做）
+      if (!running(B) || !alive(B.btn_high) || !alive(B.btn_low)) return;
+      // 底數跟玩家看到的不一樣：停在官方的 High／Low 畫面讓玩家自己選
+      if (diceFrame(B) !== seen) { st.h.mismatch++; return; }
+      if (B.input && B.input.enabled === false) return;
+      var b = pick === "high" ? B.btn_high : B.btn_low;
+      try { b.setTexture(pick === "high" ? CFG.highTex : CFG.lowTex, 1); } catch (e) {}
+      st.h.auto++;
+      B.bonus_prediction(pick);
+    };
+    var p;
+    try { p = B.check_bonus_next(); } catch (e) {
+      st.h.busy = false;
+      st.reason = String((e && e.message) || e);
+      return;
+    }
+    if (p && typeof p.then === "function") p.then(done, function () { st.h.busy = false; clearHighLowButtons(st); });
+    else done();
+  }
+  // ---- ⑪ 跳過擲骰動畫 ------------------------------------------------------------
+  function speedScene(sc, k) {
+    try { if (sc && sc.time) sc.time.timeScale = k; } catch (e) {}
+    try { if (sc && sc.tweens) sc.tweens.timeScale = k; } catch (e) {}
+  }
+  // 骰子停了沒：官方 BonusDice.update 的判斷（每顆 isFinished2）
+  function diceMoving(list) {
+    for (var i = 0; i < list.length; i++) {
+      var d = list[i];
+      if (d && typeof d.isFinished2 === "function" && d.isFinished2() === false) return true;
+    }
+    return false;
+  }
+  // 同樣的步長一路推到停：prepareValues 第一步就把整段算完、換好骰面、放回起點，
+  // 之後每一步跟官方每個畫面格走的一樣，所以停下來就是官方本來會停的那一面
+  function settleDice(D) {
+    var list = D.dice;
+    if (!Array.isArray(list) || typeof D.updatePhysics !== "function") return;
+    for (var n = 0; n < CFG.diceMaxSteps && diceMoving(list); n++) D.updatePhysics();
+  }
+  function hookDice(st, D) {
+    if (!D || st.h.dice3d) return;
+    var orig = Object.getPrototypeOf(D).randomDiceThrow;
+    if (typeof orig !== "function") return;
+    var w = function () {
+      var p = orig.apply(this, arguments);
+      try { if (window[FLAG] === st && st.h.fast) settleDice(this); } catch (e) { st.reason = String((e && e.message) || e); }
+      return p;
+    };
+    D.randomDiceThrow = w;
+    st.h.dice3d = { D: D, w: w };
+  }
+  function unhookDice(st) {
+    var x = st.h.dice3d;
+    st.h.dice3d = null;
+    try { if (x && x.D.randomDiceThrow === x.w) delete x.D.randomDiceThrow; } catch (e) {}
+  }
+  // 一回合（下一個卡片 → 猜 → 擲骰 → 成功／失敗畫完）快轉；輸入解鎖＝官方畫完了。
+  // why：round（猜 High／Low 起的，看 bonusFast）或 rescue（用道具救起的，看 bonusRescueFast）
+  function fastOn(st, B, why) {
+    var K = window.game.scene.keys;
+    st.h.fast = { B: B, at: Date.now(), why: why, pending: false };
+    speedScene(B, CFG.bonusFastSpeed);
+    speedScene(K.BonusResult, CFG.bonusFastSpeed);
+    hookDice(st, K.BonusDice);
+  }
+  function fastOff(st) {
+    var f = st.h.fast;
+    st.h.fast = null;
+    unhookDice(st);
+    if (!f) return;
+    speedScene(f.B, 1);
+    speedScene(window.game.scene.keys.BonusResult, 1);
+  }
+  // 官方 High／Low（含我們那顆接著叫的）都走 bonus_prediction：包在實例上
+  function hookPrediction(st, B) {
+    if (st.h.pred && st.h.pred.B === B) return;
+    unhookPrediction(st);
+    var orig = Object.getPrototypeOf(B).bonus_prediction;
+    if (typeof orig !== "function") return;
+    var w = function () {
+      if (window[FLAG] === st && st.bonusFast && !st.h.fast) fastOn(st, this, "round");
+      return orig.apply(this, arguments);
+    };
+    B.bonus_prediction = w;
+    st.h.pred = { B: B, w: w };
+  }
+  function unhookPrediction(st) {
+    var x = st.h.pred;
+    st.h.pred = null;
+    try { if (x && x.B.bonus_prediction === x.w) delete x.B.bonus_prediction; } catch (e) {}
+  }
+  // 猜錯後用道具救（物品欄選的、我們的捷徑都走 use_bonus_item）：包在實例上，
+  // 救起來之後伺服器推的 bonus_skip（成功字樣、停 1500、卡片滑）或 bonus_restart（淡出、重拿底數）一起快轉。
+  // use_avatar_item 回來之前官方還沒鎖輸入，pending 期間不算畫完；回 false（不能用）就收掉
+  function hookUseItem(st, B) {
+    if (st.h.useItem && st.h.useItem.B === B) return;
+    unhookUseItem(st);
+    var orig = Object.getPrototypeOf(B).use_bonus_item;
+    if (typeof orig !== "function") return;
+    var w = function () {
+      var f = null;
+      if (window[FLAG] === st && st.bonusRescueFast && !st.h.fast) {
+        fastOn(st, this, "rescue");
+        f = st.h.fast;
+        f.pending = true;
+      }
+      var p = orig.apply(this, arguments);
+      if (f !== null) {
+        var settle = function () { if (st.h.fast === f) f.pending = false; };
+        if (p && typeof p.then === "function") p.then(settle, settle);
+        else settle();
+      }
+      return p;
+    };
+    B.use_bonus_item = w;
+    st.h.useItem = { B: B, w: w };
+  }
+  function unhookUseItem(st) {
+    var x = st.h.useItem;
+    st.h.useItem = null;
+    try { if (x && x.B.use_bonus_item === x.w) delete x.B.use_bonus_item; } catch (e) {}
+  }
+  function syncFast(st) {
+    var G = window.game;
+    var B = G && G.scene && G.scene.keys ? G.scene.keys.Bonus : null;
+    var f = st.h.fast;
+    if (f && !st.h.busy) {
+      var unlocked = !f.pending && !(f.B.input && f.B.input.enabled === false);
+      var done = !running(f.B) || unlocked || Date.now() - f.at > CFG.bonusFastMaxMs;
+      var allowed = f.why === "rescue" ? st.bonusRescueFast : st.bonusFast;
+      if (done || !allowed) fastOff(st);
+    }
+    if (st.bonusFast && running(B)) hookPrediction(st, B);
+    else if (st.h.pred) unhookPrediction(st);
+    if (st.bonusRescueFast && running(B)) hookUseItem(st, B);
+    else if (st.h.useItem) unhookUseItem(st);
+  }
+
+  // ---- ⑫ 獎勵遊戲結束後不看第二次結算 ------------------------------------------------
+  function camAlpha(sc, a) {
+    try { if (sc && sc.cameras && sc.cameras.main) sc.cameras.main.setAlpha(a); } catch (e) {}
+  }
+  // 實例上包一支原型方法；拆的時候只拆自己包的那支
+  function wrapOwn(sc, name, make) {
+    var orig = sc ? Object.getPrototypeOf(sc)[name] : null;
+    if (typeof orig !== "function") return null;
+    var w = make(orig);
+    sc[name] = w;
+    return { sc: sc, name: name, w: w };
+  }
+  function unwrapOwn(x) {
+    try { if (x && x.sc[x.name] === x.w) delete x.sc[x.name]; } catch (e) {}
+  }
+  // 場景收掉時把時鐘還原（Phaser 的 Clock 換場景不會自己重設）
+  function speedUntilShutdown(sc) {
+    speedScene(sc, CFG.bonusFastSpeed);
+    try { sc.events.once("shutdown", function () { speedScene(sc, 1); }); } catch (e) {}
+  }
+  function hookBonusEnd(st) {
+    var K = window.game.scene.keys;
+    var B = K.Bonus, R = K.Result;
+    if (!B || !R) return;
+    if (st.h.end && st.h.end.B === B && st.h.end.R === R) return;
+    unhookBonusEnd(st);
+    var on = function () { return window[FLAG] === st && st.bonusSkipEnd; };
+    // 得到卡片／結束遊戲：GET 字樣、淡出、等 1 秒、捲動都快轉
+    var anim = function (orig) {
+      return function () {
+        if (on()) speedUntilShutdown(this);
+        return orig.apply(this, arguments);
+      };
+    };
+    // 第二次結算：OK 是同步建的，當場替玩家按（＝官方收 Bonus → result_scene_end → 叫醒房間）。
+    // 有升級：一樣不用按 OK，但不藏不快轉，升級動畫照常播（玩家 2026-10-06：「升級是可以顯示出來」）
+    var quit = function (orig) {
+      return function (exp, gem, cardExp, cardGem, lvup) {
+        if (!on()) return orig.apply(this, arguments);
+        if (lvup === null || lvup === undefined) {
+          camAlpha(this, 0);
+          speedUntilShutdown(this);
+          var self = this;
+          try { self.events.once("shutdown", function () { camAlpha(self, 1); }); } catch (e) {}
+        }
+        var p = orig.apply(this, arguments);
+        var ok = this.result_ok;
+        if (alive(ok) && typeof ok.emit === "function") { ok.emit("pointerup"); st.h.endSkips++; }
+        return p;
+      };
+    };
+    st.h.end = {
+      B: B,
+      R: R,
+      parts: [wrapOwn(B, "check_bonus_get", anim), wrapOwn(B, "check_bonus_quit", anim), wrapOwn(R, "result_end_bonus_quit", quit)]
+    };
+  }
+  function unhookBonusEnd(st) {
+    var x = st.h.end;
+    st.h.end = null;
+    if (!x) return;
+    for (var i = 0; i < x.parts.length; i++) unwrapOwn(x.parts[i]);
+  }
+  function syncBonusEnd(st) {
+    if (st.bonusSkipEnd) hookBonusEnd(st);
+    else if (st.h.end) unhookBonusEnd(st);
+  }
+
+  function syncHighLow(st) {
+    // 等 bonus_next 回來；官方的請求逾時沒人接時不要永遠卡著
+    if (st.h.busy && Date.now() - st.h.busyAt < CFG.highLowBusyMs) return;
+    st.h.busy = false;
+    var B = st.bonusHighLow ? decideScene() : null;
+    if (B === null) { if (st.h.mine.length || st.h.scene !== null || st.h.dice) detachHighLow(st, false); return; }
+    showBase(st, B);
+    if (st.h.scene === B && st.h.anchor === B.btn_next && st.h.mine.length && st.h.mine.every(alive)) return;
+    clearHighLowButtons(st);
+    drawHighLow(st, B);
+  }
+
   function removeBoostTexture() {
     try {
       var G = window.game;
@@ -1200,6 +1610,9 @@ export function buildItemPanelPatchScript(options: ItemPanelPatchOptions): strin
       syncDietShortcut(st);
       syncGem(st);
       syncBonus(st);
+      syncHighLow(st);
+      syncFast(st);
+      syncBonusEnd(st);
       syncSearch(st);
     } catch (e) {
       st.reason = String((e && e.message) || e);
@@ -1215,6 +1628,8 @@ export function buildItemPanelPatchScript(options: ItemPanelPatchOptions): strin
     try { if (old.d) detachBox(old.d); } catch (e) {}
     try { if (old.g) detachGem(old); } catch (e) {}
     try { if (old.b) detachBonus(old); } catch (e) {}
+    try { if (old.h) detachHighLow(old, true); } catch (e) {}
+    try { if (old.h) { fastOff(old); unhookPrediction(old); unhookBonusEnd(old); } } catch (e) {}
     // 抹字的底圖也丟掉：新版的抹法可能不一樣
     removeBubbleTexture();
     try { if (old.raised) restoreSearch(old); } catch (e) {}
@@ -1234,6 +1649,10 @@ export function buildItemPanelPatchScript(options: ItemPanelPatchOptions): strin
     bonusItem: CFG.bonusOn,
     bonusOrder: CFG.bonusOrder,
     bonusPlace: CFG.bonusPlace,
+    bonusHighLow: CFG.highLowOn,
+    bonusFast: CFG.bonusFastOn,
+    bonusRescueFast: CFG.bonusRescueFastOn,
+    bonusSkipEnd: CFG.bonusSkipEndOn,
     Panel: null,
     nextFind: 0,
     timer: null,
@@ -1246,6 +1665,8 @@ export function buildItemPanelPatchScript(options: ItemPanelPatchOptions): strin
     d: { scene: null, anchor: null, sig: null, mine: [] },
     g: { scene: null, value: null, mine: [], loading: false, nextLoad: 0 },
     b: { scene: null, anchor: null, sig: null, mine: [], used: null, pick: null, cover: false, hit: null, follow: null },
+    h: { scene: null, anchor: null, mine: [], follow: null, dice: null, busy: false, busyAt: 0, auto: 0, mismatch: 0,
+      fast: null, pred: null, useItem: null, dice3d: null, end: null, endSkips: 0 },
     raised: [],
     searchHooked: null,
     passThrough: 0,
@@ -1255,7 +1676,7 @@ export function buildItemPanelPatchScript(options: ItemPanelPatchOptions): strin
   };
   window[FLAG] = st;
   st.detach = function () {
-    detach(st); detachQuest(st); detachBox(st.d); detachGem(st); detachBonus(st); removeBoostTexture(); removeBubbleTexture();
+    detach(st); detachQuest(st); detachBox(st.d); detachGem(st); detachBonus(st); detachHighLow(st, true); fastOff(st); unhookPrediction(st); unhookUseItem(st); unhookBonusEnd(st); removeBoostTexture(); removeBubbleTexture();
     restoreSearch(st); unhookSearch(st);
   };
   st.detachRaid = function () { detach(st); };
@@ -1285,6 +1706,27 @@ export function buildItemPanelPatchScript(options: ItemPanelPatchOptions): strin
       try { syncBonus(st); } catch (e) { st.reason = String((e && e.message) || e); }
       return true;
     }
+    if (part === "bonusHighLow") {
+      st.bonusHighLow = on;
+      if (!st.h.busy) detachHighLow(st, !on);
+      try { syncHighLow(st); } catch (e) { st.reason = String((e && e.message) || e); }
+      return true;
+    }
+    if (part === "bonusFast") {
+      st.bonusFast = on;
+      try { syncFast(st); } catch (e) { st.reason = String((e && e.message) || e); }
+      return true;
+    }
+    if (part === "bonusRescueFast") {
+      st.bonusRescueFast = on;
+      try { syncFast(st); } catch (e) { st.reason = String((e && e.message) || e); }
+      return true;
+    }
+    if (part === "bonusSkipEnd") {
+      st.bonusSkipEnd = on;
+      try { syncBonusEnd(st); } catch (e) { st.reason = String((e && e.message) || e); }
+      return true;
+    }
     return false;
   };
   st.setBonusOrder = function (order) {
@@ -1308,7 +1750,10 @@ export function buildItemPanelPatchScript(options: ItemPanelPatchOptions): strin
       inQuest: st.q.scene !== null, questButtons: st.q.mine.length, dietStack: st.dietStack, gemUp: st.gemUp,
       inDiet: dietScene() !== null, dietButtons: st.d.mine.length, gemShown: st.g.mine.length > 0,
       gemPct: gem === null ? null : gem.boost_value, bonusItem: st.bonusItem, bonusOrder: st.bonusOrder, bonusPlace: st.bonusPlace,
-      inBonus: st.b.mine.length > 0, bonusPick: st.b.mine.length > 0 ? st.b.pick : null, reason: st.reason };
+      inBonus: st.b.mine.length > 0, bonusPick: st.b.mine.length > 0 ? st.b.pick : null,
+      bonusHighLow: st.bonusHighLow, highLowShown: st.h.mine.length > 0, bonusFast: st.bonusFast,
+      bonusRescueFast: st.bonusRescueFast,
+      bonusSkipEnd: st.bonusSkipEnd, reason: st.reason };
   };
   st.unpatch = function () { unpatchPanel(st.Panel); };
   tick(st);
@@ -1444,6 +1889,11 @@ export function parseItemPanelStatus(raw: string): ItemPanelStatus {
     bonusPlace: isBonusItemPlace(o.bonusPlace) ? o.bonusPlace : DEFAULT_BONUS_ITEM_PLACE,
     inBonus: o.inBonus === true,
     bonusPick: typeof o.bonusPick === "number" ? o.bonusPick : null,
+    bonusHighLow: o.bonusHighLow === true,
+    highLowShown: o.highLowShown === true,
+    bonusFast: o.bonusFast === true,
+    bonusRescueFast: o.bonusRescueFast === true,
+    bonusSkipEnd: o.bonusSkipEnd === true,
     reason: typeof o.reason === "string" ? o.reason : null,
   };
 }

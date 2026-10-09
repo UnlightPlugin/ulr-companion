@@ -934,6 +934,14 @@ interface BonusPageState {
   itemShortcut: boolean;
   place: BonusItemPlace;
   order: BonusItemOrder;
+  /** High／Low 跟下一個卡片、得到卡片一起顯示。 */
+  highLow: boolean;
+  /** 跳過擲骰動畫。 */
+  fast: boolean;
+  /** 用道具救起來之後快轉。 */
+  rescueFast: boolean;
+  /** 結束後不看第二次結算。 */
+  skipEnd: boolean;
   items: ItemPanelStatus | null;
 }
 
@@ -942,6 +950,10 @@ async function bonusPageState(): Promise<BonusPageState> {
     itemShortcut: profile.bonusItemShortcut,
     place: profile.bonusItemPlace,
     order: profile.bonusItemOrder,
+    highLow: profile.bonusHighLow,
+    fast: profile.bonusFast,
+    rescueFast: profile.bonusRescueFast,
+    skipEnd: profile.bonusSkipEnd,
     items: (await engine?.itemPanelStatus().catch(() => null)) ?? null,
   };
 }
@@ -4427,7 +4439,14 @@ app.whenReady().then(() => {
   engine.setBonusItemShortcut(profile.bonusItemShortcut);
   engine.setBonusItemOrder(profile.bonusItemOrder);
   engine.setBonusItemPlace(profile.bonusItemPlace);
+  engine.setBonusHighLow(profile.bonusHighLow);
+  engine.setBonusFast(profile.bonusFast);
+  engine.setBonusRescueFast(profile.bonusRescueFast);
+  engine.setBonusSkipEnd(profile.bonusSkipEnd);
   engine.setQuestTreasure(profile.questTreasureMarks);
+  engine.setQuestPanel("reward", profile.questRewardPanel);
+  engine.setQuestPanel("end", profile.questEndPanel);
+  engine.setQuestSkipResult(profile.questSkipResult);
   engine.onRaidAutoDeleteChanged((setting) => {
     profile = { ...profile, raidAutoDelete: setting.enabled, raidAutoDeletePrompt: setting.prompt };
     if (!ephemeral) {
@@ -4998,6 +5017,50 @@ app.whenReady().then(() => {
       profile = { ...profile, bonusItemOrder: order };
       if (!ephemeral) store = updateProfile(profile.id, { bonusItemOrder: order });
       engine?.setBonusItemOrder(order);
+      pushState();
+    }
+    return bonusPageState();
+  });
+
+  ipcMain.handle("ulr:bonus-highlow", async (_event, on: unknown): Promise<BonusPageState> => {
+    if (typeof on === "boolean") {
+      profile = { ...profile, bonusHighLow: on };
+      if (!ephemeral) store = updateProfile(profile.id, { bonusHighLow: on });
+      engine?.setBonusHighLow(on);
+      log(on ? "· 獎勵遊戲 High Low：跟下一個卡片一起顯示" : "· 獎勵遊戲 High Low：照官方");
+      pushState();
+    }
+    return bonusPageState();
+  });
+
+  ipcMain.handle("ulr:bonus-fast", async (_event, on: unknown): Promise<BonusPageState> => {
+    if (typeof on === "boolean") {
+      profile = { ...profile, bonusFast: on };
+      if (!ephemeral) store = updateProfile(profile.id, { bonusFast: on });
+      engine?.setBonusFast(on);
+      log(on ? "· 獎勵遊戲：跳過擲骰動畫" : "· 獎勵遊戲：擲骰動畫照官方");
+      pushState();
+    }
+    return bonusPageState();
+  });
+
+  ipcMain.handle("ulr:bonus-rescue-fast", async (_event, on: unknown): Promise<BonusPageState> => {
+    if (typeof on === "boolean") {
+      profile = { ...profile, bonusRescueFast: on };
+      if (!ephemeral) store = updateProfile(profile.id, { bonusRescueFast: on });
+      engine?.setBonusRescueFast(on);
+      log(on ? "· 獎勵遊戲：用道具救起來之後快轉" : "· 獎勵遊戲：用道具之後照官方");
+      pushState();
+    }
+    return bonusPageState();
+  });
+
+  ipcMain.handle("ulr:bonus-skip-end", async (_event, on: unknown): Promise<BonusPageState> => {
+    if (typeof on === "boolean") {
+      profile = { ...profile, bonusSkipEnd: on };
+      if (!ephemeral) store = updateProfile(profile.id, { bonusSkipEnd: on });
+      engine?.setBonusSkipEnd(on);
+      log(on ? "· 獎勵遊戲：結束後直接回房間" : "· 獎勵遊戲：結束後照官方看結算");
       pushState();
     }
     return bonusPageState();

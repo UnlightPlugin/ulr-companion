@@ -1097,7 +1097,15 @@
             { id: "surrender", label: "投降" },
           ],
         },
-        { id: "bonus", label: "獎勵", subs: [{ id: "bitem", label: "物品捷徑" }] },
+        {
+          id: "bonus",
+          label: "獎勵",
+          subs: [
+            { id: "bitem", label: "物品捷徑" },
+            // 玩家 2026-10-06：不用先按下一個卡片就能選 High／Low
+            { id: "bhighlow", label: "High Low" },
+          ],
+        },
         {
           id: "quest",
           label: "任務",
@@ -4214,7 +4222,7 @@
       // 住在物品欄那支注入腳本裡，狀態不在 snapshot 裡，開著才輪詢。
       let bstate = null;
       let bonusTimer = null;
-      const onBonusPage = () => tab === "bonus" && sub === "bitem";
+      const onBonusPage = () => tab === "bonus" && (sub === "bitem" || sub === "bhighlow");
 
       function startBonusPolling() {
         if (bonusTimer !== null) return;
@@ -4285,6 +4293,79 @@
           </div>`;
         return head("物品捷徑", "獎勵遊戲猜錯時，不用開物品欄就能接關。") + state + toggle + picker;
       };
+
+      function bonusHighLowText(v) {
+        if (v === null) return "還沒接上遊戲 —— 開了遊戲就會自己裝上";
+        if (!v.installed) return "還沒裝上" + (v.reason ? "：" + v.reason : "");
+        if (v.reason) return "沒作用：" + v.reason;
+        if (!v.bonusHighLow) return "關著";
+        if (v.highLowShown) return "生效中：High／Low 畫在獎勵遊戲上";
+        return "生效中，等獎勵遊戲出現「下一個卡片」時畫上";
+      }
+      const BONUS_HIGHLOW_TIP =
+        "按 High／Low 時插件替你先按「下一個卡片」再按你選的那顆，送的請求跟手動按兩下一模一樣，不多送任何東西。" +
+        "猜對之後官方的大數字會停在上一回的底數，要按了下一個卡片才換；開著時直接換成這一回真正的底數。" +
+        "伺服器回的底數萬一跟畫面上不一樣，就停在官方的 High／Low 畫面讓你重選，不會替你亂猜。";
+
+      PAGES["bonus/bhighlow"] = () => {
+        const s = bstate;
+        const on = s?.highLow ?? snap?.profile?.bonusHighLow ?? false;
+        const state = `<div class="card">
+            <div class="row"><span class="dim">狀態</span><span>${esc(bonusHighLowText(s?.items ?? null))}</span></div>
+          </div>`;
+        const toggle = `<div class="card">
+            <label class="toggle">
+              <input type="checkbox" id="bonusHighLowOn" ${on ? "checked" : ""} />
+              <span><b>High／Low 一起顯示</b>${info(BONUS_HIGHLOW_TIP)}
+                <div class="hint">「下一個卡片」「得到卡片」出現時，上下兩格同時有 High、Low，直接按就猜。不想繼續照樣按得到卡片。</div>
+              </span>
+            </label>
+          </div>`;
+        const fastOn = s?.fast ?? snap?.profile?.bonusFast ?? false;
+        const fast = `<div class="card">
+            <label class="toggle">
+              <input type="checkbox" id="bonusFastOn" ${fastOn ? "checked" : ""} />
+              <span><b>跳過擲骰動畫</b>${info(BONUS_FAST_TIP)}
+                <div class="hint">猜完骰子直接停在結果，淡出淡入、成功字樣、卡片滑動都快轉。按官方的 High／Low 也算。</div>
+              </span>
+            </label>
+          </div>`;
+        const rescueOn = s?.rescueFast ?? snap?.profile?.bonusRescueFast ?? false;
+        const rescue = `<div class="card">
+            <label class="toggle">
+              <input type="checkbox" id="bonusRescueFastOn" ${rescueOn ? "checked" : ""} />
+              <span><b>用道具後快轉</b>${info(BONUS_RESCUE_FAST_TIP)}
+                <div class="hint">猜錯後用石楠、四葉草、跳越星救起來，接著的成功字樣、卡片滑動、重拿底數都快轉。</div>
+              </span>
+            </label>
+          </div>`;
+        const skipEndOn = s?.skipEnd ?? snap?.profile?.bonusSkipEnd ?? false;
+        const skipEnd = `<div class="card">
+            <label class="toggle">
+              <input type="checkbox" id="bonusSkipEndOn" ${skipEndOn ? "checked" : ""} />
+              <span><b>結束後直接回去</b>${info(BONUS_SKIP_END_TIP)}
+                <div class="hint">按「得到卡片」或「結束遊戲」之後不看第二次結算、不用按 OK，直接回迪城（任務、渦也是回原本的房間）。升級時照樣播升級動畫。</div>
+              </span>
+            </label>
+          </div>`;
+        return (
+          head("High Low", "獎勵遊戲不用先按「下一個卡片」，動畫也可以跳過。") +
+          state +
+          toggle +
+          fast +
+          rescue +
+          skipEnd
+        );
+      };
+      const BONUS_SKIP_END_TIP =
+        "第二次結算的 OK 由插件替你按，走的是官方按下 OK 之後同一條路；得到的卡片、GEM、EXP 都已經在按「得到卡片／結束遊戲」那一刻由伺服器算好，不會因為沒看結算而少拿。" +
+        "不多送任何請求。";
+      const BONUS_RESCUE_FAST_TIP =
+        "官方用完道具後成功字樣會停 1.5 秒、卡片再慢慢滑過去；開著時這段一口氣跑完，結果是伺服器給的，畫面上的東西跟看完動畫一模一樣。" +
+        "從物品欄選的、或用插件的道具捷徑都算。不多送任何請求。";
+      const BONUS_FAST_TIP =
+        "點數是伺服器決定的，官方的骰子在擲出去那一刻就已經算好會停在哪一面；插件只是把物理一口氣推到停，不播滾動的過程，結果跟看完動畫一模一樣。" +
+        "不多送任何請求。";
 
       // --- 牌組 › 牌組替換 --------------------------------------------------
       //
@@ -4898,6 +4979,30 @@
         }
         if (t.name === "bonusItemMode" && t.checked) {
           return void window.ulr.bonus.mode(t.value).then((s) => {
+            bstate = s;
+            renderBody();
+          });
+        }
+        if (t.id === "bonusSkipEndOn") {
+          return void window.ulr.bonus.skipEnd(t.checked).then((s) => {
+            bstate = s;
+            renderBody();
+          });
+        }
+        if (t.id === "bonusRescueFastOn") {
+          return void window.ulr.bonus.rescueFast(t.checked).then((s) => {
+            bstate = s;
+            renderBody();
+          });
+        }
+        if (t.id === "bonusFastOn") {
+          return void window.ulr.bonus.fast(t.checked).then((s) => {
+            bstate = s;
+            renderBody();
+          });
+        }
+        if (t.id === "bonusHighLowOn") {
+          return void window.ulr.bonus.highLow(t.checked).then((s) => {
             bstate = s;
             renderBody();
           });

@@ -43,7 +43,8 @@ type Fn = (...a: unknown[]) => unknown;
 class Scene {
   children = { list: [] as Obj[] };
   input = { enabled: true };
-  tweens = { killTweensOf: vi.fn() };
+  tweens = { killTweensOf: vi.fn(), timeScale: 1 };
+  time = { timeScale: 1 };
   textures = {
     get: (_key: string) => ({ has: (frame: string) => frame !== "item_999" }),
     exists: () => false,
@@ -1359,6 +1360,537 @@ describe("獎勵遊戲的圓鈕", () => {
     run(buildItemPanelPatchScript(COVER));
     expect(b(st)).toHaveLength(0);
     run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+});
+
+/**
+ * 獎勵遊戲「下一個卡片／得到卡片」的樣子（2026-10-06 實機讀的）：大數字 dice_value 還停在
+ * 上一回的底數；check_bonus_next 送 bonus_next、拆 next／get、建 High／Low、數字換成回來的底數。
+ */
+function decideScene(
+  current: number,
+  shown: number,
+  nextReturns: number | null = current,
+  Ctor: typeof Scene = Scene,
+) {
+  const B = new Ctor("Bonus");
+  B.textures = {
+    get: (_key: string) => ({ has: () => true }),
+    exists: () => true,
+  };
+  B["bonus_data"] = { step: 56, dice_current: current, dice_previous: shown };
+  const dv = new Obj(B, 594, 146);
+  dv.frame = { name: `num_${shown}` };
+  B["dice_value"] = dv;
+  B["btn_next"] = new Obj(B, 265, 143).setInteractive();
+  B["btn_get"] = new Obj(B, 385, 143).setInteractive();
+  B["ulse17"] = { play: vi.fn() };
+  const handlers = new Set<Fn>();
+  B["events"] = {
+    on: (_ev: string, fn: Fn) => handlers.add(fn),
+    off: (_ev: string, fn: Fn) => handlers.delete(fn),
+  };
+  B["check_bonus_next"] = vi.fn(async function (this: Scene) {
+    this.input.enabled = false;
+    await Promise.resolve();
+    if (nextReturns === null) return;
+    (this["btn_next"] as Obj).destroy();
+    (this["btn_get"] as Obj).destroy();
+    this["btn_high"] = new Obj(this, 334, 74).setInteractive();
+    this["btn_low"] = new Obj(this, 334, 194).setInteractive();
+    (this["dice_value"] as Obj).setTexture("bonus_dice_num", `num_${nextReturns}`);
+    this.input.enabled = true;
+  });
+  if (Ctor === Scene) B["bonus_prediction"] = vi.fn(() => Promise.resolve());
+  return { B, update: () => handlers.forEach((fn) => fn()), handlers };
+}
+
+/** 官方的 bonus_prediction 在原型上（插件包在實例上）：鎖輸入、記下猜了什麼。 */
+class BonusProtoScene extends Scene {
+  predicted: string[] = [];
+  bonus_prediction(pick: string) {
+    this.input.enabled = false;
+    this.predicted.push(pick);
+    return Promise.resolve();
+  }
+}
+
+/**
+ * 官方 BonusDice：randomDiceThrow 擺好骰子＋prepareValues（不推物理），之後每個畫面格
+ * updatePhysics 推一步、每顆 isFinished2 都 true 就停。這裡推 5 步會停。
+ */
+class DiceProtoScene extends Scene {
+  steps = 0;
+  thrown = 0;
+  dice: { isFinished2: () => boolean }[] = [];
+  randomDiceThrow(_values: number[]) {
+    this.thrown++;
+    this.steps = 0;
+    this.dice = [0, 1].map(() => ({ isFinished2: () => this.steps >= 5 }));
+    return Promise.resolve();
+  }
+  updatePhysics() {
+    this.steps++;
+  }
+}
+
+describe("獎勵遊戲的 High／Low 一起顯示", () => {
+  const OFF = { shortcut: false, questStack: false, questPasses: false };
+  const ON = { ...OFF, bonusHighLow: true };
+  const mine = (st: () => Record<string, unknown>) => (st()["h"] as { mine: Obj[] }).mine;
+  const flush = async () => {
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+  };
+
+  it("下一個卡片／得到卡片出現時：上下兩格畫官方的 High／Low，大數字換成這一回的底數", () => {
+    const { B } = decideScene(7, 5);
+    const { run, st } = setup({ Bonus: B });
+    const status = parseItemPanelStatus(run(buildItemPanelPatchScript(ON)));
+    expect(status).toMatchObject({ bonusHighLow: true, highLowShown: true });
+    const [hi, lo] = mine(st);
+    expect([hi!.x, hi!.y, hi!.frame.name]).toEqual([334, 74, "bonus_high/0"]);
+    expect([lo!.x, lo!.y, lo!.frame.name]).toEqual([334, 194, "bonus_low/0"]);
+    expect((B["dice_value"] as Obj).frame.name).toBe("num_7");
+    // 官方兩顆不動
+    expect((B["btn_next"] as Obj).scene).toBe(B);
+    expect((B["btn_get"] as Obj).scene).toBe(B);
+    hi!.emit("pointerover");
+    expect(hi!.frame.name).toBe(1);
+    hi!.emit("pointerout");
+    expect(hi!.frame.name).toBe(0);
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("按 High：先走官方的下一個卡片，底數一樣才接著猜 high；只送這兩個", async () => {
+    const { B } = decideScene(7, 5);
+    const { run, st } = setup({ Bonus: B });
+    run(buildItemPanelPatchScript(ON));
+    const [hi] = mine(st);
+    hi!.emit("pointerup");
+    hi!.emit("pointerup");
+    await flush();
+    expect(B["check_bonus_next"]).toHaveBeenCalledTimes(1);
+    expect(B["bonus_prediction"]).toHaveBeenCalledTimes(1);
+    expect(B["bonus_prediction"]).toHaveBeenCalledWith("high");
+    expect((B["ulse17"] as { play: Fn }).play).toHaveBeenCalledTimes(1);
+    expect(hi!.scene).toBeUndefined();
+    expect(mine(st)).toHaveLength(0);
+    // 官方 High／Low 在了：不再畫
+    vi.advanceTimersByTime(600);
+    expect(mine(st)).toHaveLength(0);
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("⚠ 伺服器回的底數跟畫面上不一樣：不猜，停在官方的 High／Low 讓玩家重選", async () => {
+    const { B } = decideScene(7, 5, 9);
+    const { run, st } = setup({ Bonus: B });
+    run(buildItemPanelPatchScript(ON));
+    mine(st)[1]!.emit("pointerup");
+    await flush();
+    expect(B["check_bonus_next"]).toHaveBeenCalledTimes(1);
+    expect(B["bonus_prediction"]).not.toHaveBeenCalled();
+    expect((st()["h"] as { mismatch: number }).mismatch).toBe(1);
+    expect((B["btn_low"] as Obj).scene).toBe(B);
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("伺服器沒給底數（官方什麼都不做）：不猜", async () => {
+    const { B } = decideScene(7, 5, null);
+    const { run, st } = setup({ Bonus: B });
+    run(buildItemPanelPatchScript(ON));
+    mine(st)[0]!.emit("pointerup");
+    await flush();
+    expect(B["bonus_prediction"]).not.toHaveBeenCalled();
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("輸入鎖著（官方動畫中）按了不算", async () => {
+    const { B } = decideScene(7, 7);
+    const { run, st } = setup({ Bonus: B });
+    run(buildItemPanelPatchScript(ON));
+    B.input.enabled = false;
+    mine(st)[0]!.emit("pointerup");
+    await flush();
+    expect(B["check_bonus_next"]).not.toHaveBeenCalled();
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("透明度跟著下一個卡片（淡入淡出）", () => {
+    const { B, update } = decideScene(7, 7);
+    const { run, st } = setup({ Bonus: B });
+    run(buildItemPanelPatchScript(ON));
+    (B["btn_next"] as Obj).setAlpha(0.3);
+    update();
+    expect(mine(st).map((o) => o.alpha)).toEqual([0.3, 0.3]);
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("玩家自己按官方的下一個卡片：下一輪就拆掉，不替他猜", async () => {
+    const { B, handlers } = decideScene(7, 5);
+    const { run, st } = setup({ Bonus: B });
+    run(buildItemPanelPatchScript(ON));
+    const [hi] = mine(st);
+    await (B["check_bonus_next"] as () => Promise<void>).call(B);
+    vi.advanceTimersByTime(600);
+    expect(hi!.scene).toBeUndefined();
+    expect(handlers.size).toBe(0);
+    expect(B["bonus_prediction"]).not.toHaveBeenCalled();
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("關著不畫；猜錯的狀態（使用物品／結束遊戲）不畫", () => {
+    const off = decideScene(7, 5);
+    const a = setup({ Bonus: off.B });
+    a.run(buildItemPanelPatchScript(OFF));
+    expect((a.st()["h"] as { mine: Obj[] }).mine).toHaveLength(0);
+    expect((off.B["dice_value"] as Obj).frame.name).toBe("num_5");
+    a.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+
+    const fail = bonusScene(2, 5);
+    fail.textures = { get: () => ({ has: () => true }), exists: () => true };
+    const b = setup({ Bonus: fail });
+    b.run(buildItemPanelPatchScript(ON));
+    expect((b.st()["h"] as { mine: Obj[] }).mine).toHaveLength(0);
+    b.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("開關當場生效；關掉／拆掉時大數字放回官方原本那格", () => {
+    const { B, handlers } = decideScene(7, 5);
+    const { run, st } = setup({ Bonus: B });
+    run(buildItemPanelPatchScript(OFF));
+    expect(run(buildItemPanelSetPartExpression("bonusHighLow", true))).toBe("ok");
+    expect(mine(st)).toHaveLength(2);
+    expect((B["dice_value"] as Obj).frame.name).toBe("num_7");
+    expect(run(buildItemPanelSetPartExpression("bonusHighLow", false))).toBe("ok");
+    expect(mine(st)).toHaveLength(0);
+    expect(handlers.size).toBe(0);
+    expect((B["dice_value"] as Obj).frame.name).toBe("num_5");
+
+    run(buildItemPanelSetPartExpression("bonusHighLow", true));
+    const [hi] = mine(st);
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+    expect(hi!.scene).toBeUndefined();
+    expect((B["dice_value"] as Obj).frame.name).toBe("num_5");
+  });
+});
+
+describe("獎勵遊戲跳過擲骰動畫", () => {
+  const OFF = { shortcut: false, questStack: false, questPasses: false };
+  const flush = async () => {
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+  };
+  function scenes(nextReturns = 7) {
+    const { B } = decideScene(7, 5, nextReturns, BonusProtoScene);
+    const D = new DiceProtoScene("BonusDice");
+    const R = new Scene("BonusResult");
+    return { B: B as BonusProtoScene, D, R, all: { Bonus: B, BonusDice: D, BonusResult: R } };
+  }
+
+  it("按我們的 High：一回合 Bonus／BonusResult ×10、骰子擲出去當下推到停；輸入解鎖就還原", async () => {
+    const { B, D, R, all } = scenes();
+    const { run, st } = setup(all);
+    run(buildItemPanelPatchScript({ ...OFF, bonusHighLow: true, bonusFast: true }));
+    (st()["h"] as { mine: Obj[] }).mine[0]!.emit("pointerup");
+    expect([B.time.timeScale, B.tweens.timeScale, R.time.timeScale, R.tweens.timeScale]).toEqual([
+      10, 10, 10, 10,
+    ]);
+    await flush();
+    expect(B.predicted).toEqual(["high"]);
+    // 官方 diceroll 叫的那支：當場推到停（跟每格推一步同一條路）
+    await D.randomDiceThrow([3, 4]);
+    expect([D.thrown, D.steps]).toEqual([1, 5]);
+    // 還在演（輸入鎖著）：不還原
+    vi.advanceTimersByTime(600);
+    expect(B.time.timeScale).toBe(10);
+    // bonus_success／bonus_fail 畫完、解鎖
+    B.input.enabled = true;
+    vi.advanceTimersByTime(600);
+    expect([B.time.timeScale, B.tweens.timeScale, R.tweens.timeScale]).toEqual([1, 1, 1]);
+    expect(Object.prototype.hasOwnProperty.call(D, "randomDiceThrow")).toBe(false);
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+    expect(Object.prototype.hasOwnProperty.call(B, "bonus_prediction")).toBe(false);
+  });
+
+  it("按官方的 High／Low 也算（High／Low 一起顯示沒開）", async () => {
+    const { B, D, all } = scenes();
+    const { run } = setup(all);
+    run(buildItemPanelPatchScript({ ...OFF, bonusFast: true }));
+    void (B["bonus_prediction"] as (p: string) => Promise<void>)("low");
+    expect(B.predicted).toEqual(["low"]);
+    expect(B.time.timeScale).toBe(10);
+    await D.randomDiceThrow([1, 1]);
+    expect(D.steps).toBe(5);
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+    expect([B.time.timeScale, B.tweens.timeScale]).toEqual([1, 1]);
+  });
+
+  it("關著：不快轉、骰子照官方一格一步", async () => {
+    const { B, D, all } = scenes();
+    const { run, st } = setup(all);
+    run(buildItemPanelPatchScript({ ...OFF, bonusHighLow: true }));
+    (st()["h"] as { mine: Obj[] }).mine[0]!.emit("pointerup");
+    await flush();
+    expect(B.predicted).toEqual(["high"]);
+    expect(B.time.timeScale).toBe(1);
+    await D.randomDiceThrow([3, 4]);
+    expect(D.steps).toBe(0);
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("底數不一樣沒猜：解鎖後還原", async () => {
+    const { B, all } = scenes(9);
+    const { run, st } = setup(all);
+    run(buildItemPanelPatchScript({ ...OFF, bonusHighLow: true, bonusFast: true }));
+    (st()["h"] as { mine: Obj[] }).mine[0]!.emit("pointerup");
+    await flush();
+    expect(B.predicted).toEqual([]);
+    vi.advanceTimersByTime(600);
+    expect(B.time.timeScale).toBe(1);
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("開關當場生效；關掉時演到一半也還原", () => {
+    const { B, D, all } = scenes();
+    const { run } = setup(all);
+    run(buildItemPanelPatchScript(OFF));
+    expect(Object.prototype.hasOwnProperty.call(B, "bonus_prediction")).toBe(false);
+    expect(run(buildItemPanelSetPartExpression("bonusFast", true))).toBe("ok");
+    expect(Object.prototype.hasOwnProperty.call(B, "bonus_prediction")).toBe(true);
+    void (B["bonus_prediction"] as (p: string) => Promise<void>)("high");
+    expect(B.time.timeScale).toBe(10);
+    expect(run(buildItemPanelSetPartExpression("bonusFast", false))).toBe("ok");
+    expect(B.time.timeScale).toBe(1);
+    expect(Object.prototype.hasOwnProperty.call(B, "bonus_prediction")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(D, "randomDiceThrow")).toBe(false);
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+});
+
+/**
+ * 官方的 use_bonus_item 在原型上：先等 use_avatar_item（這裡用 gate 控制什麼時候回來），
+ * 回 false 就什麼都不做（輸入沒鎖），不然鎖輸入。之後的 bonus_skip／bonus_restart 是伺服器推的。
+ */
+class RescueProtoScene extends Scene {
+  used: number[] = [];
+  allowed = true;
+  release: () => void = () => undefined;
+  async use_bonus_item(id: number) {
+    this.used.push(id);
+    await new Promise<void>((r) => (this.release = r));
+    if (!this.allowed) return false;
+    this.input.enabled = false;
+    return undefined;
+  }
+}
+
+describe("獎勵遊戲用道具救起來之後快轉", () => {
+  const OFF = { shortcut: false, questStack: false, questPasses: false };
+  const flush = async () => {
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+  };
+  function scenes() {
+    const { B } = decideScene(7, 5, 7, RescueProtoScene);
+    const R = new Scene("BonusResult");
+    return { B: B as RescueProtoScene, R, all: { Bonus: B, BonusResult: R } };
+  }
+  const use = (B: RescueProtoScene, id: number) =>
+    void (B["use_bonus_item"] as (id: number) => Promise<unknown>)(id);
+
+  it("用道具當下 Bonus／BonusResult ×10；道具還沒回來（輸入還開著）不收，演完解鎖才還原", async () => {
+    const { B, R, all } = scenes();
+    const { run } = setup(all);
+    run(buildItemPanelPatchScript({ ...OFF, bonusRescueFast: true }));
+    use(B, 6);
+    expect(B.used).toEqual([6]);
+    expect([B.time.timeScale, B.tweens.timeScale, R.time.timeScale, R.tweens.timeScale]).toEqual([
+      10, 10, 10, 10,
+    ]);
+    // use_avatar_item 還沒回來：官方輸入還開著，但不算演完
+    vi.advanceTimersByTime(600);
+    expect(B.time.timeScale).toBe(10);
+    B.release();
+    await flush();
+    // bonus_skip → 成功字樣、停 1500、卡片滑：輸入鎖著，繼續快
+    vi.advanceTimersByTime(600);
+    expect(B.time.timeScale).toBe(10);
+    // bonus_success 畫完、解鎖
+    B.input.enabled = true;
+    vi.advanceTimersByTime(600);
+    expect([B.time.timeScale, B.tweens.timeScale, R.time.timeScale, R.tweens.timeScale]).toEqual([
+      1, 1, 1, 1,
+    ]);
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+    expect(Object.prototype.hasOwnProperty.call(B, "use_bonus_item")).toBe(false);
+  });
+
+  it("伺服器說不能用（回 false、輸入沒鎖）：馬上還原", async () => {
+    const { B, all } = scenes();
+    const { run } = setup(all);
+    run(buildItemPanelPatchScript({ ...OFF, bonusRescueFast: true }));
+    B.allowed = false;
+    use(B, 5);
+    expect(B.time.timeScale).toBe(10);
+    B.release();
+    await flush();
+    vi.advanceTimersByTime(600);
+    expect([B.time.timeScale, B.tweens.timeScale]).toEqual([1, 1]);
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("關著：照官方，不包 use_bonus_item；只開跳過擲骰動畫也不算", () => {
+    const { B, all } = scenes();
+    const { run } = setup(all);
+    run(buildItemPanelPatchScript({ ...OFF, bonusFast: true }));
+    expect(Object.prototype.hasOwnProperty.call(B, "use_bonus_item")).toBe(false);
+    use(B, 6);
+    expect(B.time.timeScale).toBe(1);
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("開關當場生效；關掉時演到一半也還原，跳過擲骰動畫那段不受影響", () => {
+    const { B, all } = scenes();
+    const { run } = setup(all);
+    run(buildItemPanelPatchScript(OFF));
+    expect(run(buildItemPanelSetPartExpression("bonusRescueFast", true))).toBe("ok");
+    expect(Object.prototype.hasOwnProperty.call(B, "use_bonus_item")).toBe(true);
+    use(B, 7);
+    expect(B.time.timeScale).toBe(10);
+    expect(run(buildItemPanelSetPartExpression("bonusRescueFast", false))).toBe("ok");
+    expect(B.time.timeScale).toBe(1);
+    expect(Object.prototype.hasOwnProperty.call(B, "use_bonus_item")).toBe(false);
+    expect(parseItemPanelStatus(run(ITEM_PANEL_STATUS_EXPRESSION)).bonusRescueFast).toBe(false);
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+});
+
+/** Phaser 場景的 events（on／once／off／emit）。 */
+function sceneEvents() {
+  const map = new Map<string, Fn[]>();
+  const ev = {
+    on: (name: string, fn: Fn) => void map.set(name, [...(map.get(name) ?? []), fn]),
+    off: (name: string, fn: Fn) =>
+      void map.set(
+        name,
+        (map.get(name) ?? []).filter((h) => h !== fn && (h as { inner?: Fn }).inner !== fn),
+      ),
+    once: (name: string, fn: Fn) => {
+      const w: Fn = (...a) => {
+        ev.off(name, w);
+        return fn(...a);
+      };
+      (w as { inner?: Fn }).inner = fn;
+      ev.on(name, w);
+    },
+    emit: (name: string, ...a: unknown[]) => [...(map.get(name) ?? [])].forEach((fn) => fn(...a)),
+  };
+  return ev;
+}
+
+/** 官方 Bonus 的得到卡片／結束遊戲（原型方法）。 */
+class BonusEndScene extends Scene {
+  gets = 0;
+  quits = 0;
+  events = sceneEvents();
+  check_bonus_get() {
+    this.gets++;
+    return Promise.resolve();
+  }
+  check_bonus_quit() {
+    this.quits++;
+    return Promise.resolve();
+  }
+}
+
+/** 官方 Result.result_end_bonus_quit：同步建 OK，OK 的 pointerup 收 Bonus → 回房間。 */
+class ResultEndScene extends Scene {
+  events = sceneEvents();
+  cameras = {
+    main: {
+      alpha: 1,
+      setAlpha(a: number) {
+        this.alpha = a;
+      },
+    },
+  };
+  okPressed = 0;
+  lvup: unknown = undefined;
+  result_end_bonus_quit(_exp: number, _gem: number, _cExp: number, _cGem: number, lvup: unknown) {
+    this.lvup = lvup;
+    const ok = new Obj(this, 667, 621).setInteractive();
+    ok.on("pointerup", () => void this.okPressed++);
+    this["result_ok"] = ok;
+    return Promise.resolve();
+  }
+}
+
+describe("獎勵遊戲結束後不看第二次結算", () => {
+  const OFF = { shortcut: false, questStack: false, questPasses: false };
+  const ON = { ...OFF, bonusSkipEnd: true };
+  function scenes() {
+    const B = new BonusEndScene("Bonus");
+    const R = new ResultEndScene("Result");
+    return { B, R, all: { Bonus: B, Result: R } };
+  }
+  const own = (o: object, k: string) => Object.prototype.hasOwnProperty.call(o, k);
+
+  it("得到卡片：動畫快轉，Bonus 收掉時還原", () => {
+    const { B, all } = scenes();
+    const { run } = setup(all);
+    run(buildItemPanelPatchScript(ON));
+    void (B["check_bonus_get"] as () => Promise<void>)();
+    expect(B.gets).toBe(1);
+    expect([B.time.timeScale, B.tweens.timeScale]).toEqual([10, 10]);
+    B.events.emit("shutdown");
+    expect([B.time.timeScale, B.tweens.timeScale]).toEqual([1, 1]);
+    void (B["check_bonus_quit"] as () => Promise<void>)();
+    expect(B.quits).toBe(1);
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("第二次結算：OK 當場替玩家按、藏起來快轉；Result 收掉時還原", () => {
+    const { R, all } = scenes();
+    const { run, st } = setup(all);
+    run(buildItemPanelPatchScript(ON));
+    void (R["result_end_bonus_quit"] as (...a: unknown[]) => Promise<void>)(10, 20, 0, 0, null);
+    expect(R.okPressed).toBe(1);
+    expect([R.cameras.main.alpha, R.time.timeScale, R.tweens.timeScale]).toEqual([0, 10, 10]);
+    expect((st()["h"] as { endSkips: number }).endSkips).toBe(1);
+    R.events.emit("shutdown");
+    expect([R.cameras.main.alpha, R.time.timeScale, R.tweens.timeScale]).toEqual([1, 1, 1]);
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("有升級：一樣不用按 OK，但不藏不快轉（升級動畫照常看得到）", () => {
+    const { R, all } = scenes();
+    const { run } = setup(all);
+    run(buildItemPanelPatchScript(ON));
+    void (R["result_end_bonus_quit"] as (...a: unknown[]) => Promise<void>)(10, 20, 0, 0, 31);
+    expect(R.lvup).toBe(31);
+    expect(R.okPressed).toBe(1);
+    expect([R.cameras.main.alpha, R.time.timeScale]).toEqual([1, 1]);
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("關著照官方；開關當場生效；拆掉不留包裝", () => {
+    const { B, R, all } = scenes();
+    const { run } = setup(all);
+    run(buildItemPanelPatchScript(OFF));
+    expect([own(B, "check_bonus_get"), own(R, "result_end_bonus_quit")]).toEqual([false, false]);
+    R.result_end_bonus_quit(1, 2, 0, 0, null);
+    expect(R.okPressed).toBe(0);
+
+    expect(run(buildItemPanelSetPartExpression("bonusSkipEnd", true))).toBe("ok");
+    expect([
+      own(B, "check_bonus_get"),
+      own(B, "check_bonus_quit"),
+      own(R, "result_end_bonus_quit"),
+    ]).toEqual([true, true, true]);
+    expect(run(buildItemPanelSetPartExpression("bonusSkipEnd", false))).toBe("ok");
+    expect([own(B, "check_bonus_get"), own(R, "result_end_bonus_quit")]).toEqual([false, false]);
+
+    run(buildItemPanelSetPartExpression("bonusSkipEnd", true));
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+    expect([own(B, "check_bonus_quit"), own(R, "result_end_bonus_quit")]).toEqual([false, false]);
   });
 });
 

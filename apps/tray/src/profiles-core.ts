@@ -388,6 +388,20 @@ export interface Profile {
    */
   bonusItemPlace: BonusItemPlace;
   /**
+   * 獎勵遊戲的 High／Low 跟「下一個卡片」「得到卡片」一起顯示，不必先按下一個卡片
+   * （玩家 2026-10-06）。預設關。
+   */
+  bonusHighLow: boolean;
+  /** 獎勵遊戲跳過擲骰動畫：骰子直接停在結果、其餘動畫快轉（玩家 2026-10-06）。預設關。 */
+  bonusFast: boolean;
+  /** 獎勵遊戲猜錯後用道具救起來，接下來的演出快轉（玩家 2026-10-08）。預設關。 */
+  bonusRescueFast: boolean;
+  /**
+   * 獎勵遊戲按得到卡片／結束遊戲之後不看第二次結算，直接回房間（迪城、任務、渦）。
+   * 有升級時照官方（玩家 2026-10-06）。預設關。
+   */
+  bonusSkipEnd: boolean;
+  /**
    * 畫面設定：`render` 繪製解析度（off／auto／x2／x3）、`size` 畫面大小
    * （x1／x1.25／x1.5／x2／fullscreen）。預設關、×1 —— 跟官方一樣。
    *
@@ -655,6 +669,11 @@ export function normalizeProfile(raw: unknown): Profile | null {
     bonusItemPlace: isBonusItemPlace(r["bonusItemPlace"])
       ? r["bonusItemPlace"]
       : DEFAULT_BONUS_ITEM_PLACE,
+    // 舊設定檔沒有這一欄 → 關（官方原樣）。
+    bonusHighLow: r["bonusHighLow"] === true,
+    bonusFast: r["bonusFast"] === true,
+    bonusRescueFast: r["bonusRescueFast"] === true,
+    bonusSkipEnd: r["bonusSkipEnd"] === true,
     // 舊設定檔沒有這一欄 → 關、×1（官方原樣）。
     display: normalizeDisplay(r["display"]),
   };
@@ -734,6 +753,10 @@ export function defaultProfile(kind: ClientKind = "desktop"): Profile {
     bonusItemShortcut: false,
     bonusItemOrder: DEFAULT_BONUS_ITEM_ORDER,
     bonusItemPlace: DEFAULT_BONUS_ITEM_PLACE,
+    bonusHighLow: false,
+    bonusFast: false,
+    bonusRescueFast: false,
+    bonusSkipEnd: false,
     display: { ...DEFAULT_DISPLAY_STATE },
   };
 }

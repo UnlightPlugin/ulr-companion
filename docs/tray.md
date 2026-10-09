@@ -122,7 +122,7 @@ process，這個視窗問不到。自己那一列才是引擎的真實狀態。
 | 渦       | 渦通報（說明頁，開關同互傳；見 `raid-feed.md`）      | ✅ 可用                     |
 | 迪特赫姆 | 隱藏地圖                                             | ✅ 可用                     |
 | 迪特赫姆 | 物品捷徑 · GEM UP                                    | ✅ 可用                     |
-| 獎勵     | 物品捷徑                                             | ✅ 可用                     |
+| 獎勵     | 物品捷徑 · High Low                                  | ✅ 可用                     |
 | 任務     | 物品捷徑 · 寶箱標註                                  | ✅ 可用                     |
 | 模組     | 卡面替換                                             | ✅ 可用                     |
 | 自訂COST | 對戰地點 · Cost 表 · 編輯 COST · 編輯規則 · 編輯描述 | ✅ 可用                     |
@@ -166,6 +166,25 @@ COST 決定是哪一檔，不是隨機。Exp 格（OwnCard）畫牌頭同角色�
 （`above`／`cover`）。能不能用照官方 `can_use_bonus_item`（差距 ≤ 道具 value，value < 0 永遠
 可以）；差距小時先用剛好夠的石楠1／石楠3，其餘照托盤選的優先順序（預設石楠5 → 四葉草 → 跳越星）。
 取代原本預告的「未來視」。
+
+獎勵的 High Low（開關，預設關，`bonusHighLow`）也在 `patch-item-panel.ts`：「下一個卡片／
+得到卡片」狀態時用官方 `bonus_high`／`bonus_low` 在菱形上下兩格多畫一顆，大數字換成
+`bonus_data.dice_current`（按下一個卡片本來會換成的底數；猜對後官方還停在上一回的底數）。
+按下去走場景自己的 `check_bonus_next()`，回來的底數跟畫面上一樣才接著 `bonus_prediction()`，
+不一樣就停在官方 High／Low 畫面讓玩家重選。請求跟手動按兩下一樣。
+
+同一頁的「跳過擲骰動畫」（`bonusFast`，預設關）：一回合開始（`bonus_prediction` 被叫）時
+Bonus／BonusResult 的時鐘與補間 ×10，BonusDice 擲出去當下用官方的 `updatePhysics` 一路推到停
+（`DiceManager.prepareValues` 第一步就把結果算好、換好骰面，之後重播同一條軌跡），輸入解鎖就還原。
+
+同一頁的「用道具後快轉」（`bonusRescueFast`，預設關）：猜錯後用石楠／四葉草／跳越星（物品欄或
+道具捷徑，都走 `use_bonus_item`）的當下同樣 ×10，涵蓋之後伺服器推的 `bonus_skip`（成功字樣停 1500、
+卡片滑）與 `bonus_restart`（重拿底數）。`use_avatar_item` 回來前官方輸入還開著，那段不算演完；
+回 false（不能用）或輸入解鎖就還原。
+
+同一頁的「結束後直接回去」（`bonusSkipEnd`，預設關）：得到卡片／結束遊戲的動畫快轉，第二次結算
+（`Result.result_end_bonus_quit`）的 OK 一建好就替玩家按、沒升級時藏鏡頭快轉，直接回睡著的房間
+（迪城、任務、渦）；有升級時不藏不快轉，升級動畫照常播。
 
 畫面設定（解析度／畫面大小／全螢幕）同理：畫在遊戲 Option 的 plugin 分頁上
 （`patch-display.ts`），托盤只負責記進配置的 `display` 欄。桌面版的全螢幕要

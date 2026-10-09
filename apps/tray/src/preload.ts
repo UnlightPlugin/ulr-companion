@@ -171,6 +171,13 @@ contextBridge.exposeInMainWorld("ulr", {
     mode: (mode: "off" | "above" | "cover") => ipcRenderer.invoke("ulr:bonus-mode", mode),
     /** `order`：`heather5` 石楠5、`clover` 四葉草、`star` 跳越星。 */
     order: (order: "heather5" | "clover" | "star") => ipcRenderer.invoke("ulr:bonus-order", order),
+    /** High／Low 跟下一個卡片、得到卡片一起顯示。 */
+    highLow: (on: boolean) => ipcRenderer.invoke("ulr:bonus-highlow", on),
+    /** 跳過擲骰動畫。 */
+    fast: (on: boolean) => ipcRenderer.invoke("ulr:bonus-fast", on),
+    rescueFast: (on: boolean) => ipcRenderer.invoke("ulr:bonus-rescue-fast", on),
+    /** 結束後不看第二次結算。 */
+    skipEnd: (on: boolean) => ipcRenderer.invoke("ulr:bonus-skip-end", on),
   },
 
   /**
