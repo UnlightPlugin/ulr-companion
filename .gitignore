@@ -52,7 +52,9 @@ rules/*.rule.json
 rules/*.rar
 rules/*.zip
 
-# 探測遊戲時的拋棄式腳本與傾印（probe-game 的 *.tmp.mts、tools/.scratch-*）
+# 探測遊戲時的拋棄式腳本與傾印（probe-game 的 *.tmp.mts、tools/.scratch-*、tools/.probe-*）
 *.tmp.mts
 tools/.scratch-*
+tools/.probe-*
+tools/.shot-*
 __pycache__/
