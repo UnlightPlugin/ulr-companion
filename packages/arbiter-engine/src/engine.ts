@@ -2729,7 +2729,22 @@ export class ArbiterEngine {
         await adapter.removeCostOverrides(this.#costScriptId);
         this.#costScriptId = null;
       }
-      if (this.#costs === null) return;
+      if (this.#costs === null) {
+        // ⚠ 不裝不夠：頁面上可能早就有一份（自動更新前的舊版裝的、或剛關掉的那
+        // 一下拆不到），價格改在快取裡，不收的話要關掉遊戲重開才變回官方。
+        // 當場換回原價，不重載（見 COST_PATCH_REVERT_EXPRESSION）。
+        const r = await adapter.revertCostOverrides();
+        if (r.installed && (r.hadCustoms || r.swapped > 0)) {
+          this.#log(
+            `⇄ 遊戲畫面換回官方 COST（換了 ${r.swapped} 筆${r.redrawn ? "，已重畫" : ""}）`,
+          );
+        }
+        this.#emit({ cost: { ...this.#status.cost, stale: false } });
+        // 牌盒的「自訂 N」照頁面上的自訂表畫，收完再重畫一次（setCostRule 那次
+        // 重推可能跑在收之前）。
+        if (r.hadCustoms) this.#repushDeckEdit();
+        return;
+      }
 
       // ⚠ `enabled` 要帶著：重載後掛鉤攔到資料的那一刻就得停在開關指的那一邊。
       const enabled = this.#costEnabled;

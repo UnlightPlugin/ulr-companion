@@ -32,16 +32,19 @@ import type {
   CostPatchCoverage,
   CostPatchEnabledResult,
   CostPatchReport,
+  CostPatchRevertResult,
 } from "./patch-cost.js";
 import {
   buildCostPatchCoverageExpression,
   buildCostPatchEnabledExpression,
   buildCostPatchScript,
   costsStamp,
+  COST_PATCH_REVERT_EXPRESSION,
   costTargetAssetKeys,
   isCostPatchReport,
   parseCostPatchCoverage,
   parseCostPatchEnabledResult,
+  parseCostPatchRevertResult,
 } from "./patch-cost.js";
 import type { CostToggleReport, CostToggleState, CostToggleStatus } from "./patch-cost-toggle.js";
 import {
@@ -944,6 +947,15 @@ export class CdpAdapter {
   async setCostOverridesEnabled(enabled: boolean): Promise<CostPatchEnabledResult> {
     const raw = await this.evaluate<string>(buildCostPatchEnabledExpression(enabled));
     return parseCostPatchEnabledResult(raw);
+  }
+
+  /**
+   * 頁面上留著的自訂價整份收掉，換回官方價。**立刻生效，不重載。**
+   * 為什麼需要見 `COST_PATCH_REVERT_EXPRESSION`。
+   */
+  async revertCostOverrides(): Promise<CostPatchRevertResult> {
+    const raw = await this.evaluate<string>(COST_PATCH_REVERT_EXPRESSION);
+    return parseCostPatchRevertResult(raw);
   }
 
   /**

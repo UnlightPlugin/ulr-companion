@@ -21,11 +21,13 @@ import {
   buildCostPatchCoverageExpression,
   buildCostPatchEnabledExpression,
   buildCostPatchScript,
+  COST_PATCH_REVERT_EXPRESSION,
   costsStamp,
   InvalidCostOverrideError,
   isCostPatchReport,
   normalizeCostTables,
   parseCostPatchEnabledResult,
+  parseCostPatchRevertResult,
 } from "@ulr/cdp-adapter";
 
 const BINDING = "__ulrCompanionReport";
@@ -807,6 +809,56 @@ describe("不重載切換自訂價 ↔ 原價", () => {
     expect(toggle(page, false)).toEqual({
       installed: false,
       enabled: false,
+      swapped: 0,
+      redrawn: false,
+    });
+  });
+
+  // 「遊戲裡套用自訂 COST」關著：頁面上留著的（自動更新前的舊版裝的）要當場收掉，
+  // 不能要玩家關掉遊戲重開（2026-10-11 實機）。
+  function revert(page: FakePage) {
+    const sandbox = { window: page.window };
+    vm.createContext(sandbox);
+    return parseCostPatchRevertResult(
+      vm.runInContext(COST_PATCH_REVERT_EXPRESSION, sandbox) as string,
+    );
+  }
+
+  it("整份收掉：換回原價、自訂表清空、之後再載進來的資料也只放原價", async () => {
+    const { page, cc, wp, redraws } = setup();
+    await runScript(page, buildCostPatchScript({ costs, bindingName: BINDING, pollIntervalMs: 1 }));
+    expect(costsOf(cc)).toEqual([8, 30, 33, 9, 10]);
+    redraws.length = 0;
+
+    expect(revert(page)).toEqual({ installed: true, hadCustoms: true, swapped: 3, redrawn: true });
+    expect(costsOf(cc)).toEqual([8, 19, 21, 9, 10]);
+    expect(costsOf(wp)).toEqual([0, 1]);
+    expect(redraws).toEqual(["refresh", "show_cost"]);
+    // 牌盒（patch-deck-edit）看 customs 決定要不要畫「自訂 N」
+    const flag = page.window["__ulrCostPatch"] as { customs: object; characters?: number };
+    expect(flag.customs).toEqual({});
+    expect(flag.characters).toBeUndefined();
+
+    // 掛鉤還在：再載一次（切語言）也不能把自訂價寫回去
+    page.makeFile("CharaCards", cc).onProcess();
+    expect(costsOf(cc)).toEqual([8, 19, 21, 9, 10]);
+    // 收過一次之後再收 → 沒東西可收
+    expect(revert(page).hadCustoms).toBe(false);
+  });
+
+  it("收掉之後再打開：當場又是自訂價，不必重載", async () => {
+    const { page, cc } = setup();
+    await runScript(page, buildCostPatchScript({ costs, bindingName: BINDING, pollIntervalMs: 1 }));
+    revert(page);
+    await runScript(page, buildCostPatchScript({ costs, bindingName: BINDING, pollIntervalMs: 1 }));
+    expect(costsOf(cc)).toEqual([8, 30, 33, 9, 10]);
+  });
+
+  it("頁面上沒有補丁 → installed:false", () => {
+    const { page } = setup();
+    expect(revert(page)).toEqual({
+      installed: false,
+      hadCustoms: false,
       swapped: 0,
       redrawn: false,
     });

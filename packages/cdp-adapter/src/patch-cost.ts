@@ -885,3 +885,89 @@ export function parseCostPatchEnabledResult(raw: unknown): CostPatchEnabledResul
     return off;
   }
 }
+
+// ---------------------------------------------------------------------------
+// 不重載，把頁面上留著的自訂價整份收掉
+// ---------------------------------------------------------------------------
+
+/** `COST_PATCH_REVERT_EXPRESSION` 的結果。 */
+export interface CostPatchRevertResult {
+  /** 頁面上有沒有這支補丁。沒有 = 本來就是官方價，什麼都沒做。 */
+  installed: boolean;
+  /** 收之前頁面上還記著自訂表（牌盒會拿它算「自訂 N」）。 */
+  hadCustoms: boolean;
+  /** 換回原價的快取筆數。 */
+  swapped: number;
+  /** 牌組編輯畫面開著，而且已經重畫過了。 */
+  redrawn: boolean;
+}
+
+/**
+ * 頁面上的補丁**整份收掉**：價格換回原價、自訂表清空、掛鉤之後攔到的資料也只
+ * 放原價。**立刻生效，不重載。**
+ *
+ * ## 為什麼要有這支（2026-10-11 實機）
+ *
+ * 「遊戲裡套用自訂 COST」關著時引擎不裝補丁（`setCostRule(null)`）。但頁面上
+ * 可能**早就有一份**：
+ *
+ * - 插件自動更新前的舊版裝的（遊戲沒關，頁面一路活著）
+ * - 剛打開又馬上關掉，關的那一下剛好在重載重連中，拆不到
+ *
+ * 只「不再裝」的話那份會一直留著 —— 價格是改在 Phaser 快取裡的、牌盒讀
+ * `customs` 畫「自訂 N」、房間 cost 也照它算，玩家要關掉遊戲重開才變回官方。
+ *
+ * 做法是先 `setEnabled(false)`（照 originals 換回原價並重畫 Edit），再把每張
+ * 表的自訂價清空：之後掛鉤攔到的資料走 `patchCostData` 的「規則沒它但以前動過
+ * → 放回官方」那條，不會再寫自訂價。
+ */
+export const COST_PATCH_REVERT_EXPRESSION = `(function () {
+  try {
+    var st = window["${COST_PATCH_FLAG}"];
+    if (!st || typeof st.setEnabled !== "function" || !st.cfg) {
+      return JSON.stringify({ installed: false, hadCustoms: false, swapped: 0, redrawn: false });
+    }
+    var hadCustoms = false;
+    for (var k in st.customs || {}) {
+      if (!Object.prototype.hasOwnProperty.call(st.customs, k)) continue;
+      for (var _ in st.customs[k]) { hadCustoms = true; break; }
+      if (hadCustoms) break;
+    }
+    var r = st.setEnabled(false);
+    var T = st.cfg.targets || {};
+    for (var key in T) {
+      if (!Object.prototype.hasOwnProperty.call(T, key)) continue;
+      for (var i = 0; i < T[key].length; i++) {
+        T[key][i].costs = {};
+        delete st[T[key][i].table];
+      }
+    }
+    st.customs = {};
+    st.stamp = null;
+    st.applied = 0;
+    return JSON.stringify({ installed: true, hadCustoms: hadCustoms, swapped: r.swapped, redrawn: r.redrawn });
+  } catch (e) {
+    return JSON.stringify({ installed: false, hadCustoms: false, swapped: 0, redrawn: false });
+  }
+})()`;
+
+export function parseCostPatchRevertResult(raw: unknown): CostPatchRevertResult {
+  const none: CostPatchRevertResult = {
+    installed: false,
+    hadCustoms: false,
+    swapped: 0,
+    redrawn: false,
+  };
+  if (typeof raw !== "string") return none;
+  try {
+    const o = JSON.parse(raw) as Record<string, unknown>;
+    return {
+      installed: o.installed === true,
+      hadCustoms: o.hadCustoms === true,
+      swapped: typeof o.swapped === "number" ? o.swapped : 0,
+      redrawn: o.redrawn === true,
+    };
+  } catch {
+    return none;
+  }
+}

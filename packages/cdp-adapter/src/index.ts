@@ -74,11 +74,14 @@ export {
   isCostPatchReport,
   normalizeCostTables,
   parseCostPatchEnabledResult,
+  COST_PATCH_REVERT_EXPRESSION,
+  parseCostPatchRevertResult,
 } from "./patch-cost.js";
 export type {
   CostOverrides,
   CostOverrideTables,
   CostPatchApplied,
+  CostPatchRevertResult,
   CostPatchEnabledResult,
   CostPatchError,
   CostPatchInstalled,
