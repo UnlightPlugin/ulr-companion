@@ -76,7 +76,10 @@ export const FRAGMENT_BY_CODE: ReadonlyMap<number, RaidFragmentInfo> = new Map(
  * stage 1～5；區塊編號 1～11 繞一圈（誘引之者是 M11、M1…M4）。
  *
  * 2026-09-25 從 40 筆結算（raid-learned.json 的 log，全是 Lv1）讀出來的：有記到 stage 的
- * 每一筆都合，學到的表同鍵 16/16 一致。**只有 Lv1、而且只有這五隻怪有證據**，其他一律不推。
+ * 每一筆都合，學到的表同鍵 16/16 一致。**只有 Lv1、而且只有表上這幾隻怪有證據**，其他一律不推。
+ *
+ * 渦IV（2026-10-10，23 筆）：起點跟同系的渦II 一樣，四隻 13/13 合（★4 爬行者 M7→2 也合）。
+ * 龍鯉不在表上 —— 牠永遠在 M4、stage 永遠 4，碎片卻是隨機的（見 RAID_RANDOM_FRAGMENT_MONSTERS）。
  */
 export const RAID_STAGE_START_MAP: Readonly<Record<number, number>> = {
   30108: 1, // 黑死獸 M1–M5
@@ -84,7 +87,21 @@ export const RAID_STAGE_START_MAP: Readonly<Record<number, number>> = {
   30130: 5, // 龍鯰 M5–M9
   30120: 5, // 靈龜 M5–M9
   30114: 6, // 屠殺者 M6–M10
+  // 渦IV
+  30106: 1, // 瘟疫 M1→1、M2→2
+  30113: 6, // 爬行者 M7→2、M8→3、M9→4
+  30116: 11, // 深奧之者 M1→2、M4→5
+  30119: 5, // 玄帝 M5→1、M6→2、M8→4
 };
+
+/**
+ * 碎片是隨機的怪：stage 套公式是錯的，學到的表也只是上一次的運氣。
+ *
+ * 龍鯉（渦IV，30129）：2026-10-10 的 8 筆全是 M4、stage 4，★1 六筆拿到黃紫紅紫紫綠、
+ * ★4 兩筆紫綠。公式會一律畫紅（6 次對 1 次），所以不畫。Discord 通報那邊
+ * （arbiter-link raid-feed 的 RANDOM_FRAGMENT_BOSSES）早就這樣擋了。
+ */
+export const RAID_RANDOM_FRAGMENT_MONSTERS: readonly number[] = [30129];
 
 /** 渦房地圖的區塊數（map_index 1～11）。 */
 export const RAID_MAP_COUNT = 11;

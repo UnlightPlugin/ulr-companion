@@ -81,8 +81,12 @@ export interface RaidLearnSample {
   at: number;
 }
 
-/** 結算原料最多留幾筆（每筆幾百 byte）。 */
-export const RAID_LEARN_LOG_MAX = 500;
+/**
+ * 結算原料最多留幾筆。每筆約 4 KB（排名獎勵一人一份、一場上百人），2000 筆約 8 MB。
+ * 2026-10-10 從 500 調上來：一天約 20 筆，500 筆不到一個月就開始丟最舊的，
+ * 渦IV、★4／★5 這種少見的樣本會被擠掉（玩家 2026-10-10）。
+ */
+export const RAID_LEARN_LOG_MAX = 2000;
 
 export interface RaidLearnReport {
   type: "raid-learn";

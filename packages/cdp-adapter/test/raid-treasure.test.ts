@@ -14,6 +14,7 @@ import {
   fragmentOfEntry,
   lookupRaidTreasure,
   parseRaidStatusCode,
+  RAID_RANDOM_FRAGMENT_MONSTERS,
   RAID_TREASURE_TABLE,
   raidStageByMap,
   raidTierOf,
@@ -149,7 +150,23 @@ describe("改版後：照怪＋區塊推 stage", () => {
     [30114, 7, 2],
     [30114, 8, 3],
     [30114, 10, 5],
+    // 渦IV（2026-10-10）：起點跟同系的渦II 一樣
+    [30106, 1, 1],
+    [30106, 2, 2],
+    [30113, 7, 2],
+    [30113, 8, 3],
+    [30113, 9, 4],
+    [30116, 1, 2],
+    [30116, 4, 5],
+    [30119, 5, 1],
+    [30119, 6, 2],
+    [30119, 8, 4],
   ];
+
+  it("龍鯉碎片隨機：不推 stage、列在隨機名單上", () => {
+    expect(raidStageByMap(30129, 1, 4)).toBeNull();
+    expect(RAID_RANDOM_FRAGMENT_MONSTERS).toContain(30129);
+  });
 
   it("實測到的每一筆都對得上", () => {
     for (const [m, map, stage] of SEEN)

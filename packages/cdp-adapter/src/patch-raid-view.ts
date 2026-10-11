@@ -61,6 +61,8 @@
  *   依序 stage 1～5；只有 Lv1、五隻怪有證據）
  * - 後兩種是推測：清單上畫空心、地圖漩渦半透明，跟 stage 算的分開（玩家 2026-09-25）
  * - 都沒有就不畫 —— 不猜
+ * - 碎片隨機的怪（龍鯉，raid-treasure.ts 的 RAID_RANDOM_FRAGMENT_MONSTERS）上面哪一種都不用、不畫：
+ *   牠 stage 永遠 4，公式會一律畫紅（2026-10-10 六次對一次）
  *
  * ## 獎勵表：邊打邊學（見 raid-learned.ts）
  *
@@ -120,6 +122,7 @@ import {
   RAID_FRAGMENTS,
   RAID_MAP_COUNT,
   RAID_OWN_FRAME_TINT,
+  RAID_RANDOM_FRAGMENT_MONSTERS,
   RAID_STAGE_START_MAP,
   type RaidFragment,
 } from "./raid-treasure.js";
@@ -128,7 +131,7 @@ import type { RaidLearnedTable } from "./raid-learned.js";
 const FLAG = "__ulrRaidView";
 
 /** 腳本版本。**改動注入腳本裡任何一行就 +1**，修 bug 也算。 */
-export const RAID_VIEW_SCRIPT_VERSION = 31;
+export const RAID_VIEW_SCRIPT_VERSION = 32;
 
 /** ⑪ 塞進官方 RaidUITexts.error 的鍵（官方的 raid_error 拿鍵查字）。 */
 export const RAID_CODE_NO_REPLY_KEY = "ULR_CODE_NO_REPLY";
@@ -709,6 +712,8 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
     // 照怪＋區塊推 stage（raid-treasure.ts 的 raidStageByMap，頁面裡照抄一份）
     stageStartMap: RAID_STAGE_START_MAP,
     mapCount: RAID_MAP_COUNT,
+    // 碎片隨機的怪（龍鯉）：stage、學到的表、區塊都不拿來畫
+    randomFragMonsters: RAID_RANDOM_FRAGMENT_MONSTERS,
     statuses: Object.fromEntries(
       RAID_STATUSES.map((s) => [s.code, { short: s.short, kind: s.kind }]),
     ),
@@ -908,9 +913,10 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
   /**
    * 這個渦掉哪種碎片，stage 套公式：自己看到的 stage 最優先，其次 ulgg 的（2026-09-25 七個實測
    * 全對）、公開渦通報後台算好的碎片；再來是學到的表（碎片沒對不上過的）排名第一檔；最後照怪＋區塊推 stage。
-   * 後兩種是推測，畫成空心。都沒有回 null。
+   * 後兩種是推測，畫成空心。都沒有回 null。碎片隨機的怪（龍鯉）一律 null —— 不猜。
    */
   function fragInfo(st, G, r) {
+    if (r && CFG.randomFragMonsters.indexOf(r.monster_id) !== -1) return null;
     var own = seenStage(r);
     if (own && typeof r.rarity === "number") {
       var fo = fragByFormula(r.rarity, own.stage);

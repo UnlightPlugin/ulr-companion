@@ -1295,6 +1295,38 @@ describe("渦房的獎勵標記", () => {
       expect(tracks()[1]).toMatchObject({ settled: now + 1 });
     });
 
+    it("預期碎片：渦IV 照同系起點推（瘟疫 M2 → 綠）；龍鯉碎片隨機，自己看到 stage 也不畫", () => {
+      const now = Date.now();
+      const plague = { profound_id: "p-plague", name: "瘟疫", monster_id: 30106, map_index: 2 };
+      const carp = { profound_id: "p-carp", name: "龍鯉", monster_id: 30129, map_index: 4 };
+      const { raid, window, reports } = setup([
+        ROW({ ...plague, limit: now + 3_600_000 }),
+        ROW({ ...carp, limit: now + 3_600_001 }),
+      ]);
+      window.__ulrRaidStages = { "p-carp": { stage: 4, src: "battle", at: now } };
+      run(window, buildRaidViewPatchScript({ bindingName: BINDING }));
+      const dead = [
+        ROW({ ...plague, hp: 0, limit: now + 600_000 }),
+        ROW({ ...carp, hp: 0, limit: now + 600_001 }),
+      ];
+      raid.raid_list = dead;
+      poll?.();
+      raid.raid_list = [...dead];
+      poll?.();
+      raid.raid_list = [];
+      poll?.();
+      const tracks = reports.filter((r) => r.type === "raid-track");
+      expect(tracks.find((t) => t.monsterId === 30106)).toMatchObject({
+        expectFrag: "時間的碎片",
+        expectSrc: "map",
+      });
+      expect(tracks.find((t) => t.monsterId === 30129)).toMatchObject({
+        stage: 4,
+        expectFrag: null,
+        expectSrc: null,
+      });
+    });
+
     it("上傳快照不收舊版用發現畫面記的 stage（那時的對法會套錯渦）；戰鬥記的照收", () => {
       const now = Date.now();
       const { window } = setup([
