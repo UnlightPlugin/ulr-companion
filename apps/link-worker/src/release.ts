@@ -66,13 +66,13 @@ export interface SignedRelease {
 // Release notes 有寫。詳見 docs/release.md §2。
 export const CURRENT_RELEASE: SignedRelease | null = {
   manifest: {
-    version: "2.2.0",
-    url: "https://github.com/UnlightPlugin/ulr-companion/releases/download/v2.2.0/ULR-Companion-2.2.0-win.zip",
-    sha256: "a267082a4518039a6fb7822fa76ba674f4396b5a6850c04634e5d0b301c71384",
-    notes: "好友限定的渦不再公開；投降、獎勵遊戲、任務確認框的新開關；贈送次數改插件自己數",
+    version: "2.3.0",
+    url: "https://github.com/UnlightPlugin/ulr-companion/releases/download/v2.3.0/ULR-Companion-2.3.0-win.zip",
+    sha256: "ad92a11e8560b90e8f8b1a022e7f356931f86841de9a70fd29bd85ee25b81778",
+    notes: "自訂 COST 可以整個開關（預設不套用），切換不重載",
   },
   signature:
-    "+bfVzepbl+eQrY+A8pw9Bb9J6VxzqP9u0naZZP9wWEDkkKoOQ7mx2NeqN3sJO3iqf803QBLlRnkPOeVXBHdrCQ==",
+    "ikrCtGgv0cu/bAVfcWojJ1xWz2pJyLpnOiuPo7XF143mpg+zsxB7vZLST8LkkCjHfiGUItCulHt2mnzCLfF6BQ==",
 };
 
 // 發版時把上面那行換成 `npm run release:sign` 印出來的那一段（形狀如下，
