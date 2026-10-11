@@ -162,8 +162,11 @@ contextBridge.exposeInMainWorld("ulr", {
     /** `part`：`dietStack` 水捷徑、`gemUp` GEM UP。 */
     toggle: (part: "dietStack" | "gemUp", on: boolean) =>
       ipcRenderer.invoke("ulr:diet-toggle", part, on),
-    /** `part`：`noConfirm` 迪城投降不確認、`outside` 投降鈕放 MENU 外面（渦、亞城也算）。 */
-    surrender: (part: "noConfirm" | "outside", on: boolean) =>
+    /**
+     * `part`：`noConfirm` 迪城投降不確認、`outside` 投降鈕放 MENU 外面（渦、亞城也算）、
+     * `winSkip` 迪城對手投降時直接到獎勵遊戲。
+     */
+    surrender: (part: "noConfirm" | "outside" | "winSkip", on: boolean) =>
       ipcRenderer.invoke("ulr:surrender-option", part, on),
   },
 

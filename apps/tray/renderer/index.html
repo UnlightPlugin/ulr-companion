@@ -4249,7 +4249,8 @@
         if (v === null) return "還沒接上遊戲 —— 開了遊戲就會自己裝上";
         if (!v.installed) return "還沒裝上" + (v.reason ? "：" + v.reason : "");
         if (v.reason) return "有狀況：" + v.reason;
-        if (!v.dietNoConfirm && !v.outside) return "照官方（渦的投降鈕在 MENU 裡）";
+        if (!v.dietNoConfirm && !v.outside && !v.dietWinSkip)
+          return "照官方（渦的投降鈕在 MENU 裡）";
         if (v.outsideShown) return "生效中：投降鈕在 MENU 下方";
         return "生效中，等下一場對戰";
       }
@@ -4258,6 +4259,10 @@
         "之後「你投降了」那個框不跳、結算畫面整個略過，直接進獎勵遊戲（沒有獎勵遊戲就回大廳）；" +
         "獎勵遊戲玩完後那顆 OK 照常自己按。" +
         "只在迪城的對戰；亞城照官方跳確認。渦的投降鈕本來就不確認、直接回渦房。";
+      const SURRENDER_WIN_TIP =
+        "對手在迪城投降時，「對手投降了」那個框不跳、結算畫面整個略過，直接進獎勵遊戲" +
+        "（沒有獎勵遊戲就回大廳）。插件不多送任何請求。" +
+        "獎勵遊戲玩完後那顆 OK 照常自己按。亞城照官方。";
       const SURRENDER_PLACE_TIP =
         "外面那顆跟 MENU 同一種鈕、貼在 MENU 正下方，MENU 裡就不再列投降。" +
         "迪城、亞城按下去走官方的投降流程（確認框也是官方的；迪城又選了直接投降就不問）；" +
@@ -4274,6 +4279,7 @@
           </label>`;
         const confirm = s?.surrenderNoConfirm ? "direct" : "confirm";
         const place = s?.surrenderOutside ? "outside" : "menu";
+        const win = s?.surrenderWinSkip ? "skip" : "notice";
         const confirmCard = `<div class="card">
             <div class="row"><span class="dim">迪城按投降時${info(SURRENDER_CONFIRM_TIP)}</span><span></span></div>
             ${opt("surrenderConfirm", confirm, "confirm", "跳出確認框", "照官方：問「你投降嗎?」，按 ok 才投降。")}
@@ -4284,7 +4290,12 @@
             ${opt("surrenderPlace", place, "menu", "收在 MENU 裡", "右上 MENU 打開才看得到（渦的那顆也在 MENU 裡）。")}
             ${opt("surrenderPlace", place, "outside", "放在外面", "MENU 正下方多一顆投降鈕。渦、迪城、亞城都算。")}
           </div>`;
-        return head("投降", "投降少按幾下。") + state + confirmCard + placeCard;
+        const winCard = `<div class="card">
+            <div class="row"><span class="dim">迪城對手投降時${info(SURRENDER_WIN_TIP)}</span><span></span></div>
+            ${opt("surrenderWin", win, "notice", "跳出通知框", "照官方：「對手投降了」，按 ok 才結算。")}
+            ${opt("surrenderWin", win, "skip", "直接到獎勵", "不跳框、略過結算，直接轉到獎勵遊戲。只在迪城。")}
+          </div>`;
+        return head("投降", "投降少按幾下。") + state + confirmCard + winCard + placeCard;
       };
 
       // --- 獎勵 › 物品捷徑 ---------------------------------------------------
@@ -5114,9 +5125,19 @@
             renderBody();
           });
         }
-        if ((t.name === "surrenderConfirm" || t.name === "surrenderPlace") && t.checked) {
-          const part = t.name === "surrenderConfirm" ? "noConfirm" : "outside";
-          const on = t.value === "direct" || t.value === "outside";
+        if (
+          (t.name === "surrenderConfirm" ||
+            t.name === "surrenderPlace" ||
+            t.name === "surrenderWin") &&
+          t.checked
+        ) {
+          const part =
+            t.name === "surrenderConfirm"
+              ? "noConfirm"
+              : t.name === "surrenderWin"
+                ? "winSkip"
+                : "outside";
+          const on = t.value === "direct" || t.value === "outside" || t.value === "skip";
           return void window.ulr.diet.surrender(part, on).then((s) => {
             dstate = s;
             renderBody();

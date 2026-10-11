@@ -396,6 +396,11 @@ export interface Profile {
   /** 迪城對戰按投降不跳確認框，直接投降。預設關（照官方跳確認）。玩家 2026-10-05。 */
   dietSurrenderNoConfirm: boolean;
   /**
+   * 迪城對戰對手投降時不跳「對手投降了」框、略過結算，直接進獎勵遊戲。
+   * 預設關（照官方）。玩家 2026-10-10：和小號互刷時小號那邊不必有人按 ok。
+   */
+  dietSurrenderWinSkip: boolean;
+  /**
    * 對戰的投降鈕放在 MENU 外面（MENU 正下方）。預設關（留在 MENU 裡）。
    * ⚠ 放在迪特赫姆那一頁，但**渦、亞城也算**（玩家 2026-10-05）—— 渦的是插件自己那顆。
    */
@@ -697,6 +702,7 @@ export function normalizeProfile(raw: unknown): Profile | null {
     dietItemShortcut: r["dietItemShortcut"] === true,
     dietGemUp: r["dietGemUp"] !== false,
     dietSurrenderNoConfirm: r["dietSurrenderNoConfirm"] === true,
+    dietSurrenderWinSkip: r["dietSurrenderWinSkip"] === true,
     surrenderOutside: r["surrenderOutside"] === true,
     // 舊設定檔沒有這三欄 → 關（官方原樣）、石楠5 優先、畫在上方。
     bonusItemShortcut: r["bonusItemShortcut"] === true,
@@ -790,6 +796,7 @@ export function defaultProfile(kind: ClientKind = "desktop"): Profile {
     dietItemShortcut: false,
     dietGemUp: true,
     dietSurrenderNoConfirm: false,
+    dietSurrenderWinSkip: false,
     surrenderOutside: false,
     bonusItemShortcut: false,
     bonusItemOrder: DEFAULT_BONUS_ITEM_ORDER,

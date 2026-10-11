@@ -916,12 +916,17 @@ interface DietPageState {
   gemUp: boolean;
   surrenderNoConfirm: boolean;
   surrenderOutside: boolean;
+  surrenderWinSkip: boolean;
   items: ItemPanelStatus | null;
   surrender: RaidSurrenderStatus | null;
 }
 
 function battleSurrenderOptions(): BattleSurrenderOptions {
-  return { dietNoConfirm: profile.dietSurrenderNoConfirm, outside: profile.surrenderOutside };
+  return {
+    dietNoConfirm: profile.dietSurrenderNoConfirm,
+    outside: profile.surrenderOutside,
+    dietWinSkip: profile.dietSurrenderWinSkip,
+  };
 }
 
 async function dietPageState(): Promise<DietPageState> {
@@ -930,6 +935,7 @@ async function dietPageState(): Promise<DietPageState> {
     gemUp: profile.dietGemUp,
     surrenderNoConfirm: profile.dietSurrenderNoConfirm,
     surrenderOutside: profile.surrenderOutside,
+    surrenderWinSkip: profile.dietSurrenderWinSkip,
     items: (await engine?.itemPanelStatus().catch(() => null)) ?? null,
     surrender: (await engine?.raidSurrenderStatus().catch(() => null)) ?? null,
   };
@@ -4978,14 +4984,25 @@ app.whenReady().then(() => {
 
   ipcMain.handle(
     "ulr:surrender-option",
-    // `part`：`noConfirm` 迪城投降不確認、`outside` 投降鈕放 MENU 外面（渦、亞城也算）。
+    // `part`：`noConfirm` 迪城投降不確認、`outside` 投降鈕放 MENU 外面（渦、亞城也算）、
+    // `winSkip` 迪城對手投降時直接到獎勵遊戲。
     async (_event, part: unknown, on: unknown): Promise<DietPageState> => {
-      if ((part === "noConfirm" || part === "outside") && typeof on === "boolean") {
-        const key = part === "noConfirm" ? "dietSurrenderNoConfirm" : "surrenderOutside";
+      if (
+        (part === "noConfirm" || part === "outside" || part === "winSkip") &&
+        typeof on === "boolean"
+      ) {
+        const key =
+          part === "noConfirm"
+            ? "dietSurrenderNoConfirm"
+            : part === "winSkip"
+              ? "dietSurrenderWinSkip"
+              : "surrenderOutside";
         profile = { ...profile, [key]: on };
         if (!ephemeral) store = updateProfile(profile.id, { [key]: on });
         engine?.setBattleSurrender(battleSurrenderOptions());
         if (part === "noConfirm") log(on ? "· 迪城投降改成直接投降" : "· 迪城投降照官方跳確認");
+        else if (part === "winSkip")
+          log(on ? "· 迪城對手投降時直接到獎勵遊戲" : "· 迪城對手投降照官方跳通知框");
         else log(on ? "· 投降鈕放到 MENU 外面" : "· 投降鈕收回 MENU 裡");
         pushState();
       }

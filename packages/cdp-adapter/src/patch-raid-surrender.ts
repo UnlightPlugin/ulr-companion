@@ -117,6 +117,14 @@
  *   只按第一顆 —— 獎勵遊戲結束後那顆 OK 照常由玩家按。
  * - 都只在「不確認」送出的那一次；經官方確認框送的照官方。
  *
+ * ## 勝方：對手投降時也直接到獎勵遊戲（玩家 2026-10-10，dietWinSkip）
+ *
+ * 勝方收到的是同一支：game_result → show_surrender_result("win") → 模組函式
+ * 畫「對手投降了。終止比賽。」框等按 ok（2026-10-10 從 949.js 讀的：
+ * "win" 以外 F.Cv、win 是 F.A）。開了 dietWinSkip、這一場是迪城的 duel、結果是 win
+ * 就不畫那個框，接上面同一套快轉＋自動按結算 OK。在迪城和小號互刷時，
+ * 小號那邊不必有人守著按 ok。
+ *
  * ⚠⚠ **注入腳本裡的註解不能有反引號。** 整段腳本住在一個 template literal
  * 裡，一個沒跳脫的反引號會讓字串提早結束。
  */
@@ -134,8 +142,9 @@ const FLAG = "__ulrRaidSurrender";
  * 2：2026-09-23 改版後的選單鈕（白旗沒了、Raid 不必問路）。
  * 3：對人戰的投降（迪城不確認、投降鈕放 MENU 外面，渦也算）。
  * 4：不確認送出之後跳過「你投降了」框、結算 OK 自動按。
+ * 5：勝方收到對手投降也一樣（dietWinSkip）。
  */
-export const RAID_SURRENDER_SCRIPT_VERSION = 4;
+export const RAID_SURRENDER_SCRIPT_VERSION = 5;
 
 /**
  * 官方 MENU 裡有投降鈕的房型（unlight-common 的 PvPBattleRule，2026-10-05 讀的）。
@@ -149,17 +158,20 @@ export const SURRENDER_OUTSIDE_DY = 34;
 /** 投降之後收尾與結算畫面的快轉倍率（時間與補間的 timeScale）。 */
 export const SURRENDER_SKIP_SPEED = 50;
 
-/** 投降的兩個開關。 */
+/** 投降的三個開關。 */
 export interface BattleSurrenderOptions {
   /** 迪城的 duel：投降不跳確認框。 */
   dietNoConfirm: boolean;
   /** 投降鈕放 MENU 外面（渦、迪城、亞城都算）。 */
   outside: boolean;
+  /** 迪城的 duel：對手投降時不跳「對手投降了」框，直接到獎勵遊戲。 */
+  dietWinSkip: boolean;
 }
 
 export const DEFAULT_BATTLE_SURRENDER: BattleSurrenderOptions = {
   dietNoConfirm: false,
   outside: false,
+  dietWinSkip: false,
 };
 
 export const DEFAULT_RAID_SURRENDER_POLL_MS = 500;
@@ -194,6 +206,7 @@ export interface RaidSurrenderStatus {
   mounted: boolean;
   dietNoConfirm: boolean;
   outside: boolean;
+  dietWinSkip: boolean;
   /** 外面那顆投降鈕現在畫著。 */
   outsideShown: boolean;
   reason: string | null;
@@ -202,7 +215,7 @@ export interface RaidSurrenderStatus {
 export interface RaidSurrenderPatchOptions {
   bindingName: string;
   pollIntervalMs?: number;
-  /** 投降的兩個開關。沒給＝都關（照官方＋渦的鈕在 MENU 裡）。 */
+  /** 投降的三個開關。沒給＝都關（照官方＋渦的鈕在 MENU 裡）。 */
   surrender?: BattleSurrenderOptions;
 }
 
@@ -226,6 +239,7 @@ export function buildRaidSurrenderPatchScript(options: RaidSurrenderPatchOptions
     resultSpeed: SURRENDER_SKIP_SPEED,
     dietNoConfirm: surrender.dietNoConfirm,
     outside: surrender.outside,
+    dietWinSkip: surrender.dietWinSkip,
   };
 
   return `(function () {
@@ -329,7 +343,8 @@ export function buildRaidSurrenderPatchScript(options: RaidSurrenderPatchOptions
 
   /**
    * 「你投降了」框：我們剛送出 surrender 的那一房、不是 win 就不畫，並約好替玩家按結算 OK。
-   * 其餘交回原型（對手投降、經官方確認框送的都照官方）。
+   * 「對手投降了」框：開了 dietWinSkip、迪城的 duel、win 就不畫，一樣約好按結算 OK。
+   * 其餘交回原型（亞城、經官方確認框送的都照官方）。
    */
   function hookSurrenderResult(st, m) {
     var orig = Object.getPrototypeOf(m).show_surrender_result;
@@ -338,6 +353,11 @@ export function buildRaidSurrenderPatchScript(options: RaidSurrenderPatchOptions
       if (window[FLAG] === st && result !== "win" && st.skipRoom !== null && st.skipRoom === this.room_id) {
         st.skipRoom = null;
         armResultSkip(st, this);
+        return Promise.resolve();
+      }
+      if (window[FLAG] === st && result === "win" && st.opts.dietWinSkip && dietDuel(this)) {
+        armResultSkip(st, this);
+        st.winSkips++;
         return Promise.resolve();
       }
       return orig.apply(this, arguments);
@@ -612,7 +632,7 @@ export function buildRaidSurrenderPatchScript(options: RaidSurrenderPatchOptions
     timer: null,
     reason: null,
     unhook: null,
-    opts: { dietNoConfirm: CFG.dietNoConfirm === true, outside: CFG.outside === true },
+    opts: { dietNoConfirm: CFG.dietNoConfirm === true, outside: CFG.outside === true, dietWinSkip: CFG.dietWinSkip === true },
     confirm: null,
     nextFind: 0,
     out: null,
@@ -622,11 +642,12 @@ export function buildRaidSurrenderPatchScript(options: RaidSurrenderPatchOptions
     skipRoom: null,
     surrenderResult: null,
     resultSkip: null,
-    autoOks: 0
+    autoOks: 0,
+    winSkips: 0
   };
   st.unhook = function () { unhook(st); dropOutside(st); };
   st.setOptions = function (o) {
-    st.opts = { dietNoConfirm: o.dietNoConfirm === true, outside: o.outside === true };
+    st.opts = { dietNoConfirm: o.dietNoConfirm === true, outside: o.outside === true, dietWinSkip: o.dietWinSkip === true };
     tick();
   };
   st.report = function () {
@@ -636,6 +657,7 @@ export function buildRaidSurrenderPatchScript(options: RaidSurrenderPatchOptions
       mounted: isRaid(st.scene),
       dietNoConfirm: st.opts.dietNoConfirm,
       outside: st.opts.outside,
+      dietWinSkip: st.opts.dietWinSkip,
       outsideShown: alive(st.out),
       reason: st.reason
     };
@@ -665,11 +687,15 @@ export const RAID_SURRENDER_STATUS_EXPRESSION = `(function () {
 })()`;
 
 /**
- * 換投降的兩個開關，當場生效（外面那顆下一輪就畫上或拆掉；MENU 下次打開照新的）。
+ * 換投降的開關，當場生效（外面那顆下一輪就畫上或拆掉；MENU 下次打開照新的）。
  * 回 `"ok"` 或 `"not-installed"`（頁面上是沒有 setOptions 的舊版也算）。
  */
 export function buildRaidSurrenderSetOptionsExpression(options: BattleSurrenderOptions): string {
-  const o = { dietNoConfirm: options.dietNoConfirm, outside: options.outside };
+  const o = {
+    dietNoConfirm: options.dietNoConfirm,
+    outside: options.outside,
+    dietWinSkip: options.dietWinSkip,
+  };
   return `(function () {
   try {
     var st = window["${FLAG}"];
@@ -708,6 +734,7 @@ export function parseRaidSurrenderStatus(raw: string): RaidSurrenderStatus {
       mounted: false,
       dietNoConfirm: false,
       outside: false,
+      dietWinSkip: false,
       outsideShown: false,
       reason: `頁面回了讀不懂的東西：${raw.slice(0, 120)}`,
     };
@@ -719,6 +746,7 @@ export function parseRaidSurrenderStatus(raw: string): RaidSurrenderStatus {
     mounted: o.mounted === true,
     dietNoConfirm: o.dietNoConfirm === true,
     outside: o.outside === true,
+    dietWinSkip: o.dietWinSkip === true,
     outsideShown: o.outsideShown === true,
     reason: typeof o.reason === "string" ? o.reason : null,
   };

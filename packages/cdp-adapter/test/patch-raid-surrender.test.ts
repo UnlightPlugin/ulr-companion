@@ -34,8 +34,10 @@
 
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  type BattleSurrenderOptions,
   buildRaidSurrenderPatchScript,
   buildRaidSurrenderSetOptionsExpression,
+  DEFAULT_BATTLE_SURRENDER,
   isRaidSurrenderReport,
   JUMP_PERSISTENT_SCENES,
   parseRaidSurrenderStatus,
@@ -379,9 +381,15 @@ function run(window: FakeWindow, expression: string): string {
   );
 }
 
-function install(window: FakeWindow, surrender = { dietNoConfirm: false, outside: false }): string {
+function install(window: FakeWindow, surrender: Partial<BattleSurrenderOptions> = {}): string {
   poll = null;
-  return run(window, buildRaidSurrenderPatchScript({ bindingName: BINDING, surrender }));
+  return run(
+    window,
+    buildRaidSurrenderPatchScript({
+      bindingName: BINDING,
+      surrender: { ...DEFAULT_BATTLE_SURRENDER, ...surrender },
+    }),
+  );
 }
 
 function tick(): void {
@@ -417,6 +425,7 @@ describe("buildRaidSurrenderPatchScript", () => {
       mounted: true,
       dietNoConfirm: false,
       outside: false,
+      dietWinSkip: false,
       outsideShown: false,
       reason: null,
     });
@@ -527,6 +536,7 @@ describe("buildRaidSurrenderPatchScript", () => {
       mounted: false,
       dietNoConfirm: false,
       outside: false,
+      dietWinSkip: false,
       outsideShown: false,
       reason: null,
     });
@@ -658,7 +668,10 @@ describe("對人戰的投降與鈕放外面", () => {
     const set = (outsideOn: boolean) =>
       run(
         window,
-        buildRaidSurrenderSetOptionsExpression({ dietNoConfirm: false, outside: outsideOn }),
+        buildRaidSurrenderSetOptionsExpression({
+          ...DEFAULT_BATTLE_SURRENDER,
+          outside: outsideOn,
+        }),
       );
     expect(set(true)).toBe("ok");
     const first = outside(window)!;
@@ -764,6 +777,70 @@ describe("對人戰的投降與鈕放外面", () => {
     expect(third.surrenderDialogs.at(-1)).toBe("player_surrender");
   });
 
+  it("勝方＋對手投降直接到獎勵：不跳「對手投降了」、結算藏起來 OK 自動按", async () => {
+    const { window } = makeWindow();
+    install(window, { dietWinSkip: true });
+    const G = window.game;
+    const m = duel(window, DIET);
+    const R = G.at("Result");
+    const B = G.at("Bonus");
+
+    await m.gameResult(G, "surrender", "win");
+    expect(m.surrenderDialogs).toEqual([]);
+    expect(emits(m)).toEqual([]);
+    expect([R.cameras.main.alpha, R.time.timeScale]).toEqual([0, 50]);
+    R.showResultOk();
+    expect(R.resultOkPressed).toBe(1);
+    B.events.emit("start");
+    expect([R.cameras.main.alpha, R.time.timeScale]).toEqual([1, 1]);
+    R.showResultOk();
+    expect(R.resultOkPressed).toBe(1);
+    R.leave();
+
+    // 下一場一樣跳（開關不是一次性的）
+    m.enterBattle("duel", "room-2");
+    await m.gameResult(G, "surrender", "win");
+    expect(m.surrenderDialogs).toEqual([]);
+    R.showResultOk();
+    expect(R.resultOkPressed).toBe(2);
+  });
+
+  it("⚠ 勝方直接到獎勵只在迪城的 duel、只在 win；沒開就照官方", async () => {
+    const { window } = makeWindow();
+    install(window, { dietWinSkip: true });
+    const G = window.game;
+    const R = G.at("Result");
+
+    const alex = duel(window, ALEX);
+    await alex.gameResult(G, "surrender", "win");
+    expect(alex.surrenderDialogs).toEqual(["opponent_surrender"]);
+
+    const ranked = duel(window, DIET, "ranked");
+    await ranked.gameResult(G, "surrender", "win");
+    expect(ranked.surrenderDialogs.at(-1)).toBe("opponent_surrender");
+
+    // 自己經官方確認框投降（lose）：照官方
+    CONFIRM_OK = true;
+    const lose = duel(window, DIET);
+    lose.openMenu();
+    lose.menuItem("surrender").emit("click");
+    await lose.gameResult(G, "surrender", "lose");
+    expect(lose.surrenderDialogs.at(-1)).toBe("player_surrender");
+    R.showResultOk();
+    expect(R.resultOkPressed).toBe(0);
+
+    // 開關關掉：照官方
+    run(
+      window,
+      buildRaidSurrenderSetOptionsExpression({ ...DEFAULT_BATTLE_SURRENDER, dietWinSkip: false }),
+    );
+    const off = duel(window, DIET);
+    off.enterBattle("duel", "room-3");
+    await off.gameResult(G, "surrender", "win");
+    expect(off.surrenderDialogs.at(-1)).toBe("opponent_surrender");
+    expect(status(window).dietWinSkip).toBe(false);
+  });
+
   it("拆掉：show_surrender_result 回到原型、沒觸發的結算鉤子一起收", async () => {
     const { window } = makeWindow();
     install(window, { dietNoConfirm: true, outside: false });
@@ -788,7 +865,14 @@ describe("對人戰的投降與鈕放外面", () => {
   it("沒裝時換開關回 not-installed（引擎會整支補裝）", () => {
     const { window } = makeWindow();
     expect(
-      run(window, buildRaidSurrenderSetOptionsExpression({ dietNoConfirm: true, outside: true })),
+      run(
+        window,
+        buildRaidSurrenderSetOptionsExpression({
+          dietNoConfirm: true,
+          outside: true,
+          dietWinSkip: true,
+        }),
+      ),
     ).toBe("not-installed");
   });
 });
@@ -811,6 +895,7 @@ describe("isRaidSurrenderReport / parseRaidSurrenderStatus", () => {
       mounted: true,
       dietNoConfirm: false,
       outside: false,
+      dietWinSkip: false,
       outsideShown: false,
       reason: null,
     });

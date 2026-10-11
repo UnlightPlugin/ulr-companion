@@ -1051,10 +1051,14 @@ export class ArbiterEngine {
   }
 
   /**
-   * 投降的兩個開關（迪城不確認、鈕放 MENU 外面）。托盤從配置推進來。
+   * 投降的三個開關（迪城不確認、鈕放 MENU 外面、迪城對手投降直接到獎勵）。托盤從配置推進來。
    * 住在渦戰投降那支 —— 它是對戰 MENU 的唯一擁有者。
    */
-  #battleSurrender: BattleSurrenderOptions = { dietNoConfirm: false, outside: false };
+  #battleSurrender: BattleSurrenderOptions = {
+    dietNoConfirm: false,
+    outside: false,
+    dietWinSkip: false,
+  };
 
   get battleSurrender(): BattleSurrenderOptions {
     return { ...this.#battleSurrender };
