@@ -1,15 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_LINK_TARGET } from "@ulr/arbiter-link";
-import type { Profile, ProfileStore } from "../src/profiles-core.js";
+import type { ClientKind, Profile, ProfileStore } from "../src/profiles-core.js";
 import {
   addTo,
   clampPort,
-  defaultPortFor,
   defaultProfile,
   emptyStore,
   DEFAULT_EDIT_STEP,
   DEFAULT_MATCH_PREFS,
   EDIT_UNITS,
+  kindTaken,
   normalizeEditStep,
   normalizeEditUnit,
   normalizeMatchPrefs,
@@ -21,14 +21,14 @@ import {
   userDataDirFor,
 } from "../src/profiles-core.js";
 
-function storeOf(...ports: number[]): ProfileStore {
+function storeOf(...kinds: ClientKind[]): ProfileStore {
   return {
     ...emptyStore(),
-    profiles: ports.map((port, i) => ({
-      ...defaultProfile("desktop"),
+    profiles: kinds.map((kind, i) => ({
+      ...defaultProfile(kind),
       id: `id${i}`,
       name: `配置${i}`,
-      port,
+      dataDir: `profile-id${i}`,
     })),
   };
 }
@@ -47,7 +47,7 @@ describe("整理清單", () => {
 
   it("缺欄位的配置用預設值補起來", () => {
     const s = normalizeStore({ profiles: [{ id: "a" }] });
-    expect(s.profiles[0]?.port).toBe(defaultPortFor("desktop"));
+    expect(s.profiles[0]?.dataDir).toBe("profile-a");
     expect(s.profiles[0]?.name).toBe("桌面版");
     expect(s.profiles[0]?.prefs.speedFactor).toBe(1);
   });
@@ -87,7 +87,7 @@ describe("整理清單", () => {
     // 而玩家的遊戲開在瀏覽器裡，畫面上只會寫「等遊戲…」。
     const p = normalizeStore({ profiles: [{ id: "a", kind: "web", port: 59223 }] }).profiles[0];
     expect(p?.kind).toBe("chrome");
-    expect(p?.port).toBe(59223);
+    expect(p?.dataDir).toBe("port-59223");
     // 目錄要跟著換 —— Chrome 的 profile 在 ~\ulr-cdp-profile，不是桌面版那個。
     expect(userDataDirFor(p?.kind ?? "desktop")).toBe(userDataDirFor("chrome"));
   });
@@ -109,33 +109,56 @@ describe("整理清單", () => {
     );
   });
 
-  it("埠不合法就退回預設，不讓實例開不起來", () => {
+  it("埠不合法就退回預設（命令列 --port 用）", () => {
     expect(clampPort(0, 59222)).toBe(59222);
     expect(clampPort(70000, 59222)).toBe(59222);
     expect(clampPort("abc", 59222)).toBe(59222);
     expect(clampPort(1221, 59222)).toBe(1221);
   });
+
+  it("⚠ 舊配置沿用原本的 port-NNNNN 資料夾 —— 換名字的話設定、鎖、更新暫存全部斷掉", () => {
+    // 搬檔也不行：正在跑的舊版抓著檔案（EBUSY），而且新舊兩版會分到不同的
+    // 單一實例鎖，同時接上同一個遊戲。
+    const p = normalizeProfile({ id: "a", kind: "desktop", port: 59222 });
+    expect(p?.dataDir).toBe("port-59222");
+    // 落地之後埠就不存了，靠 dataDir 記住。
+    const again = normalizeProfile(JSON.parse(JSON.stringify(p)));
+    expect(again?.dataDir).toBe("port-59222");
+    expect(again).not.toHaveProperty("port");
+  });
+
+  it("資料夾名不收會跳出目錄的字", () => {
+    expect(normalizeProfile({ id: "a", dataDir: "..\\..\\x" })?.dataDir).toBe("profile-a");
+  });
+
+  it("命令列的埠不從設定檔讀回來 —— 它只屬於那一次啟動", () => {
+    expect(normalizeProfile({ id: "a", cliPort: 9334 })).not.toHaveProperty("cliPort");
+  });
 });
 
 describe("新增", () => {
-  it("⚠ 埠不能跟既有的撞 —— 撞到的話第二份根本開不起來", () => {
-    // userData 的目錄鎖會擋掉第二個實例，而症狀是「按了開新實例但什麼都沒發生」。
-    const s = addTo(addTo(addTo(storeOf(59222), undefined), undefined), undefined);
-    const ports = s.profiles.map((p) => p.port);
-    expect(new Set(ports).size).toBe(ports.length);
+  it("⚠ 同一種客戶端只能有一份 —— 同種的兩份會接上同一個遊戲", () => {
+    const s = addTo(addTo(storeOf("desktop"), undefined), undefined);
+    expect(s.profiles.map((p) => p.kind)).toEqual(["desktop", "chrome", "edge"]);
+    // 三種都有了就不新增。
+    expect(addTo(s, undefined)).toBe(s);
   });
 
-  it("複製出來的是新 id，不是同一份的兩個參照", () => {
-    const s = storeOf(59222);
+  it("複製出來的是新 id、新資料夾，客戶端換成還沒有的那一種", () => {
+    const s = storeOf("desktop");
     const source = s.profiles[0] as Profile;
-    const next = addTo(s, source);
+    const next = addTo(s, { ...source, hiddenStages: true });
     expect(next.profiles).toHaveLength(2);
-    expect(next.profiles[1]?.id).not.toBe(source.id);
-    expect(next.profiles[1]?.port).not.toBe(source.port);
+    const copy = next.profiles[1];
+    expect(copy?.id).not.toBe(source.id);
+    expect(copy?.dataDir).not.toBe(source.dataDir);
+    expect(copy?.kind).toBe("chrome");
+    // 設定照抄。
+    expect(copy?.hiddenStages).toBe(true);
   });
 
   it("名字重複會加後綴，不會出現兩個一模一樣的", () => {
-    const s = storeOf(59222);
+    const s = storeOf("desktop");
     const source = s.profiles[0] as Profile;
     const names = addTo(addTo(s, source), source).profiles.map((p) => p.name);
     expect(new Set(names).size).toBe(names.length);
@@ -144,24 +167,24 @@ describe("新增", () => {
 
 describe("刪除", () => {
   it("⚠ 最後一份刪不掉 —— 清單空了沒有任何 UI 救得回來", () => {
-    const s = storeOf(59222);
+    const s = storeOf("desktop");
     expect(removeFrom(s, "id0").profiles).toHaveLength(1);
   });
 
   it("刪掉的那份如果是 lastUsedId，要一起清掉", () => {
-    const s: ProfileStore = { ...storeOf(59222, 9334), lastUsedId: "id1" };
+    const s: ProfileStore = { ...storeOf("desktop", "chrome"), lastUsedId: "id1" };
     expect(removeFrom(s, "id1").lastUsedId).toBeNull();
   });
 
   it("刪別的不影響 lastUsedId", () => {
-    const s: ProfileStore = { ...storeOf(59222, 9334), lastUsedId: "id0" };
+    const s: ProfileStore = { ...storeOf("desktop", "chrome"), lastUsedId: "id0" };
     expect(removeFrom(s, "id1").lastUsedId).toBe("id0");
   });
 });
 
 describe("修改", () => {
   it("prefs 是合併的，不是整份換掉", () => {
-    const s = storeOf(59222);
+    const s = storeOf("desktop");
     const next = updateIn(s, "id0", { prefs: { speedFactor: 3 } as never });
     expect(next.profiles[0]?.prefs.speedFactor).toBe(3);
     // 沒動到的欄位要留著。整份換掉的話玩家會發現「改了加速，秒數自己跑掉了」。
@@ -169,7 +192,7 @@ describe("修改", () => {
   });
 
   it("改名不換 id —— 命令列參數帶的是 id", () => {
-    const next = updateIn(storeOf(59222), "id0", { name: "主帳號" });
+    const next = updateIn(storeOf("desktop"), "id0", { name: "主帳號" });
     expect(next.profiles[0]?.id).toBe("id0");
     expect(next.profiles[0]?.name).toBe("主帳號");
   });
@@ -177,7 +200,7 @@ describe("修改", () => {
   it("換客戶端種類時，自動取的名字要跟著改", () => {
     // 不改的話配置表會出現「名稱：Chrome／客戶端：Edge」，而托盤選單與視窗
     // 標題顯示的都是名稱 —— 玩家之後分不出那一份接的是哪個瀏覽器。
-    const s = updateIn(storeOf(59223), "id0", { kind: "chrome", name: "Chrome" });
+    const s = updateIn(storeOf("desktop"), "id0", { kind: "chrome", name: "Chrome" });
     expect(updateIn(s, "id0", { kind: "edge" }).profiles[0]?.name).toBe("Edge");
     // addTo 加的數字後綴要留著（「Chrome 2」→「Edge 2」）。
     const numbered = updateIn(s, "id0", { name: "Chrome 2" });
@@ -185,45 +208,54 @@ describe("修改", () => {
   });
 
   it("⚠ 玩家自己取的名字不會被換種類改掉", () => {
-    const s = updateIn(storeOf(59223), "id0", { kind: "chrome", name: "小號" });
+    const s = updateIn(storeOf("desktop"), "id0", { kind: "chrome", name: "小號" });
     expect(updateIn(s, "id0", { kind: "edge" }).profiles[0]?.name).toBe("小號");
     // 同一次一起改名的話，他打的那個字優先。
     expect(updateIn(s, "id0", { kind: "edge", name: "打渦的" }).profiles[0]?.name).toBe("打渦的");
   });
 
-  it("改成不合法的埠會被夾回去，不會存進一個開不起來的值", () => {
-    expect(updateIn(storeOf(59222), "id0", { port: 0 }).profiles[0]?.port).toBe(
-      defaultPortFor("desktop"),
+  it("⚠ 換成別份已經在用的客戶端種類不收（其餘照改）", () => {
+    const s = storeOf("desktop", "chrome");
+    const next = updateIn(s, "id1", { kind: "desktop", name: "小號" });
+    expect(next.profiles[1]?.kind).toBe("chrome");
+    expect(next.profiles[1]?.name).toBe("小號");
+    expect(kindTaken(s, "desktop", "id1")).toBe(true);
+    expect(kindTaken(s, "edge", "id1")).toBe(false);
+  });
+
+  it("資料夾名改不動 —— 那是實例身分", () => {
+    expect(updateIn(storeOf("desktop"), "id0", { dataDir: "x" }).profiles[0]?.dataDir).toBe(
+      "profile-id0",
     );
   });
 });
 
 describe("這個實例要用哪一份", () => {
   it("--profile 指定的優先", () => {
-    const r = resolveProfile(storeOf(59222, 9334), ["--profile", "id1"]);
+    const r = resolveProfile(storeOf("desktop", "chrome"), ["--profile", "id1"]);
     expect(r.profile.id).toBe("id1");
     expect(r.ephemeral).toBe(false);
   });
 
-  it("--port 對得上就用那一份（相容舊用法）", () => {
-    const r = resolveProfile(storeOf(59222, 9334), ["--port", "9334"]);
-    expect(r.profile.id).toBe("id1");
-    expect(r.ephemeral).toBe(false);
-  });
-
-  it("⚠ --port 對不上時開臨時配置，不是拒絕啟動", () => {
-    // 那多半是玩家在試一個新埠。拒絕啟動的話他只會看到程式打不開。
-    const r = resolveProfile(storeOf(59222), ["--port", "1221"]);
+  it("⚠ --port 開臨時配置（固定埠的客戶端不寫 DevToolsActivePort，只能這樣接）", () => {
+    const r = resolveProfile(storeOf("desktop"), ["--port", "1221"]);
     expect(r.ephemeral).toBe(true);
-    expect(r.profile.port).toBe(1221);
+    expect(r.profile.cliPort).toBe(1221);
+    expect(r.profile.name).toBe("臨時");
+    // 資料夾照埠分：同一個埠開兩次還是擋得住，也不會搶到正式配置的資料夾。
+    expect(r.profile.dataDir).toBe("temp-port-1221");
+    // 種類可以一起給。
+    expect(resolveProfile(storeOf(), ["--port", "1221", "--kind", "edge"]).profile.kind).toBe(
+      "edge",
+    );
   });
 
-  it("臨時配置的名字裡不放埠 —— 標題會再補一次，變成「臨時 :9334 :9334」", () => {
-    expect(resolveProfile(storeOf(59222), ["--port", "1221"]).profile.name).toBe("臨時");
+  it("⚠ 正式配置沒有命令列埠 —— 引擎只讀 DevToolsActivePort", () => {
+    expect(resolveProfile(storeOf("desktop"), []).profile.cliPort).toBeUndefined();
   });
 
   it("臨時配置也吃 --link（舊的 --link-port 仍然收）", () => {
-    const cloud = resolveProfile(storeOf(59222), [
+    const cloud = resolveProfile(storeOf("desktop"), [
       "--port",
       "1221",
       "--link",
@@ -231,18 +263,18 @@ describe("這個實例要用哪一份", () => {
     ]);
     expect(cloud.profile.link).toBe("wss://x.workers.dev");
     // 舊用法：純數字 = 本機的那個埠。
-    const legacy = resolveProfile(storeOf(59222), ["--port", "1221", "--link-port", "9360"]);
+    const legacy = resolveProfile(storeOf("desktop"), ["--port", "1221", "--link-port", "9360"]);
     expect(legacy.profile.link).toBe("9360");
   });
 
   it("⚠ --link 也蓋過存下來的配置（開發時雙開測試唯一的入口），而且不落地", () => {
-    const store = storeOf(59222);
-    const r = resolveProfile(store, ["--port", "59222", "--link", "local"]);
+    const store = storeOf("desktop");
+    const r = resolveProfile(store, ["--kind", "desktop", "--link", "local"]);
     expect(r.ephemeral).toBe(false);
     expect(r.profile.link).toBe("local");
     expect(store.profiles[0]?.link).toBe(DEFAULT_LINK_TARGET);
     // 不帶就是預設。
-    expect(resolveProfile(store, ["--port", "59222"]).profile.link).toBe(DEFAULT_LINK_TARGET);
+    expect(resolveProfile(store, ["--kind", "desktop"]).profile.link).toBe(DEFAULT_LINK_TARGET);
   });
 
   it("--kind 拿清單裡第一份那種客戶端（開發時 npm run tray 走這條）", () => {
@@ -271,18 +303,17 @@ describe("這個實例要用哪一份", () => {
     };
     expect(resolveProfile(s, ["--kind", "edge"]).profile.id).toBe("id1");
     expect(resolveProfile(s, ["--kind", "chrome"]).profile.id).toBe("id0");
-    // 兩種的預設埠也必須不同，否則兩個瀏覽器不可能同時掛著。
-    expect(defaultPortFor("edge")).not.toBe(defaultPortFor("chrome"));
+    // 兩種的 profile 目錄（也就是 DevToolsActivePort）必須不同，否則會接錯帳號。
     expect(userDataDirFor("edge")).not.toBe(userDataDirFor("chrome"));
   });
 
   it("⚠ --kind 找不到那種客戶端時開臨時的，不是退回桌面版", () => {
     // 退回第一份的話，`npm run tray`（預設 --kind chrome）會安靜地綁上桌面版 ——
     // 而那正是開機自動啟動的安裝版占著的那一個。
-    const r = resolveProfile(storeOf(59222), ["--kind", "chrome"]);
+    const r = resolveProfile(storeOf("desktop"), ["--kind", "chrome"]);
     expect(r.ephemeral).toBe(true);
     expect(r.profile.kind).toBe("chrome");
-    expect(r.profile.port).toBe(defaultPortFor("chrome"));
+    expect(r.profile.dataDir).toBe("temp-chrome");
   });
 
   it("⚠ --kind web 是舊的說法，要當成 chrome", () => {
@@ -298,31 +329,36 @@ describe("這個實例要用哪一份", () => {
     expect(resolveProfile(s, ["--kind", "web"]).profile.id).toBe("id1");
   });
 
-  it("--profile / --port 比 --kind 優先", () => {
-    const r = resolveProfile(storeOf(59222, 9334), ["--kind", "chrome", "--port", "9334"]);
+  it("--profile 比 --kind 優先", () => {
+    const r = resolveProfile(storeOf("desktop", "chrome"), [
+      "--kind",
+      "desktop",
+      "--profile",
+      "id1",
+    ]);
     expect(r.profile.id).toBe("id1");
   });
 
   it("--kind 給了看不懂的值就當作沒給", () => {
-    expect(resolveProfile(storeOf(59222, 9334), ["--kind", "firefox"]).profile.id).toBe("id0");
+    expect(resolveProfile(storeOf("desktop", "chrome"), ["--kind", "firefox"]).profile.id).toBe(
+      "id0",
+    );
   });
 
   it("⚠ 什麼都沒帶就用**第一份**，不看上次用的那份", () => {
     // 「記住上次」在多開的人身上很方便，在其他人身上是「我只是想開插件，
     // 它卻綁到上次測試用的網頁版」，而畫面上只寫「等遊戲…」。
-    const s: ProfileStore = { ...storeOf(59222, 9334), lastUsedId: "id1" };
+    const s: ProfileStore = { ...storeOf("desktop", "chrome"), lastUsedId: "id1" };
     expect(resolveProfile(s, []).profile.id).toBe("id0");
-    expect(resolveProfile(s, []).profile.port).toBe(59222);
   });
 
   it("--profile 指到不存在的 id 就退回第一份，不要開不起來", () => {
-    const s: ProfileStore = { ...storeOf(59222, 9334), lastUsedId: "id1" };
+    const s: ProfileStore = { ...storeOf("desktop", "chrome"), lastUsedId: "id1" };
     expect(resolveProfile(s, ["--profile", "沒這個"]).profile.id).toBe("id0");
   });
 
-  it("新安裝的第一份就是桌面版 :59222", () => {
+  it("新安裝的第一份就是桌面版", () => {
     expect(emptyStore().profiles[0]?.kind).toBe("desktop");
-    expect(emptyStore().profiles[0]?.port).toBe(defaultPortFor("desktop"));
   });
 
   // --- 自訂 COST 規則路徑 ---------------------------------------------------

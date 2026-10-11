@@ -27,10 +27,11 @@
  * `--remote-debugging-port=0` 會讓它挑一個綁得上的埠，並寫進
  * `<user-data-dir>\DevToolsActivePort`（第一行是埠，第二行是 browser ws path）。
  *
- * ⚠ **`0` 只能當啟動參數，不能當設定值。** `127.0.0.1:0` 不是位址，沒有人會
- * 聽它；而且托盤是拿埠當實例身分的（`main.ts` 的 userData 分離、配置不得重複），
- * 存 0 會讓兩份配置撞在一起。所以設定裡永遠是一個真的埠號＝**首選**，0 只在
- * 首選綁不上時出現在命令列上。
+ * ⚠ **`0` 只能當啟動參數，不能拿來連。** `127.0.0.1:0` 不是位址。
+ *
+ * 2026-10-10 起托盤的配置**沒有埠**了：標準作業流程是 `=0`，托盤只讀這個檔
+ * （`resolveDebugPort` 不給 `port`）。明確的埠只剩命令列 `--port` —— 而
+ * ⚠ **固定埠啟動的客戶端不寫這個檔**（實測 Chrome 154），所以那條路只能敲埠。
  *
  * ⚠ **回退要限定在同一種客戶端。** 兩個客戶端各有各的 user-data-dir，所以各有
  * 各的 DevToolsActivePort：
@@ -145,8 +146,15 @@ export interface ResolvedDebugPort {
 }
 
 export interface ResolveDebugPortOptions {
-  /** 設定裡那個埠。永遠先問它 —— 正常情況要走快路，而且結果要可預期。 */
-  port: number;
+  /**
+   * 明確指定的埠（命令列 `--port`）。給了就先問它。
+   *
+   * **不給 = 只看 `DevToolsActivePort`。** 托盤走這條：標準作業流程是
+   * `--remote-debugging-port=0`，沒有任何固定埠值得去敲（2026-10-10 拿掉了配置裡
+   * 的埠）。⚠ 固定埠啟動的客戶端**不寫**這個檔（同日實測 Chrome 154），所以
+   * 用固定埠的人要走 `--port`。
+   */
+  port?: number | undefined;
   /**
    * 這個客戶端的 user-data-dir。**不給就不回退** —— 沒有它就沒有辦法確定
    * 找到的埠屬於哪一個客戶端，寧可連不上也不要接到別人的遊戲上。
@@ -193,6 +201,19 @@ export async function resolveDebugPort(
   options: ResolveDebugPortOptions,
 ): Promise<ResolvedDebugPort | null> {
   const fetchImpl = options.fetchImpl ?? fetch;
+  const dir = options.userDataDir;
+
+  if (options.port === undefined) {
+    const recorded = dir === undefined || dir === "" ? null : readDevToolsActivePort(dir);
+    if (recorded === null) return null;
+    try {
+      await discoverDebuggerUrl(recorded, fetchImpl);
+      return { port: recorded, source: "devtools-file" };
+    } catch {
+      return null; // 當掉留下的舊檔
+    }
+  }
+
   const configured: ResolvedDebugPort = { port: options.port, source: "configured" };
 
   let configuredLive = false;
@@ -203,7 +224,6 @@ export async function resolveDebugPort(
     // 可能是遊戲還沒開，也可能是埠變了。下面的檔案會回答。
   }
 
-  const dir = options.userDataDir;
   const recorded = dir === undefined || dir === "" ? null : readDevToolsActivePort(dir);
   // 沒有檔案、或檔案講的就是設定值 —— 沒有第二個候選，設定值說了算。
   if (recorded === null || recorded === options.port) return configuredLive ? configured : null;
@@ -257,11 +277,14 @@ async function describeListener(port: number, fetchImpl: typeof fetch): Promise<
  * 叫玩家換埠。
  */
 export async function explainDebugPort(options: {
-  port: number;
+  /** 不給 = 只看 `DevToolsActivePort`（托盤），見 {@link ResolveDebugPortOptions.port}。 */
+  port?: number | undefined;
   userDataDir?: string | undefined;
   fetchImpl?: typeof fetch;
 }): Promise<string> {
   const fetchImpl = options.fetchImpl ?? fetch;
+  if (options.port === undefined)
+    return await explainActivePortFile(options.userDataDir, fetchImpl);
   const state = await probePortState(options.port);
 
   if (state === "blocked") {
@@ -292,6 +315,18 @@ export async function explainDebugPort(options: {
   const dir = options.userDataDir;
   const recorded = dir === undefined || dir === "" ? null : readDevToolsActivePort(dir);
   if (recorded !== null && recorded !== options.port) {
+    // ⚠ 說「也連不上」之前要真的問一次。2026-10-10 這句對著好好的 :52710 講了
+    // 一整晚 —— 埠沒問題，是插件接錯分頁（見 session.ts 的 selectGamePage）。
+    const live = await discoverDebuggerUrl(recorded, fetchImpl).then(
+      () => true,
+      () => false,
+    );
+    if (live) {
+      return (
+        `客戶端開在 :${recorded}（${join(dir ?? "", DEVTOOLS_ACTIVE_PORT_FILE)}），` +
+        `那個埠連得上，但上面還找不到遊戲畫面 —— 遊戲還在載入，或停在開頭那一頁。`
+      );
+    }
     return (
       `127.0.0.1:${options.port} 沒有人在聽，但客戶端記下的是 :${recorded}` +
       `（${join(dir ?? "", DEVTOOLS_ACTIVE_PORT_FILE)}），而那個埠現在也連不上 —— ` +
@@ -305,4 +340,31 @@ export async function explainDebugPort(options: {
     `spawn 時有沒有清掉 ELECTRON_RUN_AS_NODE → ` +
     `app.asar 是不是視窗版（153KB 那個是網頁版，開完瀏覽器就自己退出）。`
   );
+}
+
+/**
+ * 只看 `DevToolsActivePort` 的那一版（托盤）。**不提任何埠號以外的設定** ——
+ * 玩家沒有埠可以設，叫他「換一個埠」是叫他去找一個不存在的欄位。
+ */
+async function explainActivePortFile(
+  dir: string | undefined,
+  fetchImpl: typeof fetch,
+): Promise<string> {
+  const file = join(dir ?? "", DEVTOOLS_ACTIVE_PORT_FILE);
+  const recorded = dir === undefined || dir === "" ? null : readDevToolsActivePort(dir);
+  if (recorded === null) {
+    return (
+      `還沒找到遊戲（${file} 不存在）。檢查順序：遊戲開了沒 → ` +
+      `啟動選項有沒有帶 --remote-debugging-port=0（不能對已經在跑的程序補掛，` +
+      `要把遊戲完全關掉再開）。`
+    );
+  }
+  const live = await discoverDebuggerUrl(recorded, fetchImpl).then(
+    () => true,
+    () => false,
+  );
+  return live
+    ? `客戶端開在 :${recorded}，連得上，但上面還找不到遊戲畫面 —— 遊戲還在載入，或停在開頭那一頁。`
+    : `客戶端記下的是 :${recorded}（${file}），但那個埠連不上 —— ` +
+        `多半是上次當掉留下的舊檔。把遊戲完全關掉再開一次。`;
 }

@@ -36,6 +36,20 @@ describe("selectGamePage", () => {
     expect(selectGamePage([WEB_PAGE])?.targetId).toBe("WEB");
   });
 
+  it("網頁版照網址選，不選排在前面的別的分頁", () => {
+    // 2026-10-10 實測：Target.getTargets 把 Discord 排在遊戲前面。
+    const picked = selectGamePage([
+      {
+        targetId: "DISCORD",
+        type: "page",
+        url: "https://discord.com/channels/1/2",
+        title: "Discord",
+      },
+      WEB_PAGE,
+    ]);
+    expect(picked?.targetId).toBe("WEB");
+  });
+
   it("選出來的 URL 已經去識別化", () => {
     const picked = selectGamePage([WEB_PAGE]);
     expect(picked?.safeUrl).not.toContain("76561199854644708");

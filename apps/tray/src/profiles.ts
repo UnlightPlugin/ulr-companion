@@ -5,7 +5,7 @@
  * 讀檔、寫檔，以及**多個實例同時寫同一個檔案**的處理。
  *
  * ⚠ **這個檔案存在共用位置，不在 per-instance 的 userData 底下。**
- * `main.ts` 會把 userData 依埠分開（那是兩個 Electron 實例不打架的關鍵），
+ * `main.ts` 會把 userData 依配置分開（那是兩個 Electron 實例不打架的關鍵），
  * 但配置清單本身必須是**所有實例看到同一份**，否則「在 A 視窗新增的配置
  * 在 B 視窗看不到」。
  *
@@ -33,10 +33,10 @@ export {
   DEFAULT_APPLY_DELAY_SECONDS,
   DEFAULT_DECK_MODE,
   isDeckMode,
+  kindTaken,
   DEFAULT_COST_RULE_MODE,
   DEFAULT_EDIT_STEP,
   DEFAULT_MATCH_PREFS,
-  defaultPortFor,
   EDIT_STEPS,
   EDIT_UNITS,
   MAX_APPLY_DELAY_SECONDS,
@@ -52,7 +52,7 @@ export {
 /**
  * 配置清單存在哪。
  *
- * ⚠ 用 `appData` 而不是 `userData` —— 後者已經被 `main.ts` 依埠改掉了，
+ * ⚠ 用 `appData` 而不是 `userData` —— 後者已經被 `main.ts` 依配置改掉了，
  * 存進去的話每個實例都會有自己的一份清單，「多開」就永遠只看得到自己。
  */
 export function storePath(): string {

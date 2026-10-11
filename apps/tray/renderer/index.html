@@ -4582,22 +4582,30 @@
       PAGES["settings/profiles"] = () => {
         const list = snap?.store.profiles ?? [];
         const meId = snap?.profile.id;
-        const ports = snap?.gamePorts ?? {};
+        const alives = snap?.gameAlive ?? {};
+        // ⚠ 同一種客戶端只能有一份（profiles-core 的 kindTaken）：同種的兩份讀同一個
+        // DevToolsActivePort，會接上同一個遊戲。舊設定檔可能已經有重複的 —— 標出來。
+        const kindCount = {};
+        for (const p of list) kindCount[p.kind] = (kindCount[p.kind] ?? 0) + 1;
+        const allKindsUsed = Object.keys(KIND_TEXT).every((k) => kindCount[k] > 0);
 
         const row = (p) => {
           const self = p.id === meId;
-          // ⚠ 別份配置只敢說「那個埠上有沒有遊戲在回話」。一個視窗只管一個
+          // ⚠ 別份配置只敢說「那個客戶端有沒有在回話」。一個視窗只管一個
           // 客戶端，它沒辦法知道另一份配置的插件狀態。
-          const alive = ports[p.port];
-          const state = self
-            ? snap?.status?.connected
-              ? "這個視窗（已接上）"
-              : "這個視窗（等遊戲…）"
-            : alive === true
-              ? "遊戲開著"
-              : alive === false
-                ? "沒有回應"
-                : "—";
+          const alive = alives[p.id];
+          const state =
+            kindCount[p.kind] > 1
+              ? `跟別份都是${KIND_TEXT[p.kind] ?? p.kind}，會接到同一個遊戲`
+              : self
+                ? snap?.status?.connected
+                  ? "這個視窗（已接上）"
+                  : "這個視窗（等遊戲…）"
+                : alive === true
+                  ? "遊戲開著"
+                  : alive === false
+                    ? "沒有回應"
+                    : "—";
           // ⚠ 中間人那一列拿掉了（玩家 2026-10-04）：一律是雲端，畫面上不給改。
           // 輸入與按鈕的事件都是 closest("tr[data-id]") 找配置。
           const cls = self ? " self" : "";
@@ -4607,15 +4615,14 @@
                     ${Object.entries(KIND_TEXT)
                       .map(
                         ([k, label]) =>
-                          `<option value="${k}"${p.kind === k ? " selected" : ""}>${label}</option>`,
+                          `<option value="${k}"${p.kind === k ? " selected" : kindCount[k] > 0 ? " disabled" : ""}>${label}</option>`,
                       )
                       .join("")}
                   </select></td>
-              <td><input type="number" data-field="port" value="${p.port}" /></td>
               <td class="state">${esc(state)}</td>
               <td class="acts">
                 ${self ? "" : `<button data-act="launch">開新實例</button>`}
-                <button data-act="dup">複製</button>
+                ${allKindsUsed ? "" : `<button data-act="dup">複製</button>`}
                 ${list.length > 1 && !self ? `<button data-act="del">刪除</button>` : ""}
               </td>
             </tr>`;
@@ -4623,33 +4630,33 @@
 
         const table = list.length
           ? `<table class="profiles">
-               <thead><tr><th>名稱</th><th>客戶端</th><th>遊戲埠</th><th>狀態</th><th></th></tr></thead>
+               <thead><tr><th>名稱</th><th>客戶端</th><th>狀態</th><th></th></tr></thead>
                <tbody>${list.map(row).join("")}</tbody>
              </table>`
           : `<div class="hint">清單是空的。按下面的「新增配置」建一份 ——
-               第一份預設是桌面版，第二份會自動變成 Chrome 並換一個埠。
+               第一份預設是桌面版，第二份會自動變成 Chrome。
                要接 Edge 的話在「客戶端」那一格改成 Edge 即可（它有自己的
-               瀏覽器 profile 與埠，跟 Chrome 可以同時開）。</div>`;
+               瀏覽器 profile，跟 Chrome 可以同時開）。</div>`;
 
         return (
           head("配置", "一個視窗管一個遊戲客戶端。要同時管兩個就建兩份配置，各開一個實例。") +
           `<div class="card">
              ${table}
-             <div class="row"><span></span><span><button id="addProfile">新增配置…</button></span></div>
+             ${allKindsUsed ? "" : `<div class="row"><span></span><span><button id="addProfile">新增配置…</button></span></div>`}
              <!--
-               ⚠ 這裡以前有五行說明。留下的兩行是「不知道就會壞掉」的：改埠不重開
-               沒有任何反應（引擎綁在啟動時的埠上）、兩份撞同一個埠時第二份是
-               **開不起來**而不是報錯。其餘三行（狀態欄的語意、中間人留空＝雲端、
-               local 是什麼）都是「看得懂欄位就猜得到」的，刪掉不會有人卡住。
+               ⚠ 埠那一欄 2026-10-10 拿掉了：標準作業流程是 --remote-debugging-port=0，
+               插件只讀客戶端自己寫的 DevToolsActivePort。留下的兩行是「不知道就會
+               卡住」的：換客戶端不重開沒有反應（引擎綁在啟動時的客戶端上）、
+               同一種只能一份（下拉選單裡別份用掉的那幾種是灰的）。
              -->
              <div class="hint">
-               ⚠ 改埠要<b>重開那個實例</b>才生效。<br />
-               ⚠ 兩份不能用同一個埠 —— 撞到的話第二份會<b>安靜地開不起來</b>。
+               ⚠ 改客戶端要<b>重開那個實例</b>才生效。<br />
+               ⚠ 同一種客戶端只能有一份 —— 兩份會接到<b>同一個遊戲</b>。
              </div>
            </div>` +
           (snap?.ephemeral
             ? `<div class="card"><div class="hint warn" style="margin-top:0">
-                 這個視窗是命令列開的臨時配置（<b>:${snap.profile.port}</b>），<b>不在清單裡</b>。
+                 這個視窗是命令列開的臨時配置${snap.profile.cliPort ? `（<b>:${snap.profile.cliPort}</b>）` : ""}，<b>不在清單裡</b>。
                  改它的設定不會存下來 —— 要留著就按上面的「新增配置」。
                </div></div>`
             : "")
@@ -4663,10 +4670,14 @@
        */
       function clientKindRow(p) {
         if (!p) return "";
+        // 別份配置已經是那一種的不給選（同一種客戶端只能有一份）。
+        const taken = new Set(
+          (snap?.store.profiles ?? []).filter((o) => o.id !== p.id).map((o) => o.kind),
+        );
         const opts = Object.entries(KIND_TEXT)
           .map(
             ([k, label]) =>
-              `<option value="${k}"${p.kind === k ? " selected" : ""}>${label}</option>`,
+              `<option value="${k}"${p.kind === k ? " selected" : taken.has(k) ? " disabled" : ""}>${label}</option>`,
           )
           .join("");
         return `<div class="row"><span class="dim">客戶端</span>${
@@ -5138,16 +5149,7 @@
         const row = t.closest("tr[data-id]");
         if (row && t.dataset.field) {
           editing = null;
-          const field = t.dataset.field;
-          const value = field === "port" ? Number(t.value) : t.value;
-          const patch = { [field]: value };
-          // 換客戶端種類時順手把埠帶到那一種的預設，玩家少改一個欄位。
-          if (field === "kind") {
-            window.ulr.profiles.defaultPort(value).then((port) => {
-              window.ulr.profiles.edit(row.dataset.id, { kind: value, port }).then(apply);
-            });
-            return;
-          }
+          const patch = { [t.dataset.field]: t.value };
           return void window.ulr.profiles.edit(row.dataset.id, patch).then(apply);
         }
       });

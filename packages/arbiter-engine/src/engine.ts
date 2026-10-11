@@ -248,11 +248,12 @@ export const SPEED_RENEW_MS = Math.floor(DEFAULT_SPEED_LEASE_MS / 3);
 
 export interface EngineOptions {
   /**
-   * 遊戲的 CDP 埠。桌面版 59222、網頁版 59223（都是**首選**，不是保證）。
+   * 明確指定的 CDP 埠（命令列 `--port`）。給了就先問它，連不上再讀
+   * `userDataDir` 裡的 `DevToolsActivePort`。
    *
-   * 連不上時引擎會去讀 `userDataDir` 裡的 `DevToolsActivePort` 找回實際的埠，
-   * 所以這個值錯了不見得會失敗 —— 但**它仍然是實例的身分**（托盤拿它分 userData、
-   * 兩份配置不得重複），所以不可以填 0。理由見 `cdp-adapter/debug-port.ts`。
+   * **不給、但給了 `userDataDir` = 只看 `DevToolsActivePort`。** 托盤走這條 ——
+   * 標準作業流程是 `--remote-debugging-port=0`，沒有固定埠值得敲。兩個都不給
+   * 才退回 `DEFAULT_DEBUG_PORT`。理由見 `cdp-adapter/debug-port.ts`。
    */
   port?: number;
   /**
@@ -2619,12 +2620,20 @@ export class ArbiterEngine {
    * 另開一條連線對頂層頁面下 `Page.reload`（見 `reload-page.ts`）。
    */
   async reloadGamePage(): Promise<void> {
-    const preferred = this.#options.port ?? DEFAULT_DEBUG_PORT;
+    const preferred = this.#preferredPort();
     const port =
       this.#status.port ??
       (await resolveDebugPort({ port: preferred, userDataDir: this.#options.userDataDir }))?.port ??
       preferred;
+    if (port === undefined) throw new Error("還沒找到遊戲（客戶端沒有留下 DevToolsActivePort）");
     await reloadGamePage({ port });
+  }
+
+  /** 明確指定的埠；`undefined` = 只看 `DevToolsActivePort`（見 `EngineOptions.port`）。 */
+  #preferredPort(): number | undefined {
+    const { port, userDataDir } = this.#options;
+    if (port !== undefined) return port;
+    return userDataDir === undefined || userDataDir === "" ? DEFAULT_DEBUG_PORT : undefined;
   }
 
   /**
@@ -3579,7 +3588,7 @@ export class ArbiterEngine {
     title: string;
     port: number;
   } | null> {
-    const preferred = this.#options.port ?? DEFAULT_DEBUG_PORT;
+    const preferred = this.#preferredPort();
     const userDataDir = this.#options.userDataDir;
 
     for (let attempt = 1; !this.#stopping; attempt++) {
@@ -3588,14 +3597,18 @@ export class ArbiterEngine {
       // 用「遊戲還沒開」那一刻的答案connect一輩子。
       const resolved = await resolveDebugPort({ port: preferred, userDataDir });
       const port = resolved?.port ?? preferred;
-      const adapter = createCdpAdapter({ port });
+      // 只看檔案、檔案又沒有活的埠：沒有東西可以連，跟連不上走同一條路。
+      const adapter = port === undefined ? null : createCdpAdapter({ port });
 
       try {
+        if (adapter === null || port === undefined) {
+          throw new Error("客戶端沒有留下可以連的 DevToolsActivePort");
+        }
         const session = await adapter.connect();
         // 桌面版重載的空檔只接得到外殼：畫面大小先套，不等遊戲（見 adapter 那支的說明）
         await adapter.applyDisplayToAttachedShell(this.#display).catch(() => null);
         await adapter.waitForGame();
-        if (port !== preferred) {
+        if (preferred !== undefined && port !== preferred) {
           // 這件事一定要講。玩家設定裡看到的是 preferred，而之後所有指令
           // （CLI 的 --port、arbiter、probe）要接的是這一個。
           this.#log(
@@ -3605,7 +3618,7 @@ export class ArbiterEngine {
         return { adapter, title: session.title, port };
       } catch (err) {
         // 連不上就把這一輪的 adapter 收乾淨，不要留著等 GC。
-        await adapter.disconnect().catch(() => {});
+        await adapter?.disconnect().catch(() => {});
         // 桌面版重載的空檔先接到了外殼，遊戲 iframe 剛冒出來 —— 馬上重挑就接得到。
         // 不睡、也不診斷埠（埠好好的，診斷只會印出一句錯的話）。
         if (err instanceof GameFrameAppearedError) continue;

@@ -8,17 +8,16 @@
  *     npm run tray -- --kind edge       第一份 Edge 的配置
  *     npm run tray -- --kind desktop    第一份桌面版的配置
  *     npm run tray -- --profile <id>    指定配置
- *     npm run tray -- --port 59222       相容用法：對得上就用那份，對不上開臨時的
+ *     npm run tray -- --port 9334        客戶端用固定埠啟動時（不寫 DevToolsActivePort）開臨時配置
  *
  * ⚠ **兩份要能同時活著，而 Electron 預設會擋。** 兩個關卡：
  *
  * 1. `userData` 預設是同一個目錄，兩個實例會搶同一份 cache 與 LevelDB，
- *    症狀是第二個開起來畫面空白或直接退出。→ 依埠分開。
- * 2. 一般 app 會用 `requestSingleInstanceLock()` 防止重複開啟。這裡**刻意
- *    不用** —— 雙開正是預期用法。要防的是「同一個埠開兩份」，而那由
- *    userData 目錄的鎖自然擋掉。
+ *    症狀是第二個開起來畫面空白或直接退出。→ 依配置分開（`Profile.dataDir`）。
+ * 2. `requestSingleInstanceLock()` 依 userData 分開，所以擋掉的只有「同一份
+ *    配置開兩份」（見下面關卡 2 的說明）。
  *
- * ⚠ **配置清單不能放在 userData 底下**（它已經依埠分開了）。見 `profiles.ts`。
+ * ⚠ **配置清單不能放在 userData 底下**（它已經依配置分開了）。見 `profiles.ts`。
  *
  * UI 只做三件事：畫 `EngineStatus`、呼叫 `setPrefs()`、維護配置清單。
  * 所有仲裁規則都在 `@ulr/arbiter-engine` 裡，跟命令列跑的是同一份。
@@ -222,8 +221,8 @@ import type {
 import {
   addProfile,
   clientLabel,
-  defaultPortFor,
   isDeckMode,
+  kindTaken,
   EDIT_STEPS,
   EDIT_UNITS,
   loadStore,
@@ -287,14 +286,15 @@ let ephemeral = false;
 const APP_DIR = join(app.getPath("appData"), "ulr-companion");
 
 // ⚠ 關卡 1：兩份實例不能共用 userData。
-// 必須在 app ready 之前設，而且要在讀完配置之後 —— 埠是從配置來的。
+// 必須在 app ready 之前設，而且要在讀完配置之後 —— 資料夾名是從配置來的
+// （舊配置沿用以前的 `port-59222`，見 `Profile.dataDir`）。
 {
   // `loadStore()` 會用到 app.getPath，那在 ready 之前就可以呼叫。
   store = loadStore();
   const resolved = resolveProfile(store, process.argv);
   profile = resolved.profile;
   ephemeral = resolved.ephemeral;
-  app.setPath("userData", join(APP_DIR, `port-${profile.port}`));
+  app.setPath("userData", join(APP_DIR, profile.dataDir));
 }
 
 /**
@@ -313,8 +313,8 @@ const APP_DIR = join(app.getPath("appData"), "ulr-companion");
  *   - 兩個引擎各自跟中間人連線、各自算配對
  *
  * `requestSingleInstanceLock()` 是**依 userData 分開**的，而上面那一段已經把
- * userData 依埠分開了 —— 所以多開（不同配置＝不同埠）完全不受影響，被擋掉的
- * 剛好只有「同一個埠開兩份」這一種，也就是我們本來就想擋的那一種。
+ * userData 依配置分開了 —— 所以多開（不同配置）完全不受影響，被擋掉的
+ * 剛好只有「同一份配置開兩份」這一種，也就是我們本來就想擋的那一種。
  *
  * ⚠ 第二份不是安靜地死掉：它會把第一份的視窗叫出來，因為玩家按下「開新實例」
  * 或再點一次捷徑時想看到的就是那個視窗。**但開機自動啟動那次不叫**
@@ -356,17 +356,17 @@ function log(line: string): void {
 }
 
 /**
- * 每個遊戲埠上有沒有一個開著 debug port 的客戶端在回話。
+ * 每份配置（id）的客戶端有沒有一個開著 debug port 的在回話。
  *
- * ⚠ **這是配置表唯一能對「別份配置」說的話。** 一個托盤實例只綁一個埠，引擎
- * 也只看自己那一個 —— 它沒有任何辦法知道另一份配置的插件狀態（那是另一個
- * process，甚至可能根本沒開）。但「那個埠上有沒有遊戲」是問得到的：CDP 的
- * `/json/version` 就是拿來回答這件事的。
+ * ⚠ **這是配置表唯一能對「別份配置」說的話。** 一個托盤實例只綁一個客戶端，
+ * 引擎也只看自己那一個 —— 它沒有任何辦法知道另一份配置的插件狀態（那是另一個
+ * process，甚至可能根本沒開）。但「那個客戶端有沒有開著」是問得到的：讀它的
+ * `DevToolsActivePort`、再問 CDP 的 `/json/version`。
  *
  * 所以表格裡自己那一列顯示引擎的真實狀態，其他列只敢說「遊戲開著／沒有回應」。
  * 混成同一句話會讓玩家以為插件已經在管另一個客戶端了。
  */
-const gamePorts = new Map<number, boolean>();
+const gameAlive = new Map<string, boolean>();
 let probeTimer: ReturnType<typeof setInterval> | null = null;
 
 /** 探測間隔。玩家盯著設定頁看的時候要夠即時，但這是每 N 秒的 HTTP 請求。 */
@@ -378,7 +378,7 @@ const probeFetch: typeof fetch = (input, init) =>
   fetch(input, { ...init, signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
 
 /**
- * 把每一份配置的遊戲埠敲一遍。
+ * 把每一份配置的客戶端問一遍。
  *
  * ⚠ **只在設定視窗看得見的時候做。** 托盤程式大部分時間是背景常駐的，
  * 沒人在看的時候每四秒發三個 HTTP 請求是純粹的浪費（而且會出現在防火牆與
@@ -387,21 +387,18 @@ const probeFetch: typeof fetch = (input, init) =>
 async function probeGamePorts(): Promise<void> {
   if (window === null || !window.isVisible()) return;
   const seen = await Promise.all(
-    store.profiles.map(async (p): Promise<readonly [number, boolean]> => {
-      // ⚠ 走 `resolveDebugPort` 而不是直接敲設定裡那個埠：客戶端可能挑到別的埠
-      // （首選被 Windows 保留時就會這樣）。只敲設定值的話，表格會說「沒有回應」，
-      // 而玩家的遊戲明明開著 —— 那正是這一輪要修掉的誤導。
-      // 回退範圍限定在這份配置自己的 user-data-dir，不會抓到另一種客戶端。
+    store.profiles.map(async (p): Promise<readonly [string, boolean]> => {
+      // 讀這份配置自己那種客戶端的 DevToolsActivePort（`=0` 挑到哪就是哪），
+      // 不會抓到另一種客戶端。
       const live = await resolveDebugPort({
-        port: p.port,
         userDataDir: userDataDirFor(p.kind),
         fetchImpl: probeFetch,
       });
-      return [p.port, live !== null];
+      return [p.id, live !== null];
     }),
   );
-  gamePorts.clear();
-  for (const [port, alive] of seen) gamePorts.set(port, alive);
+  gameAlive.clear();
+  for (const [id, alive] of seen) gameAlive.set(id, alive);
   pushState();
 }
 
@@ -518,7 +515,8 @@ function buildMenu(): Menu {
           others.length === 0
             ? [{ label: "（沒有其他配置，去設定 › 配置新增）", enabled: false }]
             : others.map((p) => ({
-                label: `${p.name}  :${p.port}`,
+                label:
+                  p.name === clientLabel(p.kind) ? p.name : `${p.name}（${clientLabel(p.kind)}）`,
                 click: () => launchInstance(p.id),
               })),
       },
@@ -605,8 +603,8 @@ interface Snapshot {
   bootExt: { dir: string; installed: string | null; bundled: string | null; guideUrl: string };
   /** 網頁版教學頁用：這台機器上的 Chrome／Edge 怎麼帶除錯埠開。 */
   browsers: { chrome: BrowserSetup; edge: BrowserSetup };
-  /** 遊戲埠 → 那個埠上有沒有客戶端在回話。見 `gamePorts` 的註解。 */
-  gamePorts: Record<number, boolean>;
+  /** 配置 id → 那份的客戶端有沒有在回話。見 `gameAlive` 的註解。 */
+  gameAlive: Record<string, boolean>;
   /** 目前載入的 COST 規則摘要。`null` = 沒選。 */
   costRule: (CostRuleInfo & { fileName: string }) | null;
   /**
@@ -3451,7 +3449,7 @@ function snapshot(): Snapshot {
       guideUrl: USERSCRIPT_GUIDE_URL,
     },
     browsers: { chrome: browserSetup("chrome"), edge: browserSetup("edge") },
-    gamePorts: Object.fromEntries(gamePorts),
+    gameAlive: Object.fromEntries(gameAlive),
     costRule: costRule === null ? null : { ...costRule, fileName: basename(costRule.path) },
     costRuleError: costRuleError,
     costRuleMode: profile.costRuleMode,
@@ -4336,9 +4334,9 @@ app.whenReady().then(() => {
   markUsed(profile.id);
 
   engine = new ArbiterEngine({
-    port: profile.port,
-    // 埠只是首選。連不上時引擎會從這個目錄的 DevToolsActivePort 找回實際的埠 ——
-    // 目錄跟著 kind 走，所以救回來的一定是這份配置要管的那個客戶端。
+    // 不給埠 = 只讀這個目錄的 DevToolsActivePort（標準作業流程是 `=0`）。目錄跟著
+    // kind 走，所以找到的一定是這份配置要管的那個客戶端。命令列 `--port` 才帶埠。
+    ...(profile.cliPort !== undefined ? { port: profile.cliPort } : {}),
     userDataDir: userDataDirFor(profile.kind),
     link: profile.link,
     prefs: profile.prefs,
@@ -4532,12 +4530,12 @@ app.whenReady().then(() => {
   });
   ipcMain.handle(
     "ulr:profile-edit",
-    (_event, id: string, patch: { name?: string; port?: number; kind?: ClientKind }) => {
-      // 只挑這三格。中間人不給改（見 Profile.link），渲染層送什麼來都不收。
-      const { name, port, kind } = patch;
+    (_event, id: string, patch: { name?: string; kind?: ClientKind }) => {
+      // 只挑這兩格。中間人不給改（見 Profile.link）、埠已經沒有了（2026-10-10），
+      // 渲染層送什麼來都不收。種類撞到別份的話 `updateIn` 不收那一格。
+      const { name, kind } = patch;
       editProfile(id, {
         ...(name !== undefined ? { name } : {}),
-        ...(port !== undefined ? { port } : {}),
         ...(kind !== undefined ? { kind } : {}),
       });
       return snapshot();
@@ -5119,7 +5117,6 @@ app.whenReady().then(() => {
     return { enabled: profile.hiddenStages, stages: HIDDEN_STAGES, status: await stageStatus() };
   });
 
-  ipcMain.handle("ulr:profile-default-port", (_event, kind: ClientKind) => defaultPortFor(kind));
   ipcMain.handle("ulr:profile-launch", (_event, id: string) => {
     launchInstance(id);
     return snapshot();
@@ -5169,6 +5166,12 @@ app.whenReady().then(() => {
   ipcMain.handle("ulr:client-kind", async (_event, raw: unknown) => {
     if (raw !== "desktop" && raw !== "chrome" && raw !== "edge") return snapshot();
     if (ephemeral || raw === profile.kind) return snapshot();
+    // 別份已經是這一種：`updateIn` 不會收，重開只是白重開一次。
+    if (kindTaken(store, raw, profile.id)) {
+      log(`⚠ 已經有一份 ${clientLabel(raw)} 的配置了，同一種客戶端只能有一份`);
+      pushState();
+      return snapshot();
+    }
     log(`· 客戶端改為 ${raw}，重開插件`);
     editProfile(profile.id, { kind: raw });
     await restart();
@@ -5190,9 +5193,9 @@ app.whenReady().then(() => {
     try {
       const r = await ensureBrowser({
         family,
-        // ⚠ 別族不能用 profile.port：桌面版配置的埠上坐著桌面版遊戲，問得到
-        // 就會被當成「這個瀏覽器已經開著」，然後什麼都沒開。
-        port: family === profile.kind ? profile.port : browserDebugPort(family),
+        // 只拿來問「是不是已經開著」—— `alwaysAutoPort` 一律用 `=0` 開，而判斷
+        // 「開著」時檔案（profileDir 的 DevToolsActivePort）優先於這個埠。
+        port: browserDebugPort(family),
         profileDir: userDataDirFor(family),
         alwaysAutoPort: true,
         // Edge 每次啟動都臨時掛上 ULR Boot（見 loadExtensionArgs）。資料夾裡沒有

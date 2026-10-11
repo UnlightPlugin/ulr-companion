@@ -26,7 +26,6 @@ contextBridge.exposeInMainWorld("ulr", {
     remove: (id: string) => ipcRenderer.invoke("ulr:profile-remove", id),
     edit: (id: string, patch: Record<string, unknown>) =>
       ipcRenderer.invoke("ulr:profile-edit", id, patch),
-    defaultPort: (kind: string) => ipcRenderer.invoke("ulr:profile-default-port", kind),
     /** 開一個綁在這份配置上的新視窗（＝多開）。 */
     launch: (id: string) => ipcRenderer.invoke("ulr:profile-launch", id),
   },

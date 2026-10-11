@@ -153,6 +153,56 @@ describe("resolveDebugPort", () => {
     // 插件，它卻接到桌面版的遊戲去」，而且兩邊看起來都正常。
     expect(await resolveDebugPort({ port: 59223, fetchImpl: fetchAnswering(40000) })).toBeNull();
   });
+
+  describe("不給埠（托盤：只看 DevToolsActivePort）", () => {
+    it("檔案的埠活著就用它", async () => {
+      expect(
+        await resolveDebugPort({
+          userDataDir: userDataDir("40000"),
+          fetchImpl: fetchAnswering(40000),
+        }),
+      ).toEqual({ port: 40000, source: "devtools-file" });
+    });
+
+    it("⚠ 不去敲任何固定埠 —— 59222 上坐著別的程式也不會接過去", async () => {
+      expect(
+        await resolveDebugPort({ userDataDir: userDataDir(), fetchImpl: fetchAnswering(59222) }),
+      ).toBeNull();
+    });
+
+    it("檔案是舊的（那個埠死了）就回 null", async () => {
+      expect(
+        await resolveDebugPort({ userDataDir: userDataDir("40000"), fetchImpl: fetchAnswering() }),
+      ).toBeNull();
+    });
+  });
+});
+
+describe("explainDebugPort（不給埠）", () => {
+  it("沒有檔：叫玩家檢查遊戲開了沒、啟動選項有沒有 =0，不提換埠", async () => {
+    const msg = await explainDebugPort({ userDataDir: userDataDir(), fetchImpl: fetchAnswering() });
+    expect(msg).toContain("--remote-debugging-port=0");
+    expect(msg).not.toContain("換一個埠");
+    expect(msg).not.toContain("59222");
+  });
+
+  it("檔案的埠連得上：說找不到遊戲畫面，不叫玩家重開", async () => {
+    const msg = await explainDebugPort({
+      userDataDir: userDataDir("40000"),
+      fetchImpl: fetchAnswering(40000),
+    });
+    expect(msg).toContain("連得上");
+    expect(msg).not.toContain("關掉再開");
+  });
+
+  it("檔案的埠連不上：舊檔，叫玩家重開遊戲", async () => {
+    const msg = await explainDebugPort({
+      userDataDir: userDataDir("40000"),
+      fetchImpl: fetchAnswering(),
+    });
+    expect(msg).toContain(":40000");
+    expect(msg).toContain("完全關掉再開");
+  });
 });
 
 describe("explainDebugPort", () => {
@@ -223,6 +273,28 @@ describe("explainDebugPort", () => {
     });
     expect(msg).toContain(":40000");
     expect(msg).toContain("完全關掉再開");
+  });
+
+  it("客戶端記的埠其實連得上 → 不能說是舊檔、不能叫玩家重開", async () => {
+    // 2026-10-10：:52710 好好的，插件卻對著它講了一整晚「多半是上次當掉留下的舊檔」。
+    const server = createServer();
+    const port = await new Promise<number>((resolve) => {
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address();
+        resolve(typeof addr === "object" && addr !== null ? addr.port : 0);
+      });
+    });
+    await new Promise<void>((r) => server.close(() => r()));
+
+    const msg = await explainDebugPort({
+      port,
+      userDataDir: userDataDir("40000"),
+      fetchImpl: fetchAnswering(40000),
+    });
+    expect(msg).toContain(":40000");
+    expect(msg).toContain("連得上");
+    expect(msg).not.toContain("舊檔");
+    expect(msg).not.toContain("關掉再開");
   });
 });
 

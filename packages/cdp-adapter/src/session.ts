@@ -112,9 +112,13 @@ export function selectGamePage(targets: readonly RawTargetInfo[]): PageTarget | 
   // 所以遊戲來源的 iframe target 存在時直接 attach 它。
   const chosen =
     gameFrames[0] ??
+    // 網頁版直接是 https 的遊戲頁。⚠ 要照網址認，不能拿「第一個分頁」：
+    // 玩家的瀏覽器常同時開著別的分頁（2026-10-10 是 Discord），而
+    // `Target.getTargets` 不照分頁順序排 —— 接到 Discord 上會每 30 秒
+    // 「試過 N 個都沒有 Phaser」一次，永遠接不上。
+    pages.find((p) => isGameOriginUrl(p.url)) ??
     // 桌面版的殼是 file://…/index.html，它把遊戲載在 iframe 裡 —— 舊客戶端的
-    // iframe 跟殼同一個程序，attach 殼就找得到。網頁版則直接是 https 的遊戲頁。
-    // 兩種都可能，優先取 file:// 的殼（桌面版），否則取第一個。
+    // iframe 跟殼同一個程序，attach 殼就找得到。
     pages.find((p) => p.url.startsWith("file://")) ??
     pages[0];
   if (chosen === undefined) return null;

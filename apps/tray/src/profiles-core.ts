@@ -9,9 +9,9 @@
  * 分開的理由跟 `arbiter-link/protocol.ts` 一樣：這裡面有三條「錯了會安靜地
  * 壞掉」的規則，而它們必須測得到 ——
  *
- * 1. 兩份配置**不能用同一個遊戲埠**（撞到的話第二份根本開不起來）
+ * 1. **同一種客戶端只能有一份**（同種的兩份會接上同一個遊戲，見 `kindTaken`）
  * 2. **最後一份刪不掉**（清單空了視窗沒有東西可綁，而且沒有 UI 救得回來）
- * 3. `--port` 對不上任何配置時要開**臨時配置**，不是拒絕啟動
+ * 3. `--port`／`--kind` 對不上任何配置時要開**臨時配置**，不是拒絕啟動
  */
 
 import type { LinkPrefs } from "@ulr/arbiter-link";
@@ -19,12 +19,10 @@ import { DEFAULT_LINK_TARGET, normalizePrefs } from "@ulr/arbiter-link";
 import { DEFAULT_STAGE_PICK, normalizeStagePick, RANDOM_STAGE } from "@ulr/arbiter-engine";
 import type { StagePick } from "@ulr/arbiter-engine";
 import {
-  browserDebugPort,
   browserProfileDir,
   DEFAULT_BONUS_ITEM_ORDER,
   DEFAULT_BONUS_ITEM_PLACE,
   DEFAULT_CHARA_PICKER_MODE,
-  DEFAULT_DEBUG_PORT,
   DEFAULT_DISPLAY_STATE,
   DEFAULT_RAID_REWARD_MODE,
   desktopUserDataDir,
@@ -47,8 +45,8 @@ import type {
 } from "@ulr/cdp-adapter";
 
 /**
- * 客戶端種類。不影響接線方式（三種都是 CDP），影響的是**預設埠、
- * `DevToolsActivePort` 去哪裡找、以及畫面上叫它什麼**。
+ * 客戶端種類。不影響接線方式（三種都是 CDP），影響的是
+ * **`DevToolsActivePort` 去哪裡找、以及畫面上叫它什麼**。
  *
  * ⚠ **瀏覽器是照種類分的，不是一個籠統的「網頁版」。** Chrome 與 Edge 各有
  * 自己的 profile 目錄與首選埠（`@ulr/cdp-adapter` 的 `BrowserFamily`），所以
@@ -179,8 +177,21 @@ export interface Profile {
   /** 穩定識別。改名不會換 id —— 命令列參數帶的是它。 */
   id: string;
   name: string;
-  /** 遊戲的 CDP 埠。**這也是實例的身分**（見 `main.ts` 的 userData 分離）。 */
-  port: number;
+  /**
+   * 這個實例的資料夾名（`%APPDATA%\ulr-companion\<dataDir>`，`main.ts` 的 userData
+   * 分離＋單一實例鎖都靠它）。玩家看不到。
+   *
+   * ⚠ 2026-10-10 以前配置有一格「遊戲埠」，而它同時是實例身分（資料夾叫
+   * `port-59222`）。埠拿掉之後**舊配置沿用那個資料夾名**，不搬檔：搬的話正在跑的
+   * 舊版會抓著檔案（EBUSY），而且新舊兩版會分到不同的鎖、同時接上同一個遊戲。
+   * 新建的配置是 `profile-<id>`。
+   */
+  dataDir: string;
+  /**
+   * 命令列 `--port` 明確指定的埠。**只活在那一次啟動、不落地**（臨時配置才有）。
+   * 沒有的話引擎只讀 `DevToolsActivePort` —— 標準作業流程是 `--remote-debugging-port=0`。
+   */
+  cliPort?: number;
   /**
    * 中間人在哪。**要跟對手指到同一個**，所以存下來的配置一律是雲端。
    *
@@ -543,20 +554,24 @@ export interface ProfileStore {
   multiProfile: boolean;
 }
 
-const DESKTOP_PORT = DEFAULT_DEBUG_PORT;
+/** 三種客戶端，新增配置時照這個順序挑還沒有的那一種。 */
+export const CLIENT_KINDS: readonly ClientKind[] = ["desktop", "chrome", "edge"] as const;
 
 /**
- * 這一種的預設埠 —— 桌面版 59222、Chrome 59223、Edge 59224，連號一眼看得出
- * 是同一組。
+ * 這份配置已經有別份是同一種客戶端了嗎。
  *
- * ⚠ 這些值都是**首選**，不是「一定會用這個」。連不上時引擎會去讀客戶端自己
- * 寫的 `DevToolsActivePort`（見 `cdp-adapter/debug-port.ts`），所以玩家看到的
- * 埠與實際接上的埠有可能不同 —— UI 要顯示的是**實際**那個。
+ * ⚠ **同一種客戶端只能有一份配置。** 引擎找遊戲靠的是那種客戶端的
+ * `DevToolsActivePort`（`userDataDirFor`），同種的兩份讀的是同一個檔，會接上
+ * **同一個**遊戲 —— 每段注入裝兩次、補丁互拆（`main.ts` 關卡 2 講的那個病）。
+ * 這條取代了以前的「兩份不能用同一個埠」。
  */
-export function defaultPortFor(kind: ClientKind): number {
-  if (kind === "chrome") return browserDebugPort("chrome");
-  if (kind === "edge") return browserDebugPort("edge");
-  return DESKTOP_PORT;
+export function kindTaken(store: ProfileStore, kind: ClientKind, exceptId?: string): boolean {
+  return store.profiles.some((p) => p.kind === kind && p.id !== exceptId);
+}
+
+/** 資料夾名只收英數、底線、連字號 —— 它會被接進路徑。 */
+function normalizeDataDir(raw: unknown): string | null {
+  return typeof raw === "string" && /^[\w-]{1,64}$/.test(raw) ? raw : null;
 }
 
 /**
@@ -621,10 +636,14 @@ export function normalizeProfile(raw: unknown): Profile | null {
    * 自己取過名字的人（任何其他字串）完全不受影響。
    */
   const legacyAutoName = raw2 === "網頁版" && r["kind"] === "web";
+  // 舊配置沒有 `dataDir`：照它當時的埠找回原本那個資料夾（見 `Profile.dataDir`）。
+  const legacyPort = clampPort(r["port"], 0);
   return {
     id,
     name: raw2 === "" || legacyAutoName ? clientLabel(kind) : raw2,
-    port: clampPort(r["port"], defaultPortFor(kind)),
+    dataDir:
+      normalizeDataDir(r["dataDir"]) ?? (legacyPort > 0 ? `port-${legacyPort}` : `profile-${id}`),
+    // `cliPort` 刻意不讀：它只屬於命令列開的那一次（見 `resolveProfile`）。
     // ⚠ **存下來的中間人一律讀成雲端**，`link` 與舊的 `linkPort` 都不看。
     //
     // 畫面上已經沒有那一格（玩家 2026-10-04）—— 照讀的話，以前填過 `local`
@@ -730,10 +749,11 @@ function normalizeCostRulePath(raw: unknown): string | null {
 }
 
 export function defaultProfile(kind: ClientKind = "desktop"): Profile {
+  const id = newId();
   return {
-    id: newId(),
+    id,
     name: clientLabel(kind),
-    port: defaultPortFor(kind),
+    dataDir: `profile-${id}`,
     link: DEFAULT_LINK_TARGET,
     kind,
     prefs: normalizePrefs(undefined),
@@ -824,25 +844,28 @@ export function normalizeStore(raw: unknown): ProfileStore {
 /**
  * 新增一份（`source` 有給就是「複製」）。
  *
- * ⚠ **埠撞在一起的兩份配置不能同時跑** —— userData 的目錄鎖會擋掉第二個，
- * 而症狀是「按了開新實例但什麼都沒發生」，完全查不出原因。所以新增的當下
- * 就先挑一個沒人用的埠，不要把這個問題留到玩家按下去才爆。
+ * ⚠ **同一種客戶端只能有一份**（見 {@link kindTaken}）。新增的當下就挑一種還沒
+ * 有的，不要把衝突留到玩家按「開新實例」才爆。三種都有了就**不新增**（回傳原樣）。
+ * 複製也一樣：設定照抄，客戶端換成還沒有的那一種。
  */
 export function addTo(store: ProfileStore, source?: Profile): ProfileStore {
   // 第二份預設是 Chrome（不是 Edge）—— 那是絕大多數人裝著的瀏覽器，也是舊版
   // 「網頁版」實際會開的那一個。要 Edge 的人在種類那一格改一下就好。
-  const base = source ?? defaultProfile(store.profiles.length === 0 ? "desktop" : "chrome");
+  const wanted = source?.kind ?? (store.profiles.length === 0 ? "desktop" : "chrome");
+  const kind = kindTaken(store, wanted) ? CLIENT_KINDS.find((k) => !kindTaken(store, k)) : wanted;
+  if (kind === undefined) return store;
 
-  const used = new Set(store.profiles.map((p) => p.port));
-  let port = base.port;
-  while (used.has(port)) port += 1;
+  const fresh = defaultProfile(kind);
+  const base = source === undefined ? fresh : { ...source, kind };
+  const baseName =
+    source === undefined ? fresh.name : renameForKind(source.name, source.kind, kind);
 
   const names = new Set(store.profiles.map((p) => p.name));
-  const stem = source === undefined ? base.name : `${base.name} 複本`;
+  const stem = source === undefined || kind !== source.kind ? baseName : `${baseName} 複本`;
   let name = stem;
   for (let i = 2; names.has(name); i++) name = `${stem} ${i}`;
 
-  const created: Profile = { ...base, id: newId(), name, port };
+  const created: Profile = { ...base, id: fresh.id, dataDir: fresh.dataDir, name };
   return { ...store, profiles: [...store.profiles, created] };
 }
 
@@ -879,12 +902,22 @@ function renameForKind(name: string, from: ClientKind, to: ClientKind): string {
   return suffixed !== null && suffixed[1] === old ? `${clientLabel(to)} ${suffixed[2]}` : name;
 }
 
-/** 改一份，其餘照舊。`prefs` 是合併的，不是整份換掉。 */
+/**
+ * 改一份，其餘照舊。`prefs` 是合併的，不是整份換掉。
+ *
+ * ⚠ 改成**別份已經在用的客戶端種類**時，種類那一格不收（其餘照改）——
+ * 理由見 {@link kindTaken}。`dataDir` 也不收：那是實例身分，改了等於換一個實例。
+ */
 export function updateIn(
   store: ProfileStore,
   id: string,
   patch: Partial<Omit<Profile, "id">>,
 ): ProfileStore {
+  const { dataDir: _ignored, ...rest } = patch;
+  patch =
+    rest.kind !== undefined && kindTaken(store, normalizeKind(rest.kind), id)
+      ? (({ kind: _taken, ...keep }) => keep)(rest)
+      : rest;
   return {
     ...store,
     profiles: store.profiles.map((p) => {
@@ -904,21 +937,20 @@ export function updateIn(
 /**
  * 這個實例要用哪一份配置。
  *
- * 優先序：`--profile <id>` → `--port <n>` 對得上的那份 → `--kind <web|desktop>`
+ * 優先序：`--profile <id>` → `--port <n>`（臨時配置）→ `--kind <chrome|edge|desktop>`
  * → **清單第一份**。
  *
  * ⚠ **不看「上次用的那份」。** 那個行為在多開的人身上很方便，但在其他人身上
  * 是「我只是想開插件，它卻綁到我上次測試用的網頁版」—— 而畫面上只寫「等遊戲…」，
  * 完全看不出來是綁錯了客戶端。不帶參數的啟動要是**可預測的**：
- * 清單第一份（新安裝就是桌面版 :59222）。
+ * 清單第一份（新安裝就是桌面版）。
  *
  * 要開別份的人本來就有明確的入口 —— 托盤的「開新實例」帶的是 `--profile <id>`，
  * 不受這條影響。`lastUsedId` 仍然記著（`profiles.json` 裡看得到最後開的是哪一份，
  * 玩家回報問題時有用），只是不再拿來決定啟動。
  *
- * ⚠ `--port` 那條是為了**相容舊的用法**（`npm run tray -- --port 59222`）。
- * 對不上任何配置時不要當作錯誤：那多半是玩家在試一個新埠，直接臨時建一份
- * 不落地的配置給他用，比拒絕啟動有用得多。
+ * ⚠ `--port` 是給**固定埠啟動的客戶端**的（它們不寫 DevToolsActivePort）。不要當作
+ * 錯誤：直接臨時建一份不落地的配置給他用，比拒絕啟動有用得多。
  */
 export function resolveProfile(
   store: ProfileStore,
@@ -951,15 +983,20 @@ function resolveProfileOnly(
     if (hit !== undefined) return { profile: hit, ephemeral: false };
   }
 
+  // `--port <n>`：明確敲那個埠（固定埠啟動的客戶端不寫 DevToolsActivePort，只能這樣接）。
+  // 配置已經沒有埠可以對了，所以一律是臨時配置；資料夾照埠分，同一個埠開兩次還是擋得住。
   const wantPort = flag("port");
   if (wantPort !== undefined) {
     const port = clampPort(wantPort, 0);
-    const hit = store.profiles.find((p) => p.port === port);
-    if (hit !== undefined) return { profile: hit, ephemeral: false };
     if (port > 0) {
-      // 名字裡不要放埠 —— 視窗標題與狀態列本來就會補上，會變成「臨時 :9334 :9334」。
+      const kind = normalizeKind(flag("kind") ?? "desktop");
       return {
-        profile: { ...defaultProfile("desktop"), name: "臨時", port },
+        profile: {
+          ...defaultProfile(kind),
+          name: "臨時",
+          dataDir: `temp-port-${port}`,
+          cliPort: port,
+        },
         ephemeral: true,
       };
     }
@@ -970,9 +1007,7 @@ function resolveProfileOnly(
    * 「要接哪一種客戶端」，拿清單裡第一份那種。
    *
    * ⚠ 這條是為了**開發時的 `npm run tray`**（`scripts/run-tray.mjs` 不帶參數時
-   * 預設補 `--kind chrome`）。用 `--port 59223` 也做得到同一件事，但那要把埠號抄在
-   * 腳本裡，而它是 `defaultPortFor()` 算出來的 —— 兩邊哪天不一致，症狀是托盤
-   * 安靜地開了一份**臨時**配置（改設定不會存下來），而畫面上一切正常。
+   * 預設補 `--kind chrome`）。
    *
    * ⚠ `--kind web` 仍然收，遷成 `chrome`（見 {@link ClientKind}）—— 外面還有
    * 舊的捷徑與筆記帶著它，而讓它變成「看不懂的值」等於安靜地綁到桌面版去。
@@ -989,7 +1024,7 @@ function resolveProfileOnly(
     const kind = normalizeKind(wantKind);
     const hit = store.profiles.find((p) => p.kind === kind);
     if (hit !== undefined) return { profile: hit, ephemeral: false };
-    return { profile: defaultProfile(kind), ephemeral: true };
+    return { profile: { ...defaultProfile(kind), dataDir: `temp-${kind}` }, ephemeral: true };
   }
 
   // `profiles` 保證非空（`normalizeStore` 會補一份），所以那個 ?? 只是給型別看的。
