@@ -451,6 +451,24 @@ describe("這個實例要用哪一份", () => {
   it("記在配置裡才活得過遊戲重載 —— 存了要讀得回來", () => {
     expect(normalizeProfile({ id: "x", port: 59222, hiddenStages: true })?.hiddenStages).toBe(true);
   });
+
+  // --- 遊戲裡套用自訂 COST --------------------------------------------------
+
+  it("預設關閉（玩家訂的）：規則照樣載著給配對用，遊戲畫面不套", () => {
+    expect(defaultProfile("desktop").customCostInGame).toBe(false);
+    // 預設規則還是會載 —— 這一格跟 costRuleMode 是兩件事。
+    expect(defaultProfile("desktop").costRuleMode).toBe("default");
+  });
+
+  it("舊設定檔沒有這個欄位 → false；只有 true 才算開", () => {
+    expect(normalizeProfile({ id: "x", port: 59222 })?.customCostInGame).toBe(false);
+    expect(normalizeProfile({ id: "x", port: 59222, customCostInGame: 1 })?.customCostInGame).toBe(
+      false,
+    );
+    expect(
+      normalizeProfile({ id: "x", port: 59222, customCostInGame: true })?.customCostInGame,
+    ).toBe(true);
+  });
   // --- 自動配對的開房設定 ---------------------------------------------------
 
   it("舊設定檔沒有 match 這一欄 → 拿到一份可用的預設", () => {

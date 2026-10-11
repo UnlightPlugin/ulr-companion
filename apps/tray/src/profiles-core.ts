@@ -248,6 +248,15 @@ export interface Profile {
    */
   costRulePath: string | null;
   /**
+   * 遊戲畫面上套不套自訂 COST（迪特赫姆的價格／罰則、牌組編輯的 COST 開關）。
+   * 預設**關閉**（玩家 2026-10-11 訂的）。
+   *
+   * ⚠ 跟 `costRuleMode: "off"` 不是同一件事。那個是「沒有規則」，自動配對也跟著
+   * 不能用；這一格關著時規則照樣載著給配對用，只是不交給遊戲畫面 —— 迪城與牌組
+   * 編輯都是官方價，牌組編輯標題列那顆「自訂 ↔ 官方」開關也不畫。
+   */
+  customCostInGame: boolean;
+  /**
    * 把隱藏地圖（010~013）加進遊戲自己的開房選單。預設**關閉**。
    *
    * ⚠ 一定要記在配置裡。補丁是 `Runtime.evaluate` 裝的，**遊戲一重載就沒了**
@@ -662,6 +671,8 @@ export function normalizeProfile(raw: unknown): Profile | null {
     readyTint: normalizeTint(typeof r["readyTint"] === "number" ? r["readyTint"] : null),
     costRulePath: normalizeCostRulePath(r["costRulePath"]),
     costRuleMode: normalizeCostRuleMode(r["costRuleMode"], r["costRulePath"]),
+    // 舊設定檔沒有這一欄 → 關（玩家訂的預設）。
+    customCostInGame: r["customCostInGame"] === true,
     // ⚠ `=== true` 而不是「有值就算」：舊設定檔沒有這一欄，那時候的預設就該是
     // 關閉。插件裝上去不該改變玩家在遊戲裡看到的選單。
     hiddenStages: r["hiddenStages"] === true,
@@ -769,6 +780,8 @@ export function defaultProfile(kind: ClientKind = "desktop"): Profile {
     // `costRuleMode` —— 這是 v1.1 起刻意改掉的立場。
     costRulePath: null,
     costRuleMode: DEFAULT_COST_RULE_MODE,
+    // 規則載著給配對用，但遊戲畫面預設不套（見 `customCostInGame`）。
+    customCostInGame: false,
     // 同理，預設不動遊戲的開房選單。
     hiddenStages: false,
     match: { ...DEFAULT_MATCH_PREFS },

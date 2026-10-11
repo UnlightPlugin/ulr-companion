@@ -386,11 +386,12 @@ npx tsx apps/companion/src/index.ts rule my.ulrcost.json   # 看重算後的 8 �
 | 方式   | 怎麼做                                                 |
 | ------ | ------------------------------------------------------ |
 | 命令列 | `companion cost my.ulrcost.json --port 59223 --reload` |
-| 托盤   | `自訂COST › Cost 表` → 選規則檔 → 重載遊戲             |
+| 托盤   | `自訂COST › Cost 表` → 選規則檔（當場生效，不重載）    |
 
-⚠ **注入只對之後載入的 document 生效**（`addScriptToEvaluateOnNewDocument`）。
-選好規則之後畫面上的數字不會立刻變，那是正常的，要重載遊戲。托盤的狀態列
-會顯示 `已裝上，等遊戲重新載入才會變`。
+托盤這條路**不重載遊戲**（2026-10-11 起）：引擎除了 `addScriptToEvaluateOnNewDocument`
+之外，也把同一份腳本 evaluate 到現在的頁面上，直接改 Phaser 快取裡的價格；停用則
+走 `revertCostOverrides()` 換回原價。遊戲還沒載入卡片資料時托盤顯示
+`已裝上，遊戲載入卡片資料時套用`，載進來那一刻就會套上。
 
 ⚠ **換規則時舊的注入一定要先拆掉。** `addScriptToEvaluateOnNewDocument` 是
 累加的，而 `patch-cost` 的 `__ulrCostPatch` 閘只讓**第一支**跑成功 —— 不拆

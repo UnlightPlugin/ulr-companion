@@ -51,8 +51,8 @@ contextBridge.exposeInMainWorld("ulr", {
      * ⚠ 收的是一個**列舉值**而不是路徑 —— 同上，渲染層不指定檔案。
      */
     mode: (mode: "default" | "file" | "off") => ipcRenderer.invoke("ulr:cost-mode", mode),
-    /** 重載遊戲讓注入生效。⚠ 會打斷對戰。 */
-    reload: () => ipcRenderer.invoke("ulr:cost-reload"),
+    /** 遊戲畫面上（迪特赫姆、牌組編輯）套不套自訂 COST。規則本身不動。 */
+    inGame: (on: boolean) => ipcRenderer.invoke("ulr:cost-in-game", on),
   },
 
   /**

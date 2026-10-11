@@ -1690,7 +1690,7 @@
        */
       const COST_PHASE_TEXT = {
         off: "未啟用（顯示原版數字）",
-        pending: "已裝上，等遊戲重新載入才會變",
+        pending: "已裝上，遊戲載入卡片資料時套用",
         applied: "生效中",
         error: "注入失敗",
       };
@@ -1699,7 +1699,7 @@
        * 罰則的狀態跟價格分開。
        *
        * ⚠ 這不是多此一舉：罰則走 `Deck.prototype.getCost`，<b>立刻生效</b>；
-       * 價格走載入時的資料改寫，要重載。合成一句話一定會對其中一邊說謊。
+       * 價格改的是快取裡的資料，要等資料載進來。合成一句話一定會對其中一邊說謊。
        */
       const COST_PENALTY_TEXT = {
         off: "用遊戲原本的（7~13 罰 5、14 以上罰 10）",
@@ -1831,6 +1831,13 @@
 
         const state = `<div class="card">
              ${
+               // 「對戰地點」頁那格關著：規則載著給配對用，遊戲畫面不套。下面兩行
+               // 會寫「未啟用」—— 不講原因的話看起來像規則沒載成功。
+               rule && snap?.profile?.customCostInGame !== true
+                 ? `<div class="hint">遊戲裡<b>沒有套用</b>這份規則：迪特赫姆與牌組編輯都是官方價，規則只拿來自動配對。要套用到「自訂COST › 對戰地點」打開。</div>`
+                 : ""
+             }
+             ${
                // 牌組畫面標題列那顆開關切到「官方」了。規則還載著，只是畫面上
                // 暫時是原版的價格與罰則 —— 要講出來，否則下面兩行看起來像壞掉。
                rule && cost.enabled === false
@@ -1860,11 +1867,7 @@
              ${cost.error ? `<div class="hint warn">⚠ ${esc(cost.error)}</div>` : ""}
              ${
                cost.phase === "pending"
-                 ? `<div class="hint">⚠ 這兩件事的生效時機<b>不一樣</b>。<br />
-                      <b>壓 C 罰則</b>改的是遊戲的計算函式，<b>已經生效</b>了 ——
-                      牌組畫面的罰則與總和現在就是規則裡的。<br />
-                      <b>卡片價格</b>改的是載入時的資料，只對<b>之後載入</b>的畫面生效，
-                      要按下面的重載或自己重開遊戲。</div>`
+                 ? `<div class="hint">遊戲還沒載入卡片資料（或還沒接上遊戲）—— 載進來的那一刻就會套上，不必重載。</div>`
                  : ""
              }
            </div>`;
@@ -1911,7 +1914,6 @@
              </div>
              <div class="presets">
                ${mode === "file" ? `<button id="costPick">選規則檔…</button>` : ""}
-               ${rule && st?.connected ? `<button id="costReload">重載遊戲讓它生效</button>` : ""}
              </div>
              ${
                mode === "default"
@@ -1928,10 +1930,7 @@
                         檔案是你的，我們一個位元組都不碰。</div>`
                    : `<div class="hint">遊戲顯示原版 COST。⚠ 大廳那顆<b>快速比賽</b>在這個模式下用不了（沒有規則就沒有「約定」可言）。</div>`
              }
-             <div class="hint">
-               ⚠ 重載會<b>打斷正在進行的對戰</b>。
-               ${st?.connected ? "" : "現在還沒接上遊戲，接上之後才按得到。"}
-             </div>
+             <div class="hint">換規則<b>當場生效</b>，不會重載遊戲。</div>
            </div>`;
 
         return (
@@ -3122,8 +3121,7 @@
              <div class="hint">存檔會<b>就地覆寫同一個檔</b>，核對碼重算 ——
                跟「編輯 COST」是同一個檔案的兩半，兩邊互不影響。
                <b>要傳給對手之前記得改版本號</b>（上面那格）。<br />
-               ⚠ 壓 C 改完<b>立刻生效</b>，不用重載遊戲（它攔的是遊戲的計算函式）；
-               價格才要重載。</div>
+               ⚠ 存檔後壓 C 與價格都<b>當場生效</b>，不用重載遊戲。</div>
            </div>`;
 
         const rows = bands
@@ -3395,6 +3393,13 @@
         "⚠ 配到人會直接消耗 AP 並開打。再按一次那顆按鈕就是取消。\n" +
         "⚠ 排隊時每 5 秒確認你還在那個頻道：跑去打別場、退出頻道、換頻道都會自動停止排隊。";
 
+      const COST_IN_GAME_TIP =
+        "關著時規則照樣載著，自動配對照樣用它算檔位；只是遊戲畫面上不套：\n" +
+        "· 迪特赫姆的卡片價格、壓 C 罰則、牌盒與房間的 cost 都是官方的\n" +
+        "· 牌組編輯標題列那顆「自訂 ↔ 官方」開關不畫\n" +
+        "\n" +
+        "切換當場生效，不必重載遊戲。";
+
       PAGES["rule/match"] = () => {
         const stage = mform?.stage ?? snap?.profile?.match?.stage ?? "arcadia";
 
@@ -3421,9 +3426,24 @@
               ? "交給遊戲伺服器抽。"
               : `想開在 ${esc(stageName(stage))}。<b>對手也要選同一張才一定開得成</b>${info(PICK_TIP)}`;
 
+        // 遊戲畫面套不套自訂 COST（Profile.customCostInGame）。預設關。
+        const inGame = snap?.profile?.customCostInGame === true;
+
         return (
           head("對戰地點", "配到人之後，這一場開在哪。") +
           `<div class="card">
+             <label class="toggle">
+               <input type="checkbox" id="costInGameOn" ${inGame ? "checked" : ""} />
+               <span><b>遊戲裡套用自訂 COST</b>${info(COST_IN_GAME_TIP)}
+                 <div class="hint">${
+                   inGame
+                     ? "迪特赫姆用自訂 COST；牌組編輯標題列有「自訂 ↔ 官方」開關。"
+                     : "迪特赫姆、牌組編輯都是官方 COST，也不顯示切換開關。"
+                 }</div>
+               </span>
+             </label>
+           </div>
+           <div class="card">
              <div class="row"><span class="dim">對戰地點</span>
                <span><select id="mStage">${opts}</select>${info(STAGE_TIP)}</span></div>
              <div class="hint">${line}</div>
@@ -5005,6 +5025,14 @@
         // ⚠ 地點改了要**立刻**存。這一頁沒有存檔鈕，而下一份狀態推播就會照
         // 設定檔重畫 —— 不存的話選單會自己彈回舊值。
         if (t.id === "mStage") return void saveStagePick(t.value);
+        if (t.id === "costInGameOn") {
+          // 勾選框是 INPUT，焦點還在它身上時 apply() 不重畫（isEditing）—— 底下那句
+          // 說明要換，自己補畫。
+          return void window.ulr.cost.inGame(t.checked).then((s) => {
+            apply(s);
+            renderBody();
+          });
+        }
         if (t.id === "ready") return void set({ readyEnabled: t.checked });
         if (t.id === "seconds") {
           dragging = false;
@@ -5466,7 +5494,6 @@
         }
         if (btn.id === "costPick") return void window.ulr.cost.pick().then(apply);
         if (btn.id === "costClear") return void window.ulr.cost.clear().then(apply);
-        if (btn.id === "costReload") return void window.ulr.cost.reload().then(apply);
         if (btn.id === "costModeDefault") return void window.ulr.cost.mode("default").then(apply);
         if (btn.id === "costModeOff") return void window.ulr.cost.mode("off").then(apply);
         if (btn.id === "costModeFile") {

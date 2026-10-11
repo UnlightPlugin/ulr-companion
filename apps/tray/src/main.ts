@@ -3701,6 +3701,22 @@ let costRuleFull: CostRule | null = null;
  * 這個值，散在三個地方各算一次的話，總有一天其中一個會拿到不同步的那一份。
  */
 let costRuleHash: string | null = null;
+/**
+ * 交給引擎的那一份（卡片 id 已經換好）。**規則載著不等於交給引擎** ——
+ * `profile.customCostInGame` 關著時這裡有值，但引擎拿到的是 `null`。
+ */
+let costRuleTables: Parameters<ArbiterEngine["setCostRule"]>[0] = null;
+
+/**
+ * 照 `customCostInGame` 把規則交給引擎或收回來。
+ *
+ * ⚠ 關著時規則**沒有被丟掉**（`costRuleFull` 還在，自動配對照樣用）。收回的
+ * 只是遊戲畫面上的部分：迪城的自訂價與罰則、牌組編輯的自訂總和與開關 ——
+ * 引擎沒拿到表，這些全部退回官方（見 `room-cost.ts`、`patch-cost-toggle.ts`）。
+ */
+function pushCostRuleToEngine(): void {
+  engine?.setCostRule(profile.customCostInGame ? costRuleTables : null);
+}
 
 // ---------------------------------------------------------------------------
 // 編輯 COST
@@ -4070,6 +4086,7 @@ function loadCostRule(path: string | null, origin: CostRuleOrigin = "file"): voi
     costRuleHash = null;
     costRuleError = null;
     costRuleOrigin = null;
+    costRuleTables = null;
     engine?.setCostRule(null);
     return;
   }
@@ -4132,13 +4149,14 @@ function loadCostRule(path: string | null, origin: CostRuleOrigin = "file"): voi
     // 2026-09-23 改版後客戶端只認 id，而且順序重排過 —— 不是索引 +1。
     const equipment = toCardIdTable(rule.equipment, parseEquipmentKey, legacyWeaponId);
     const eventCards = toCardIdTable(rule.eventCards, parseEventCardKey, legacyEventId);
-    engine?.setCostRule({
+    costRuleTables = {
       characters: rule.characters,
       monsters: rule.monsters,
       equipment: equipment.byId,
       eventCards: eventCards.byId,
       bands,
-    });
+    };
+    pushCostRuleToEngine();
     costRuleFull = rule;
     costRuleHash = contentHash(rule);
     costRuleError = null;
@@ -4171,6 +4189,7 @@ function loadCostRule(path: string | null, origin: CostRuleOrigin = "file"): voi
     costRuleFull = null;
     costRuleHash = null;
     costRuleOrigin = null;
+    costRuleTables = null;
     engine?.setCostRule(null);
     // ⚠ 記錄**不夠**。記錄在「戰鬥」頁，玩家人在「自訂COST › Cost 表」頁，
     // 那一頁只會說「還沒選規則」—— 看起來就是按了沒反應。所以同時留一份
@@ -4188,14 +4207,6 @@ function loadCostRule(path: string | null, origin: CostRuleOrigin = "file"): voi
     }
   }
 }
-
-/**
- * 有一份新的預設規則載進來了，但**遊戲那邊還是舊價格**。
- *
- * 卡片價格是 `Page.addScriptToEvaluateOnNewDocument` 裝的 —— 它只對之後載入
- * 的 document 生效，所以規則換了之後遊戲得重載一次才看得到新數字。
- */
-let pendingRuleReload = false;
 
 /**
  * 這一條連線已經為了「頁面比插件早載入」自動重載過了嗎。
@@ -4219,12 +4230,13 @@ let autoReloadedThisAttach = false;
 async function applyPendingReload(): Promise<void> {
   if (engine === null) return;
 
-  // 兩種要重載的理由，判準與時機**完全一樣**，所以走同一支：
+  // 唯一的理由：頁面上那份卡片資料**不是這一份規則**改出來的（`cost.stale`）。
   //
-  //   pendingRuleReload  規則換了（玩家自己選的，或中間人推下來一份新的）
-  //   cost.stale         頁面上那份卡片資料**不是這一份規則**改出來的
+  // ⚠ 換規則**不走這裡**（玩家 2026-10-11：「那一頁也要改成不重載」）。
+  // 09-24 起 patch-cost 直接改 Phaser 快取，引擎 `#syncCosts` 會當場套上新規則，
+  // 套完問一次覆蓋率 —— 蓋得到就不會 stale，這條路只剩真的套不上時的退路。
   //
-  // ⚠ 後者有兩種情形，而且都是常態不是異常：
+  // ⚠ stale 有兩種情形：
   //
   //   1. 玩家從 Steam 開遊戲 —— 遊戲先跑起來、插件兩秒後才接上，而
   //      `addScriptToEvaluateOnNewDocument` 只管之後載入的 document
@@ -4233,32 +4245,21 @@ async function applyPendingReload(): Promise<void> {
   // 兩種的症狀是同一句「插件開著，cost 沒生效」，而第 2 種一度判不出來
   // （見 `costsStamp`：判準原本只問「改過嗎」，不問「改的是哪一份」）。
   const stale = latest?.cost.stale === true;
-  if (!pendingRuleReload && !stale) return;
-  // 對戰中：留著旗標，下一次狀態推播時再試（`onStatus` 會叫這支）。
+  if (!stale) return;
+  // 對戰中：下一次狀態推播時再試（`onStatus` 會叫這支）。
   if (latest?.armed === true) return;
   // 還沒連上遊戲就不必重載 —— 遊戲一啟動就會帶著新規則載入，那才是常態。
-  if (latest?.connected !== true) {
-    pendingRuleReload = false;
-    return;
-  }
+  if (latest?.connected !== true) return;
   // ⚠ **一條連線只自動重載一次。** `stale` 是從頁面問回來的，而「問回來的
   // 東西一定有一天會回錯」—— 沒有這道閘的話，一個永遠回 true 的答案會讓
   // 遊戲無限重載，而玩家完全無法把它跟插件連在一起。旗標在斷線時重置
   // （見 `onStatus`），所以下一次接上仍然救得回來。
-  if (stale && !pendingRuleReload) {
-    if (autoReloadedThisAttach) return;
-    autoReloadedThisAttach = true;
-  }
+  if (autoReloadedThisAttach) return;
+  autoReloadedThisAttach = true;
 
-  const why = pendingRuleReload;
-  pendingRuleReload = false;
   try {
     await engine.reloadGame();
-    log(
-      why
-        ? "⟳ 新的 COST 表已套用（不在對戰中，已請遊戲重新載入）"
-        : "⟳ 遊戲畫面上的價格不是現在這份規則（遊戲比插件早開，或剛換過規則）—— 已請遊戲重新載入",
-    );
+    log("⟳ 遊戲畫面上的價格不是現在這份規則，當場套不上 —— 已請遊戲重新載入");
   } catch (err) {
     log(`✗ 套用新 COST 表時重載失敗：${err instanceof Error ? err.message : String(err)}`);
   }
@@ -4312,19 +4313,13 @@ function applyCostRule(): void {
 /**
  * 玩家在「Cost 表」那一頁換了規則（選檔、換模式、停用）。
  *
- * ⚠ **換完要自己重載，不能只換記憶體裡那份。** 卡片價格是
- * `addScriptToEvaluateOnNewDocument` 裝的，只對**之後**載入的 document 生效 ——
- * 頁面上那份資料早就在快取裡，換規則對它一點作用都沒有。這裡原本只換不重載，
- * 而症狀是「我明明選了規則，數字沒變」（記錄檔還會說載入成功）。
- *
- * ⚠ **這裡不直接呼叫 `reloadGame()`。** 走 `applyPendingReload()` 那條線的
- * 理由跟自動更新完全一樣：它只在**不在對戰中**時動手，正在打的話留著旗標，
- * 等這一場結束（`onStatus`）再做。玩家在對戰中打開設定換規則不該被踢出去。
+ * ⚠ **不重載遊戲**（玩家 2026-10-11）。引擎拿到新規則（或 `null`）就當場改快取：
+ * 換規則走 `installCostOverridesLive`（舊規則動過、新規則沒動的卡會還原成原價），
+ * 停用走 `revertCostOverrides`。以前這裡會挑不在對戰中的時機重載一次 —— 那是
+ * 09-24 之前「只有載入那一刻的掛鉤」時代留下的。
  */
 function changeCostRule(): void {
   applyCostRule();
-  pendingRuleReload = true;
-  void applyPendingReload();
 }
 
 /** 改配置的連線設定。**埠變了要重開實例才會生效** —— 引擎綁在啟動時的埠上。 */
@@ -4581,7 +4576,7 @@ app.whenReady().then(() => {
     const mode: CostRuleMode = raw === "file" || raw === "off" ? raw : "default";
     editProfile(profile.id, { costRuleMode: mode });
     changeCostRule();
-    if (mode === "off") log("· 自訂 COST 已停用（不在對戰中的話會自己重載一次）");
+    if (mode === "off") log("· 自訂 COST 已停用（遊戲畫面當場換回原版數字）");
     pushState();
     return snapshot();
   });
@@ -4590,26 +4585,33 @@ app.whenReady().then(() => {
   ipcMain.handle("ulr:cost-clear", () => {
     editProfile(profile.id, { costRuleMode: "off" });
     changeCostRule();
-    log("· 自訂 COST 已停用（不在對戰中的話會自己重載一次）");
+    log("· 自訂 COST 已停用（遊戲畫面當場換回原版數字）");
     pushState();
     return snapshot();
   });
 
   /**
-   * 重載遊戲讓注入生效。
+   * 遊戲畫面上套不套自訂 COST（見 `Profile.customCostInGame`）。規則不動。
    *
-   * ⚠ **會打斷對戰**，所以按鈕文案要講明白 —— 按下去是玩家自己的決定。
-   * 換規則本身已經**不需要**按它了（`changeCostRule()` 會挑一個不在對戰中的
-   * 時機自己重載），這顆留著是給「我就是要現在」與那條路沒生效時用的。
+   * ⚠ **不重載**（玩家 2026-10-11：「官方和自訂 COST 切換都不用重載」）。兩個方向
+   * 都由引擎當場改快取：打開走 `installCostOverridesLive`，關掉走
+   * `revertCostOverrides`（把頁面上留著的自訂價與自訂表收掉）。
+   *
+   * ⚠ 走 `profile = {...}` 而不是 `editProfile`：臨時配置不在清單裡，
+   * `editProfile` 對它是空操作。
    */
-  ipcMain.handle("ulr:cost-reload", async () => {
-    try {
-      await engine?.reloadGame();
-      log("⟳ 已請遊戲重新載入，自訂 COST 會在載完後生效");
-    } catch (err) {
-      log(`✗ 重載失敗：${err instanceof Error ? err.message : String(err)}`);
+  ipcMain.handle("ulr:cost-in-game", (_event, on: unknown) => {
+    if (typeof on === "boolean" && on !== profile.customCostInGame) {
+      profile = { ...profile, customCostInGame: on };
+      if (!ephemeral) store = updateProfile(profile.id, { customCostInGame: on });
+      pushCostRuleToEngine();
+      log(
+        on
+          ? "· 遊戲裡套用自訂 COST（迪特赫姆、牌組編輯）"
+          : "· 遊戲裡不套用自訂 COST（迪特赫姆、牌組編輯都是官方價）",
+      );
+      pushState();
     }
-    pushState();
     return snapshot();
   });
 
@@ -5395,10 +5397,8 @@ app.whenReady().then(() => {
    * 預設 COST 表的自動更新。**只在預設模式下做事** —— 玩家自己選了檔的話，
    * 我們一個位元組都不該碰他的規則。
    *
-   * ⚠ 收到新規則之後**不重載遊戲**。卡片價格是 `addScriptToEvaluateOnNewDocument`
-   * 裝的，要下次載入才生效（見 `engine.ts` 的那張表），而重載會打斷對戰 ——
-   * 這裡照 `updater.ts` 同一條線：等一個安全的時機，由 `#applyPendingReload()`
-   * 在玩家不在對戰中時自己做掉。
+   * ⚠ 收到新規則之後**不重載遊戲**：引擎當場改快取（跟「Cost 表」換規則同一條路，
+   * 見 `changeCostRule`）。
    */
   startRuleFeed({
     appDir: APP_DIR,
@@ -5412,8 +5412,6 @@ app.whenReady().then(() => {
       }
       applyCostRule();
       pushState();
-      pendingRuleReload = true;
-      void applyPendingReload();
     },
   });
 
