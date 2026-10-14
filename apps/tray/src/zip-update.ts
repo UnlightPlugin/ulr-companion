@@ -7,9 +7,16 @@
  *
  * ```
  *   主程式：驗簽章 → 驗雜湊 → 解壓到暫存 → 寫一支換檔腳本 → 帶著自己的 PID
- *           把它叫起來 → 自己退出
- *   腳本：  等那個 PID 死掉 → 把新檔案搬進安裝目錄 → 把程式叫回來 → 自刪
+ *           把它叫起來 → **等它回報「我起來了」** → 自己退出
+ *   腳本：  回報 → 等那個 PID 死掉 → 把新檔案搬進安裝目錄 → 把程式叫回來 → 自刪
  * ```
+ *
+ * ## ⚠ 腳本沒回報就不准退出（2026-10-14）
+ *
+ * `spawn()` 沒有 throw 不代表腳本真的在跑：找不到 `powershell.exe` 是**事後**才
+ * 從 `error` 事件出來，被防毒／端點防護擋掉的話更是什麼都不會說。那時候退出，
+ * 玩家看到的是「插件自己消失了，而且再也沒回來」。所以腳本第一件事是寫一個
+ * 記號檔，我們看到它才退出；看不到就留一行 log、照常跑。
  *
  * ## ⚠ Windows 擋的是「覆寫執行中的 exe」，不是「動那個目錄」
  *
@@ -31,9 +38,11 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import {
   accessSync,
   constants,
+  existsSync,
   mkdirSync,
   readdirSync,
   rmSync,
@@ -45,6 +54,12 @@ import { dirname, join } from "node:path";
 
 /** 換檔腳本裡等主程式退出的上限（秒）。等不到就照樣換 —— 檔案鎖有自己的重試。 */
 const WAIT_SECONDS = 60;
+
+/**
+ * 等換檔腳本回報「我起來了」的上限。PowerShell 冷啟動在慢的機器上要好幾秒，
+ * 而等太久的代價只是晚一點退出。
+ */
+const READY_TIMEOUT_MS = 30_000;
 
 /** 被鎖住的舊檔改成這個副檔名，下次啟動再刪。 */
 export const STALE_SUFFIX = ".ulrold";
@@ -62,12 +77,13 @@ export interface ZipUpdateOptions {
 }
 
 /**
- * 把 zip 換上去。**回 `true` 代表換檔腳本已經起來了，呼叫端要立刻 `app.quit()`。**
+ * 把 zip 換上去。**回 `true` 代表換檔腳本已經起來了（它自己回報的），呼叫端要
+ * 立刻退出。**
  *
  * 回 `false` 代表這一版沒換成（原因已經寫進 log），程式繼續正常跑 ——
  * 更新失敗不該影響仲裁，那是玩家真正在用的東西。
  */
-export function applyZipUpdate(options: ZipUpdateOptions): boolean {
+export async function applyZipUpdate(options: ZipUpdateOptions): Promise<boolean> {
   const log = (line: string): void => options.onLog?.(line);
   const installDir = dirname(options.exePath);
 
@@ -100,13 +116,20 @@ export function applyZipUpdate(options: ZipUpdateOptions): boolean {
   }
 
   const script = join(options.workDir, `apply-${options.version}.ps1`);
+  // 腳本的記錄放在暫存資料夾**外面** —— 放裡面的話下一次重試會連它一起刪掉，
+  // 而那正是唯一能說明「上一次到底跑到哪」的東西。
+  const scriptLog = join(options.workDir, `apply-${options.version}.log`);
+  const ready = join(options.workDir, `apply-${options.version}.ready`);
   try {
     writeFileSync(script, swapScript(), "ascii");
+    // 上一次留下來的記號不算數。
+    rmSync(ready, { force: true });
   } catch (err) {
     log(`✗ 寫換檔腳本失敗：${err instanceof Error ? err.message : String(err)}`);
     return false;
   }
 
+  let child: ChildProcess;
   try {
     // ⚠ **一定要 detached + unref**：這支腳本要活得比我們久（它第一件事就是
     // 等我們死掉）。掛在我們底下的話，我們一退出它就跟著被收掉，而症狀是
@@ -117,7 +140,7 @@ export function applyZipUpdate(options: ZipUpdateOptions): boolean {
     // （同一個坑在 `updater.ts` 與 docs/launching.md 都記過）。
     const env = { ...process.env };
     delete env["ELECTRON_RUN_AS_NODE"];
-    const child = spawn(
+    child = spawn(
       "powershell.exe",
       [
         "-NoProfile",
@@ -138,6 +161,10 @@ export function applyZipUpdate(options: ZipUpdateOptions): boolean {
         options.exePath,
         "-Stage",
         stage,
+        "-Log",
+        scriptLog,
+        "-Ready",
+        ready,
       ],
       { detached: true, stdio: "ignore", env, windowsHide: true },
     );
@@ -146,7 +173,49 @@ export function applyZipUpdate(options: ZipUpdateOptions): boolean {
     log(`✗ 啟動換檔腳本失敗：${err instanceof Error ? err.message : String(err)}`);
     return false;
   }
+
+  const problem = await waitForReady(child, ready);
+  if (problem !== null) {
+    // 放棄了就把它收掉 —— 晚到的腳本會在我們還活著的時候搬檔案、再叫一份新的起來。
+    try {
+      child.kill();
+    } catch {
+      /* 本來就沒起來 */
+    }
+    log(`✗ 換檔腳本沒有起來（${problem}），這一版沒有裝上`);
+    log("  有些防毒／端點防護會擋掉背景的 PowerShell。請自己到 GitHub 下載新的 zip 解壓覆蓋。");
+    return false;
+  }
   return true;
+}
+
+/**
+ * 等換檔腳本寫出記號檔。回 `null` 是起來了，否則回一句說明。
+ *
+ * ⚠ `error` 的監聽**不能拿掉**：`spawn()` 失敗（找不到 `powershell.exe`、被拒絕）
+ * 是從這個事件出來的，而沒有人聽的 `error` 會變成主程序的未捕捉例外。
+ */
+function waitForReady(child: ChildProcess, ready: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    const startedAt = Date.now();
+    let settled = false;
+    const finish = (problem: string | null): void => {
+      if (settled) return;
+      settled = true;
+      clearInterval(poll);
+      resolve(problem);
+    };
+    const poll = setInterval(() => {
+      if (existsSync(ready)) finish(null);
+      else if (Date.now() - startedAt > READY_TIMEOUT_MS) {
+        finish(`等了 ${READY_TIMEOUT_MS / 1000} 秒沒有回應`);
+      }
+    }, 250);
+    child.on("error", (err) => finish(err.message));
+    child.once("exit", (code) => {
+      finish(existsSync(ready) ? null : `一起來就結束了，結束碼 ${String(code)}`);
+    });
+  });
 }
 
 /**
@@ -281,11 +350,15 @@ function swapScript(): string {
   [string]$Source,
   [string]$Target,
   [string]$Exe,
-  [string]$Stage
+  [string]$Stage,
+  [string]$Log,
+  [string]$Ready
 )
 $ErrorActionPreference = 'Stop'
-$log = Join-Path $Stage 'apply.log'
-function Say($m) { try { Add-Content -Path $log -Value ("[" + (Get-Date -Format o) + "] " + $m) } catch {} }
+function Say($m) { try { Add-Content -LiteralPath $Log -Value ("[" + (Get-Date -Format o) + "] " + $m) } catch {} }
+
+# The app only quits once it sees this file. If we cannot write it, stop here.
+Set-Content -LiteralPath $Ready -Value $PID
 
 Say "waiting for pid $ParentPid"
 for ($i = 0; $i -lt ${WAIT_SECONDS}; $i++) {
@@ -318,7 +391,8 @@ Say "done, failures=$failed"
 Say "relaunching $Exe"
 try { Start-Process -FilePath $Exe -WorkingDirectory $Target } catch { Say ("relaunch failed: " + $_.Exception.Message) }
 
-# Keep the log, drop the payload.
-try { Get-ChildItem -LiteralPath $Stage -Directory | Remove-Item -Recurse -Force } catch {}
+# The log lives outside the stage folder, so the whole payload can go.
+try { Remove-Item -LiteralPath $Stage -Recurse -Force } catch {}
+try { Remove-Item -LiteralPath $Ready -Force } catch {}
 `;
 }

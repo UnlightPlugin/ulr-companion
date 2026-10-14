@@ -121,6 +121,14 @@ export function startAutoUpdate(options: UpdaterOptions): () => void {
   let stopped = false;
   /** 已經下載好、等一個安全時機的那一版。 */
   let staged: { version: string; path: string } | null = null;
+  /**
+   * 這一次執行已經套用失敗過的那一版。**重新啟動之前不再碰它。**
+   *
+   * ⚠ 沒有這個的話，裝不上去的機器每小時會把整包（125 MB）重抓一次再失敗一次，
+   * 沒有盡頭。會讓它失敗的原因（安裝目錄寫不進去、換檔腳本被擋）都不是等一個
+   * 小時就會好的事；真的處理掉了，重開插件就會再試。
+   */
+  let abandoned: string | null = null;
 
   const log = (line: string): void => options.onLog?.(line);
 
@@ -129,7 +137,7 @@ export function startAutoUpdate(options: UpdaterOptions): () => void {
     try {
       // 已經備好一版了 → 這一輪只做「能不能套用」的判斷，不重複下載。
       if (staged !== null) {
-        applyIfIdle(staged);
+        await applyIfIdle(staged);
         return;
       }
       const manifest = await fetchManifest(feed);
@@ -139,6 +147,7 @@ export function startAutoUpdate(options: UpdaterOptions): () => void {
       // ⚠ **只往新的走。** 舊清單的簽章永遠有效，所以「版本不一樣就更新」
       // 等於對重播舊清單毫無抵抗力 —— 見 `isNewerVersion()`。
       if (!isNewerVersion(manifest.version, options.currentVersion)) return;
+      if (manifest.version === abandoned) return;
 
       log(
         `↓ 有新版 ${manifest.version}${manifest.notes === undefined ? "" : `：${manifest.notes}`}`,
@@ -147,7 +156,7 @@ export function startAutoUpdate(options: UpdaterOptions): () => void {
       if (path === null) return;
       staged = { version: manifest.version, path };
       log(`✓ ${manifest.version} 已下載，等對戰結束再套用`);
-      applyIfIdle(staged);
+      await applyIfIdle(staged);
     } catch (err) {
       // 靜默更新的「靜默」不包括錯誤。查不到原因的失敗比失敗本身麻煩。
       log(`✗ 檢查更新失敗：${err instanceof Error ? err.message : String(err)}`);
@@ -181,13 +190,13 @@ export function startAutoUpdate(options: UpdaterOptions): () => void {
    * 被當成純 Node 跑，第一行就炸在 `app.setPath` —— 玩家看到的是「更新完
    * 就再也打不開了」。（同一個坑第五次出現，見 docs/launching.md 陷阱 1。）
    */
-  const applyIfIdle = (ready: { version: string; path: string }): void => {
+  const applyIfIdle = async (ready: { version: string; path: string }): Promise<void> => {
     if (options.isBusy()) return;
 
     if (ready.path.toLowerCase().endsWith(".zip")) {
       log(`⟳ 套用 ${ready.version}（換檔，換完會自己重新啟動）`);
       markUpdating();
-      const started = applyZipUpdate({
+      const started = await applyZipUpdate({
         zipPath: ready.path,
         version: ready.version,
         exePath: process.execPath,
@@ -195,12 +204,13 @@ export function startAutoUpdate(options: UpdaterOptions): () => void {
         onLog: log,
       });
       if (!started) {
-        // 換不上去（多半是安裝目錄沒有寫入權）。⚠ 紙條要撕掉，否則下一次
-        // 手動開啟會被當成「更新後自動起來的」而不跳視窗。
+        // 換不上去（安裝目錄沒有寫入權、換檔腳本起不來）。⚠ 紙條要撕掉，否則
+        // 下一次手動開啟會被當成「更新後自動起來的」而不跳視窗。
         clearUpdating();
-        // ⚠ 已下載的那一份留著沒有用 —— 每小時 tick 會再走一次同一條失敗路徑。
-        // 清成 null 讓它至少能在使用者搬動安裝位置之後重新試一次完整流程。
+        // ⚠ 已下載的那一份留著沒有用，重抓一次也一樣 —— 見 `abandoned`。
         staged = null;
+        abandoned = ready.version;
+        log(`  ${ready.version} 在插件重新啟動之前不會再自動重試`);
         return;
       }
       options.quit();
