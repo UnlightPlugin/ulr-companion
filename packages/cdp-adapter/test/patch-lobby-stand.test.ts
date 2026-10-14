@@ -411,6 +411,7 @@ function stateOf(s: StateSugar = {}): LobbyStandState {
     ready: s.ready ?? true,
     sets: s.sets ?? [{ charas: s.charas ?? [], layout: s.layout ?? {} }],
     ui: s.ui ?? {},
+    skillVoice: s.skillVoice ?? true,
   };
 }
 
@@ -989,6 +990,53 @@ describe("點立繪說話", () => {
     );
   });
 
+  it("Skill: Off：招式整句不說，只剩台詞；按 OK 才存、回報帶 skillVoice", async () => {
+    const { window, lobby, click, said, reports } = await onStage();
+    const st = window["__ulrLobbyStand"] as { state: LobbyStandState };
+    lobby.input.emit("pointerdown", pointer(5, 600, { right: true }), []);
+    const skill = editButton(lobby, "Skill: On");
+    skill.emit("pointerup", pointer(0, 0));
+    expect(editButton(lobby, "Skill: Off")).toBe(skill);
+    expect(st.state.skillVoice).toBe(true); // 還是草稿
+    // 切到大廳元件時這顆跟著藏
+    editButton(lobby, "UI").emit("pointerup", pointer(0, 0));
+    expect(skill.visible).toBe(false);
+    editButton(lobby, "Chara").emit("pointerup", pointer(0, 0));
+    expect(skill.visible).toBe(true);
+
+    editButton(lobby, "OK").emit("pointerup", pointer(0, 0));
+    const r = reports.find((x) => x.type === "lobby-stand-sets")!;
+    expect(r.skillVoice).toBe(false);
+    expect(isLobbyStandReport(r)).toBe(true);
+    expect(st.state.skillVoice).toBe(false);
+
+    const heard = new Set<string>();
+    for (let i = 0; i < 8; i++) {
+      await click(650, 300);
+      lobby.runTimers();
+      heard.add(JSON.stringify(said()));
+      await click(0, 0);
+    }
+    expect(heard).toEqual(new Set([JSON.stringify(["二行目が", "あるよ"])]));
+  });
+
+  it("沒按 OK 就離開：Skill 的切換不算；托盤推 skillVoice: false 來就不喊招式", async () => {
+    const { window, lobby } = await onStage();
+    const st = window["__ulrLobbyStand"] as { state: LobbyStandState };
+    lobby.input.emit("pointerdown", pointer(5, 600, { right: true }), []);
+    editButton(lobby, "Skill: On").emit("pointerup", pointer(0, 0));
+    run(window, buildLobbyStandStateExpression(stateOf({ ready: false })));
+    expect(st.state.skillVoice).toBe(true);
+
+    run(
+      window,
+      buildLobbyStandStateExpression(stateOf({ charas: ["cc063", "cc005"], skillVoice: false })),
+    );
+    expect(st.state.skillVoice).toBe(false);
+    lobby.input.emit("pointerdown", pointer(5, 600, { right: true }), []);
+    expect(editButton(lobby, "Skill: Off")).toBeDefined();
+  });
+
   it("點到按鈕不說話；右鍵進編輯時對話框收掉", async () => {
     const { lobby, click, bubble } = await onStage();
     const s = lobby.stand_chara!;
@@ -1104,5 +1152,11 @@ describe("isLobbyStandReport", () => {
       isLobbyStandReport(sets(Array.from({ length: 11 }, () => ({ charas: [], layout: {} })))),
     ).toBe(false);
     expect(isLobbyStandReport({ type: "lobby-stand-charas", charas: ["cc001"] })).toBe(false);
+    expect(isLobbyStandReport({ type: "lobby-stand-sets", sets: [], skillVoice: false })).toBe(
+      true,
+    );
+    expect(isLobbyStandReport({ type: "lobby-stand-sets", sets: [], skillVoice: "no" })).toBe(
+      false,
+    );
   });
 });

@@ -48,6 +48,9 @@
  * - 語音：遊戲快取的 `voice`（= CharaVoice.json）有 `{角色}_dialogue{台詞id}`／
  *   `{角色}_skill{n}` 就播 `images/assets/Voice/{角色}/{檔名}`。官方只在有稀有卡時播，
  *   **玩家選了不看稀有卡**；音量照遊戲的 volume_voice，0 就只出字幕
+ * - 招式那四句可以關（2026-10-11 玩家：「大廳語音再增加一個選項，是否發出技能語音」）：
+ *   編輯立繪時第一排最右邊的 [Skill: On]／[Skill: Off]，所有套共用，按 OK 才存。
+ *   關掉 = 招式整句不說（語音與招式名字幕都沒有），只剩台詞
  *
  * ## Library：同一顆愛心改成可複選
  *
@@ -86,6 +89,7 @@
  *   [Front]     選中的那張移到最上層      [Back]  移到最下層
  *   [OK]        存檔、離開編輯（套組、立繪與大廳元件一起存）
  *   [UI]        切到編輯大廳元件（見下面）
+ *   [Skill: On] 點立繪說話時喊不喊招式（字是現在的狀態，按了切換）
  *   [Prev] [Next]  換編輯另一套      [New]  新增一套空的      [Del]  刪掉這套
  * ```
  *
@@ -123,7 +127,8 @@
  * ## 存在哪
  *
  * 頁面只回報，真相在托盤的牌組庫（`DeckLibrary.lobbyStand`，跟牌組一起上雲）：
- * `{ type: "lobby-stand-sets", sets, ui? }`，每次都是整份（ui 只有按 OK 時帶）。
+ * `{ type: "lobby-stand-sets", sets, ui?, skillVoice? }`，每次都是整份（ui 與
+ * skillVoice 只有按 OK 時帶）。
  * 牌組庫沒接上（`ready: false`）時整支什麼都不做 —— 首頁與 Library 完全是官方的。
  *
  * ## 長命的場景
@@ -146,7 +151,7 @@ import {
 const FLAG = "__ulrLobbyStand";
 
 /** 腳本版本。**改動注入腳本裡任何一行就 +1**，修 bug 也算。先拆再裝。 */
-export const LOBBY_STAND_SCRIPT_VERSION = 10;
+export const LOBBY_STAND_SCRIPT_VERSION = 11;
 
 export const DEFAULT_LOBBY_STAND_POLL_MS = 250;
 
@@ -191,6 +196,8 @@ export interface LobbyStandState {
   sets: LobbyStandSet[];
   /** 組名 → 改法。沒列到的組照官方。所有套共用。 */
   ui: Record<string, LobbyUiLayout>;
+  /** 點立繪說話時要不要喊招式。所有套共用。 */
+  skillVoice: boolean;
 }
 
 export type LobbyStandReport =
@@ -200,6 +207,8 @@ export type LobbyStandReport =
       sets: LobbyStandSet[];
       /** 整份（沒列到的組 = 改回官方）。只有按 OK 時送。 */
       ui?: Record<string, LobbyUiLayout>;
+      /** 只有按 OK 時送。 */
+      skillVoice?: boolean;
     }
   | { type: "lobby-stand-error"; message: string };
 
@@ -306,10 +315,17 @@ function isSet(v: unknown): v is LobbyStandSet {
 
 export function isLobbyStandReport(value: unknown): value is LobbyStandReport {
   if (typeof value !== "object" || value === null) return false;
-  const v = value as { type?: unknown; sets?: unknown; ui?: unknown; message?: unknown };
+  const v = value as {
+    type?: unknown;
+    sets?: unknown;
+    ui?: unknown;
+    skillVoice?: unknown;
+    message?: unknown;
+  };
   if (v.type === "lobby-stand-sets") {
     if (!Array.isArray(v.sets) || v.sets.length > LOBBY_STAND_SETS_LIMIT) return false;
     if (!v.sets.every((s) => isSet(s))) return false;
+    if (v.skillVoice !== undefined && typeof v.skillVoice !== "boolean") return false;
     if (v.ui === undefined) return true;
     if (typeof v.ui !== "object" || v.ui === null || Array.isArray(v.ui)) return false;
     const ui = Object.entries(v.ui as Record<string, unknown>);
@@ -382,6 +398,10 @@ const UI = {
   modeX: 344,
   toUi: "UI",
   toChara: "Chara",
+  /** 點立繪說話時喊不喊招式。字是現在的狀態，按了切換。只在編輯立繪時出現。 */
+  skillX: 428,
+  skillOn: "Skill: On",
+  skillOff: "Skill: Off",
   hint: "Wheel: Size   Shift+Wheel: Turn   Right-click: Flip",
   uiHint: "Drag: Move   Wheel: Size   Right-click: Hide",
   /** 大廳元件：隱藏的組在編輯時半透明顯示（點得到才能叫回來）。 */
@@ -977,7 +997,8 @@ export function buildLobbyStandPatchScript(options: LobbyStandPatchOptions): str
   // 點立繪說話
   //
   // 台詞：這個角色的一般開場台詞＋對「同台的角色」說的那幾句（玩家選的），有招式
-  // 語音的再加四招（字幕是招式名，從遊戲自己的 Feats 讀，跟著遊戲語言）。
+  // 語音的再加四招（字幕是招式名，從遊戲自己的 Feats 讀，跟著遊戲語言）；玩家把
+  // skillVoice 關掉就不加這四招。
   // 語音：CharaVoice 有那一句就播（玩家選的：不看有沒有稀有卡），音量照遊戲的
   // volume_voice，0 就不播。音檔與對話框圖都只碰 CDN，不送遊戲伺服器。
   // -------------------------------------------------------------------------
@@ -1035,7 +1056,7 @@ export function buildLobbyStandPatchScript(options: LobbyStandPatchOptions): str
   }
 
   /** 這個角色現在能說的話：{ text, voice }。 */
-  function linesFor(lb, chara) {
+  function linesFor(st, lb, chara) {
     var out = [];
     var D = CFG.dialogue.charas[chara];
     function add(ids) {
@@ -1052,6 +1073,7 @@ export function buildLobbyStandPatchScript(options: LobbyStandPatchOptions): str
         if (D.vs && D.vs[it.chara]) add(D.vs[it.chara]);
       }
     }
+    if (!st.state.skillVoice) return out;
     for (var n = 1; n <= 4; n++) {
       var v = voiceOf(chara, "skill" + n);
       var name = v && skillName(chara, n);
@@ -1112,7 +1134,7 @@ export function buildLobbyStandPatchScript(options: LobbyStandPatchOptions): str
 
   function speak(st, lb, item) {
     var sc = lb.scene;
-    var all = linesFor(lb, item.chara);
+    var all = linesFor(st, lb, item.chara);
     if (all.length === 0) return;
     // 不連說同一句
     var pool = all.length > 1 ? all.filter(function (l) { return l.key !== lb.lastLine; }) : all;
@@ -1377,10 +1399,11 @@ export function buildLobbyStandPatchScript(options: LobbyStandPatchOptions): str
       var S = st.state.ui[key];
       draft[key] = { x: S.x, y: S.y, scale: S.scale, hidden: !!S.hidden };
     }
-    // ed.sets／ed.cur 是套組的草稿：換套、新增、刪除都先改這份
+    // ed.sets／ed.cur 是套組的草稿：換套、新增、刪除都先改這份；ed.skillVoice 也是草稿
     var ed = { mode: "chara", ui: draft, uiSel: null, parts: [], hidden: [], drag: null,
       zone: null, up: null, standBtns: [], modeText: null, hint: null, setText: null,
-      sets: copySets(st.state.sets), cur: clampIdx(st.cur, st.state.sets.length) };
+      sets: copySets(st.state.sets), cur: clampIdx(st.cur, st.state.sets.length),
+      skillVoice: st.state.skillVoice };
     lb.edit = ed;
     lb.sel = null;
 
@@ -1475,7 +1498,11 @@ export function buildLobbyStandPatchScript(options: LobbyStandPatchOptions): str
     label.__ulrRow = "set";
     label.__ulrDy = 12;
     ed.setText = label;
-    ed.standBtns = front.concat(back, prev, next, add, del, [label]);
+    var skill = makeButton(sc, U.skillX, "btn", ed.skillVoice ? U.skillOn : U.skillOff, function () {
+      ed.skillVoice = !ed.skillVoice;
+      skill[1].setText(ed.skillVoice ? U.skillOn : U.skillOff);
+    });
+    ed.standBtns = front.concat(back, prev, next, add, del, skill, [label]);
     ed.parts = ed.parts.concat(ed.standBtns);
     ed.parts = ed.parts.concat(makeButton(sc, U.okX, "btn", U.ok, function () { saveEdit(st, lb); }));
     var mode = makeButton(sc, U.modeX, "btn", U.toUi, function () {
@@ -1594,8 +1621,9 @@ export function buildLobbyStandPatchScript(options: LobbyStandPatchOptions): str
     st.cur = ed.cur;
     var ui = uiChanged(ed.ui);
     st.state.ui = ui;
+    st.state.skillVoice = ed.skillVoice;
     exitEdit(st, lb);
-    report({ type: "lobby-stand-sets", sets: copySets(st.state.sets), ui: ui });
+    report({ type: "lobby-stand-sets", sets: copySets(st.state.sets), ui: ui, skillVoice: ed.skillVoice });
   }
 
   function exitEdit(st, lb) {
@@ -1769,6 +1797,7 @@ export function buildLobbyStandPatchScript(options: LobbyStandPatchOptions): str
     });
     if (s.sets.length === 0) s.sets = [{ charas: [], layout: {} }];
     if (!s.ui || typeof s.ui !== "object") s.ui = {};
+    s.skillVoice = s.skillVoice !== false;
     return s;
   }
 

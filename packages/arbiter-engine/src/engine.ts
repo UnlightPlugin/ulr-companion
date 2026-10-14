@@ -2914,6 +2914,7 @@ export class ArbiterEngine {
         layout: Object.fromEntries(Object.entries(s.layout).map(([k, v]) => [k, { ...v }])),
       })),
       ui: Object.fromEntries(Object.entries(state.ui).map(([k, v]) => [k, { ...v }])),
+      skillVoice: state.skillVoice,
     };
     void this.#syncLobbyStand();
   }

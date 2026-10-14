@@ -131,6 +131,7 @@ import {
   setFavoriteEvent,
   setHiddenWeapon,
   setLobbyStandSets,
+  setLobbyStandSkillVoice,
   setLobbyStandUi,
   stockTable,
   substituteCharas,
@@ -2260,6 +2261,7 @@ function pushLobbyStand(): void {
     ready: deck !== null,
     sets: stand?.sets ?? [],
     ui: stand?.ui ?? {},
+    skillVoice: stand?.skillVoice ?? true,
   };
   const text = JSON.stringify(state);
   if (text === lobbyStandPushed) return;
@@ -2273,6 +2275,9 @@ function onLobbyStand(report: LobbyStandReport): void {
   if (deck !== null) {
     let library = setLobbyStandSets(deck.library, report.sets);
     if (report.ui !== undefined) library = setLobbyStandUi(library, report.ui);
+    if (report.skillVoice !== undefined) {
+      library = setLobbyStandSkillVoice(library, report.skillVoice);
+    }
     if (library !== deck.library) {
       deck = { ...deck, library };
       saveDeckLibrary();

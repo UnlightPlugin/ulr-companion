@@ -89,6 +89,7 @@ export {
   parseStandSet,
   parseUiLayout,
   setLobbyStandSets,
+  setLobbyStandSkillVoice,
   setLobbyStandUi,
 } from "./lobby-stand.js";
 export type { LobbyStand, StandLayout, StandSet, UiLayout } from "./lobby-stand.js";

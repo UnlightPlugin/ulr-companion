@@ -17,6 +17,7 @@ import {
   parseStandLayout,
   parseUiLayout,
   setLobbyStandSets,
+  setLobbyStandSkillVoice,
   setLobbyStandUi,
 } from "../src/lobby-stand.js";
 import { mergeLibraries, parseSyncDocument, toSyncDocument } from "../src/merge.js";
@@ -91,6 +92,28 @@ describe("setLobbyStandUi（大廳元件）", () => {
   });
 });
 
+describe("setLobbyStandSkillVoice（點立繪喊不喊招式）", () => {
+  it("預設會喊；關掉動時間戳、不動套組；沒變回同一個物件", () => {
+    const base = setLobbyStandSets(emptyLibrary("a"), [{ charas: ["cc063"], layout: {} }], T0);
+    expect(lobbyStand(emptyLibrary("a")).skillVoice).toBe(true);
+    expect(setLobbyStandSkillVoice(base, true, T1)).toBe(base);
+    const off = setLobbyStandSkillVoice(base, false, T1);
+    expect(lobbyStand(off).skillVoice).toBe(false);
+    expect(lobbyStand(off).sets[0]!.charas).toEqual(["cc063"]);
+    expect(off.lobbyStand?.updatedAt).toBe(T1.toISOString());
+    expect(setLobbyStandSkillVoice(off, false, T0)).toBe(off);
+  });
+
+  it("存檔：關掉才寫這一欄，讀回來還是關的；沒動過的存檔跟舊版一樣沒有這一欄", () => {
+    const base = setLobbyStandSets(emptyLibrary("a"), [{ charas: ["cc063"], layout: {} }], T0);
+    expect(serializeLibrary(base)).not.toContain("skillVoice");
+    const off = setLobbyStandSkillVoice(base, false, T1);
+    const back = parseLibrary(serializeLibrary(off), "00000000").library;
+    expect(back.lobbyStand).toEqual(off.lobbyStand);
+    expect(parseLobbyStand({ sets: [], skillVoice: "no", updatedAt: "x" })?.skillVoice).toBe(true);
+  });
+});
+
 describe("parseStandLayout", () => {
   it("夾回範圍、角度歸一、小數截短", () => {
     expect(parseStandLayout({ x: 9999, y: -9999, scale: 50, angle: 370.04, z: 1 })).toEqual({
@@ -138,6 +161,7 @@ describe("存檔與雲端", () => {
     expect(s).toEqual({
       sets: [{ charas: ["cc063"], layout: { cc063: L } }],
       ui: {},
+      skillVoice: true,
       updatedAt: T0.toISOString(),
     });
     expect(parseLobbyStand({ sets: [] })).toBeNull();

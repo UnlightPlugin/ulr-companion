@@ -15,6 +15,8 @@
  *             … ]                                    每次進首頁隨機挑一套
  *   ui      { duel: { x, y, scale, hidden }, … }    大廳元件的位移／縮放／隱藏，所有套共用
  *                                                    （玩家選的，2026-10-03）
+ *   skillVoice  false                                點立繪說話時不喊招式（2026-10-11 加的）；
+ *                                                    沒有這一欄 = 會喊，所有套共用
  * ```
  *
  * 整份一個時間戳、較新的整份贏（理由同 FavoriteCards：玩家一次只在一台電腦上動）。
@@ -60,6 +62,8 @@ export interface LobbyStand {
   sets: StandSet[];
   /** 組名（`duel`、`ranking`、`avatar`…，名單在 patch-lobby-stand）→ 改法。沒改的不存。 */
   ui: Record<string, UiLayout>;
+  /** 點立繪說話時要不要喊招式（招式語音＋招式名字幕）。預設要。 */
+  skillVoice: boolean;
   /** ISO 8601。整份最後一次改動的時間。 */
   updatedAt: string;
 }
@@ -187,13 +191,23 @@ export function parseLobbyStand(raw: unknown): LobbyStand | null {
   const r = raw as Record<string, unknown>;
   if (typeof r.updatedAt !== "string") return null;
   const sets = Array.isArray(r.sets) ? parseSets(r.sets) : [parseStandSet(r)];
-  return { sets, ui: parseUiMap(r.ui), updatedAt: r.updatedAt };
+  return {
+    sets,
+    ui: parseUiMap(r.ui),
+    skillVoice: r.skillVoice !== false,
+    updatedAt: r.updatedAt,
+  };
 }
 
 /** 沒設過時給一套空的（`updatedAt` 空字串，任何一份設過的都比它新）。 */
 export function lobbyStand(library: DeckLibrary): LobbyStand {
   return copyLobbyStand(
-    library.lobbyStand ?? { sets: [{ charas: [], layout: {} }], ui: {}, updatedAt: "" },
+    library.lobbyStand ?? {
+      sets: [{ charas: [], layout: {} }],
+      ui: {},
+      skillVoice: true,
+      updatedAt: "",
+    },
   );
 }
 
@@ -206,7 +220,7 @@ function copySet(s: StandSet): StandSet {
 export function copyLobbyStand(s: LobbyStand): LobbyStand {
   const ui: Record<string, UiLayout> = {};
   for (const key of Object.keys(s.ui).sort()) ui[key] = { ...s.ui[key]! };
-  return { sets: s.sets.map(copySet), ui, updatedAt: s.updatedAt };
+  return { sets: s.sets.map(copySet), ui, skillVoice: s.skillVoice, updatedAt: s.updatedAt };
 }
 
 /**
@@ -246,6 +260,20 @@ export function setLobbyStandUi(
   };
 }
 
+/** 存「點立繪說話時要不要喊招式」。沒變就回同一個物件。 */
+export function setLobbyStandSkillVoice(
+  library: DeckLibrary,
+  skillVoice: boolean,
+  now: Date = new Date(),
+): DeckLibrary {
+  const cur = lobbyStand(library);
+  if (cur.skillVoice === skillVoice) return library;
+  return {
+    ...library,
+    lobbyStand: { ...cur, skillVoice, updatedAt: now.toISOString() },
+  };
+}
+
 /** 兩邊取較新的一份；只有一邊有就是那一邊，平手本地贏。 */
 export function newerLobbyStand(
   local: LobbyStand | undefined,
@@ -271,7 +299,10 @@ export function serializeLobbyStand(s: LobbyStand): unknown {
     const u = s.ui[key]!;
     ui[key] = { x: u.x, y: u.y, scale: u.scale, hidden: u.hidden };
   }
-  return { sets, ui, updatedAt: s.updatedAt };
+  // 預設（會喊）不寫：沒動過這個開關的存檔跟舊版一字不差
+  return s.skillVoice
+    ? { sets, ui, updatedAt: s.updatedAt }
+    : { sets, ui, skillVoice: false, updatedAt: s.updatedAt };
 }
 
 function clamp(v: number, lo: number, hi: number): number {
