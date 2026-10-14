@@ -240,6 +240,33 @@ function removeTree(path: string): void {
 }
 
 /**
+ * 清掉暫存區裡上一次留下來的東西（下載的 zip、解開的檔案、換檔腳本）。
+ * **每次啟動叫一次。** 腳本的記錄（`*.log`）留著。
+ *
+ * 啟動時那裡沒有任何還用得到的東西 —— 「已經下載好的那一版」只記在記憶體裡，
+ * 重開就會重抓。不清的話每更新一版就多佔三百多 MB，而且沒有人會去看那個資料夾。
+ */
+export function cleanupUpdateLeftovers(workDir: string): number {
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(workDir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  let removed = 0;
+  for (const entry of entries) {
+    if (entry.name.endsWith(".log")) continue;
+    try {
+      removeTree(join(workDir, entry.name));
+      removed++;
+    } catch {
+      // 還鎖著（換檔腳本正在收尾？）—— 下次啟動再說。
+    }
+  }
+  return removed;
+}
+
+/**
  * 清掉上一次換檔留下來的 `*.ulrold`。**每次啟動叫一次。**
  *
  * ⚠ 換檔當下那些檔案還被自己鎖著（我們就是從它們執行的），所以只能改名，

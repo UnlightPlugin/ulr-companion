@@ -243,7 +243,7 @@ import { startRuleFeed } from "./rule-feed.js";
 import { TitleButton } from "./title-button.js";
 import { BUNDLE_REPORT_INTERVAL_MS, createBundleReporter, readPushToken } from "./bundle-report.js";
 import { consumeUpdatedFlag, startAutoUpdate } from "./updater.js";
-import { cleanupStaleFiles } from "./zip-update.js";
+import { cleanupStaleFiles, cleanupUpdateLeftovers } from "./zip-update.js";
 import {
   BOOT_EXT_DIR,
   bootExtVersion,
@@ -5421,6 +5421,9 @@ app.whenReady().then(() => {
   {
     const stale = cleanupStaleFiles(dirname(process.execPath));
     if (stale > 0) log(`· 已清掉上次更新留下的 ${stale} 個舊檔`);
+    // 暫存區同理：下載的 zip 與解開的那一份，重開之後沒有一樣還用得到。
+    // 開發模式不碰（更新那條線在開發模式整支沒啟動，見 updater.ts）。
+    if (app.isPackaged) cleanupUpdateLeftovers(join(app.getPath("userData"), "updates"));
   }
 
   // ⚠ 更新後由安裝檔叫起來的那一次**不要跳視窗**。玩家可能正在打字、
