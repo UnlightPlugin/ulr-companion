@@ -79,7 +79,7 @@ export function applyZipUpdate(options: ZipUpdateOptions): boolean {
 
   const stage = join(options.workDir, `stage-${options.version}`);
   try {
-    rmSync(stage, { recursive: true, force: true });
+    removeTree(stage);
     mkdirSync(stage, { recursive: true });
     if (!extract(options.zipPath, stage)) {
       log("✗ 解壓縮失敗，這一版沒有裝上");
@@ -147,6 +147,27 @@ export function applyZipUpdate(options: ZipUpdateOptions): boolean {
     return false;
   }
   return true;
+}
+
+/**
+ * 整個資料夾刪掉。**刪暫存區一律走這支，不要直接 `rmSync`。**
+ *
+ * ⚠⚠ Electron 把 `node:fs` 換過：`*.asar` 在它眼裡是**資料夾**，而且讀過一次
+ * 就把檔案開著不放。遞迴刪除於是鑽進 `app.asar` 裡、最後對它 `rmdir` ——
+ * `EBUSY`。2026-10-12 的 2.3.0 就卡在這：第一次套用沒換成，留下的 `stage-*`
+ * 之後每小時都刪不掉，而每次失敗都把 125 MB 重抓一遍。
+ *
+ * `process.noAsar` 是 Electron 給的開關，開著的時候 `.asar` 就只是一個檔案。
+ * 純 Node（測試）底下這個屬性沒有作用，設了也無害。
+ */
+function removeTree(path: string): void {
+  const before = process.noAsar;
+  process.noAsar = true;
+  try {
+    rmSync(path, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
+  } finally {
+    process.noAsar = before;
+  }
 }
 
 /**
