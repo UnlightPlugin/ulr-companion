@@ -1104,6 +1104,8 @@
             { id: "bitem", label: "物品捷徑" },
             // 玩家 2026-10-06：不用先按下一個卡片就能選 High／Low
             { id: "bhighlow", label: "High Low" },
+            // 玩家 2026-10-11：照勾選的目標自己爬，勝場、敗場各一組
+            { id: "bclimb", label: "自動爬星" },
           ],
         },
         {
@@ -4336,7 +4338,8 @@
       // 住在物品欄那支注入腳本裡，狀態不在 snapshot 裡，開著才輪詢。
       let bstate = null;
       let bonusTimer = null;
-      const onBonusPage = () => tab === "bonus" && (sub === "bitem" || sub === "bhighlow");
+      const onBonusPage = () =>
+        tab === "bonus" && (sub === "bitem" || sub === "bhighlow" || sub === "bclimb");
 
       function startBonusPolling() {
         if (bonusTimer !== null) return;
@@ -4471,6 +4474,144 @@
           skipEnd
         );
       };
+      // --- 獎勵 › 自動爬星 ---------------------------------------------------
+      const CLIMB_KIND = {
+        raid2: "渦二",
+        raid1: "渦一",
+        chara1: "第一位角色卡",
+        chara2: "第二位角色卡",
+        chara3: "第三位角色卡",
+        gem: "GEM",
+        heather3: "白色石楠3",
+        exp: "EXP",
+      };
+      const CLIMB_STOP = {
+        noTarget: "沒有目標可拿",
+        floor100: "到 100 層了",
+        noItem: "猜錯了，沒有能用的道具",
+        notWorth: "猜錯了，救起來不划算",
+        quitNotWorth: "猜錯了，救起來不划算，已結束遊戲",
+        quitNoItem: "猜錯了，沒有能用的道具，已結束遊戲",
+        itemRefused: "道具用不了",
+        noData: "讀不到獎品資料",
+        error: "出錯了",
+      };
+      function bonusClimbText(v) {
+        if (v === null) return "還沒接上遊戲 —— 開了遊戲就會自己裝上";
+        if (!v.installed) return "還沒裝上" + (v.reason ? "：" + v.reason : "");
+        const c = v.climb;
+        if (!c || !c.on) return "關著";
+        if (!c.inBonus) return "生效中，等獎勵遊戲開始";
+        const where = `${c.group === "lose" ? "敗場" : "勝場"}，第 ${c.step} 層（${c.start} 層起）`;
+        if (c.stopped) {
+          const why = CLIMB_STOP[c.stopped] ?? c.stopped;
+          if (c.stopped.startsWith("quit")) return `${where}：${why}`;
+          return `${where}：已交還給你 —— ${why}${c.stopped === "error" && v.reason ? "：" + v.reason : ""}`;
+        }
+        if (c.what === "seekRaid2") return `${where}：往上找渦二（到第 ${c.cell} 層）`;
+        if (c.what === "seekGem") return `${where}：渦二沒出現，往上找 GEM 或渦一`;
+        if (c.what === "floor100") return `${where}：爬到 100 層`;
+        if (c.what === "peek") return `${where}：往上看前幾層有沒有目標（到第 ${c.cell} 層）`;
+        if (CLIMB_KIND[c.what]) return `${where}：去拿第 ${c.cell} 層的${CLIMB_KIND[c.what]}`;
+        return where;
+      }
+      const BONUS_CLIMB_TIP =
+        "替你按的是官方同一組按鈕（下一個卡片、High／Low、使用物品、得到卡片），送的請求跟手動按一模一樣，不多送任何東西。" +
+        "畫面上只看得到腳下和後面三張，所以是邊爬邊看。" +
+        "同時看到好幾種勾選的目標時：渦二 → 渦一 → 角色卡／GEM／白色石楠3（這三種誰近拿誰）→ EXP；腳下那張就是目標就收下。" +
+        "沒有目標可拿時會停下來交還給你，不會替你收下用不到的卡；停下來之後這一場就不再動。";
+      const BONUS_CLIMB_CP_TIP =
+        "猜錯時先算救起來划不划算，全部換成 GEM（跟 Moon 腳本同一套）：石楠1 200、石楠3 540、石楠5／四葉草／跳越星 900。" +
+        "渦二、往上找渦二、爬 100 層：一定要到，有能用的道具就用。" +
+        "渦一（2500）、角色卡（你填的價值 × 張數）：什麼道具都能用，但要比「價值 − 還剩幾層 × 246」便宜。" +
+        "GEM（結算的 GEM 基數 × 卡上的倍率 × 加成）、白色石楠3（540）、EXP（結算的 EXP 基數 × 卡上的倍率 × 0.1，通常只有幾十）：只准用石楠1，而且「價值 × 0.687 的層數次方」要比 200 多 —— 所以 EXP 猜錯了不會救。" +
+        "往上看前幾層、渦二沒了改找 GEM／渦一這種沒有特定目標的：不救。" +
+        "道具的順序：夠用的石楠1／石楠3 先，再來石楠5 → 跳越星 → 四葉草；下一層就是目標、而且骰壞的是 2／3／11／12 時先用四葉草（重猜幾乎必中）。";
+
+      function bonusClimbConfig() {
+        return bstate?.climb ?? snap?.profile?.bonusClimb ?? null;
+      }
+      function applyBonusClimb(t) {
+        const cur = bonusClimbConfig();
+        if (cur === null) return;
+        const next = { ...cur, win: { ...cur.win }, lose: { ...cur.lose } };
+        const path = t.dataset.climb;
+        const value = t.type === "checkbox" ? t.checked : Number(t.value);
+        if (!path.includes(".")) next[path] = value;
+        else {
+          const [group, key] = path.split(".");
+          if (next[group] === undefined) return;
+          next[group][key] = value;
+        }
+        return window.ulr.bonus.climb(next).then((s) => {
+          bstate = s;
+          renderBody();
+        });
+      }
+
+      PAGES["bonus/bclimb"] = () => {
+        const s = bstate;
+        const cfg = bonusClimbConfig();
+        if (cfg === null) return head("自動爬星") + `<div class="card dim">讀取中…</div>`;
+        const state = `<div class="card">
+            <div class="row"><span class="dim">狀態</span><span>${esc(bonusClimbText(s?.items ?? null))}</span></div>
+          </div>`;
+        const toggle = `<div class="card">
+            <label class="toggle">
+              <input type="checkbox" data-climb="on" ${cfg.on ? "checked" : ""} />
+              <span><b>自動爬星</b>${info(BONUS_CLIMB_TIP)}
+                <div class="hint">進獎勵遊戲後照下面勾的目標自己爬：猜大小、猜錯用道具、走到目標就收下。沒有目標時停下來交還給你。</div>
+              </span>
+            </label>
+          </div>`;
+        const rescue = `<div class="card">
+            <div class="row"><span class="dim">猜錯時先算救起來划不划算${info(BONUS_CLIMB_CP_TIP)}</span><span></span></div>
+            <div class="row">
+              <span>角色卡每張的價值</span>
+              <span><input type="number" data-climb="charaValue" min="0" max="99999" step="100" style="width:6em" value="${cfg.charaValue}" /> GEM</span>
+            </div>
+            <label class="toggle" style="margin-top:8px">
+              <input type="checkbox" data-climb="quit" ${cfg.quit ? "checked" : ""} />
+              <span><b>不划算就直接結束遊戲</b>
+                <div class="hint">救起來不划算、或沒有能用的道具時：勾了直接按「結束遊戲」，沒勾就停下來交還給你。</div>
+              </span>
+            </label>
+          </div>`;
+        const num = (path, value, min, max) =>
+          `<input type="number" data-climb="${path}" min="${min}" max="${max}" step="1" style="width:4.2em" value="${value}" />`;
+        const goal = (group, g, key, label, body, hint) => `<label class="toggle">
+            <input type="checkbox" data-climb="${group}.${key}" ${g[key] ? "checked" : ""} />
+            <span><b>${label}</b>${body ? `<span class="dim">　${body}</span>` : ""}
+              ${hint ? `<div class="hint">${hint}</div>` : ""}
+            </span>
+          </label>`;
+        const within = (group, g, key) =>
+          `開局起前 ${num(`${group}.${key}Within`, g[`${key}Within`], 1, 50)} 層內出現就拿`;
+        const card = (group, title, note) => {
+          const g = cfg[group];
+          return `<div class="card">
+            <div class="row"><span><b>${title}</b></span><span class="dim">${note}</span></div>
+            ${goal(group, g, "gem", "GEM", within(group, g, "gem"), "")}
+            ${goal(group, g, "chara1", "第一位角色卡", within(group, g, "chara1"), "")}
+            ${goal(group, g, "chara2", "第二位角色卡", within(group, g, "chara2"), "")}
+            ${goal(group, g, "chara3", "第三位角色卡", within(group, g, "chara3"), "看現在這副牌組那個位置的角色。×1 而且 Lv1 的是野生卡，不算。")}
+            ${goal(group, g, "raid2", "渦二", `最多爬到第 ${num(`${group}.raid2Max`, g.raid2Max, 1, 500)} 層`, "看得到就拿；沒看到就一路往上找到這一層，還沒有就改拿 GEM 或渦一。")}
+            ${goal(group, g, "floor100", "100 層", "", "一路爬到 100 層就停下來交還給你，路上不拿獎勵。跟渦二一起勾時以渦二為準。")}
+            ${goal(group, g, "raid1", "渦一", within(group, g, "raid1"), "")}
+            ${group === "lose" ? goal(group, g, "heather3", "白色石楠3", within(group, g, "heather3"), "") : ""}
+            ${goal(group, g, "exp", "EXP", within(group, g, "exp"), "滿等就不用勾。排在其他目標後面，猜錯不會為它花道具。")}
+          </div>`;
+        };
+        return (
+          head("自動爬星", "獎勵遊戲照勾選的目標自己爬，勝場、敗場各設一組。") +
+          state +
+          toggle +
+          rescue +
+          card("win", "勝場", "75 層起") +
+          card("lose", "敗場", "55 層起；平手、時間到也算這一組")
+        );
+      };
+
       const BONUS_SKIP_END_TIP =
         "第二次結算的 OK 由插件替你按，走的是官方按下 OK 之後同一條路；得到的卡片、GEM、EXP 都已經在按「得到卡片／結束遊戲」那一刻由伺服器算好，不會因為沒看結算而少拿。" +
         "不多送任何請求。";
@@ -5165,6 +5306,7 @@
             renderBody();
           });
         }
+        if (t.dataset.climb !== undefined) return void applyBonusClimb(t);
         if (t.id === "dietStackOn" || t.id === "dietGemUpOn") {
           const part = t.id === "dietStackOn" ? "dietStack" : "gemUp";
           return void window.ulr.diet.toggle(part, t.checked).then((s) => {

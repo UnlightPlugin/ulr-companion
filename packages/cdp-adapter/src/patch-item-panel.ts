@@ -202,6 +202,58 @@
  *   沒升級時藏鏡頭＋快轉；**有升級（lvup 不是 null）不藏不快轉**，升級動畫照常看得到
  * - 時鐘在場景 shutdown 時還原（Phaser 的 Clock 換場景不會自己重設），鏡頭也是
  *
+ * ## ⑬ 自動爬星（可開關，玩家 2026-10-11）
+ *
+ * 照勾選的目標替玩家按：下一個卡片 → High／Low → 猜錯用道具 → 走到目標按得到卡片。
+ * 全部叫場景自己的方法（check_bonus_next／bonus_prediction／use_bonus_item／check_bonus_get），
+ * 請求跟手動按一模一樣，**不多送**。輸入鎖著（官方動畫中）不動，所以 ⑪⑫ 的快轉照樣疊得上。
+ *
+ * 獎品列（2026-10-11 讀的）：bonus_rewards 七張，[3] 是腳下、[4..6] 是後面三張 —— 看不到更遠。
+ * 每張 { reward_type, reward_id, reward_slot, reward_amount, reward_step }；reward_type 1 角色卡、
+ * 2 事件卡、3 道具、5 GEM、9 加成卡（id 1 經驗、id 2 GEM）。猜對後官方先換 bonus_data、
+ * 再抓新的獎品列、最後才解鎖輸入，所以輸入開著時兩邊對得上（保險再比一次 reward_step）。
+ *
+ * 目標分兩組（玩家：「要先分勝場、敗場」，勝場 75 層起、敗場 55 層起）：看 Result 場景的
+ * result_params.result，win 是勝場、其他（lose／draw／timeup）是敗場。每一組可以勾：
+ *
+ * - GEM、渦一、牌組第一／二／三位角色的卡：各自填「前 X 層」—— 從**這一場開局那一層**算起
+ *   X 層裡（含開局那層）出現才拿。角色卡看現在這副牌組（registry 的 deck／deck_now）三個
+ *   位置的角色；**x1 而且 Lv1 的不算**（玩家：「那是野生的，不是牌組的」，牌組的卡一次 6 張以上）
+ * - 渦二：填「最多爬到第幾層」。看得到就拿（不管前幾層）；還沒到那一層就一路往上找；
+ *   到了還沒有 → 改拿 GEM 或渦一（玩家：「渦二沒拿到，是改拿 GEM、渦一才對」；不管那兩樣
+ *   有沒有勾、在不在前幾層，看得到就拿、渦一先，看不到繼續往上直到出現）
+ * - 100 層：一路爬到 100 層就停、交還給玩家，路上不拿獎勵（跟渦二一起勾時以渦二為準）
+ * - 白色石楠3（道具 6）：一樣填「前 X 層」。玩家要的是敗場那組才有，托盤只在敗場畫這一格；
+ *   資料上兩組都有欄位，勝場那格永遠是沒勾
+ *
+ * - EXP（加成卡 id 1）：一樣填「前 X 層」。滿等拿了沒用，所以是可選的；值很低（照 Moon 的
+ *   算法 exp_base × 倍率 × 0.1，兩位數 GEM），猜錯不會為它花道具
+ *
+ * 同時看到好幾種，一層一層比：渦二 → 渦一（玩家：「渦一比角色卡稀有」）→ 角色卡／GEM／石楠3
+ * **誰近拿誰**（玩家：「角色卡 GEM 花3 是就近優先」）→ EXP；同一種拿近的。腳下那張就是目標 → 得到卡片。
+ * 都沒有、但「前 X 層」還有沒露出來的 → 往上一層讓下一張出來；全看過了 → **停下來交還給玩家**
+ * （不替他收下用不到的卡）。停了這一場就不再動，換設定才重新來。
+ *
+ * 猜錯要不要救，照 Moon 的 獎勵遊戲.py 算划不划算（玩家：「要像 Moon 腳本一樣計算 CP 值」
+ * 「花3、GEM 都要考量 CP 值」），全部換成 GEM（價錢表見 BONUS_ITEM_PRICES 那一段）：
+ *
+ * - 一定要到的（渦二、往上找渦二、100 層）：不算，有能用的道具就用
+ * - 稀有的（渦一、角色卡）：什麼道具都能用，但要比「救起來的期望」便宜；期望＝價值 −
+ *   還剩幾層 × 每層平均的花費（約 246）。角色卡一張值多少玩家自己填（乘上張數）
+ * - 買得到的（GEM、石楠3、EXP）：**只准石楠1**，而且期望＝價值 × 0.687^層數 要比它貴
+ * - 沒有特定目標（往上看前幾層、渦二沒了找 GEM／渦一）：不救
+ *
+ * 不救、或沒有能用的道具：玩家開了「允許直接結束」就按結束遊戲（check_bonus_quit），
+ * 沒開就停下來交還給玩家。
+ *
+ * 猜大小：底數小於 7 猜大、大於 7 猜小、7 隨便。道具的順序：夠用的石楠1／石楠3 先，大的照
+ * 石楠5、跳越星、四葉草。石楠與跳越星是算猜對 —— 走到下一層，而且下一層的底數就是剛剛骰壞
+ * 的那一顆（差 4 以上一定是 2／3／11／12，幾乎必中），一朵等於走兩層；四葉草是留在原地
+ * 重投，只走一層，所以排最後。**下一層就是目標**時到了就收、那個好猜的底數用不到，
+ * 而且骰壞的是 2／3／11／12（重猜也幾乎必中）→ 四葉草先。
+ *
+ * 在跑的時候 ⑨ 的捷徑與 ⑩ 的 High／Low 不畫（它自己會按，畫了只會閃一下），交還之後才出來。
+ *
  * ## 找面板類別
  *
  * 模組 id 每次改版都會變，跟 patch-penalty 一樣從 webpack 的模組表掃特徵字串
@@ -217,7 +269,7 @@ import { WEBPACK_REQUIRE_SNIPPET } from "./patch-penalty.js";
 const FLAG = "__ulrItemPanel";
 
 /** 腳本版本。**改動注入腳本裡任何一行就 +1**，修 bug 也算。 */
-export const ITEM_PANEL_SCRIPT_VERSION = 10;
+export const ITEM_PANEL_SCRIPT_VERSION = 11;
 
 /** 官方 AvatarItem.APRestoreID（2026-09-26）：精靈、古代、魔女、特製蘑菇萃取液、聖杯的碎片。 */
 export const AP_RESTORE_ITEM_IDS = [1, 2, 3, 38, 133] as const;
@@ -304,6 +356,227 @@ export function isBonusItemPlace(v: unknown): v is BonusItemPlace {
   return v === "above" || v === "cover";
 }
 
+/** 自動爬星的一組目標（勝場、敗場各一組）。`*Within`＝從開局那一層算起前幾層裡有才拿。 */
+export interface BonusClimbGoals {
+  gem: boolean;
+  gemWithin: number;
+  /** 牌組第一～三位角色的卡（×1 而且 Lv1 的是野生的，不算）。 */
+  chara1: boolean;
+  chara1Within: number;
+  chara2: boolean;
+  chara2Within: number;
+  chara3: boolean;
+  chara3Within: number;
+  /** 渦二：一路爬到 `raid2Max` 層去找，過了還沒有就拿 GEM 或渦一。 */
+  raid2: boolean;
+  raid2Max: number;
+  /** 爬到 100 層就停，路上不拿獎勵。 */
+  floor100: boolean;
+  raid1: boolean;
+  raid1Within: number;
+  /** 白色石楠3（玩家 2026-10-11：「敗場增加選項：花3」；托盤只在敗場那組畫出來）。 */
+  heather3: boolean;
+  heather3Within: number;
+  /** 經驗的加成卡（玩家 2026-10-11：「EXP 也可以納入考量，也是可選是否拿」）。 */
+  exp: boolean;
+  expWithin: number;
+}
+
+export interface BonusClimbConfig {
+  on: boolean;
+  /** 猜錯了救起來不划算（或沒有能用的道具）時直接按結束遊戲；沒開就停下來交還給玩家。 */
+  quit: boolean;
+  /** 一張牌組角色卡值多少 GEM（玩家自己填；算划不划算用，乘上張數）。 */
+  charaValue: number;
+  /** 勝場（75 層起）。 */
+  win: BonusClimbGoals;
+  /** 敗場（55 層起；平手、時間到也算這一組）。 */
+  lose: BonusClimbGoals;
+}
+
+/** 「前幾層」能填的範圍。 */
+export const BONUS_CLIMB_WITHIN_RANGE = { min: 1, max: 50 } as const;
+/** 渦二「最多爬到第幾層」能填的範圍。 */
+export const BONUS_CLIMB_RAID2_MAX_RANGE = { min: 1, max: 500 } as const;
+/** 「100 層」那個目標停在哪一層。 */
+export const BONUS_CLIMB_FLOOR = 100;
+
+export const DEFAULT_BONUS_CLIMB_GOALS: BonusClimbGoals = {
+  gem: false,
+  gemWithin: 6,
+  chara1: false,
+  chara1Within: 6,
+  chara2: false,
+  chara2Within: 6,
+  chara3: false,
+  chara3Within: 6,
+  raid2: false,
+  raid2Max: 105,
+  floor100: false,
+  raid1: false,
+  raid1Within: 6,
+  heather3: false,
+  heather3Within: 6,
+  exp: false,
+  expWithin: 6,
+};
+
+/** 角色卡每張的價值能填的範圍。 */
+export const BONUS_CLIMB_CHARA_VALUE_RANGE = { min: 0, max: 99999 } as const;
+
+export const DEFAULT_BONUS_CLIMB: BonusClimbConfig = {
+  on: false,
+  quit: false,
+  // 玩家 2026-10-11：「一張 L 卡預設設為 150 GEM，一次都拿 7 張或 9 張，沒那麼值錢」
+  charaValue: 150,
+  win: DEFAULT_BONUS_CLIMB_GOALS,
+  lose: DEFAULT_BONUS_CLIMB_GOALS,
+};
+
+/**
+ * 看到好幾種勾選的目標時先拿哪一種，一層一層比（玩家 2026-10-11）：
+ * 渦二 → 渦一（「渦一比角色卡稀有」）→ 角色卡／GEM／石楠3 **誰近拿誰**（「就近優先」）→ EXP
+ * （照 Moon 的算法只值兩位數 GEM，墊底）。
+ */
+export const BONUS_CLIMB_TIERS = [
+  ["raid2"],
+  ["raid1"],
+  ["chara1", "chara2", "chara3", "gem", "heather3"],
+  ["exp"],
+] as const;
+/** 經驗換成 GEM 的匯率（Moon 的「經驗換GEM」）：exp_base × 卡上的倍率 × 這個數。 */
+export const BONUS_CLIMB_EXP_RATE = 0.1;
+
+/** 自動爬星猜錯時的大道具順序：四葉草排最後；下一層就是目標、重猜又好猜時提到最前面。 */
+export const BONUS_CLIMB_ITEMS = [BONUS_HEATHER_5, BONUS_STAR, BONUS_CLOVER] as const;
+export const BONUS_CLIMB_ITEMS_NEXT_IS_TARGET = [
+  BONUS_CLOVER,
+  BONUS_HEATHER_5,
+  BONUS_STAR,
+] as const;
+/** 拿它當底數重猜幾乎必中的骰面（勝率 92% 以上）。 */
+export const BONUS_CLIMB_EASY_DICE = [2, 3, 11, 12] as const;
+
+/**
+ * 猜錯時「救起來划不划算」的估價，全部換成 GEM —— 跟 Moon 的 `獎勵遊戲.py` 同一套
+ * （玩家 2026-10-11：「要像 Moon 腳本一樣計算 CP 值」）。
+ *
+ * - 道具的價錢：石楠是商店價；四葉草、跳越星商店沒賣，比照石楠5（估的）
+ * - 目標的價值：渦二 8000、渦一 2500、石楠3 540；角色卡一張多少玩家自己填（預設 150，
+ *   等級不算，只看張數）；GEM 卡＝結算的 gem_base × 卡上的倍率 × GEM 加成、經驗卡＝
+ *   exp_base × 卡上的倍率 × 0.1（都是當場讀 Result 的 result_params）
+ * - 爬一層猜對的機率：兩顆骰子的和、猜好的那邊，對所有底數取期望 ≈ 0.687
+ */
+const HEATHER_3_PRICE = 540;
+export const BONUS_ITEM_PRICES: Readonly<Record<number, number>> = {
+  [BONUS_HEATHER_1]: 200,
+  [BONUS_HEATHER_3]: HEATHER_3_PRICE,
+  [BONUS_HEATHER_5]: 900,
+  [BONUS_CLOVER]: 900,
+  [BONUS_STAR]: 900,
+};
+export const BONUS_CLIMB_VALUES = {
+  raid2: 8000,
+  raid1: 2500,
+  heather3: HEATHER_3_PRICE,
+} as const;
+
+const DICE_WAYS: Readonly<Record<number, number>> = {
+  2: 1,
+  3: 2,
+  4: 3,
+  5: 4,
+  6: 5,
+  7: 6,
+  8: 5,
+  9: 4,
+  10: 3,
+  11: 2,
+  12: 1,
+};
+/** 底數是 `base` 時猜大／猜小取好的那邊的勝率（一樣大算輸）。 */
+export function bonusGuessWinRate(base: number): number {
+  let low = 0;
+  let high = 0;
+  for (const [k, ways] of Object.entries(DICE_WAYS)) {
+    if (Number(k) < base) low += ways;
+    if (Number(k) > base) high += ways;
+  }
+  return Math.max(low, high) / 36;
+}
+export const BONUS_CLIMB_WIN_RATE = Object.entries(DICE_WAYS).reduce(
+  (sum, [k, ways]) => sum + (ways / 36) * bonusGuessWinRate(Number(k)),
+  0,
+);
+/** 會花道具去救的目標，每爬一層平均要付多少 GEM：(1−p)/p 朵石楠3。 */
+export const BONUS_CLIMB_STEP_COST =
+  ((1 - BONUS_CLIMB_WIN_RATE) / BONUS_CLIMB_WIN_RATE) * HEATHER_3_PRICE;
+
+function clampInt(v: unknown, range: { min: number; max: number }, fallback: number): number {
+  if (typeof v !== "number" || !Number.isFinite(v)) return fallback;
+  return Math.min(range.max, Math.max(range.min, Math.round(v)));
+}
+
+function normalizeBonusClimbGoals(v: unknown): BonusClimbGoals {
+  const o = (typeof v === "object" && v !== null ? v : {}) as Record<string, unknown>;
+  const d = DEFAULT_BONUS_CLIMB_GOALS;
+  const within = (k: keyof BonusClimbGoals): number =>
+    clampInt(o[k], BONUS_CLIMB_WITHIN_RANGE, d[k] as number);
+  return {
+    gem: o["gem"] === true,
+    gemWithin: within("gemWithin"),
+    chara1: o["chara1"] === true,
+    chara1Within: within("chara1Within"),
+    chara2: o["chara2"] === true,
+    chara2Within: within("chara2Within"),
+    chara3: o["chara3"] === true,
+    chara3Within: within("chara3Within"),
+    raid2: o["raid2"] === true,
+    raid2Max: clampInt(o["raid2Max"], BONUS_CLIMB_RAID2_MAX_RANGE, d.raid2Max),
+    floor100: o["floor100"] === true,
+    raid1: o["raid1"] === true,
+    raid1Within: within("raid1Within"),
+    heather3: o["heather3"] === true,
+    heather3Within: within("heather3Within"),
+    exp: o["exp"] === true,
+    expWithin: within("expWithin"),
+  };
+}
+
+/** 外面來的東西（設定檔、IPC）整理成合法的自動爬星設定；缺的、不合理的都退回預設。 */
+export function normalizeBonusClimb(v: unknown): BonusClimbConfig {
+  const o = (typeof v === "object" && v !== null ? v : {}) as Record<string, unknown>;
+  return {
+    on: o["on"] === true,
+    quit: o["quit"] === true,
+    charaValue: clampInt(
+      o["charaValue"],
+      BONUS_CLIMB_CHARA_VALUE_RANGE,
+      DEFAULT_BONUS_CLIMB.charaValue,
+    ),
+    win: normalizeBonusClimbGoals(o["win"]),
+    lose: normalizeBonusClimbGoals(o["lose"]),
+  };
+}
+
+/** 自動爬星現在在做什麼。`what` 是代號：目標種類、往上找的理由、或停下來的理由。 */
+export interface BonusClimbStatus {
+  on: boolean;
+  /** 人在獎勵遊戲裡。 */
+  inBonus: boolean;
+  group: "win" | "lose" | null;
+  /** 這一場開局那一層。 */
+  start: number | null;
+  step: number | null;
+  /** 已經交還給玩家：停下來的理由代號；還在跑是 null。 */
+  stopped: string | null;
+  what: string | null;
+  /** 目標在第幾層（往上找的時候是找到哪一層為止）。 */
+  cell: number | null;
+  /** 這一場替玩家按了幾下。 */
+  acts: number;
+}
+
 export interface ItemPanelPatchOptions {
   /** 渦房的物品捷徑開不開。 */
   shortcut: boolean;
@@ -329,6 +602,8 @@ export interface ItemPanelPatchOptions {
   bonusRescueFast?: boolean;
   /** 獎勵遊戲按得到卡片／結束遊戲之後不看第二次結算，直接回房間。沒給＝關。 */
   bonusSkipEnd?: boolean;
+  /** 獎勵遊戲自動爬星。沒給＝關。 */
+  bonusClimb?: BonusClimbConfig;
 }
 
 /** 任務房捷徑的兩塊：水沙、通行證。 */
@@ -383,6 +658,7 @@ export interface ItemPanelStatus {
   bonusFast: boolean;
   bonusRescueFast: boolean;
   bonusSkipEnd: boolean;
+  climb: BonusClimbStatus;
   reason: string | null;
 }
 
@@ -516,6 +792,26 @@ export function buildItemPanelPatchScript(options: ItemPanelPatchOptions): strin
     bonusRescueFastOn: options.bonusRescueFast === true,
     // ⑫ 結束後不看第二次結算
     bonusSkipEndOn: options.bonusSkipEnd === true,
+    // ⑬ 自動爬星
+    climb: normalizeBonusClimb(options.bonusClimb),
+    climbTiers: BONUS_CLIMB_TIERS,
+    climbExpRate: BONUS_CLIMB_EXP_RATE,
+    climbItems: BONUS_CLIMB_ITEMS,
+    climbItemsTarget: BONUS_CLIMB_ITEMS_NEXT_IS_TARGET,
+    climbEasy: BONUS_CLIMB_EASY_DICE,
+    climbFloor: BONUS_CLIMB_FLOOR,
+    climbRaid1: RAID_DETECTOR_1,
+    climbRaid2: RAID_DETECTOR_2,
+    climbHeather3: BONUS_HEATHER_3,
+    // 猜錯時的估價（跟 Moon 同一套）
+    climbPrices: BONUS_ITEM_PRICES,
+    climbValues: BONUS_CLIMB_VALUES,
+    climbWinRate: BONUS_CLIMB_WIN_RATE,
+    climbStepCost: BONUS_CLIMB_STEP_COST,
+    climbCheap: [BONUS_HEATHER_1],
+    // 畫面上看得到腳下往後幾張
+    climbSee: 3,
+    climbBusyMs: 15000,
   };
 
   return `(function () {
@@ -1105,6 +1401,14 @@ export function buildItemPanelPatchScript(options: ItemPanelPatchOptions): strin
       if (G.textures.exists(CFG.bonusBtnTex)) G.textures.remove(CFG.bonusBtnTex);
     } catch (e) {}
   }
+  // use_bonus_item 會 item_zone.destroy()、item_panel.show_item()／panel_close()／destroy()。
+  // 官方是開著物品欄才叫它；沒開就墊替身，開著就照官方
+  function callUseBonusItem(B, id) {
+    var noop = function () {};
+    if (!alive(B.item_zone)) B.item_zone = { destroy: noop };
+    if (!alive(B.item_panel)) B.item_panel = { show_item: noop, panel_close: noop, destroy: noop };
+    return B.use_bonus_item(id);
+  }
   function useBonus(st, B, id) {
     if (B.input && B.input.enabled === false) return;
     var btn = B.btn_item;
@@ -1114,11 +1418,6 @@ export function buildItemPanelPatchScript(options: ItemPanelPatchOptions): strin
     if (st.b.cover) { try { if (st.b.hit) st.b.hit.disableInteractive(); } catch (e) {} }
     else detachBonus(st);
     try { if (B.ulse17) B.ulse17.play(); } catch (e) {}
-    // use_bonus_item 會 item_zone.destroy()、item_panel.show_item()／panel_close()／destroy()。
-    // 官方是開著物品欄才叫它；沒開就墊替身，開著就照官方
-    var noop = function () {};
-    if (!alive(B.item_zone)) B.item_zone = { destroy: noop };
-    if (!alive(B.item_panel)) B.item_panel = { show_item: noop, panel_close: noop, destroy: noop };
     st.uses++;
     // 伺服器說不能用（回 false）時官方什麼都不做、輸入沒鎖：放回來（拆掉讓下一輪重畫）
     var again = function () {
@@ -1127,7 +1426,7 @@ export function buildItemPanelPatchScript(options: ItemPanelPatchOptions): strin
         detachBonus(st);
       }
     };
-    var p = B.use_bonus_item(id);
+    var p = callUseBonusItem(B, id);
     if (p && typeof p.then === "function") p.then(again, again);
   }
   // 抹字的圓鈕＋道具圖＋數量。蓋在使用物品上（同位置、同大小），或縮小轉向放在左上
@@ -1198,7 +1497,8 @@ export function buildItemPanelPatchScript(options: ItemPanelPatchOptions): strin
     return c;
   }
   function syncBonus(st) {
-    var B = st.bonusItem ? bonusScene() : null;
+    // 自動爬星在跑的時候不畫：它自己會用，畫了只會閃一下
+    var B = st.bonusItem && !climbActive(st) ? bonusScene() : null;
     if (B !== null && st.b.used === B.btn_item) {
       // 按過了：蓋著的那顆跟官方鈕一起淡出，鈕拆了（bonusScene 回 null）才跟著拆
       if (st.b.cover && st.b.anchor === B.btn_item && st.b.mine.length && st.b.mine.every(alive)) return;
@@ -1527,7 +1827,7 @@ export function buildItemPanelPatchScript(options: ItemPanelPatchOptions): strin
     // 等 bonus_next 回來；官方的請求逾時沒人接時不要永遠卡著
     if (st.h.busy && Date.now() - st.h.busyAt < CFG.highLowBusyMs) return;
     st.h.busy = false;
-    var B = st.bonusHighLow ? decideScene() : null;
+    var B = st.bonusHighLow && !climbActive(st) ? decideScene() : null;
     if (B === null) { if (st.h.mine.length || st.h.scene !== null || st.h.dice) detachHighLow(st, false); return; }
     showBase(st, B);
     if (st.h.scene === B && st.h.anchor === B.btn_next && st.h.mine.length && st.h.mine.every(alive)) return;
@@ -1540,6 +1840,262 @@ export function buildItemPanelPatchScript(options: ItemPanelPatchOptions): strin
       var G = window.game;
       if (G.textures.exists(CFG.boostTex)) G.textures.remove(CFG.boostTex);
     } catch (e) {}
+  }
+
+  // ---- ⑬ 自動爬星 ----------------------------------------------------------------
+  function climbActive(st) { return st.c.on && st.c.key !== null && st.c.stopped === null; }
+  // 勝場一組，其他（敗、平手、時間到）一組：Result 場景的 result_params.result
+  function climbGroup() {
+    try {
+      var R = window.game.scene.keys.Result;
+      var r = R && R.result_params ? R.result_params.result : null;
+      return r === null || r === undefined || r === "win" ? "win" : "lose";
+    } catch (e) { return "win"; }
+  }
+  var climbCards = { src: null, map: null };
+  function charaCard(id) {
+    try {
+      var arr = window.game.cache.json.get("CharaCards");
+      if (!Array.isArray(arr)) return null;
+      if (climbCards.src !== arr) {
+        var m = {};
+        for (var i = 0; i < arr.length; i++) if (arr[i]) m[arr[i].id] = arr[i];
+        climbCards = { src: arr, map: m };
+      }
+      return climbCards.map[id] || null;
+    } catch (e) { return null; }
+  }
+  // 現在這副牌組三個位置的角色（CharaCards 的 chara）；沒放人的位置是 null
+  function deckCharas() {
+    var out = [null, null, null];
+    try {
+      var R = window.game.registry;
+      var decks = R.get("deck"), now = R.get("deck_now");
+      if (!Array.isArray(decks)) return out;
+      var d = null;
+      for (var i = 0; i < decks.length; i++) if (decks[i] && decks[i].deck_id === now) d = decks[i];
+      if (d === null) for (var j = 0; j < decks.length; j++) if (decks[j] && decks[j].main === 1) d = decks[j];
+      if (d === null || !Array.isArray(d.chara_card_id)) return out;
+      for (var k = 0; k < 3; k++) {
+        var c = charaCard(d.chara_card_id[k]);
+        out[k] = c && c.chara ? c.chara : null;
+      }
+    } catch (e) {}
+    return out;
+  }
+  // 一張獎勵是哪一種目標；不是目標回 null。reward_type：1 角色卡、3 道具、5 GEM、9 加成卡（id 2＝GEM）
+  function climbKind(r, charas) {
+    if (!r) return null;
+    if (r.reward_type === 3) {
+      return r.reward_id === CFG.climbRaid2 ? "raid2" : r.reward_id === CFG.climbRaid1 ? "raid1"
+        : r.reward_id === CFG.climbHeather3 ? "heather3" : null;
+    }
+    if (r.reward_type === 5) return "gem";
+    if (r.reward_type === 9) return r.reward_id === 2 ? "gem" : r.reward_id === 1 ? "exp" : null;
+    if (r.reward_type !== 1) return null;
+    var c = charaCard(r.reward_id);
+    if (c === null) return null;
+    // x1 而且 Lv1 的是野生的，不是照牌組發的（牌組的卡一次 6 張以上）
+    if (!(r.reward_amount > 1) && !(c.level > 1)) return null;
+    for (var i = 0; i < 3; i++) if (charas[i] !== null && charas[i] === c.chara) return "chara" + (i + 1);
+    return null;
+  }
+  // 腳下（rewards[3]）加後面三張裡挑。回 { act: get／next／stop, what, cell, off }；
+  // off 是目標離腳下幾層，往上找（沒有特定目標）時是 null
+  function climbPlan(goals, start, step, rewards, charas) {
+    var near = {};
+    for (var k = 0; k <= CFG.climbSee; k++) {
+      var kind = climbKind(rewards[3 + k], charas);
+      if (kind !== null && near[kind] === undefined) near[kind] = k;
+    }
+    var pastCap = goals.raid2 && step >= goals.raid2Max;
+    var inFirst = function (within, k) { return step + k <= start + within - 1; };
+    // 一層一層比：前面那層有就不看後面的；同一層裡誰近拿誰
+    for (var i = 0; i < CFG.climbTiers.length; i++) {
+      var best = null;
+      for (var t = 0; t < CFG.climbTiers[i].length; t++) {
+        var kd = CFG.climbTiers[i][t], off = near[kd];
+        if (off === undefined) continue;
+        var want = kd === "raid2" ? goals.raid2
+          : (goals[kd] && inFirst(goals[kd + "Within"], off)) || (pastCap && (kd === "gem" || kd === "raid1"));
+        if (want && (best === null || off < best.off)) best = { what: kd, off: off };
+      }
+      if (best !== null) return { act: best.off === 0 ? "get" : "next", what: best.what, cell: step + best.off, off: best.off };
+    }
+    if (goals.raid2) {
+      return pastCap ? { act: "next", what: "seekGem", cell: null, off: null }
+        : { act: "next", what: "seekRaid2", cell: goals.raid2Max, off: null };
+    }
+    if (goals.floor100) {
+      return step < CFG.climbFloor ? { act: "next", what: "floor100", cell: CFG.climbFloor, off: null }
+        : { act: "stop", what: "floor100", cell: null, off: null };
+    }
+    // 「前幾層」還有沒露出來的：往上一層，讓下一張出來
+    var last = 0;
+    for (var j = 0; j < CFG.climbTiers.length; j++) {
+      for (var u = 0; u < CFG.climbTiers[j].length; u++) {
+        var g = CFG.climbTiers[j][u];
+        if (g !== "raid2" && goals[g]) last = Math.max(last, start + goals[g + "Within"] - 1);
+      }
+    }
+    if (step + CFG.climbSee < last) return { act: "next", what: "peek", cell: last, off: null };
+    return { act: "stop", what: "noTarget", cell: null, off: null };
+  }
+  // 一張獎勵換算成多少 GEM（Moon 的估價）。GEM 卡要結算的 gem_base 與加成，讀不到當 0
+  function climbValue(kind, r, charaValue) {
+    var n = r && r.reward_amount > 1 ? r.reward_amount : 1;
+    if (kind === "gem") {
+      var rp = null;
+      try { rp = window.game.scene.keys.Result.result_params; } catch (e) {}
+      var boost = rp && typeof rp.gem_boost === "number" && rp.gem_boost > 0 ? rp.gem_boost / 100 : 1;
+      if (r.reward_type === 5) return r.reward_amount * boost;
+      return rp && typeof rp.gem_base === "number" ? rp.gem_base * r.reward_amount / 100 * boost : 0;
+    }
+    if (kind === "exp") {
+      var xp = null;
+      try { xp = window.game.scene.keys.Result.result_params; } catch (e) {}
+      return xp && typeof xp.exp_base === "number" ? xp.exp_base * r.reward_amount / 100 * CFG.climbExpRate : 0;
+    }
+    if (kind.indexOf("chara") === 0) return charaValue * n;
+    return (CFG.climbValues[kind] || 0) * n;
+  }
+  // 猜錯要不要救、用哪一個。回 { id } 或 { id: null, why: notWorth／noItem }。跟 Moon 的 選花() 同一套：
+  // - 一定要到的（渦二、往上找渦二、100 層）：不算划不划算，有能用的就用
+  // - 稀有的（渦一、角色卡）：什麼道具都能用，但第一個能用的要比「救起來的期望」便宜；
+  //   期望＝價值 − 還剩幾層 x 每層的花費
+  // - 買得到的（GEM、石楠3）：只准石楠1，而且期望＝價值 x 勝率^層數（猜錯就不再救）要比它貴
+  // - 沒有特定目標（往上看、渦二沒了找 GEM）：不救
+  // 道具順序：夠用的小石楠先；大的照 石楠5、跳越星、四葉草。下一層就是目標、而且拿骰壞的
+  // 那一顆當底數重猜幾乎必中（2、3、11、12）時四葉草先 —— 過關道具白送的那個好猜底數用不到
+  function climbRescue(plan, have, d, rewards, charaValue) {
+    var hard = plan.what === "raid2" || plan.what === "seekRaid2" || plan.what === "floor100";
+    var rare = hard || plan.what === "raid1" || plan.what.indexOf("chara") === 0;
+    var expect = 0;
+    if (!hard) {
+      if (plan.off === null) return { id: null, why: "notWorth" };
+      var value = climbValue(plan.what, rewards[3 + plan.off], charaValue);
+      expect = rare ? value - plan.off * CFG.climbStepCost : value * Math.pow(CFG.climbWinRate, plan.off);
+      if (!(expect > 0)) return { id: null, why: "notWorth" };
+    }
+    var diff = Math.abs(d.dice_current - d.dice_previous);
+    var easy = CFG.climbEasy.indexOf(d.dice_current) !== -1;
+    var lists = rare ? [CFG.bonusPrecise, plan.off === 1 && easy ? CFG.climbItemsTarget : CFG.climbItems] : [CFG.climbCheap];
+    for (var i = 0; i < lists.length; i++) {
+      for (var j = 0; j < lists[i].length; j++) {
+        var id = lists[i][j];
+        if (!(have[id] > 0) || !bonusUsable(id, diff)) continue;
+        if (!hard && !(CFG.climbPrices[id] < expect)) return { id: null, why: "notWorth" };
+        return { id: id, why: null };
+      }
+    }
+    return { id: null, why: rare ? "noItem" : "notWorth" };
+  }
+  // 這一回的底數：畫面上那個大數字（bonus_next 回來官方就換成它）
+  function climbBase(B) {
+    try {
+      var n = String(B.dice_value.frame.name);
+      if (n.indexOf("num_") === 0) {
+        var v = parseInt(n.slice(4), 10);
+        if (v >= 2 && v <= 12) return v;
+      }
+    } catch (e) {}
+    var d = B.bonus_data;
+    return d && typeof d.dice_current === "number" ? d.dice_current : null;
+  }
+  function climbShown(o) { return alive(o) && o.visible !== false && !(o.alpha < 1); }
+  function climbReset(c) {
+    c.key = null; c.group = null; c.start = null; c.step = null; c.stopped = null; c.plan = null; c.busy = false; c.acts = 0;
+  }
+  // 交還給玩家：這一場不再替他按
+  function climbStop(st, why) { st.c.stopped = why; st.c.plan = null; }
+  function climbBusy(st, p) {
+    var c = st.c;
+    c.busy = true;
+    c.busyAt = Date.now();
+    c.acts++;
+    var done = function () { c.busy = false; };
+    if (p && typeof p.then === "function") p.then(done, done);
+    else done();
+  }
+  function climbSound(B) { try { if (B.ulse17) B.ulse17.play(); } catch (e) {} }
+  function syncClimb(st) {
+    var c = st.c;
+    var G = window.game;
+    var B = G && G.scene && G.scene.keys ? G.scene.keys.Bonus : null;
+    var d = running(B) ? B.bonus_data : null;
+    // 一場＝一條星條（官方 create 每次重建）
+    if (!d || typeof d.step !== "number" || !alive(B.bonus_star)) {
+      if (c.key !== null && !alive(c.key)) climbReset(c);
+      return;
+    }
+    if (c.key !== B.bonus_star) {
+      climbReset(c);
+      c.key = B.bonus_star;
+      c.start = d.step;
+      c.group = climbGroup();
+    }
+    c.step = d.step;
+    if (!c.on || c.stopped !== null) return;
+    if (c.busy && Date.now() - c.busyAt < CFG.climbBusyMs) return;
+    c.busy = false;
+    if (B.input && B.input.enabled === false) return;
+    var goals = c.cfg[c.group];
+    var rewards = B.bonus_rewards;
+    if (!goals || !Array.isArray(rewards) || rewards.length < 4 + CFG.climbSee) return climbStop(st, "noData");
+    // 獎品列還沒換成這一層的：等下一輪
+    if (rewards[3] && typeof rewards[3].reward_step === "number" && rewards[3].reward_step !== d.step) return;
+    try {
+      // 猜大小：底數小猜大、大猜小；7 兩邊一樣
+      if (climbShown(B.btn_high) && climbShown(B.btn_low)) {
+        if (typeof B.bonus_prediction !== "function") return climbStop(st, "noData");
+        var base = climbBase(B);
+        if (base === null) return;
+        var pick = base < 7 ? "high" : base > 7 ? "low" : Math.random() < 0.5 ? "high" : "low";
+        climbSound(B);
+        try { (pick === "high" ? B.btn_high : B.btn_low).setTexture(pick === "high" ? CFG.highTex : CFG.lowTex, 1); } catch (e) {}
+        climbBusy(st, B.bonus_prediction(pick));
+        return;
+      }
+      var plan = climbPlan(goals, c.start, d.step, rewards, deckCharas());
+      // 下一個卡片／得到卡片
+      if (climbShown(B.btn_next) && climbShown(B.btn_get) && !alive(B.btn_high) && !alive(B.btn_low)) {
+        if (plan.act === "stop") return climbStop(st, plan.what);
+        var fn = plan.act === "get" ? B.check_bonus_get : B.check_bonus_next;
+        if (typeof fn !== "function") return climbStop(st, "noData");
+        c.plan = plan;
+        climbSound(B);
+        if (plan.act === "next" && !st.h.fast && st.bonusFast) fastOn(st, B, "round");
+        climbBusy(st, fn.call(B));
+        return;
+      }
+      // 猜錯：使用物品／結束遊戲
+      if (climbShown(B.btn_item) && climbShown(B.btn_quit)) {
+        if (plan.act !== "next") return climbStop(st, plan.act === "stop" ? plan.what : "noTarget");
+        if (typeof B.use_bonus_item !== "function" || typeof d.dice_current !== "number" || typeof d.dice_previous !== "number") return climbStop(st, "noData");
+        var res = climbRescue(plan, owned(), d, rewards, c.cfg.charaValue);
+        if (res.id === null) {
+          // 不救：允許的話直接結束遊戲（＝按那顆鈕），不然交還給玩家
+          if (!c.cfg.quit || typeof B.check_bonus_quit !== "function") return climbStop(st, res.why);
+          climbSound(B);
+          climbBusy(st, B.check_bonus_quit());
+          return climbStop(st, res.why === "noItem" ? "quitNoItem" : "quitNotWorth");
+        }
+        var id = res.id;
+        c.plan = plan;
+        var key = c.key, btn = B.btn_item;
+        climbSound(B);
+        var p = callUseBonusItem(B, id);
+        climbBusy(st, p);
+        // 伺服器說不能用（回 false）：官方什麼都不做、輸入沒鎖、兩顆鈕還在
+        var refused = function () {
+          if (window[FLAG] === st && c.key === key && c.stopped === null && alive(btn) && !(B.input && B.input.enabled === false)) climbStop(st, "itemRefused");
+        };
+        if (p && typeof p.then === "function") p.then(refused, refused);
+      }
+    } catch (e) {
+      st.reason = String((e && e.message) || e);
+      climbStop(st, "error");
+    }
   }
 
   // ---- ⑥ 開始搜索蓋在物品欄上面 -------------------------------------------------
@@ -1609,6 +2165,7 @@ export function buildItemPanelPatchScript(options: ItemPanelPatchOptions): strin
       syncQuestShortcut(st);
       syncDietShortcut(st);
       syncGem(st);
+      syncClimb(st);
       syncBonus(st);
       syncHighLow(st);
       syncFast(st);
@@ -1667,6 +2224,8 @@ export function buildItemPanelPatchScript(options: ItemPanelPatchOptions): strin
     b: { scene: null, anchor: null, sig: null, mine: [], used: null, pick: null, cover: false, hit: null, follow: null },
     h: { scene: null, anchor: null, mine: [], follow: null, dice: null, busy: false, busyAt: 0, auto: 0, mismatch: 0,
       fast: null, pred: null, useItem: null, dice3d: null, end: null, endSkips: 0 },
+    c: { on: CFG.climb.on, cfg: CFG.climb, key: null, group: null, start: null, step: null, stopped: null, plan: null,
+      busy: false, busyAt: 0, acts: 0 },
     raised: [],
     searchHooked: null,
     passThrough: 0,
@@ -1743,6 +2302,16 @@ export function buildItemPanelPatchScript(options: ItemPanelPatchOptions): strin
     try { syncBonus(st); } catch (e) { st.reason = String((e && e.message) || e); }
     return true;
   };
+  // 換自動爬星的設定（開關、兩組目標）。已經交還給玩家的那一場照新設定重新來
+  st.setBonusClimb = function (cfg) {
+    if (!cfg || !cfg.win || !cfg.lose) return false;
+    st.c.cfg = cfg;
+    st.c.on = cfg.on === true;
+    st.c.stopped = null;
+    st.c.plan = null;
+    try { syncClimb(st); syncBonus(st); syncHighLow(st); } catch (e) { st.reason = String((e && e.message) || e); }
+    return true;
+  };
   st.report = function () {
     var gem = gemBoost();
     return { installed: true, version: st.version, found: st.Panel !== null, shortcut: st.shortcut,
@@ -1753,7 +2322,11 @@ export function buildItemPanelPatchScript(options: ItemPanelPatchOptions): strin
       inBonus: st.b.mine.length > 0, bonusPick: st.b.mine.length > 0 ? st.b.pick : null,
       bonusHighLow: st.bonusHighLow, highLowShown: st.h.mine.length > 0, bonusFast: st.bonusFast,
       bonusRescueFast: st.bonusRescueFast,
-      bonusSkipEnd: st.bonusSkipEnd, reason: st.reason };
+      bonusSkipEnd: st.bonusSkipEnd,
+      climb: { on: st.c.on, inBonus: st.c.key !== null, group: st.c.group, start: st.c.start, step: st.c.step,
+        stopped: st.c.stopped, what: st.c.plan ? st.c.plan.what : null, cell: st.c.plan ? st.c.plan.cell : null,
+        acts: st.c.acts },
+      reason: st.reason };
   };
   st.unpatch = function () { unpatchPanel(st.Panel); };
   tick(st);
@@ -1843,6 +2416,23 @@ export function buildItemPanelSetBonusPlaceExpression(place: BonusItemPlace): st
 })()`;
 }
 
+/**
+ * 換自動爬星的設定（開關＋勝場、敗場兩組目標），下一輪（0.5 秒內）照新的走。
+ * 回 `"ok"` 或 `"not-installed"`（頁面上是沒有 setBonusClimb 的舊版也算）。
+ */
+export function buildItemPanelSetBonusClimbExpression(config: BonusClimbConfig): string {
+  return `(function () {
+  try {
+    var st = window["${FLAG}"];
+    if (!st || typeof st.setBonusClimb !== "function") return "not-installed";
+    st.setBonusClimb(JSON.parse(${embedJson(normalizeBonusClimb(config))}));
+    return "ok";
+  } catch (e) {
+    return "error:" + String((e && e.message) || e);
+  }
+})()`;
+}
+
 /** 拆掉：停輪詢、拆各房的捷徑與 GEM UP、官方兩顆鈕放回來、搜索框放回原 depth、面板類別還原。 */
 export const ITEM_PANEL_UNINSTALL_EXPRESSION = `(function () {
   try {
@@ -1894,6 +2484,24 @@ export function parseItemPanelStatus(raw: string): ItemPanelStatus {
     bonusFast: o.bonusFast === true,
     bonusRescueFast: o.bonusRescueFast === true,
     bonusSkipEnd: o.bonusSkipEnd === true,
+    climb: parseBonusClimbStatus(o.climb),
     reason: typeof o.reason === "string" ? o.reason : null,
+  };
+}
+
+function parseBonusClimbStatus(v: unknown): BonusClimbStatus {
+  const o = (typeof v === "object" && v !== null ? v : {}) as Record<string, unknown>;
+  const numOrNull = (x: unknown): number | null => (typeof x === "number" ? x : null);
+  const strOrNull = (x: unknown): string | null => (typeof x === "string" ? x : null);
+  return {
+    on: o["on"] === true,
+    inBonus: o["inBonus"] === true,
+    group: o["group"] === "win" || o["group"] === "lose" ? o["group"] : null,
+    start: numOrNull(o["start"]),
+    step: numOrNull(o["step"]),
+    stopped: strOrNull(o["stopped"]),
+    what: strOrNull(o["what"]),
+    cell: numOrNull(o["cell"]),
+    acts: typeof o["acts"] === "number" ? o["acts"] : 0,
   };
 }

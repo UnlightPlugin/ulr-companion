@@ -21,22 +21,31 @@
  * 12. 獎勵遊戲：猜錯才畫一顆；差距小先用剛好夠的石楠，其餘照優先順序；按下去走 use_bonus_item（沒開物品欄墊替身）
  * 13. 獎勵遊戲的圓鈕：官方 bonus_item 抹掉字；左上（縮小轉向、只認圓）或蓋在使用物品上（跟著淡入淡出）；
  *     做不出底圖時退回物品欄格子
+ * 14. 自動爬星：只叫場景自己的方法；稀有的先、前 X 層從開局層算、野生卡不算；沒目標／沒道具交還給玩家
+ *     （不收卡、不結束遊戲）；下一層是目標且好猜才先用四葉草
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  BONUS_CLIMB_STEP_COST,
+  BONUS_CLIMB_WIN_RATE,
+  bonusGuessWinRate,
   buildItemPanelPatchScript,
+  buildItemPanelSetBonusClimbExpression,
   buildItemPanelSetBonusOrderExpression,
   buildItemPanelSetBonusPlaceExpression,
   buildItemPanelSetPartExpression,
   buildItemPanelSetShortcutExpression,
+  DEFAULT_BONUS_CLIMB_GOALS,
   ITEM_PANEL_SCRIPT_VERSION,
   ITEM_PANEL_STATUS_EXPRESSION,
   ITEM_PANEL_UNINSTALL_EXPRESSION,
+  normalizeBonusClimb,
   parseItemPanelStatus,
   RAID_DETECTOR_1,
   RAID_DETECTOR_2,
 } from "@ulr/cdp-adapter";
+import type { BonusClimbConfig, BonusClimbGoals } from "@ulr/cdp-adapter";
 
 type Fn = (...a: unknown[]) => unknown;
 
@@ -417,6 +426,132 @@ const BONUS_ITEMS = [
   { item_id: 8, quantity: 7 },
 ];
 
+/** cache 的 CharaCards：牌組三位（L5、R3、L1）、同角色的 L1 與 L3、一張別人的。 */
+const CHARA_CARDS = [
+  { id: 466, chara: "cc061", level: 5 },
+  { id: 316, chara: "cc066", level: 3 },
+  { id: 206, chara: "cc078", level: 1 },
+  { id: 461, chara: "cc061", level: 1 },
+  { id: 463, chara: "cc061", level: 3 },
+  { id: 311, chara: "cc066", level: 1 },
+  { id: 900, chara: "cc001", level: 1 },
+];
+/** registry 的 deck（2026-10-11 實機讀到的形狀）；deck_now 是 1。 */
+const DECKS = [
+  { deck_id: 1, main: 1, chara_card_id: [466, 316, 206] },
+  { deck_id: 2, main: 0, chara_card_id: [900, null, null] },
+];
+
+type Reward = { reward_type: number; reward_id: number; reward_amount: number };
+const EVENT_CARD: Reward = { reward_type: 2, reward_id: 33, reward_amount: 1 };
+const GEM_CARD: Reward = { reward_type: 9, reward_id: 2, reward_amount: 1900 };
+const EXP_CARD: Reward = { reward_type: 9, reward_id: 1, reward_amount: 1500 };
+const RAID1: Reward = { reward_type: 3, reward_id: 366, reward_amount: 1 };
+const RAID2: Reward = { reward_type: 3, reward_id: 367, reward_amount: 1 };
+
+/**
+ * 一整場獎勵遊戲（2026-10-11 從跑著的客戶端讀的流程）：
+ *
+ * - bonus_rewards 七張，[3] 是腳下，每張帶 reward_step；沒指定的層是事件卡
+ * - 下一個卡片：鎖輸入 → 拆 next／get → 建 high／low、大數字換成底數 → 解鎖
+ * - 猜：照 `rolls` 依序出骰。猜對：step+1、獎品列換新、next／get 回來；猜錯：使用物品／結束遊戲
+ * - 用道具：四葉草（4）留在原地重投（底數＝骰壞的那一顆），其他算猜對；`refuse` 時伺服器回 false
+ * - 得到卡片：記下在哪一層收的
+ */
+function climbGame(o: {
+  start: number;
+  base: number;
+  cells?: Record<number, Reward>;
+  rolls?: number[];
+  result?: string;
+  refuse?: boolean;
+}) {
+  const B = new Scene("Bonus");
+  const R = new Scene("Result");
+  // 2026-10-11 實機：gem_base 37、gem_boost 150（100 ＋ 權杖的 50）
+  R["result_params"] = { result: o.result ?? "win", gem_base: 37, gem_boost: 150, exp_base: 55 };
+  B.textures = { get: () => ({ has: () => true }), exists: () => true };
+  const rolls = [...(o.rolls ?? [])];
+  const log = { next: 0, picks: [] as string[], items: [] as number[], got: null as number | null };
+  const data = () => B["bonus_data"] as { step: number; dice_current: number };
+  const rewards = (step: number) =>
+    [-3, -2, -1, 0, 1, 2, 3].map((k) => ({
+      ...(o.cells?.[step + k] ?? EVENT_CARD),
+      reward_slot: 1,
+      reward_step: step + k,
+    }));
+  const decide = () => {
+    B["btn_high"] = null;
+    B["btn_low"] = null;
+    B["btn_next"] = new Obj(B, 265, 143).setInteractive();
+    B["btn_get"] = new Obj(B, 385, 143).setInteractive();
+  };
+  const guess = (base: number) => {
+    B["btn_high"] = new Obj(B, 334, 74).setInteractive();
+    B["btn_low"] = new Obj(B, 334, 194).setInteractive();
+    (B["dice_value"] as Obj).setTexture("bonus_dice_num", `num_${base}`);
+  };
+  const kill = (...names: string[]) =>
+    names.forEach((n) => (B[n] as Obj | null | undefined)?.destroy());
+  const advance = () => {
+    const step = data().step + 1;
+    B["bonus_data"] = { ...data(), step };
+    B["bonus_rewards"] = rewards(step);
+    kill("btn_high", "btn_low");
+    decide();
+  };
+  B["bonus_data"] = { step: o.start, dice_current: o.base, dice_previous: o.base };
+  B["bonus_rewards"] = rewards(o.start);
+  B["bonus_star"] = new Obj(B, 258, 8);
+  const dv = new Obj(B, 594, 146);
+  dv.frame = { name: `num_${o.base}` };
+  B["dice_value"] = dv;
+  B["ulse17"] = { play: vi.fn() };
+  decide();
+  B["check_bonus_next"] = vi.fn(async function (this: Scene) {
+    this.input.enabled = false;
+    log.next++;
+    await Promise.resolve();
+    kill("btn_next", "btn_get");
+    guess(data().dice_current);
+    this.input.enabled = true;
+  });
+  B["bonus_prediction"] = vi.fn(async function (this: Scene, pick: string) {
+    this.input.enabled = false;
+    log.picks.push(pick);
+    await Promise.resolve();
+    const base = data().dice_current;
+    const roll = rolls.shift() ?? (pick === "high" ? 12 : 2);
+    const ok = pick === "high" ? roll > base : roll < base;
+    B["bonus_data"] = { step: data().step, dice_current: roll, dice_previous: base };
+    kill(pick === "high" ? "btn_low" : "btn_high");
+    if (ok) advance();
+    else {
+      B["btn_item"] = new Obj(B, 265, 143).setInteractive();
+      B["btn_quit"] = new Obj(B, 385, 143).setInteractive();
+    }
+    this.input.enabled = true;
+  });
+  B["use_bonus_item"] = vi.fn(async function (this: Scene, id: number) {
+    await Promise.resolve();
+    if (o.refuse === true) return;
+    this.input.enabled = false;
+    log.items.push(id);
+    const item = ITEMS.find((x) => x.item_id === id);
+    if (item) item.quantity--;
+    kill("btn_item", "btn_quit", "btn_high", "btn_low");
+    if (id === 4) guess(data().dice_current);
+    else advance();
+    this.input.enabled = true;
+  });
+  B["check_bonus_get"] = vi.fn(async function (this: Scene) {
+    this.input.enabled = false;
+    log.got = data().step;
+  });
+  B["check_bonus_quit"] = vi.fn(async () => undefined);
+  return { B, R, log };
+}
+
 /** registry 的 player_boost。 */
 let BOOSTS: { boost_type: number; boost_value: number; item_id: number; expire_at: string }[] = [];
 /** game.textures 裡有的 key。 */
@@ -443,10 +578,23 @@ function setup(scenes: Record<string, Scene>, extra: Record<string, unknown> = {
     webpackChunkunlight: chunks,
     game: {
       scene: { keys: scenes },
-      cache: { json: { get: (k: string) => (k === "AvatarItems" ? ROWS : undefined) } },
+      cache: {
+        json: {
+          get: (k: string) =>
+            k === "AvatarItems" ? ROWS : k === "CharaCards" ? CHARA_CARDS : undefined,
+        },
+      },
       registry: {
         get: (k: string) =>
-          k === "avatar_item" ? ITEMS : k === "player_boost" ? BOOSTS : undefined,
+          k === "avatar_item"
+            ? ITEMS
+            : k === "player_boost"
+              ? BOOSTS
+              : k === "deck"
+                ? DECKS
+                : k === "deck_now"
+                  ? 1
+                  : undefined,
       },
       textures: {
         exists: (k: string) => TEX.has(k),
@@ -1891,6 +2039,581 @@ describe("獎勵遊戲結束後不看第二次結算", () => {
     run(buildItemPanelSetPartExpression("bonusSkipEnd", true));
     run(ITEM_PANEL_UNINSTALL_EXPRESSION);
     expect([own(B, "check_bonus_quit"), own(R, "result_end_bonus_quit")]).toEqual([false, false]);
+  });
+});
+
+describe("獎勵遊戲自動爬星", () => {
+  const OFF = { shortcut: false, questStack: false, questPasses: false };
+  const goals = (g: Partial<BonusClimbGoals> = {}): BonusClimbGoals => ({
+    ...DEFAULT_BONUS_CLIMB_GOALS,
+    ...g,
+  });
+  const climb = (
+    win: Partial<BonusClimbGoals>,
+    lose: Partial<BonusClimbGoals> = {},
+  ): BonusClimbConfig => ({
+    on: true,
+    quit: false,
+    charaValue: 150,
+    win: goals(win),
+    lose: goals(lose),
+  });
+  /** 讓輪詢跑 n 輪，每輪之間把官方那些 await 走完。 */
+  const play = async (n = 30) => {
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < 8; j++) await Promise.resolve();
+      vi.advanceTimersByTime(500);
+    }
+    for (let j = 0; j < 8; j++) await Promise.resolve();
+  };
+  const start = (game: ReturnType<typeof climbGame>, config: BonusClimbConfig, more = {}) => {
+    const { run, st } = setup({ Bonus: game.B, Result: game.R });
+    run(buildItemPanelPatchScript({ ...OFF, ...more, bonusClimb: config }));
+    const status = () => parseItemPanelStatus(run(ITEM_PANEL_STATUS_EXPRESSION)).climb;
+    return { run, st, status };
+  };
+  const card = (id: number, amount: number): Reward => ({
+    reward_type: 1,
+    reward_id: id,
+    reward_amount: amount,
+  });
+
+  beforeEach(() => {
+    ITEMS = BONUS_ITEMS.map((x) => ({ ...x }));
+  });
+
+  it("腳下那張就是勾選的目標：直接得到卡片，不往上爬", async () => {
+    const game = climbGame({ start: 75, base: 5, cells: { 75: GEM_CARD } });
+    const { run, status } = start(game, climb({ gem: true }));
+    expect(status()).toMatchObject({ on: true, inBonus: true, group: "win", start: 75, step: 75 });
+    await play(3);
+    expect(game.log).toMatchObject({ next: 0, got: 75 });
+    expect(game.B["check_bonus_get"]).toHaveBeenCalledTimes(1);
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("經驗的加成卡（同一種 type、id 不同）不是 GEM", async () => {
+    const game = climbGame({ start: 75, base: 5, cells: { 75: EXP_CARD, 76: GEM_CARD } });
+    const { run } = start(game, climb({ gem: true }));
+    await play();
+    expect(game.log.got).toBe(76);
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("目標在後面：下一個卡片 → 底數小猜大、大猜小 → 走到那一層才收", async () => {
+    const game = climbGame({ start: 75, base: 5, cells: { 77: GEM_CARD }, rolls: [9, 3] });
+    const { run, status } = start(game, climb({ gem: true }));
+    expect(status()).toMatchObject({ stopped: null, what: "gem", cell: 77 });
+    await play();
+    expect(game.log).toEqual({ next: 2, picks: ["high", "low"], items: [], got: 77 });
+    // 每按一下都有官方的按鈕聲
+    expect((game.B["ulse17"] as { play: Fn }).play).toHaveBeenCalledTimes(5);
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("同時看到好幾種：渦二 → 渦一 → 其他，會走過腳下的 GEM 與角色卡", async () => {
+    const all = { gem: true, chara1: true, raid1: true, raid2: true };
+    const a = climbGame({
+      start: 75,
+      base: 5,
+      cells: { 75: GEM_CARD, 76: card(461, 7), 77: RAID1 },
+    });
+    const ra = start(a, climb(all));
+    await play();
+    expect(a.log.got).toBe(77);
+    ra.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+
+    const b = climbGame({
+      start: 75,
+      base: 5,
+      cells: { 75: GEM_CARD, 76: RAID1, 78: RAID2 },
+    });
+    const rb = start(b, climb(all));
+    await play();
+    expect(b.log.got).toBe(78);
+    rb.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("角色卡、GEM、石楠3 之間誰近拿誰；EXP 墊底", async () => {
+    const flower: Reward = { reward_type: 3, reward_id: 6, reward_amount: 1 };
+    const all = { gem: true, chara1: true, heather3: true, exp: true };
+    const cases: [Record<number, Reward>, number][] = [
+      // 腳下的 GEM 贏過下一層的角色卡
+      [{ 75: GEM_CARD, 76: card(461, 7) }, 75],
+      [{ 76: card(461, 7), 77: GEM_CARD }, 76],
+      [{ 76: GEM_CARD, 77: card(461, 7) }, 76],
+      [{ 76: flower, 77: GEM_CARD, 78: card(461, 7) }, 76],
+      // EXP 再近也排在後面；只有它的時候才拿
+      [{ 75: EXP_CARD, 76: EXP_CARD, 78: flower }, 78],
+      [{ 76: EXP_CARD }, 76],
+    ];
+    for (const [cells, want] of cases) {
+      const game = climbGame({ start: 75, base: 5, cells });
+      const r = start(game, climb(all));
+      await play();
+      expect(game.log.got).toBe(want);
+      r.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+    }
+  });
+
+  it("EXP 值很低（55 x 15 x 0.1 = 82）：猜錯不為它花道具", async () => {
+    const game = climbGame({ start: 75, base: 6, cells: { 76: EXP_CARD }, rolls: [5] });
+    const { run, status } = start(game, climb({ exp: true }));
+    expect(status()).toMatchObject({ what: "exp", cell: 76 });
+    await play();
+    expect(game.B["use_bonus_item"]).not.toHaveBeenCalled();
+    expect(status().stopped).toBe("notWorth");
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("角色卡看牌組的位置：第二位的卡只有勾第二位才拿", async () => {
+    const mk = () => climbGame({ start: 75, base: 5, cells: { 76: card(311, 7) } });
+    const a = mk();
+    const ra = start(a, climb({ chara2: true, chara2Within: 4 }));
+    await play();
+    expect(a.log.got).toBe(76);
+    ra.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+
+    const b = mk();
+    const rb = start(b, climb({ chara1: true, chara1Within: 4, chara3: true, chara3Within: 4 }));
+    await play();
+    expect(b.log).toMatchObject({ next: 0, got: null });
+    expect(rb.status().stopped).toBe("noTarget");
+    rb.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("⚠ x1 而且 Lv1 的角色卡是野生的，不拿；Lv3 的 x1、Lv1 的 x7 照拿", async () => {
+    const wild = climbGame({ start: 75, base: 5, cells: { 76: card(461, 1) } });
+    const rw = start(wild, climb({ chara1: true, chara1Within: 4 }));
+    await play();
+    expect(wild.log).toMatchObject({ next: 0, got: null });
+    expect(rw.status().stopped).toBe("noTarget");
+    rw.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+
+    for (const reward of [card(463, 1), card(461, 7)]) {
+      const game = climbGame({ start: 75, base: 5, cells: { 76: reward } });
+      const r = start(game, climb({ chara1: true, chara1Within: 4 }));
+      await play();
+      expect(game.log.got).toBe(76);
+      r.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+    }
+  });
+
+  it("前 X 層從開局那一層算：超出去的不拿；還有沒露出來的就往上一層看", async () => {
+    // 前 3 層＝75～77，GEM 在 78：看得到也不拿，交還給玩家
+    const out = climbGame({ start: 75, base: 5, cells: { 78: GEM_CARD } });
+    const ro = start(out, climb({ gem: true, gemWithin: 3 }));
+    await play();
+    expect(out.log).toMatchObject({ next: 0, got: null });
+    expect(ro.status().stopped).toBe("noTarget");
+    ro.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+
+    // 前 6 層＝75～80，GEM 在 79：開局看不到（只到 78），往上一層就看到了
+    const peek = climbGame({ start: 75, base: 5, cells: { 79: GEM_CARD } });
+    const rp = start(peek, climb({ gem: true, gemWithin: 6 }));
+    expect(rp.status()).toMatchObject({ what: "peek", cell: 80 });
+    await play();
+    expect(peek.log.got).toBe(79);
+    rp.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+
+    // GEM 在 81：爬到 77 就把 80 以前都看過了，停在那裡
+    const none = climbGame({ start: 75, base: 5, cells: { 81: GEM_CARD } });
+    const rn = start(none, climb({ gem: true, gemWithin: 6 }));
+    await play();
+    expect(none.log).toMatchObject({ next: 2, got: null });
+    expect(rn.status()).toMatchObject({ step: 77, stopped: "noTarget" });
+    rn.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("渦二：看得到就拿（比 GEM 先）；一路找到上限還沒有 → 改拿 GEM 或渦一", async () => {
+    const seen = climbGame({ start: 75, base: 5, cells: { 76: GEM_CARD, 77: RAID2 } });
+    const rs = start(seen, climb({ gem: true, raid2: true, raid2Max: 105 }));
+    await play();
+    expect(seen.log.got).toBe(77);
+    rs.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+
+    // 沒勾 GEM：路上的 GEM（76）走過去；過了 78 層才拿（82）
+    const cap = climbGame({ start: 75, base: 5, cells: { 76: GEM_CARD, 82: GEM_CARD } });
+    const rc = start(cap, climb({ raid2: true, raid2Max: 78 }));
+    expect(rc.status()).toMatchObject({ what: "seekRaid2", cell: 78 });
+    await play(60);
+    expect(cap.log.got).toBe(82);
+    rc.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+
+    // 過了上限渦一也拿（沒勾也算），而且比 GEM 先；上限以前的渦一（76）照樣走過去
+    const r1 = climbGame({
+      start: 75,
+      base: 5,
+      cells: { 76: RAID1, 80: GEM_CARD, 81: RAID1 },
+    });
+    const rr = start(r1, climb({ raid2: true, raid2Max: 78 }));
+    await play(60);
+    expect(r1.log.got).toBe(81);
+    rr.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("100 層：一路爬到 100 層就交還給玩家，路上的 GEM 不拿、到了也不替他收", async () => {
+    const game = climbGame({ start: 97, base: 5, cells: { 98: GEM_CARD } });
+    const { run, status } = start(game, climb({ floor100: true }));
+    expect(status()).toMatchObject({ what: "floor100", cell: 100 });
+    await play();
+    expect(game.log).toMatchObject({ next: 3, got: null });
+    expect(status()).toMatchObject({ step: 100, stopped: "floor100" });
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("猜錯、目標還有兩層：石楠5（過了這一層，下一層白拿好猜的底數）", async () => {
+    const game = climbGame({ start: 75, base: 6, cells: { 77: RAID1 }, rolls: [2] });
+    const { run } = start(game, climb({ raid1: true }));
+    await play();
+    expect(game.log).toMatchObject({ items: [7], picks: ["high", "high"], got: 77 });
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("⚠ 猜錯、下一層就是目標、骰壞的是 2：四葉草先，重投後拿 2 當底數重猜", async () => {
+    const game = climbGame({ start: 75, base: 6, cells: { 76: RAID1 }, rolls: [2, 9] });
+    const { run } = start(game, climb({ raid1: true }));
+    await play();
+    expect(game.log).toEqual({ next: 1, picks: ["high", "high"], items: [4], got: 76 });
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("下一層是目標但四葉草沒了：石楠5，再沒有就跳越星", async () => {
+    const mk = () => climbGame({ start: 75, base: 6, cells: { 76: RAID1 }, rolls: [2] });
+    const gone = (id: number) => (ITEMS.find((x) => x.item_id === id)!.quantity = 0);
+    gone(4);
+    const a = mk();
+    const ra = start(a, climb({ raid1: true }));
+    await play();
+    expect(a.log).toMatchObject({ items: [7], got: 76 });
+    ra.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+
+    gone(7);
+    const b = mk();
+    const rb = start(b, climb({ raid1: true }));
+    await play();
+    expect(b.log).toMatchObject({ items: [8], got: 76 });
+    rb.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("差距小：夠用的小石楠先，就算下一層是目標、骰壞的是 2", async () => {
+    // 5 猜大出 2（差 3）→ 石楠3
+    const a = climbGame({ start: 75, base: 5, cells: { 76: RAID1 }, rolls: [2] });
+    const ra = start(a, climb({ raid1: true }));
+    await play();
+    expect(a.log).toMatchObject({ items: [6], got: 76 });
+    ra.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+
+    // 6 猜大出 5（差 1）→ 石楠1
+    const b = climbGame({ start: 75, base: 6, cells: { 76: RAID1 }, rolls: [5] });
+    const rb = start(b, climb({ raid1: true }));
+    await play();
+    expect(b.log).toMatchObject({ items: [5], got: 76 });
+    rb.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("下一層是目標但骰壞的不好猜（5）、小石楠又沒了：照平常的順序用石楠5，不用四葉草", async () => {
+    ITEMS.find((x) => x.item_id === 5)!.quantity = 0;
+    ITEMS.find((x) => x.item_id === 6)!.quantity = 0;
+    const game = climbGame({ start: 75, base: 6, cells: { 76: RAID1 }, rolls: [5] });
+    const { run } = start(game, climb({ raid1: true }));
+    await play();
+    expect(game.log).toMatchObject({ items: [7], got: 76 });
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("GEM、石楠3 是買得到的：只准石楠1，而且救起來的期望要比它貴", async () => {
+    // GEM 卡 37 x 19 x 1.5 = 1054；下一層 → 期望 724，差 1 用石楠1
+    const a = climbGame({ start: 75, base: 6, cells: { 76: GEM_CARD }, rolls: [5] });
+    const ra = start(a, climb({ gem: true }));
+    await play();
+    expect(a.log).toMatchObject({ items: [5], got: 76 });
+    ra.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+
+    // 差 4：石楠1 救不了，石楠5 不准用 → 不救
+    const b = climbGame({ start: 75, base: 6, cells: { 76: GEM_CARD }, rolls: [2] });
+    const rb = start(b, climb({ gem: true }));
+    await play();
+    expect(b.B["use_bonus_item"]).not.toHaveBeenCalled();
+    expect(b.B["check_bonus_quit"]).not.toHaveBeenCalled();
+    expect(rb.status().stopped).toBe("notWorth");
+    rb.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+
+    // 倍率只有 3 的 GEM 卡（166）：期望 114 比石楠1 的 200 還少 → 差 1 也不救
+    const cheap: Reward = { reward_type: 9, reward_id: 2, reward_amount: 300 };
+    const c = climbGame({ start: 75, base: 6, cells: { 76: cheap }, rolls: [5] });
+    const rc = start(c, climb({ gem: true }));
+    await play();
+    expect(c.B["use_bonus_item"]).not.toHaveBeenCalled();
+    expect(rc.status().stopped).toBe("notWorth");
+    rc.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+
+    // 石楠3（540）還有三層：540 x 0.687^3 = 175 → 不救；剩兩層（255）就救
+    const flower: Reward = { reward_type: 3, reward_id: 6, reward_amount: 1 };
+    const d = climbGame({ start: 55, base: 6, cells: { 58: flower }, rolls: [5], result: "lose" });
+    const rd = start(d, climb({}, { heather3: true }));
+    await play();
+    expect(d.B["use_bonus_item"]).not.toHaveBeenCalled();
+    expect(rd.status().stopped).toBe("notWorth");
+    rd.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+    const e = climbGame({ start: 55, base: 6, cells: { 57: flower }, rolls: [5], result: "lose" });
+    const re = start(e, climb({}, { heather3: true }));
+    await play();
+    expect(e.log).toMatchObject({ items: [5], got: 57 });
+    re.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("角色卡的價值照玩家填的算（x 張數）：填得低就不值得花石楠5", async () => {
+    const mk = () => climbGame({ start: 75, base: 6, cells: { 76: card(461, 7) }, rolls: [2] });
+    // 預設一張 150：150 x 7 − 246 = 804，比四葉草／石楠5（900）便宜 → 差 4 不救
+    const a = mk();
+    const ra = start(a, climb({ chara1: true }));
+    await play();
+    expect(a.B["use_bonus_item"]).not.toHaveBeenCalled();
+    expect(ra.status().stopped).toBe("notWorth");
+    ra.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+
+    // 同一張卡差 3：石楠3（540）比 804 便宜 → 救
+    const near = climbGame({ start: 75, base: 5, cells: { 76: card(461, 7) }, rolls: [2] });
+    const rn = start(near, climb({ chara1: true }));
+    await play();
+    expect(near.log).toMatchObject({ items: [6], got: 76 });
+    rn.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+
+    // 填 2200：下一層就是目標、骰壞的是 2 → 四葉草
+    const b = mk();
+    const rb = start(b, { ...climb({ chara1: true }), charaValue: 2200 });
+    await play();
+    expect(b.log).toMatchObject({ items: [4], got: 76 });
+    rb.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("一定要到的（往上找渦二、100 層）不算划不划算；往上看前幾層的不救", async () => {
+    const seek = climbGame({ start: 75, base: 6, rolls: [2] });
+    const rs = start(seek, climb({ raid2: true, raid2Max: 77 }));
+    await play(12);
+    expect(seek.log.items).toEqual([7]);
+    rs.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+
+    const floor = climbGame({ start: 98, base: 6, rolls: [2] });
+    const rf = start(floor, climb({ floor100: true }));
+    await play();
+    expect(floor.log.items).toEqual([7]);
+    expect(rf.status()).toMatchObject({ step: 100, stopped: "floor100" });
+    rf.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+
+    const peek = climbGame({ start: 75, base: 6, rolls: [5] });
+    const rp = start(peek, climb({ gem: true, gemWithin: 6 }));
+    await play();
+    expect(peek.B["use_bonus_item"]).not.toHaveBeenCalled();
+    expect(rp.status()).toMatchObject({ step: 75, stopped: "notWorth" });
+    rp.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("允許直接結束：不划算、沒有能用的道具都按結束遊戲，只按一次", async () => {
+    const a = climbGame({ start: 75, base: 6, cells: { 76: GEM_CARD }, rolls: [2] });
+    const ra = start(a, { ...climb({ gem: true }), quit: true });
+    await play();
+    expect(a.B["check_bonus_quit"]).toHaveBeenCalledTimes(1);
+    expect(a.B["use_bonus_item"]).not.toHaveBeenCalled();
+    expect(ra.status().stopped).toBe("quitNotWorth");
+    ra.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+
+    ITEMS.forEach((x) => (x.quantity = 0));
+    const b = climbGame({ start: 75, base: 6, cells: { 77: RAID1 }, rolls: [2] });
+    const rb = start(b, { ...climb({ raid1: true }), quit: true });
+    await play();
+    expect(b.B["check_bonus_quit"]).toHaveBeenCalledTimes(1);
+    expect(rb.status().stopped).toBe("quitNoItem");
+    rb.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("估價的常數跟 Moon 對得上：一層的勝率 0.687、每層花費 246", () => {
+    expect(BONUS_CLIMB_WIN_RATE).toBeCloseTo(0.687, 3);
+    expect(Math.round(BONUS_CLIMB_STEP_COST)).toBe(246);
+    expect(bonusGuessWinRate(2)).toBeCloseTo(35 / 36, 6);
+    expect(bonusGuessWinRate(7)).toBeCloseTo(15 / 36, 6);
+  });
+
+  it("猜錯沒有能用的道具：交還給玩家，不替他按結束遊戲；之後也不再動", async () => {
+    ITEMS.forEach((x) => (x.quantity = 0));
+    const game = climbGame({ start: 75, base: 6, cells: { 77: RAID1 }, rolls: [2] });
+    const { run, status } = start(game, climb({ raid1: true }));
+    await play();
+    expect(status()).toMatchObject({ step: 75, stopped: "noItem" });
+    expect(game.B["use_bonus_item"]).not.toHaveBeenCalled();
+    expect(game.B["check_bonus_quit"]).not.toHaveBeenCalled();
+    expect(game.log).toMatchObject({ next: 1, got: null });
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("伺服器說道具不能用：交還給玩家，不一直重送", async () => {
+    const game = climbGame({
+      start: 75,
+      base: 6,
+      cells: { 77: RAID1 },
+      rolls: [2],
+      refuse: true,
+    });
+    const { run, status } = start(game, climb({ raid1: true }));
+    await play();
+    expect(game.B["use_bonus_item"]).toHaveBeenCalledTimes(1);
+    expect(status().stopped).toBe("itemRefused");
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("勝場、敗場各看各的那一組；平手、時間到算敗場", async () => {
+    for (const result of ["lose", "draw", "timeup"]) {
+      const game = climbGame({ start: 55, base: 5, cells: { 55: GEM_CARD, 56: RAID1 }, result });
+      const { run, status } = start(game, climb({ gem: true }, { raid1: true }));
+      expect(status().group).toBe("lose");
+      await play();
+      expect(game.log.got).toBe(56);
+      run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+    }
+    const win = climbGame({ start: 75, base: 5, cells: { 75: GEM_CARD, 76: RAID1 } });
+    const rw = start(win, climb({ gem: true }, { raid1: true }));
+    await play();
+    expect(win.log.got).toBe(75);
+    rw.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("白色石楠3 也能當目標（敗場那組的選項）；跟 GEM 同時看到時拿近的", async () => {
+    const flower: Reward = { reward_type: 3, reward_id: 6, reward_amount: 1 };
+    const a = climbGame({ start: 55, base: 5, cells: { 57: flower }, result: "lose" });
+    const ra = start(a, climb({}, { heather3: true }));
+    expect(ra.status()).toMatchObject({ group: "lose", what: "heather3", cell: 57 });
+    await play();
+    expect(a.log.got).toBe(57);
+    ra.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+
+    const b = climbGame({
+      start: 55,
+      base: 5,
+      cells: { 56: flower, 57: GEM_CARD },
+      result: "lose",
+    });
+    const rb = start(b, climb({}, { heather3: true, gem: true }));
+    await play();
+    expect(b.log.got).toBe(56);
+    rb.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+
+    // 沒勾就只是一張普通的獎品
+    const c = climbGame({ start: 55, base: 5, cells: { 56: flower }, result: "lose" });
+    const rc = start(c, climb({}, { gem: true, gemWithin: 4 }));
+    await play();
+    expect(c.log).toMatchObject({ next: 0, got: null });
+    rc.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("關著、什麼都沒勾、輸入鎖著：都不替玩家按", async () => {
+    const off = climbGame({ start: 75, base: 5, cells: { 75: GEM_CARD } });
+    const ro = start(off, { ...climb({ gem: true }), on: false });
+    await play(4);
+    expect(off.log).toMatchObject({ next: 0, got: null });
+    expect(ro.status()).toMatchObject({ on: false, inBonus: true, stopped: null });
+    ro.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+
+    const none = climbGame({ start: 75, base: 5, cells: { 75: GEM_CARD } });
+    const rn = start(none, climb({}));
+    await play(4);
+    expect(none.log).toMatchObject({ next: 0, got: null });
+    expect(rn.status().stopped).toBe("noTarget");
+    rn.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+
+    const locked = climbGame({ start: 75, base: 5, cells: { 75: GEM_CARD } });
+    locked.B.input.enabled = false;
+    const rl = start(locked, climb({ gem: true }));
+    await play(4);
+    expect(locked.log.got).toBeNull();
+    locked.B.input.enabled = true;
+    await play(2);
+    expect(locked.log.got).toBe(75);
+    rl.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("獎品列還沒換成這一層的（reward_step 對不上）：等，不照舊的那一列走", async () => {
+    const game = climbGame({ start: 75, base: 5, cells: { 75: GEM_CARD } });
+    const fresh = game.B["bonus_rewards"];
+    game.B["bonus_rewards"] = (fresh as { reward_step: number }[]).map((r) => ({
+      ...r,
+      reward_step: r.reward_step - 1,
+    }));
+    const { run } = start(game, climb({ gem: true }));
+    await play(3);
+    expect(game.log.got).toBeNull();
+    game.B["bonus_rewards"] = fresh;
+    await play(2);
+    expect(game.log.got).toBe(75);
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("換設定當場生效：交還之後換了目標就重新來；關掉就停", async () => {
+    const game = climbGame({ start: 75, base: 5, cells: { 77: GEM_CARD } });
+    const { run, status } = start(game, climb({}));
+    await play(2);
+    expect(status().stopped).toBe("noTarget");
+    expect(run(buildItemPanelSetBonusClimbExpression(climb({ gem: true })))).toBe("ok");
+    expect(status()).toMatchObject({ stopped: null, what: "gem", cell: 77 });
+    await play(2);
+    run(buildItemPanelSetBonusClimbExpression({ ...climb({ gem: true }), on: false }));
+    const at = game.log.next;
+    await play(10);
+    expect(game.log).toMatchObject({ next: at, got: null });
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+    expect(run(buildItemPanelSetBonusClimbExpression(climb({})))).toBe("not-installed");
+  });
+
+  it("在跑的時候不畫捷徑與 High／Low；交還之後才畫", async () => {
+    const game = climbGame({ start: 98, base: 5 });
+    const { run, st } = start(game, climb({ floor100: true }), {
+      bonusHighLow: true,
+      bonusItem: true,
+    });
+    const hl = () => (st()["h"] as { mine: Obj[] }).mine;
+    expect(hl()).toHaveLength(0);
+    await play();
+    expect(game.log.next).toBe(2);
+    expect(hl()).toHaveLength(2);
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("下一場從頭算：開局層、分組、交還都重來", async () => {
+    const game = climbGame({ start: 75, base: 5 });
+    const { run, status } = start(game, climb({}));
+    await play(2);
+    expect(status()).toMatchObject({ start: 75, stopped: "noTarget" });
+    (game.B["bonus_star"] as Obj).destroy();
+    await play(1);
+    expect(status()).toMatchObject({ inBonus: false, start: null, stopped: null });
+    game.B["bonus_star"] = new Obj(game.B, 258, 8);
+    game.B["bonus_data"] = { step: 55, dice_current: 5, dice_previous: 5 };
+    (game.R["result_params"] as { result: string }).result = "lose";
+    await play(1);
+    expect(status()).toMatchObject({ inBonus: true, group: "lose", start: 55 });
+    run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
+  it("設定整理：缺的補預設、數字夾回範圍、不是布林的當沒勾", () => {
+    expect(normalizeBonusClimb(undefined)).toEqual({
+      on: false,
+      quit: false,
+      charaValue: 150,
+      win: DEFAULT_BONUS_CLIMB_GOALS,
+      lose: DEFAULT_BONUS_CLIMB_GOALS,
+    });
+    const c = normalizeBonusClimb({
+      on: true,
+      quit: 1,
+      charaValue: -5,
+      win: { gem: "yes", gemWithin: 0, raid2: true, raid2Max: 9999, raid1Within: 2.6 },
+      lose: { chara1: true, chara1Within: Number.NaN },
+    });
+    expect(c.on).toBe(true);
+    expect(c).toMatchObject({ quit: false, charaValue: 0 });
+    expect(c.win).toMatchObject({ gem: false, gemWithin: 1, raid2: true, raid2Max: 500 });
+    expect(c.win.raid1Within).toBe(3);
+    expect(c.lose).toMatchObject({ chara1: true, chara1Within: 6, raid2: false, raid2Max: 105 });
   });
 });
 

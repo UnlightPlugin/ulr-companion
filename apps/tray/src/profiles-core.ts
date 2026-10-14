@@ -20,6 +20,7 @@ import { DEFAULT_STAGE_PICK, normalizeStagePick, RANDOM_STAGE } from "@ulr/arbit
 import type { StagePick } from "@ulr/arbiter-engine";
 import {
   browserProfileDir,
+  DEFAULT_BONUS_CLIMB,
   DEFAULT_BONUS_ITEM_ORDER,
   DEFAULT_BONUS_ITEM_PLACE,
   DEFAULT_CHARA_PICKER_MODE,
@@ -33,9 +34,11 @@ import {
   isRaidRewardMode,
   isRenderMode,
   isSizeMode,
+  normalizeBonusClimb,
   normalizeTint,
 } from "@ulr/cdp-adapter";
 import type {
+  BonusClimbConfig,
   BonusItemOrder,
   BonusItemPlace,
   CharaPickerMode,
@@ -446,6 +449,11 @@ export interface Profile {
    */
   bonusSkipEnd: boolean;
   /**
+   * 獎勵遊戲自動爬星：照勾選的目標替玩家爬（下一個卡片、High／Low、猜錯用道具、到了收下）。
+   * 勝場、敗場各一組目標（玩家 2026-10-11）。預設關、什麼都沒勾。
+   */
+  bonusClimb: BonusClimbConfig;
+  /**
    * 畫面設定：`render` 繪製解析度（off／auto／x2／x3）、`size` 畫面大小
    * （x1／x1.25／x1.5／x2／fullscreen）。預設關、×1 —— 跟官方一樣。
    *
@@ -735,6 +743,7 @@ export function normalizeProfile(raw: unknown): Profile | null {
     bonusFast: r["bonusFast"] === true,
     bonusRescueFast: r["bonusRescueFast"] === true,
     bonusSkipEnd: r["bonusSkipEnd"] === true,
+    bonusClimb: normalizeBonusClimb(r["bonusClimb"]),
     // 舊設定檔沒有這一欄 → 關、×1（官方原樣）。
     display: normalizeDisplay(r["display"]),
   };
@@ -826,6 +835,7 @@ export function defaultProfile(kind: ClientKind = "desktop"): Profile {
     bonusFast: false,
     bonusRescueFast: false,
     bonusSkipEnd: false,
+    bonusClimb: DEFAULT_BONUS_CLIMB,
     display: { ...DEFAULT_DISPLAY_STATE },
   };
 }

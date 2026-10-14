@@ -185,6 +185,8 @@ contextBridge.exposeInMainWorld("ulr", {
     rescueFast: (on: boolean) => ipcRenderer.invoke("ulr:bonus-rescue-fast", on),
     /** 結束後不看第二次結算。 */
     skipEnd: (on: boolean) => ipcRenderer.invoke("ulr:bonus-skip-end", on),
+    /** 自動爬星：整份設定（開關＋勝場、敗場兩組目標）；主程序會整理成合法的再存。 */
+    climb: (config: unknown) => ipcRenderer.invoke("ulr:bonus-climb", config),
   },
 
   /**

@@ -75,12 +75,14 @@ import {
   isCharaPickerMode,
   isQuestPanelMode,
   isRaidRewardMode,
+  normalizeBonusClimb,
   resolveDebugPort,
   ROOM_ERROR_AP_SHORT,
   SELECTABLE_STAGES,
   summarizeQuestBonus,
 } from "@ulr/cdp-adapter";
 import type {
+  BonusClimbConfig,
   BonusItemOrder,
   BonusItemPlace,
   QuestBonusStats,
@@ -957,6 +959,8 @@ interface BonusPageState {
   rescueFast: boolean;
   /** 結束後不看第二次結算。 */
   skipEnd: boolean;
+  /** 自動爬星：開關＋勝場、敗場兩組目標。 */
+  climb: BonusClimbConfig;
   items: ItemPanelStatus | null;
 }
 
@@ -969,6 +973,7 @@ async function bonusPageState(): Promise<BonusPageState> {
     fast: profile.bonusFast,
     rescueFast: profile.bonusRescueFast,
     skipEnd: profile.bonusSkipEnd,
+    climb: profile.bonusClimb,
     items: (await engine?.itemPanelStatus().catch(() => null)) ?? null,
   };
 }
@@ -4458,6 +4463,7 @@ app.whenReady().then(() => {
   engine.setBonusFast(profile.bonusFast);
   engine.setBonusRescueFast(profile.bonusRescueFast);
   engine.setBonusSkipEnd(profile.bonusSkipEnd);
+  engine.setBonusClimb(profile.bonusClimb);
   engine.setQuestTreasure(profile.questTreasureMarks);
   engine.setQuestPanel("reward", profile.questRewardPanel);
   engine.setQuestPanel("end", profile.questEndPanel);
@@ -5107,6 +5113,18 @@ app.whenReady().then(() => {
       log(on ? "· 獎勵遊戲：結束後直接回房間" : "· 獎勵遊戲：結束後照官方看結算");
       pushState();
     }
+    return bonusPageState();
+  });
+
+  // 整份設定一起來（開關＋兩組目標）；不合理的數字在 normalizeBonusClimb 裡夾回範圍
+  ipcMain.handle("ulr:bonus-climb", async (_event, config: unknown): Promise<BonusPageState> => {
+    const next = normalizeBonusClimb(config);
+    const toggled = next.on !== profile.bonusClimb.on;
+    profile = { ...profile, bonusClimb: next };
+    if (!ephemeral) store = updateProfile(profile.id, { bonusClimb: next });
+    engine?.setBonusClimb(next);
+    if (toggled) log(next.on ? "· 獎勵遊戲：自動爬星開啟" : "· 獎勵遊戲：自動爬星已關閉");
+    pushState();
     return bonusPageState();
   });
 

@@ -129,6 +129,7 @@ import {
   parseInputRescueStatus,
 } from "./patch-input-rescue.js";
 import type {
+  BonusClimbConfig,
   BonusItemOrder,
   BonusItemPlace,
   ItemPanelPart,
@@ -137,6 +138,7 @@ import type {
 } from "./patch-item-panel.js";
 import {
   buildItemPanelPatchScript,
+  buildItemPanelSetBonusClimbExpression,
   buildItemPanelSetBonusOrderExpression,
   buildItemPanelSetBonusPlaceExpression,
   buildItemPanelSetPartExpression,
@@ -1780,6 +1782,11 @@ export class CdpAdapter {
   /** 換獎勵遊戲的捷徑畫在哪（上方／蓋在使用物品上）。回 `"ok"` 或 `"not-installed"`。 */
   async setBonusItemPlace(place: BonusItemPlace): Promise<string> {
     return await this.evaluate<string>(buildItemPanelSetBonusPlaceExpression(place));
+  }
+
+  /** 換獎勵遊戲自動爬星的設定（開關＋兩組目標）。回 `"ok"` 或 `"not-installed"`。 */
+  async setBonusClimb(config: BonusClimbConfig): Promise<string> {
+    return await this.evaluate<string>(buildItemPanelSetBonusClimbExpression(config));
   }
 
   async uninstallItemPanelPatch(): Promise<string> {

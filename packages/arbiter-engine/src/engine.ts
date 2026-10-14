@@ -111,6 +111,7 @@ import type {
   EditDeckRead,
   HiddenStageStatus,
   InputRescueReport,
+  BonusClimbConfig,
   BonusItemOrder,
   BonusItemPlace,
   DietPart,
@@ -195,6 +196,7 @@ import {
   DEFAULT_RAID_AUTO_DELETE,
   DEFAULT_DISPLAY_STATE,
   DEFAULT_RAID_REWARD_MODE,
+  DEFAULT_BONUS_CLIMB,
   DEFAULT_BONUS_ITEM_ORDER,
   DEFAULT_BONUS_ITEM_PLACE,
   DISPLAY_SCRIPT_VERSION,
@@ -1221,6 +1223,8 @@ export class ArbiterEngine {
   #bonusRescueFast = false;
   /** 獎勵遊戲結束後不看第二次結算。同上。 */
   #bonusSkipEnd = false;
+  /** 獎勵遊戲自動爬星（開關＋勝場、敗場兩組目標）。同上。 */
+  #bonusClimb: BonusClimbConfig = DEFAULT_BONUS_CLIMB;
 
   get itemShortcut(): boolean {
     return this.#itemShortcut;
@@ -1331,6 +1335,21 @@ export class ArbiterEngine {
       .catch(() => undefined);
   }
 
+  get bonusClimb(): BonusClimbConfig {
+    return this.#bonusClimb;
+  }
+
+  /** 換獎勵遊戲自動爬星的設定。同上。 */
+  setBonusClimb(config: BonusClimbConfig): void {
+    this.#bonusClimb = config;
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    void adapter
+      .setBonusClimb(config)
+      .then((r) => (r === "not-installed" ? this.#syncItemPanel() : undefined))
+      .catch(() => undefined);
+  }
+
   #pushItemPanelPart(part: ItemPanelPart, on: boolean): void {
     const adapter = this.#adapter;
     if (adapter === null) return;
@@ -1354,6 +1373,7 @@ export class ArbiterEngine {
       bonusFast: this.#bonusFast,
       bonusRescueFast: this.#bonusRescueFast,
       bonusSkipEnd: this.#bonusSkipEnd,
+      bonusClimb: this.#bonusClimb,
     };
   }
 
