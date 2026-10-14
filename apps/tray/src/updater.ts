@@ -78,6 +78,16 @@ export interface UpdaterOptions {
    * 用「有沒有連線」當判準的話，開著插件的人永遠等不到更新。
    */
   isBusy: () => boolean;
+  /**
+   * 把整個程式收掉（主程式的 `quit()`）。
+   *
+   * ⚠⚠ **不要在這支裡直接叫 `app.quit()`。** 設定視窗的 `close` 會把它當成
+   * 「使用者按了 X」而擋下來（收進托盤），於是**退出被安靜地取消**：換檔腳本
+   * 等不到我們死掉，版本永遠換不上去，而 log 停在「⟳ 套用」那一行、一個錯誤
+   * 都沒有。只有視窗被開過的那些人會中，所以開發時測不出來（2026-10-12 的 2.3.0）。
+   * 主程式那支還會先把頁面上的攔截拆乾淨，這裡本來就該走它。
+   */
+  quit: () => void;
   onLog?: (line: string) => void;
 }
 
@@ -163,7 +173,8 @@ export function startAutoUpdate(options: UpdaterOptions): () => void {
    * 變成**每小時無限重啟**。而且因為版本沒變，log 上看起來像更新一直失敗，
    * 但錯誤訊息一行都沒有。
    *
-   * ⚠ **一定要 `app.quit()`。** 兩條路都換不掉正在執行的檔案。
+   * ⚠ **一定要退出**，而且要走 `options.quit()`（見那裡的註解）。兩條路都
+   * 換不掉正在執行的檔案。
    *
    * ⚠ **一定要清掉 `ELECTRON_RUN_AS_NODE`。** 安裝檔／腳本本身不是 Electron，
    * 但它們裝完會把**新版的 app** 叫起來，而那個是。帶著這個變數的話新版會
@@ -192,7 +203,7 @@ export function startAutoUpdate(options: UpdaterOptions): () => void {
         staged = null;
         return;
       }
-      app.quit();
+      options.quit();
       return;
     }
 
@@ -221,7 +232,7 @@ export function startAutoUpdate(options: UpdaterOptions): () => void {
       clearUpdating();
       return;
     }
-    app.quit();
+    options.quit();
   };
 
   const first = setTimeout(() => void tick(), FIRST_CHECK_DELAY_MS);

@@ -5390,6 +5390,7 @@ app.whenReady().then(() => {
   startAutoUpdate({
     currentVersion: VERSION,
     isBusy: () => latest?.armed === true,
+    quit: () => void quit(),
     onLog: (l) => log(l),
   });
 
@@ -5438,3 +5439,10 @@ app.whenReady().then(() => {
 // ⚠ 托盤程式沒有視窗時**不能結束**。這是 Electron 在 Windows/Linux 上的預設行為，
 // 而它對這個 app 是錯的：關掉設定視窗之後仲裁還要繼續跑。
 app.on("window-all-closed", () => {});
+
+// ⚠ 任何一條路叫了 `app.quit()`，設定視窗的 `close` 都要放行。少了這一行，
+// 沒有先把 `quitting` 設起來的 `app.quit()` 會被那個處理器**安靜地取消**
+// （它以為是使用者按了 X）—— 自動更新就這樣卡了一版，見 `UpdaterOptions.quit`。
+app.on("before-quit", () => {
+  quitting = true;
+});
