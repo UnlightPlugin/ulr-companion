@@ -49,6 +49,7 @@ import {
   formatRaidTally,
   formatRaidTrack,
   formatVanished,
+  historyRows,
   ledgerExpect,
   ledgerLevels,
   outcomeKey,
@@ -1546,6 +1547,7 @@ export class ArbiterEngine {
         this.#raidAutoDelete,
         this.#teamsForPage(),
         this.#raidLearned,
+        this.#raidHistoryButton,
       );
     } catch {
       return null;
@@ -1566,6 +1568,7 @@ export class ArbiterEngine {
         this.#raidAutoDelete,
         teams,
         this.#raidLearned,
+        this.#raidHistoryButton,
       );
       this.#raidTeamsPushed = JSON.stringify(teams);
       if (!status.installed) this.#log(`· 渦房獎勵標記還沒裝上：${status.reason ?? "原因不明"}`);
@@ -1830,6 +1833,20 @@ export class ArbiterEngine {
     }
   }
 
+  /** 渦房更新鈕左邊的「History」要不要畫。托盤從配置推進來。 */
+  #raidHistoryButton = true;
+
+  /** 換設定。立刻推到頁面上（頁面沒裝就整支補裝）。 */
+  setRaidHistoryButton(on: boolean): void {
+    this.#raidHistoryButton = on;
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    void adapter
+      .setRaidHistoryButton(on)
+      .then((r) => (r === "not-installed" ? this.#syncRaidView() : undefined))
+      .catch(() => undefined);
+  }
+
   // ---- 今天有幾個渦沒拿到獎勵（見 raid-track.ts） ---------------------------
 
   /** 打過／看過的渦與結果，加上道具對帳（托盤從硬碟讀進來、每變一次回寫）。 */
@@ -1839,9 +1856,9 @@ export class ArbiterEngine {
   /** 還在等結算、清單上卻不見了的渦：第一次發現不見的時刻（等一下結算再判定） */
   #raidGoneSince = new Map<string, number>();
 
-  /** 托盤啟動時把硬碟上的紀錄交進來。太舊的當場丟掉。 */
+  /** 托盤啟動時把硬碟上的紀錄交進來。超過上限的丟最舊的。 */
   setRaidOutcomeState(state: RaidOutcomeState): void {
-    this.#raidOutcomes = pruneOutcomes(state.outcomes, Date.now());
+    this.#raidOutcomes = pruneOutcomes(state.outcomes);
     this.#itemLedger = state.ledger;
   }
 
@@ -1861,9 +1878,32 @@ export class ArbiterEngine {
     const next = upsertOutcome(this.#raidOutcomes, report, now, this.#raidBattles);
     const rec = next.find((x) => x.key === outcomeKey(report.found, report.name));
     this.#log(formatRaidTrack(report) + (rec ? formatOutcomeDetail(rec) : ""));
-    this.#raidOutcomes = pruneOutcomes(next, now);
+    this.#raidOutcomes = next;
     this.#log(formatRaidTally(tallyToday(this.#raidOutcomes, now)));
     this.#saveRaidOutcomes();
+  }
+
+  /**
+   * 玩家按了渦房的 History：把紀錄整理成清單（拿到的＋有分卻沒拿到的，新的在前），
+   * 交給頁面的歷史面板畫。不跟伺服器要任何東西。
+   */
+  async #showRaidHistory(): Promise<void> {
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    try {
+      const rows = historyRows(this.#raidOutcomes);
+      let r = await adapter.showRaidHistory(rows);
+      if (r === "not-installed") {
+        await this.#syncRaidReward();
+        r = await adapter.showRaidHistory(rows);
+      }
+      // busy＝結算正在演、open＝面板已經開著：都是玩家看得到的狀況，不必記
+      if (r !== "ok" && r !== "busy" && r !== "open") {
+        this.#log(`⚠ 渦的歷史獎勵面板開不起來：${r}`);
+      }
+    } catch (err) {
+      this.#log(`✗ 渦的歷史獎勵面板開不起來：${describe(err)}`);
+    }
   }
 
   /** 結算到了：對回渦（還在等的、判成沒拿到的都翻成拿到），列的東西記進對帳。 */
@@ -1923,6 +1963,8 @@ export class ArbiterEngine {
   }
 
   #saveRaidOutcomes(): void {
+    // 每條會多一筆的路都經過這裡：滿了就丟最舊的
+    this.#raidOutcomes = pruneOutcomes(this.#raidOutcomes);
     const state: RaidOutcomeState = { outcomes: [...this.#raidOutcomes], ledger: this.#itemLedger };
     for (const h of this.#raidOutcomesHandlers) {
       try {
@@ -3314,6 +3356,8 @@ export class ArbiterEngine {
         adapter.onRaidReward((r) => this.#onRaidReward(r));
         adapter.onRaidItemDelta((r) => this.#onRaidItemDelta(r));
         adapter.onRaidRewardMode((r) => this.#onRaidRewardMode(r));
+        // 渦房的 History 鈕：紀錄在這邊，整理好交給同一支腳本的歷史面板
+        adapter.onRaidHistory(() => void this.#showRaidHistory());
         await this.#syncRaidReward();
         // 畫面設定（解析度／畫面大小）＋ Option 的 plugin 分頁：腳本自己等 game 建好。
         adapter.onDisplaySettings((r) => this.#onDisplaySettings(r));

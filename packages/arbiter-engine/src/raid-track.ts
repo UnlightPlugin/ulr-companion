@@ -10,7 +10,13 @@
  */
 
 import { RAID_LEDGER_WATCH } from "@ulr/cdp-adapter";
-import type { RaidRewardEntry, RaidSnapshotRow, RaidTrackReport } from "@ulr/cdp-adapter";
+import type {
+  RaidHistoryCode,
+  RaidHistoryRow,
+  RaidRewardEntry,
+  RaidSnapshotRow,
+  RaidTrackReport,
+} from "@ulr/cdp-adapter";
 
 /** ms → 本機時間 HH:MM:SS。`utcOffsetMin` 給測試用；沒給就用這台電腦的時區。 */
 export function clockOf(ms: number, utcOffsetMin?: number): string {
@@ -111,6 +117,8 @@ export interface RaidOutcomeRecord {
   /** 結算上的名次、實際拿到的東西、官方回報「領了」成功沒 */
   rank: number | null;
   rewards: string[];
+  /** 同一批獎勵的官方獎勵碼（歷史面板畫卡面用）；2026-10-11 前的紀錄沒有，是空的 */
+  codes: RaidHistoryCode[];
   received: boolean | null;
   /** 判定（結束）的時刻；還在等的是建立時刻。算「哪一天」用 */
   at: number;
@@ -157,6 +165,7 @@ function blankRecord(key: string, name: string, now: number): RaidOutcomeRecord 
     lastBattleAt: null,
     rank: null,
     rewards: [],
+    codes: [],
     received: null,
     at: now,
   };
@@ -395,6 +404,7 @@ export function settleOutcomes(
       outcome: got ? "got" : base.outcome === "pending" ? "pending" : "lost",
       rank: e.rank,
       rewards: flatRewards(e),
+      codes: e.codes ?? [],
       received: e.received ?? null,
       settled: got ? now : base.settled,
       at: got ? decidedAt(prev, now) : base.at,
@@ -405,14 +415,66 @@ export function settleOutcomes(
   return { records: next, changed };
 }
 
-/** 留一個月：找規律要累積樣本，一天十幾筆，檔案不大。 */
-const OUTCOME_KEEP_MS = 30 * 24 * 3600 * 1000;
+/**
+ * 最多留幾筆。不照時間丟（玩家 2026-10-11：歷史獎勵要一直看得到），滿了才丟最舊的。
+ * 一筆約 1 KB、一天三四十個渦，2000 筆約兩個月、2 MB。跟 RAID_LEARN_LOG_MAX 同一個數。
+ */
+export const RAID_OUTCOME_MAX = 2000;
 
+/** 超過上限就丟 `at` 最舊的那幾筆；留下的順序不變。 */
 export function pruneOutcomes(
   records: readonly RaidOutcomeRecord[],
-  now: number,
+  max: number = RAID_OUTCOME_MAX,
 ): RaidOutcomeRecord[] {
-  return records.filter((x) => now - x.at < OUTCOME_KEEP_MS);
+  if (records.length <= max) return [...records];
+  // 同一刻的照原本順序，排前面的先丟
+  const drop = new Set(
+    records
+      .map((x, i) => [x.at, i] as const)
+      .sort((a, b) => a[0] - b[0] || a[1] - b[1])
+      .slice(0, records.length - max)
+      .map(([, i]) => i),
+  );
+  return records.filter((_, i) => !drop.has(i));
+}
+
+/**
+ * 歷史面板的清單：結束了而且自己有份的渦（拿到的、有分卻沒拿到的），新的在前。
+ * 0 分又不是發現者的（本來就沒份）與還在等結算的不列。
+ */
+export function historyRows(records: readonly RaidOutcomeRecord[]): RaidHistoryRow[] {
+  return records
+    .filter((x) => x.outcome === "got" || x.outcome === "lost")
+    .sort((a, b) => b.at - a.at)
+    .map((x) => ({
+      name: x.name,
+      level: x.level,
+      founder: x.founder,
+      point: x.point,
+      rank: x.rank,
+      at: x.at,
+      got: x.outcome === "got",
+      rewards: x.rewards,
+      ...(x.codes.length > 0 ? { codes: x.codes } : {}),
+    }));
+}
+
+function parseCodes(value: unknown): RaidHistoryCode[] {
+  if (!Array.isArray(value)) return [];
+  const out: RaidHistoryCode[] = [];
+  for (const c of value as Partial<Record<keyof RaidHistoryCode, unknown>>[]) {
+    if (typeof c !== "object" || c === null) continue;
+    const { g, type, id, slot, value: n } = c;
+    if (typeof type !== "number" || typeof id !== "number") continue;
+    out.push({
+      g: typeof g === "number" ? g : 0,
+      type,
+      id,
+      slot: typeof slot === "number" ? slot : 0,
+      value: typeof n === "number" ? n : 0,
+    });
+  }
+  return out;
 }
 
 /** 讀硬碟的一列：壞掉的回 null；少了的欄位（舊版寫的）當不知道。 */
@@ -474,6 +536,7 @@ function parseOutcomeRecord(x: Partial<Record<keyof RaidOutcomeRecord, unknown>>
     lastBattleAt: num(x.lastBattleAt),
     rank: num(x.rank),
     rewards: strs(x.rewards),
+    codes: parseCodes(x.codes),
     received: typeof x.received === "boolean" ? x.received : null,
     at: x.at,
   } satisfies RaidOutcomeRecord;

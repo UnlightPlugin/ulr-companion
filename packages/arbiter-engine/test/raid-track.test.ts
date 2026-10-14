@@ -9,10 +9,12 @@ import {
   formatRaidTally,
   formatRaidTrack,
   formatVanished,
+  historyRows,
   ledgerExpect,
   ledgerLevels,
   parseOutcomeState,
   pruneOutcomes,
+  RAID_OUTCOME_MAX,
   RAID_VANISH_GRACE_MS,
   raidOutcome,
   settleOutcomes,
@@ -260,7 +262,7 @@ describe("每個渦拿到結算了沒", () => {
     );
   });
 
-  it("今天照本機時區切；等結算的另外數；一個月前的丟掉；存檔讀回來一樣", () => {
+  it("今天照本機時區切；等結算的另外數；存檔讀回來一樣", () => {
     const yesterday = upsertOutcome([], R({ found: 1 }), Date.parse("2026-09-24T23:59:00+08:00"));
     const today = upsertOutcome([], R({ found: 2, mine: false }), at("00:01:00"));
     const pending = addBattle([], [], battle({ raid: "x@3" }), at("00:02:00"));
@@ -270,7 +272,6 @@ describe("每個渦拿到結算了沒", () => {
     expect(formatRaidTally(t)).toBe(
       "· 今天結束的渦：拿到獎勵 0｜有分卻沒拿到 1｜本來就沒份 0｜等結算 1（沒拿到：魔性的鱗粉 Lv1★6 stage 5（區塊9） 3,800 分）",
     );
-    expect(pruneOutcomes(recs, at("00:00:00") + 30 * 24 * 3600 * 1000)).toHaveLength(2);
     const ledger = emptyLedger();
     const state = parseOutcomeState(JSON.parse(JSON.stringify({ outcomes: recs, ledger })));
     expect(state.outcomes).toEqual(recs);
@@ -282,8 +283,63 @@ describe("每個渦拿到結算了沒", () => {
       key: "5",
       stage: null,
       expectItems: [],
+      codes: [],
       source: "track",
     });
+  });
+
+  it("不照時間丟：再舊都留著，超過筆數才丟最舊的，留下的順序不變", () => {
+    const rec = (found: number, when: number) => upsertOutcome([], R({ found }), when)[0]!;
+    const recs = [rec(1, 300), rec(2, 100), rec(3, 200), rec(4, 100)];
+    expect(pruneOutcomes(recs)).toEqual(recs);
+    expect(RAID_OUTCOME_MAX).toBe(2000);
+    expect(pruneOutcomes(recs, 3).map((x) => x.key)).toEqual(["1", "3", "4"]);
+    expect(pruneOutcomes(recs, 1).map((x) => x.key)).toEqual(["1"]);
+  });
+
+  it("歷史面板的清單：拿到的與有分沒拿到的，新的在前；獎勵碼跟著結算存下來", () => {
+    const codes = [
+      { g: 1, type: 3, id: 2, slot: 0, value: 2 },
+      { g: 3, type: 1, id: 10010, slot: 0, value: 2 },
+    ];
+    let recs = settleOutcomes([], [ENTRY({ codes })], at("15:00:00")).records;
+    // 有分卻沒拿到（消失了、結算沒來）
+    recs = upsertOutcome(recs, R({ found: 7, mine: false, point: 500 }), at("16:00:00"));
+    // 0 分又不是發現者、還在等結算的：不列
+    recs = upsertOutcome(recs, R({ found: 8, mine: false, point: 0 }), at("17:00:00"));
+    recs = addBattle(recs, [], battle({ raid: "x@9" }), at("18:00:00"));
+    expect(recs).toHaveLength(4);
+    const rows = historyRows(recs);
+    expect(rows).toEqual([
+      {
+        name: "魔性的鱗粉",
+        level: 1,
+        founder: null,
+        point: 500,
+        rank: null,
+        at: at("16:00:00"),
+        got: false,
+        rewards: [],
+      },
+      {
+        name: "龍鯰",
+        level: null,
+        founder: "蒼兔",
+        point: 1991,
+        rank: 4,
+        at: at("15:00:00"),
+        got: true,
+        rewards: ["古代妙藥 x2", "死亡的碎片 x2"],
+        codes,
+      },
+    ]);
+    // 存檔讀回來獎勵碼還在；壞掉的那一格丟掉
+    const back = parseOutcomeState(
+      JSON.parse(
+        JSON.stringify({ outcomes: [{ ...recs[0], codes: [...codes, null, { id: "x" }] }] }),
+      ),
+    );
+    expect(back.outcomes[0]!.codes).toEqual(codes);
   });
 });
 

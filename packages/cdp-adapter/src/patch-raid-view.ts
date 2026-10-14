@@ -20,7 +20,8 @@
  *        讀榜上分數相減，回報 raid-battle（細節在「⑨ 打渦隊伍：記一場」那段）
  *      · 看：托盤把自己的紀錄＋插件互傳查到的別人的推下來（setTeams）。詳細面板排行榜上
  *        有隊伍的名字後面掛 deck_icon、點得下去；一支直接開，多支先列清單
- *   ⑩ 更新鈕：Profound 計數（raid_owned）下面一顆「Refresh」＝重進渦房
+ *   ⑩ 更新鈕：Profound 計數（raid_owned）下面一顆「Refresh」＝重進渦房；它左邊一顆「History」
+ *      ＝歷史獎勵面板（只回報 raid-history，清單在托盤、面板在 patch-raid-reward）
  *   ⑪ 渦碼沒回應時解開畫面（官方 bug，見下）
  *   ⑫ SUPPORT 公開清單：名字右邊接碎片色（只看公開渦表，見「⑫ SUPPORT 公開清單」那段）
  *   ⑬ BOSS 被動（硬化／吸收／潛伏／濁濫／夜霧／隱身／收穫／磁暴）：伺服器不送，照規則算（見「BOSS 被動」那段）。
@@ -131,7 +132,7 @@ import type { RaidLearnedTable } from "./raid-learned.js";
 const FLAG = "__ulrRaidView";
 
 /** 腳本版本。**改動注入腳本裡任何一行就 +1**，修 bug 也算。 */
-export const RAID_VIEW_SCRIPT_VERSION = 32;
+export const RAID_VIEW_SCRIPT_VERSION = 34;
 
 /** ⑪ 塞進官方 RaidUITexts.error 的鍵（官方的 raid_error 拿鍵查字）。 */
 export const RAID_CODE_NO_REPLY_KEY = "ULR_CODE_NO_REPLY";
@@ -239,6 +240,22 @@ export function isRaidRefreshReport(value: unknown): value is RaidRefreshReport 
   );
 }
 
+/**
+ * 玩家按了渦房的「History」（更新鈕左邊那顆）。紀錄在托盤手上（raid-outcomes.json），
+ * 托盤收到後把清單交給 patch-raid-reward 的歷史面板畫。
+ */
+export interface RaidHistoryRequestReport {
+  type: "raid-history";
+}
+
+export function isRaidHistoryRequestReport(value: unknown): value is RaidHistoryRequestReport {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    (value as { type?: unknown }).type === "raid-history"
+  );
+}
+
 /** 面板上的字。照官方 RaidUITexts 的五語；畫進遊戲的字要短，說明放 tooltip。 */
 export const RAID_VIEW_LABELS: Record<
   string,
@@ -263,6 +280,9 @@ export const RAID_VIEW_LABELS: Record<
     fromMap: string;
     refresh: string;
     refreshTip: string;
+    /** 更新鈕左邊那顆：打開歷史獎勵面板（字照更新鈕，所有語言都是英文） */
+    history: string;
+    historyTip: string;
     /** 詳細面板的「Points」滑上去：渦的分數公式（一行一條） */
     pointsTip: string;
     /** 隊伍面板（⑨）：標題 __NAME__ 換成玩家名；欄名要短 */
@@ -297,6 +317,8 @@ export const RAID_VIEW_LABELS: Record<
     fromMap: "区画から推定（stage __S__）",
     refresh: "Refresh",
     refreshTip: "渦リスト・AP・報酬を読み直す（渦部屋に入り直すのと同じ）",
+    history: "History",
+    historyTip: "これまでに受け取った渦の報酬",
     pointsTip:
       "キャラが1ターン生き残る +500\nダメージ ×100 ±9\nダメージ0なら0点\nGem 固定 10\nExp 固定 50",
     teamsTitle: "__NAME__ のデッキ",
@@ -327,6 +349,8 @@ export const RAID_VIEW_LABELS: Record<
     fromMap: "guessed from map area (stage __S__)",
     refresh: "Refresh",
     refreshTip: "Reload vortex list, AP and rewards (same as re-entering the room)",
+    history: "History",
+    historyTip: "Vortex rewards you have received so far",
     pointsTip:
       "Character survives a full turn +500\nDamage ×100 ±9\nNo damage: 0 points\nGem: fixed 10\nExp: fixed 50",
     teamsTitle: "__NAME__'s decks",
@@ -357,6 +381,8 @@ export const RAID_VIEW_LABELS: Record<
     fromMap: "구역 기준 추정 (stage __S__)",
     refresh: "Refresh",
     refreshTip: "소용돌이 목록・AP・보상을 다시 읽기 (방에 다시 들어가는 것과 같음)",
+    history: "History",
+    historyTip: "지금까지 받은 소용돌이 보상",
     pointsTip:
       "캐릭터가 한 턴 끝까지 생존 +500\n데미지 ×100 ±9\n데미지 없으면 0점\nGem 고정 10\nExp 고정 50",
     teamsTitle: "__NAME__의 덱",
@@ -387,6 +413,8 @@ export const RAID_VIEW_LABELS: Record<
     fromMap: "由区块推算（stage __S__）",
     refresh: "Refresh",
     refreshTip: "重读涡清单、AP 与结算（等于重进涡房）",
+    history: "History",
+    historyTip: "到目前为止领到的涡奖励",
     pointsTip: "角色完整活一回合 +500\n伤害 ×100 ±9\n没有伤害就没有分数\nGem 固定 10\nExp 固定 50",
     teamsTitle: "__NAME__ 的队伍",
     colTeam: "队伍",
@@ -416,6 +444,8 @@ export const RAID_VIEW_LABELS: Record<
     fromMap: "由區塊推算（stage __S__）",
     refresh: "Refresh",
     refreshTip: "重讀渦清單、AP 與結算（等於重進渦房）",
+    history: "History",
+    historyTip: "到目前為止領到的渦獎勵",
     pointsTip: "角色完整活一回合 +500\n傷害 ×100 ±9\n沒有傷害就沒有分數\nGem 固定 10\nExp 固定 50",
     teamsTitle: "__NAME__ 的隊伍",
     colTeam: "隊伍",
@@ -682,6 +712,8 @@ export interface RaidViewPatchOptions {
   teams?: RaidTeamsMap;
   /** 學到的獎勵表（可空） */
   learned?: RaidLearnedTable;
+  /** 更新鈕左邊要不要畫「History」。沒給＝畫。 */
+  history?: boolean;
 }
 
 export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): string {
@@ -694,6 +726,7 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
     autoDelete: options.autoDelete ?? DEFAULT_RAID_AUTO_DELETE,
     teams: options.teams ?? {},
     learned: options.learned ?? {},
+    history: options.history !== false,
     manualCooldownMs: RAID_VIEW_MANUAL_REFRESH_COOLDOWN_MS,
     learnGiveUpMs: RAID_LEARN_GIVE_UP_MS,
     battleMaxMs: RAID_BATTLE_PENDING_MAX_MS,
@@ -2710,7 +2743,7 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
     var x = Math.round(anchor.x + 8), y = Math.round(anchor.y + 9);
     var rb = st.refreshBtn;
     var cooling = st.refreshing || Date.now() - st.lastManual < CFG.manualCooldownMs;
-    if (rb && rb.anchor === anchor && rb.x === x && rb.y === y && alive(rb.btn)) {
+    if (rb && rb.anchor === anchor && rb.x === x && rb.y === y && rb.history === st.history && alive(rb.btn)) {
       if (rb.btn.alpha !== (cooling ? 0.5 : 1)) rb.btn.setAlpha(cooling ? 0.5 : 1);
       return;
     }
@@ -2735,7 +2768,36 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
       sfx(R);
       btn.setAlpha(0.5);
     });
-    st.refreshBtn = { anchor: anchor, x: x, y: y, btn: btn, objs: objs };
+    if (st.history) addHistoryBtn(st, R, x, y, depth, objs);
+    st.refreshBtn = { anchor: anchor, x: x, y: y, history: st.history, btn: btn, objs: objs };
+  }
+  /**
+   * 更新鈕左邊同一行、同款的「History」：紀錄在托盤手上，這裡只說「玩家要看」，面板由 patch-raid-reward 畫。
+   * 原本疊在 Refresh 正下方，玩家連按 Refresh 會按到（2026-10-13）→ 搬到左邊、隔開 32px。
+   * 插件視窗可以關掉不畫（st.history，見 buildRaidViewSetHistoryExpression）。
+   */
+  function addHistoryBtn(st, R, x, y, depth, objs) {
+    var hist = R.add.text(x - 32, y, L().history, { fontFamily: FONT, fontSize: 11, resolution: 2, color: BTN_COLOR })
+      .setOrigin(1, 0.5).setDepth(depth).setStroke("black", 3).setInteractive({ useHandCursor: true });
+    objs.push(hist);
+    var htip = [];
+    hist.on("pointerover", function () {
+      hist.setColor(BTN_HOVER);
+      destroyAll(htip);
+      var tt = R.add.text(hist.x - hist.width, hist.y - 10, L().historyTip, { fontFamily: FONT, fontSize: 11, color: "white", resolution: 2 }).setOrigin(0, 1).setDepth(depth + 6);
+      var bg = R.rexUI.add.roundRectangle(tt.x + tt.width / 2, tt.y - tt.height / 2, tt.width + 10, tt.height + 6, 2, 0x000000, 0.85).setDepth(depth + 5);
+      htip.push(bg, tt);
+      objs.push(bg, tt);
+    });
+    hist.on("pointerout", function () { hist.setColor(BTN_COLOR); destroyAll(htip); });
+    hist.on("pointerup", function () {
+      var now = Date.now();
+      if (busy(st, R) || now - st.lastHistory < 1000) return;
+      st.lastHistory = now;
+      sfx(R);
+      destroyAll(htip);
+      report({ type: "raid-history" });
+    });
   }
 
   // ---- 主迴圈 ---------------------------------------------------------------
@@ -2919,6 +2981,8 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
     refreshBtn: null,
     refreshing: false,
     lastManual: 0,
+    lastHistory: 0,
+    history: CFG.history !== false,
     lastList: null,
     metaPub: null,
     pubIndexOf: null,
@@ -3051,6 +3115,20 @@ export function buildRaidViewSetAutoDeleteExpression(setting: RaidAutoDeleteSett
     var st = window["${FLAG}"];
     if (!st) return "not-installed";
     st.autoDelete = JSON.parse(${embedJson({ enabled: setting.enabled, prompt: setting.prompt })});
+    return "ok";
+  } catch (e) {
+    return "error:" + String((e && e.message) || e);
+  }
+})()`;
+}
+
+/** 托盤推「要不要畫 History 鈕」下來。回 "ok" / "not-installed"。下一幀更新鈕那一組照新設定重畫。 */
+export function buildRaidViewSetHistoryExpression(on: boolean): string {
+  return `(function () {
+  try {
+    var st = window["${FLAG}"];
+    if (!st) return "not-installed";
+    st.history = ${on ? "true" : "false"};
     return "ok";
   } catch (e) {
     return "error:" + String((e && e.message) || e);

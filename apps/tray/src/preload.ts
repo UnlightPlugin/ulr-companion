@@ -141,6 +141,7 @@ contextBridge.exposeInMainWorld("ulr", {
     teamShare: (on: boolean) => ipcRenderer.invoke("ulr:raid-team-share", on),
     autoDelete: (on: boolean) => ipcRenderer.invoke("ulr:raid-auto-delete", on),
     itemShortcut: (on: boolean) => ipcRenderer.invoke("ulr:raid-item-shortcut", on),
+    historyButton: (on: boolean) => ipcRenderer.invoke("ulr:raid-history-button", on),
   },
 
   /** 任務：物品捷徑與寶箱標註的開關與狀態。 */

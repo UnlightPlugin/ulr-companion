@@ -190,6 +190,7 @@ import type {
   RaidAutoDeleteSettingReport,
   RaidBattleReport,
   RaidCodesReport,
+  RaidHistoryRequestReport,
   RaidPublicMap,
   RaidRefreshReport,
   RaidSnapshotRow,
@@ -207,6 +208,7 @@ import {
   type RaidSupportRow,
 } from "./raid-support.js";
 import type {
+  RaidHistoryRow,
   RaidRewardMode,
   RaidRewardModeReport,
   RaidItemDeltaReport,
@@ -214,6 +216,7 @@ import type {
   RaidRewardStatus,
 } from "./patch-raid-reward.js";
 import {
+  buildRaidRewardHistoryExpression,
   buildRaidRewardPatchScript,
   buildRaidRewardSetModeExpression,
   isRaidItemDeltaReport,
@@ -226,6 +229,7 @@ import {
 import {
   buildRaidViewPatchScript,
   buildRaidViewSetAutoDeleteExpression,
+  buildRaidViewSetHistoryExpression,
   buildRaidViewSetPublicExpression,
   buildRaidViewSetTeamsExpression,
   buildRaidViewSetLearnedExpression,
@@ -233,6 +237,7 @@ import {
   isRaidAutoDeleteSettingReport,
   isRaidBattleReport,
   isRaidCodesReport,
+  isRaidHistoryRequestReport,
   isRaidRefreshReport,
   isRaidStageReport,
   isRaidTrackReport,
@@ -460,6 +465,7 @@ export class CdpAdapter {
   #raidCodesHandlers = new Set<(report: RaidCodesReport) => void>();
   #raidBattleHandlers = new Set<(report: RaidBattleReport) => void>();
   #raidRefreshHandlers = new Set<(report: RaidRefreshReport) => void>();
+  #raidHistoryHandlers = new Set<(report: RaidHistoryRequestReport) => void>();
   #raidStageHandlers = new Set<(report: RaidStageReport) => void>();
   #raidTrackHandlers = new Set<(report: RaidTrackReport) => void>();
   #raidLearnHandlers = new Set<(report: RaidLearnReport) => void>();
@@ -1850,6 +1856,7 @@ export class CdpAdapter {
     autoDelete?: RaidAutoDeleteSetting,
     teams?: RaidTeamsMap,
     learned?: RaidLearnedTable,
+    history?: boolean,
   ): Promise<RaidViewStatus> {
     const raw = await this.evaluate<string>(
       buildRaidViewPatchScript({
@@ -1858,6 +1865,7 @@ export class CdpAdapter {
         ...(autoDelete === undefined ? {} : { autoDelete }),
         ...(teams === undefined ? {} : { teams }),
         ...(learned === undefined ? {} : { learned }),
+        ...(history === undefined ? {} : { history }),
       }),
     );
     return parseRaidViewStatus(raw);
@@ -1883,6 +1891,12 @@ export class CdpAdapter {
   onRaidRefresh(handler: (report: RaidRefreshReport) => void): () => void {
     this.#raidRefreshHandlers.add(handler);
     return () => this.#raidRefreshHandlers.delete(handler);
+  }
+
+  /** 玩家按了渦房的「History」：要看以前拿過的渦獎勵（清單用 {@link showRaidHistory} 交下去）。 */
+  onRaidHistory(handler: (report: RaidHistoryRequestReport) => void): () => void {
+    this.#raidHistoryHandlers.add(handler);
+    return () => this.#raidHistoryHandlers.delete(handler);
   }
 
   /** 頁面記下了某個渦新的 stage（發現畫面或開打）。 */
@@ -1933,6 +1947,11 @@ export class CdpAdapter {
 
   async setRaidAutoDelete(setting: RaidAutoDeleteSetting): Promise<string> {
     return await this.evaluate<string>(buildRaidViewSetAutoDeleteExpression(setting));
+  }
+
+  /** 更新鈕左邊的「History」要不要畫。回 `"ok"` 或 `"not-installed"`。 */
+  async setRaidHistoryButton(on: boolean): Promise<string> {
+    return await this.evaluate<string>(buildRaidViewSetHistoryExpression(on));
   }
 
   /** SUPPORT 清單畫出來了：那一批公開渦的渦碼。 */
@@ -1999,6 +2018,11 @@ export class CdpAdapter {
 
   async setRaidRewardMode(mode: RaidRewardMode): Promise<string> {
     return await this.evaluate<string>(buildRaidRewardSetModeExpression(mode));
+  }
+
+  /** 打開歷史獎勵面板。回 `ok`／`not-installed`／`not-in-raid`／`busy`／`open`／`error:…`。 */
+  async showRaidHistory(rows: readonly RaidHistoryRow[]): Promise<string> {
+    return await this.evaluate<string>(buildRaidRewardHistoryExpression(rows));
   }
 
   async uninstallRaidRewardPatch(): Promise<string> {
@@ -2296,6 +2320,10 @@ export class CdpAdapter {
     }
     if (isRaidRefreshReport(parsed)) {
       dispatch(this.#raidRefreshHandlers, parsed);
+      return;
+    }
+    if (isRaidHistoryRequestReport(parsed)) {
+      dispatch(this.#raidHistoryHandlers, parsed);
       return;
     }
     if (isRaidStageReport(parsed)) {

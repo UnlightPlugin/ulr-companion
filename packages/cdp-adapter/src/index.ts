@@ -508,6 +508,7 @@ export type { RaidPassiveRule } from "./raid-passive.js";
 export {
   buildRaidViewPatchScript,
   buildRaidViewSetAutoDeleteExpression,
+  buildRaidViewSetHistoryExpression,
   buildRaidViewSetPublicExpression,
   buildRaidViewSetTeamsExpression,
   buildRaidViewSetLearnedExpression,
@@ -516,6 +517,7 @@ export {
   RAID_BATTLE_TAIL_MS,
   RAID_UNKNOWN_TINT,
   isRaidBattleReport,
+  isRaidHistoryRequestReport,
   isRaidRefreshReport,
   isRaidStageReport,
   isRaidTrackReport,
@@ -542,6 +544,7 @@ export type {
   RaidBattleReport,
   RaidCodesReport,
   RaidDeckContent,
+  RaidHistoryRequestReport,
   RaidPublicInfo,
   RaidPublicMap,
   RaidRefreshReport,
@@ -579,6 +582,7 @@ export type {
 } from "./raid-learned.js";
 
 export {
+  buildRaidRewardHistoryExpression,
   buildRaidRewardPatchScript,
   buildRaidRewardSetModeExpression,
   DEFAULT_RAID_REWARD_MODE,
@@ -587,6 +591,7 @@ export {
   isRaidRewardModeReport,
   isRaidRewardReport,
   parseRaidRewardStatus,
+  RAID_HISTORY_PERIODS,
   RAID_LEDGER_WATCH,
   RAID_REWARD_LABELS,
   RAID_REWARD_MODES,
@@ -595,6 +600,8 @@ export {
   RAID_REWARD_UNINSTALL_EXPRESSION,
 } from "./patch-raid-reward.js";
 export type {
+  RaidHistoryCode,
+  RaidHistoryRow,
   RaidItemDeltaReport,
   RaidLedgerItem,
   RaidRewardEntry,

@@ -3585,12 +3585,23 @@
               · 地圖：渦照碎片色上色，還不知道的是灰色；素材渦上方掛圖，自己開的渦紅框<br />
               · 點進渦之後多一顆「獎勵一覽」：發現／參加／每一檔排名／擊破，自己現在那一檔亮一點<br />
               · Profound 計數下面的「Refresh」：等於重進渦房（渦清單、AP、死渦的結算一起重讀），順便馬上重查 Cloudflare Workers<br />
+              · 它左邊的「History」（上面可以關）：以前拿過的渦獎勵。前三頁是今天／7 天／全部的合計，後面一頁 4 個渦、新的在前；紀錄只存在這台電腦，留最近 2000 個渦<br />
               · 詳細畫面的排行榜：有隊伍紀錄的名字後面多一顆牌組圖示，點名字看那個人打這個渦用的隊伍<br />
               · SUPPORT 清單：已經通報過、碎片知道了的渦，名字右邊接碎片色（見「渦通報」）
             </div>
             <div class="hint">
               改版後客戶端不再給每個人的傷害，傷害統計先停用（打渦隊伍的傷害改成插件在戰鬥中自己算）。
             </div>
+          </div>`;
+        const histCard = `<div class="card">
+            <label class="toggle">
+              <input type="checkbox" id="raidHistoryButtonOn" ${s?.historyButton !== false ? "checked" : ""} />
+              <span><b>顯示「History」鈕</b>
+                <div class="hint">
+                  渦房 Refresh 左邊那顆，按下去看以前拿過的渦獎勵。關掉只是不畫這顆鈕，獎勵照樣記錄，之後打開還看得到。
+                </div>
+              </span>
+            </label>
           </div>`;
         const share = `<div class="card">
             <label class="toggle">
@@ -3611,7 +3622,9 @@
               </span>
             </label>
           </div>`;
-        return head("獎勵標記", "渦打倒後發什麼，直接畫在渦房裡。") + state + share + what;
+        return (
+          head("獎勵標記", "渦打倒後發什麼，直接畫在渦房裡。") + state + share + histCard + what
+        );
       };
 
       function raidRewardText(r) {
@@ -5074,6 +5087,12 @@
         }
         if (t.id === "raidAutoDeleteOn") {
           return void window.ulr.raid.autoDelete(t.checked).then((s) => {
+            rstate = s;
+            renderBody();
+          });
+        }
+        if (t.id === "raidHistoryButtonOn") {
+          return void window.ulr.raid.historyButton(t.checked).then((s) => {
             rstate = s;
             renderBody();
           });

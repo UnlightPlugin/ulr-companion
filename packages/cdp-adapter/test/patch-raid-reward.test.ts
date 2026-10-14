@@ -8,6 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  buildRaidRewardHistoryExpression,
   buildRaidRewardPatchScript,
   buildRaidRewardSetModeExpression,
   isRaidItemDeltaReport,
@@ -16,6 +17,7 @@ import {
   RAID_REWARD_SCRIPT_VERSION,
   RAID_REWARD_STATUS_EXPRESSION,
   RAID_REWARD_UNINSTALL_EXPRESSION,
+  type RaidHistoryRow,
   type RaidItemDeltaReport,
 } from "@ulr/cdp-adapter";
 
@@ -94,6 +96,9 @@ class Scene {
   updated = 0;
   queue: unknown[] = [];
   afterFlow: (() => void) | null = null;
+  /** Phaser 的 ScenePlugin：人在不在渦房 */
+  scene = { isActive: (): boolean => true };
+  __ulrRaidRewardBatch?: unknown;
   ulse01 = { play: () => undefined };
   textures = {
     exists: (k: string) =>
@@ -260,6 +265,13 @@ describe("渦擊破結算的 OK 面板", () => {
       defeat: [],
       rank: ["L1 艾伯李斯特 x1", "30GEM"],
     });
+    // 原始獎勵碼照同樣的順序攤平、帶分類（托盤存起來，歷史面板畫卡面用）
+    expect((r.entries[0] as { codes?: unknown }).codes).toEqual([
+      { g: 0, type: 2, id: 6, slot: 0, value: 1 },
+      { g: 1, type: 3, id: 7, slot: 0, value: 2 },
+      { g: 3, type: 1, id: 1, slot: 0, value: 1 },
+      { g: 3, type: 5, id: 0, slot: 0, value: 30 },
+    ]);
   });
 
   it("原始獎勵碼記給 patch-raid-view 學獎勵表：每個參加者的排名獎勵、沒有玩家名字", async () => {
@@ -447,6 +459,169 @@ describe("渦擊破結算的 OK 面板", () => {
     );
     expect(st.installed).toBe(true);
     expect(st.reason).toContain("show_raid_reward");
+  });
+});
+
+describe("歷史面板（渦房的 History）", () => {
+  const DAY = 24 * 3600 * 1000;
+  const NOW = Date.now();
+  const stamp = (ms: number) => {
+    const d = new Date(ms);
+    const p = (n: number) => String(n).padStart(2, "0");
+    return `${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  };
+  const H = (over: Partial<RaidHistoryRow> = {}): RaidHistoryRow => ({
+    name: "屠殺者",
+    level: 1,
+    founder: "yoyoyo",
+    point: 1602,
+    rank: 24,
+    at: NOW,
+    got: true,
+    rewards: [],
+    ...over,
+  });
+  // 新的在前（托盤排好的）：今天有獎勵碼的、沒拿到的、三天前只有名字的、一個月前的
+  const ROWS: RaidHistoryRow[] = [
+    H({
+      rewards: ["古代妙藥 x2", "L1 艾伯李斯特 x1"],
+      codes: [
+        { g: 1, type: 3, id: 7, slot: 0, value: 2 },
+        { g: 3, type: 1, id: 1, slot: 0, value: 1 },
+      ],
+    }),
+    H({ name: "龍鯰", got: false, rank: null, point: 500, founder: null }),
+    H({
+      name: "黑死獸",
+      at: NOW - 3 * DAY,
+      rewards: ["古代妙藥 x2", "勇者短劍 x1", "30GEM", "不存在的東西 x3"],
+    }),
+    H({ name: "妖精", level: null, at: NOW - 30 * DAY, rewards: ["古代妙藥 x1"] }),
+  ];
+  const open = (window: Record<string, unknown>, rows: RaidHistoryRow[] = ROWS) =>
+    run(window, buildRaidRewardHistoryExpression(rows));
+  const texts = (raid: Scene) =>
+    raid
+      .alive()
+      .filter((o) => o.kind === "text")
+      .map((o) => o.text);
+  const next = (raid: Scene) =>
+    raid
+      .alive()
+      .filter((o) => o.texture.key === "btn_arrow-2")[1]!
+      .emit("pointerup");
+  const install = () => {
+    const made = makeWindow();
+    const cards = withCards(made.window);
+    run(made.window, buildRaidRewardPatchScript({ bindingName: BINDING, mode: "none" }));
+    return { ...made, cards };
+  };
+
+  it("沒裝、人不在渦房、結算正在跑、已經開著：都不畫", () => {
+    const { window, raid } = makeWindow();
+    expect(open(window)).toBe("not-installed");
+    run(window, buildRaidRewardPatchScript({ bindingName: BINDING, mode: "none" }));
+    raid.scene.isActive = () => false;
+    expect(open(window)).toBe("not-in-raid");
+    raid.scene.isActive = () => true;
+    raid.__ulrRaidRewardBatch = { list: [] };
+    expect(open(window)).toBe("busy");
+    expect(raid.alive()).toHaveLength(0);
+    delete raid.__ulrRaidRewardBatch;
+    expect(open(window)).toBe("ok");
+    expect(parseRaidRewardStatus(run(window, RAID_REWARD_STATUS_EXPRESSION)).open).toBe(true);
+    const n = raid.alive().length;
+    expect(open(window)).toBe("open");
+    expect(raid.alive()).toHaveLength(n);
+    okButton(raid).emit("pointerup");
+    expect(raid.alive()).toHaveLength(0);
+    // 沒送任何請求
+    expect(raid.sent).toEqual([]);
+  });
+
+  it("前三頁是合計：今天／7 天／全部，同一樣東西加總成一張卡、數量寫在卡下", () => {
+    const { window, raid, cards } = install();
+    expect(open(window)).toBe("ok");
+    expect(raid.alive().map((o) => o.texture.key)).toContain("raid_result_panel");
+    // 今天：只有第一個渦（沒拿到的不算）。照種類排：角色卡、道具
+    expect(texts(raid)).toEqual(expect.arrayContaining(["Today", "Raids 1", "x1", "x2"]));
+    expect(cards).toEqual([
+      [1, 1, 0],
+      [7, 3, 0],
+    ]);
+    // 7 天：加上三天前那個（只存了名字的照卡表反查；查不到的寫字）
+    cards.length = 0;
+    next(raid);
+    expect(texts(raid)).toEqual(
+      expect.arrayContaining(["7 Days", "Raids 2", "x1", "x4", "x30", "不存在的東西 x3"]),
+    );
+    expect(texts(raid)).not.toContain("Today");
+    expect(cards).toEqual([
+      [1, 1, 0],
+      [6, 2, 0],
+      [7, 3, 0],
+      [0, 5, 0],
+    ]);
+    const hits = raid.alive().filter((o) => o.kind === "zone" && o.handlers.has("pointerover"));
+    hits[2]!.emit("pointerover");
+    expect(texts(raid)).toContain("古代妙藥 x4");
+    // 全部
+    next(raid);
+    expect(texts(raid)).toEqual(expect.arrayContaining(["Total", "Raids 3", "x5"]));
+  });
+
+  it("後面一頁 4 個渦、新的在前：時刻、名次、發現者、卡面；沒拿到的寫「-」", () => {
+    const { window, raid, cards } = install();
+    open(window);
+    next(raid);
+    next(raid);
+    cards.length = 0;
+    next(raid);
+    const t = texts(raid);
+    expect(t).toEqual(
+      expect.arrayContaining([
+        "Lv.1 屠殺者",
+        "Lv.1 龍鯰",
+        "Lv.1 黑死獸",
+        "妖精",
+        stamp(NOW),
+        stamp(NOW - 30 * DAY),
+        "第 24 名  [1,602Pts.]",
+        "[500Pts.]",
+        "發現者  yoyoyo",
+        "發現者  -",
+        "-",
+        "不存在的東西 x3",
+      ]),
+    );
+    // 第一列用獎勵碼、第三第四列照名字反查
+    expect(cards).toEqual([
+      [7, 3, 0],
+      [1, 1, 0],
+      [7, 3, 0],
+      [6, 2, 0],
+      [0, 5, 0],
+      [7, 3, 0],
+    ]);
+    const hits = raid.alive().filter((o) => o.kind === "zone" && o.handlers.has("pointerover"));
+    hits[1]!.emit("pointerover");
+    expect(texts(raid)).toContain("排行榜獎勵  L1 艾伯李斯特 x1");
+    hits[1]!.emit("pointerout");
+    // 舊紀錄不知道是哪一類獎勵：只出名字
+    hits[2]!.emit("pointerover");
+    expect(texts(raid)).toContain("古代妙藥 x2");
+    // 4 個渦剛好一頁：下一頁繞回合計
+    next(raid);
+    expect(texts(raid)).toContain("Today");
+    okButton(raid).emit("pointerup");
+    expect(raid.alive()).toHaveLength(0);
+  });
+
+  it("一筆都沒有：合計頁照開，寫「-」", () => {
+    const { window, raid } = install();
+    expect(open(window, [])).toBe("ok");
+    expect(texts(raid)).toEqual(expect.arrayContaining(["Today", "Raids 0", "-"]));
+    expect(raid.alive().filter((o) => o.texture.key === "btn_arrow-2")).toHaveLength(2);
   });
 });
 

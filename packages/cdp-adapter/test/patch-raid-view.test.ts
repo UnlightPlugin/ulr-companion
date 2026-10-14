@@ -28,6 +28,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildRaidViewPatchScript,
   buildRaidViewSetAutoDeleteExpression,
+  buildRaidViewSetHistoryExpression,
   buildRaidViewSetLearnedExpression,
   buildRaidViewSetPublicExpression,
   isRaidLearnReport,
@@ -45,6 +46,7 @@ import {
   RAID_VIEW_SCRIPT_VERSION,
   RAID_VIEW_STATUS_EXPRESSION,
   RAID_VIEW_UNINSTALL_EXPRESSION,
+  isRaidHistoryRequestReport,
   type RaidFragment,
   type RaidLearnedTable,
   type RaidLearnSample,
@@ -1449,6 +1451,37 @@ describe("渦房的獎勵標記", () => {
       btn.emit("pointerup");
       await flush();
       expect(raid.sent.filter((m) => m[0] === "db_raid")).toHaveLength(1);
+    });
+
+    it("左邊同一行再一顆 History（隔開，連按 Refresh 按不到）：只回報 raid-history（面板是 patch-raid-reward 畫的），不送任何請求", () => {
+      const { raid, window, reports } = setup([ROW()]);
+      run(window, buildRaidViewPatchScript({ bindingName: BINDING }));
+      const hist = raid.alive().find((o) => o.text === "History")!;
+      // 右緣對齊（origin 1）在 Refresh 左緣再往左 32px
+      expect(hist.x).toBe(button(raid)!.x - 32);
+      expect(hist.y).toBe(button(raid)!.y);
+      hist.emit("pointerup");
+      // 連點只算一次
+      hist.emit("pointerup");
+      expect(reports.filter((r) => r.type === "raid-history")).toHaveLength(1);
+      expect(isRaidHistoryRequestReport(reports.find((r) => r.type === "raid-history"))).toBe(true);
+      expect(raid.sent).toEqual([]);
+    });
+
+    it("History 可以關：裝的時候帶 history:false 就不畫，Refresh 照舊；之後推設定當場補上／收掉", () => {
+      const { raid, window } = setup([ROW()]);
+      const history = () => raid.alive().find((o) => o.text === "History");
+      run(window, buildRaidViewPatchScript({ bindingName: BINDING, history: false }));
+      expect(button(raid)).toBeDefined();
+      expect(history()).toBeUndefined();
+      expect(run(window, buildRaidViewSetHistoryExpression(true))).toBe("ok");
+      poll?.();
+      expect(history()).toBeDefined();
+      expect(button(raid)).toBeDefined();
+      expect(run(window, buildRaidViewSetHistoryExpression(false))).toBe("ok");
+      poll?.();
+      expect(history()).toBeUndefined();
+      expect(button(raid)).toBeDefined();
     });
 
     it("詳細面板開著：照點地圖渦那條路用新的那一列重開；渦不見了就回清單", async () => {

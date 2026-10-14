@@ -861,6 +861,7 @@ interface RaidPageState {
   autoDelete: boolean;
   autoDeletePrompt: boolean;
   itemShortcut: boolean;
+  historyButton: boolean;
   view: RaidViewStatus | null;
   reward: RaidRewardStatus | null;
   items: ItemPanelStatus | null;
@@ -874,6 +875,7 @@ async function raidPageState(): Promise<RaidPageState> {
     autoDelete: profile.raidAutoDelete,
     autoDeletePrompt: profile.raidAutoDeletePrompt,
     itemShortcut: profile.raidItemShortcut,
+    historyButton: profile.raidHistoryButton,
     view: (await engine?.raidViewStatus().catch(() => null)) ?? null,
     reward: (await engine?.raidRewardStatus().catch(() => null)) ?? null,
     items: (await engine?.itemPanelStatus().catch(() => null)) ?? null,
@@ -4443,6 +4445,7 @@ app.whenReady().then(() => {
     prompt: profile.raidAutoDeletePrompt,
   });
   engine.setItemShortcut(profile.raidItemShortcut);
+  engine.setRaidHistoryButton(profile.raidHistoryButton);
   engine.setQuestItemShortcut("stack", profile.questStackShortcut);
   engine.setQuestItemShortcut("passes", profile.questPassShortcut);
   engine.setDietOverlay("dietStack", profile.dietItemShortcut);
@@ -4946,6 +4949,17 @@ app.whenReady().then(() => {
       if (!ephemeral) store = updateProfile(profile.id, { raidItemShortcut: on });
       engine?.setItemShortcut(on);
       log(on ? "· 渦房物品捷徑已開啟" : "· 渦房物品捷徑已關閉（好友與物品鈕放回來）");
+      pushState();
+    }
+    return raidPageState();
+  });
+
+  ipcMain.handle("ulr:raid-history-button", async (_event, on: unknown): Promise<RaidPageState> => {
+    if (typeof on === "boolean") {
+      profile = { ...profile, raidHistoryButton: on };
+      if (!ephemeral) store = updateProfile(profile.id, { raidHistoryButton: on });
+      engine?.setRaidHistoryButton(on);
+      log(on ? "· 渦房 History 鈕已顯示" : "· 渦房 History 鈕已隱藏（渦獎勵照樣記錄）");
       pushState();
     }
     return raidPageState();

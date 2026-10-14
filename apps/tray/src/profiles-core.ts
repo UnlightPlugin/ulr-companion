@@ -375,6 +375,11 @@ export interface Profile {
    */
   raidItemShortcut: boolean;
   /**
+   * 渦房更新鈕左邊的「History」（歷史獎勵面板）要不要畫。預設開。
+   * 關掉只是不畫鈕，渦獎勵照樣記進 raid-outcomes.json（玩家 2026-10-13：要能在插件面板設）。
+   */
+  raidHistoryButton: boolean;
+  /**
    * 任務房的水沙捷徑：FRIENDLIST 上方疊水與沙漏（一點就用）。
    * 預設關，跟渦房那個一樣。跟通行證捷徑分開開關（玩家 2026-09-26：「兩者分開」）。
    */
@@ -701,6 +706,8 @@ export function normalizeProfile(raw: unknown): Profile | null {
     raidAutoDeletePrompt: r["raidAutoDeletePrompt"] !== false,
     // 舊設定檔沒有這一欄 → 關（官方原樣）。
     raidItemShortcut: r["raidItemShortcut"] === true,
+    // 舊設定檔沒有這一欄 → 開。
+    raidHistoryButton: r["raidHistoryButton"] !== false,
     // 舊設定檔沒有這三欄 → 關（官方原樣）。
     questStackShortcut: r["questStackShortcut"] === true,
     questPassShortcut: r["questPassShortcut"] === true,
@@ -800,6 +807,7 @@ export function defaultProfile(kind: ClientKind = "desktop"): Profile {
     raidAutoDelete: false,
     raidAutoDeletePrompt: true,
     raidItemShortcut: false,
+    raidHistoryButton: true,
     questStackShortcut: false,
     questPassShortcut: false,
     questTreasureMarks: false,
