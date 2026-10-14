@@ -91,13 +91,25 @@ export interface UpdaterOptions {
   onLog?: (line: string) => void;
 }
 
+/** `startAutoUpdate` 的把手。 */
+export interface AutoUpdater {
+  stop: () => void;
+  /**
+   * 現在就檢查一次（設置 › 關於 的「檢查更新」）。走的是跟每小時那一輪**同一條路**：
+   * 有新版就下載，不在對戰中就當場套用（插件會自己重開）。回一句給畫面看的話。
+   *
+   * ⚠ 跟每小時那一輪撞在一起時共用同一個進行中的檢查，不會下載兩次。
+   */
+  checkNow: () => Promise<string>;
+}
+
 /**
- * 啟動自動更新。回傳一個停掉它的函式。
+ * 啟動自動更新。回傳停掉它與手動檢查的把手。
  *
  * **永遠不會 throw。** 更新失敗只是「這次沒更新」，不該影響仲裁 ——
  * 那是玩家真正在用的東西。
  */
-export function startAutoUpdate(options: UpdaterOptions): () => void {
+export function startAutoUpdate(options: UpdaterOptions): AutoUpdater {
   const override = process.env[FEED_ENV];
   const feed = override !== undefined && override.length > 0 ? override : DEFAULT_UPDATE_FEED;
 
@@ -107,7 +119,7 @@ export function startAutoUpdate(options: UpdaterOptions): () => void {
   // 後者正是「Cloudflare 帳號被盜 = 每一台電腦被接管」那條路徑。
   if (UPDATE_PUBLIC_KEY.length === 0) {
     options.onLog?.("（沒有發布公鑰，自動更新未啟動）");
-    return () => {};
+    return { stop: () => {}, checkNow: async () => "這一份沒有發布公鑰，不能更新" };
   }
 
   // ⚠ **開發模式不要自動更新。** `process.execPath` 是 node_modules 裡的
@@ -115,7 +127,7 @@ export function startAutoUpdate(options: UpdaterOptions): () => void {
   // 又跑回舊的，症狀是「我明明改了程式碼，跑起來卻是別的行為」。
   if (!app.isPackaged) {
     options.onLog?.("（開發模式，自動更新未啟動）");
-    return () => {};
+    return { stop: () => {}, checkNow: async () => "開發模式不會更新" };
   }
 
   let stopped = false;
@@ -132,35 +144,58 @@ export function startAutoUpdate(options: UpdaterOptions): () => void {
 
   const log = (line: string): void => options.onLog?.(line);
 
-  const tick = async (): Promise<void> => {
-    if (stopped) return;
+  /** 套用的結果講成一句話（手動檢查要回給畫面）。 */
+  const applyResult = async (ready: { version: string; path: string }): Promise<string> => {
+    const r = await applyIfIdle(ready);
+    if (r === "busy") return `${ready.version} 已下載，對戰結束後自動套用`;
+    if (r === "applying") return `正在套用 ${ready.version}，插件會自己重新啟動`;
+    return `${ready.version} 沒有裝上，原因寫在記錄裡`;
+  };
+
+  const runCheck = async (): Promise<string> => {
+    if (stopped) return "自動更新已停止";
     try {
       // 已經備好一版了 → 這一輪只做「能不能套用」的判斷，不重複下載。
-      if (staged !== null) {
-        await applyIfIdle(staged);
-        return;
-      }
+      if (staged !== null) return await applyResult(staged);
       const manifest = await fetchManifest(feed);
       // ⚠ `null` 有兩種可能：還沒發過版（404），或**簽章驗不過**。後者要看得見 ——
       // 它要嘛是發版流程出錯，要嘛是有人在冒充發布來源，兩種都不該安靜略過。
-      if (manifest === null) return;
+      if (manifest === null) return "沒有查到可用的發布清單";
       // ⚠ **只往新的走。** 舊清單的簽章永遠有效，所以「版本不一樣就更新」
       // 等於對重播舊清單毫無抵抗力 —— 見 `isNewerVersion()`。
-      if (!isNewerVersion(manifest.version, options.currentVersion)) return;
-      if (manifest.version === abandoned) return;
+      if (!isNewerVersion(manifest.version, options.currentVersion)) {
+        return `已經是最新版（最新發布 ${manifest.version}）`;
+      }
+      if (manifest.version === abandoned) {
+        return `${manifest.version} 這次執行裝不上去，重開插件會再試一次`;
+      }
 
       log(
         `↓ 有新版 ${manifest.version}${manifest.notes === undefined ? "" : `：${manifest.notes}`}`,
       );
       const path = await download(manifest);
-      if (path === null) return;
+      if (path === null) return `${manifest.version} 下載失敗，原因寫在記錄裡`;
       staged = { version: manifest.version, path };
       log(`✓ ${manifest.version} 已下載，等對戰結束再套用`);
-      await applyIfIdle(staged);
+      return await applyResult(staged);
     } catch (err) {
       // 靜默更新的「靜默」不包括錯誤。查不到原因的失敗比失敗本身麻煩。
-      log(`✗ 檢查更新失敗：${err instanceof Error ? err.message : String(err)}`);
+      const message = err instanceof Error ? err.message : String(err);
+      log(`✗ 檢查更新失敗：${message}`);
+      return `檢查失敗：${message}`;
     }
+  };
+
+  /** 進行中的那一次。手動與每小時撞在一起時共用，不會下載兩次。 */
+  let inflight: Promise<string> | null = null;
+  const check = (): Promise<string> => {
+    inflight ??= runCheck().finally(() => {
+      inflight = null;
+    });
+    return inflight;
+  };
+  const tick = async (): Promise<void> => {
+    await check();
   };
 
   /**
@@ -190,8 +225,11 @@ export function startAutoUpdate(options: UpdaterOptions): () => void {
    * 被當成純 Node 跑，第一行就炸在 `app.setPath` —— 玩家看到的是「更新完
    * 就再也打不開了」。（同一個坑第五次出現，見 docs/launching.md 陷阱 1。）
    */
-  const applyIfIdle = async (ready: { version: string; path: string }): Promise<void> => {
-    if (options.isBusy()) return;
+  const applyIfIdle = async (ready: {
+    version: string;
+    path: string;
+  }): Promise<"busy" | "applying" | "failed"> => {
+    if (options.isBusy()) return "busy";
 
     if (ready.path.toLowerCase().endsWith(".zip")) {
       log(`⟳ 套用 ${ready.version}（換檔，換完會自己重新啟動）`);
@@ -211,10 +249,10 @@ export function startAutoUpdate(options: UpdaterOptions): () => void {
         staged = null;
         abandoned = ready.version;
         log(`  ${ready.version} 在插件重新啟動之前不會再自動重試`);
-        return;
+        return "failed";
       }
       options.quit();
-      return;
+      return "applying";
     }
 
     log(`⟳ 套用 ${ready.version}（靜默安裝，裝完會自己重新啟動）`);
@@ -240,17 +278,21 @@ export function startAutoUpdate(options: UpdaterOptions): () => void {
     } catch (err) {
       log(`✗ 啟動安裝檔失敗：${err instanceof Error ? err.message : String(err)}`);
       clearUpdating();
-      return;
+      return "failed";
     }
     options.quit();
+    return "applying";
   };
 
   const first = setTimeout(() => void tick(), FIRST_CHECK_DELAY_MS);
   const timer = setInterval(() => void tick(), CHECK_INTERVAL_MS);
-  return () => {
-    stopped = true;
-    clearTimeout(first);
-    clearInterval(timer);
+  return {
+    stop: () => {
+      stopped = true;
+      clearTimeout(first);
+      clearInterval(timer);
+    },
+    checkNow: check,
   };
 }
 

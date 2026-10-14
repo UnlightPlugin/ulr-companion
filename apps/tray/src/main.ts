@@ -245,6 +245,7 @@ import {
 import { startRuleFeed } from "./rule-feed.js";
 import { TitleButton } from "./title-button.js";
 import { BUNDLE_REPORT_INTERVAL_MS, createBundleReporter, readPushToken } from "./bundle-report.js";
+import type { AutoUpdater } from "./updater.js";
 import { consumeUpdatedFlag, startAutoUpdate } from "./updater.js";
 import { cleanupStaleFiles, cleanupUpdateLeftovers } from "./zip-update.js";
 import {
@@ -333,6 +334,8 @@ app.on("second-instance", (_event, argv) => {
 let tray: Tray | null = null;
 let window: BrowserWindow | null = null;
 let engine: ArbiterEngine | null = null;
+/** 自動更新的把手。「檢查更新」鈕靠它的 `checkNow`。 */
+let updater: AutoUpdater | null = null;
 let latest: EngineStatus | null = null;
 /** 桌面版遊戲視窗標題列上的重新整理鈕（見 title-button.ts）。app ready 之後才建。 */
 let titleButton: TitleButton | null = null;
@@ -4614,6 +4617,18 @@ app.whenReady().then(() => {
    * ⚠ 走 `profile = {...}` 而不是 `editProfile`：臨時配置不在清單裡，
    * `editProfile` 對它是空操作。
    */
+  /**
+   * 設置 › 關於 的「檢查更新」：現在就問一次，不必等每小時那一輪。
+   *
+   * 跟自動的同一條路（updater.ts 的 `checkNow`）：有新版就下載，不在對戰中就當場
+   * 套用、插件自己重開；對戰中就等打完。回一句給畫面看的話。
+   */
+  ipcMain.handle("ulr:update-check", async (): Promise<string> => {
+    if (updater === null) return "自動更新還沒啟動";
+    log("· 手動檢查更新");
+    return await updater.checkNow();
+  });
+
   ipcMain.handle("ulr:cost-in-game", (_event, on: unknown) => {
     if (typeof on === "boolean" && on !== profile.customCostInGame) {
       profile = { ...profile, customCostInGame: on };
@@ -5424,7 +5439,7 @@ app.whenReady().then(() => {
 
   void engine.start();
   // 靜默下載、安全的時機才套用。細節與那個「安全」的定義見 updater.ts。
-  startAutoUpdate({
+  updater = startAutoUpdate({
     currentVersion: VERSION,
     isBusy: () => latest?.armed === true,
     quit: () => void quit(),

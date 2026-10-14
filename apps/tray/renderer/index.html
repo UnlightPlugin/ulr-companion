@@ -5107,6 +5107,13 @@
         },
       ];
 
+      /**
+       * 「檢查更新」鈕的狀態。`null` = 還沒按過。檢查中按鈕停用，免得連點。
+       * 真的有新版而且不在對戰中的話插件會自己重開，這一行字來不及被看到也沒關係。
+       */
+      let updMsg = null;
+      let updBusy = false;
+
       PAGES["settings/about"] = () =>
         head("關於", "") +
         `<div class="card">
@@ -5121,6 +5128,13 @@
                snap?.packaged ? "" : "<br />開發模式不會自動更新。"
              }
            </div>
+           <div class="presets">
+             <button id="updateCheck"${updBusy || !snap?.packaged ? " disabled" : ""}>${
+               updBusy ? "檢查中…" : "檢查更新"
+             }</button>
+           </div>
+           ${updMsg ? `<div class="hint">${esc(updMsg)}</div>` : ""}
+           <div class="hint">不想等一小時就按這顆：有新版會下載，不在對戰中就當場換上、插件自己重新啟動。</div>
          </div>
          <div class="card">
            <div class="hint" style="margin-top:0">
@@ -5652,6 +5666,19 @@
             sstate = s;
             renderBody();
           });
+        }
+        if (btn.id === "updateCheck") {
+          updBusy = true;
+          updMsg = null;
+          renderBody();
+          return void window.ulr
+            .checkUpdate()
+            .then((m) => (updMsg = m))
+            .catch((e) => (updMsg = `檢查失敗：${e?.message ?? e}`))
+            .finally(() => {
+              updBusy = false;
+              renderBody();
+            });
         }
         if (btn.id === "costPick") return void window.ulr.cost.pick().then(apply);
         if (btn.id === "costClear") return void window.ulr.cost.clear().then(apply);

@@ -30,6 +30,12 @@ contextBridge.exposeInMainWorld("ulr", {
     launch: (id: string) => ipcRenderer.invoke("ulr:profile-launch", id),
   },
 
+  /**
+   * 現在就檢查更新（設置 › 關於）。有新版就下載、不在對戰中就套用並重開。
+   * 回一句給畫面看的話。
+   */
+  checkUpdate: (): Promise<string> => ipcRenderer.invoke("ulr:update-check"),
+
   /** 換準備中的染色。`null` = 不染色（官方原本的樣子）。 */
   setReadyTint: (tint: number | null) => ipcRenderer.invoke("ulr:set-tint", tint),
 
