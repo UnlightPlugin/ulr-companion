@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>UNLIGHT:Revive 設定</title>
+    <link rel="stylesheet" href="style.css" />
+    <script type="module" src="options.js"></script>
+  </head>
+  <body>
+    <main class="wide">
+      <h1>UNLIGHT:Revive</h1>
+      <p id="status" role="status" aria-live="polite"></p>
+
+      <section>
+        <h2>帳號</h2>
+        <p id="empty" class="muted" hidden>還沒有帳號，請在下面登入。</p>
+        <ul id="accounts" class="accounts"></ul>
+        <p class="muted small">
+          「複製連結」會拿到這個帳號的書籤網址。每個書籤只會登入它自己那個帳號。
+        </p>
+      </section>
+
+      <section>
+        <div class="section-head">
+          <h2 id="login-title">新增帳號</h2>
+          <button id="cancel-relogin" class="secondary small-button" hidden>
+            取消
+          </button>
+        </div>
+        <div id="login"></div>
+      </section>
+
+      <section>
+        <h2>遊戲頁面</h2>
+        <form id="game-settings">
+          <label>
+            分頁標題
+            <input name="title" placeholder="用網站原本的標題" />
+          </label>
+          <label>
+            分頁圖示
+            <select name="favicon">
+              <option value="">預設</option>
+              <option value="rose">玫瑰</option>
+              <option value="green">綠色</option>
+              <option value="frum">弗拉姆</option>
+              <option value="custom">圖片網址</option>
+            </select>
+          </label>
+          <label id="custom-favicon" hidden>
+            圖示網址
+            <input
+              name="faviconUrl"
+              type="url"
+              placeholder="https://example.com/icon.png"
+            />
+          </label>
+          <label class="check">
+            <input type="checkbox" name="steamCss" />
+            用網站的 Steam 樣式表把遊戲置中
+          </label>
+          <label class="check">
+            <input type="checkbox" name="autoResize" />
+            把遊戲縮放到符合視窗大小
+          </label>
+        </form>
+        <p class="muted small">下次載入遊戲時生效。</p>
+      </section>
+
+      <section>
+        <h2>登入資料怎麼保存</h2>
+        <ul class="notes muted small">
+          <li>
+            密碼只會用 Steam 的公鑰加密後送給 Steam，這個插件不會儲存密碼。
+          </li>
+          <li>
+            每個帳號會存帳號名稱、Email 和 Steam ID（用來列在這裡），以及一個
+            代替密碼的 Steam 登入憑證（refresh token）。
+          </li>
+          <li>
+            勾了「記住登入」的帳號，憑證會用無法匯出的金鑰加密，不會以明文存放。
+            但能完整存取這個瀏覽器設定檔的人，仍然可以使用它。
+          </li>
+          <li>
+            沒勾「記住登入」的帳號，憑證只放在記憶體，關掉瀏覽器或重新載入插件就沒了。
+          </li>
+          <li>
+            遊戲看不到這個憑證：遊戲伺服器只會拿到一張 UNLIGHT:Revive 專用的
+            Steam 票證，遊戲頁面也讀不到插件的儲存空間。
+          </li>
+          <li>
+            憑證剩不到 30 天時，開遊戲會順便請 Steam 續期，所以常用的帳號很少需要再打密碼。
+          </li>
+          <li>
+            移除帳號或重新登入，只會改這裡存的東西；舊憑證在 Steam 那邊到期前都還有效。
+            要撤銷的話，到
+            <a
+              href="https://store.steampowered.com/account/authorizeddevices"
+              target="_blank"
+              rel="noopener"
+              >Steam 的授權裝置</a
+            >移除名為「unlight_extension」的裝置。
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

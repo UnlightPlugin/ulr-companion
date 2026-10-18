@@ -1,0 +1,59 @@
+{
+  "manifest_version": 3,
+  "name": "UNLIGHT:Revive Steam 登入",
+  "version": "1.0.0",
+  "description": "不開 Steam 用戶端，直接用 Steam 帳號在瀏覽器玩 UNLIGHT:Revive。",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0qWTSiFHMTepg7Yvfq5z8l0+kqVf4ep+mFUJlENLsf4H763M2M/ESpkFmi2Izdc0EzcRaMAosuoMHnPqjuAD6Kn8ZXXbsHNOGVJIP6F0zCPwkkzoga7BUzRX90enzqEmlBpyoP4HjxaXFlTCxhCr9DyAlmEB3vDgeS7c6JfocYy9kg9fjM9q+pVdgcWHdHrwSGy8KApvC0dImQn2Ze1hu6z4ZSz7FXb5HJM51Sp9OcronCva/1b+ZmMJMERtM/LyEbuG96pII4GrtMBEGTvFDe9zmORiSePbti4wUKlarSb5Jj/8hX7heE78u0tLgNnZsA8KLAy4ttmpJ55B4zcGtQIDAQAB",
+  "minimum_chrome_version": "116",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": ["declarativeNetRequestWithHostAccess", "storage"],
+  "host_permissions": [
+    "https://api.steampowered.com/*",
+    "wss://*.steamserver.net/*"
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      { "id": "steam_origin", "enabled": true, "path": "rules.json" }
+    ]
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.playunlight.online/?*",
+        "https://www.playunlight.online/stove?*"
+      ],
+      "js": ["game_main.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://www.playunlight.online/?*",
+        "https://www.playunlight.online/stove?*"
+      ],
+      "js": ["game.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "action": {
+    "default_title": "開始玩 UNLIGHT:Revive",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    },
+    "default_popup": "popup.html"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  }
+}

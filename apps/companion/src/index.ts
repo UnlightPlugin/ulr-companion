@@ -27,9 +27,6 @@ import type {
 import {
   BROWSER_DEBUG_PORT,
   browserDebugPort,
-  buildBookmarklet,
-  buildBookmarkUrl,
-  buildExtensionFiles,
   COST_TABLE_IDS,
   createCdpAdapter,
   DEBUG_PORT_SWITCH,
@@ -39,8 +36,6 @@ import {
   EDGE_BROWSER_PROFILE_DIR,
   EDGE_DEBUG_PORT,
   ensureBrowser,
-  GAME_ORIGIN,
-  openGameTab,
   refreshBundles,
   toCostTable,
 } from "@ulr/cdp-adapter";
@@ -68,12 +63,7 @@ import {
   legacyWeaponId,
   legacyEventId,
 } from "@ulr/rule-schema";
-import {
-  CACHE_PATH,
-  NoBundleCacheError,
-  readBundleCache,
-  writeBundleCache,
-} from "./bundle-cache.js";
+import { CACHE_PATH, writeBundleCache } from "./bundle-cache.js";
 
 /** 套用之後等頁面回報的時間。cc_asset 在載入序列偏後面。 */
 const REPORT_WAIT_MS = 15_000;
@@ -131,17 +121,17 @@ function usage(): void {
   console.log("                              ⚠ 改 COST 直接改 .ulrcost.json 就行，Hash 會重算");
   console.log("");
   console.log("  web --refresh [--no-launch] 讀當前版本的 bundle 檔名（必要時自己開 Steam 版）");
-  console.log("  web --steamid <id> [--port N] [--game-port N]");
-  console.log("                              免 Steam 直接開一個遊戲分頁");
-  console.log("                              瀏覽器沒在跑就自己開一個（帶 debug port）");
+  console.log(
+    "                              （免 Steam 直開 --steamid 已失效，改用 Steam 登入擴充）",
+  );
+  console.log(
+    "  browser [--port N]          開一個帶 debug port 的瀏覽器，進去用 Steam 登入擴充開遊戲",
+  );
   console.log("                              [--edge] 改用 Edge（自己的 profile 與埠，");
   console.log("                              跟 Chrome 可以同時開，各掛一個帳號）");
   console.log("                              [--profile <目錄>] [--browser <exe>] 覆寫預設");
   console.log(`                              預設 profile：${DEFAULT_BROWSER_PROFILE_DIR}`);
   console.log(`                              --edge 的是：${EDGE_BROWSER_PROFILE_DIR}`);
-  console.log("  web --bookmarklet --steamid <id>");
-  console.log("                              印出書籤網址與 javascript: 書籤");
-  console.log("  web --extension <輸出目錄>  產生未封裝的 Chrome 擴充功能");
 }
 
 function parseFlag(args: string[], name: string): string | undefined {
@@ -559,7 +549,7 @@ async function cmdCost(args: string[]): Promise<number> {
 }
 
 /**
- * 免 Steam 開遊戲。
+ * 網頁版的 bundle 檔名（`--refresh`）。免 Steam 直開的那幾支 2026-10-15 起登不進去，已拿掉。
  *
  * 為什麼預設接 `BROWSER_DEBUG_PORT` 而不是 `DEFAULT_DEBUG_PORT`：這整組指令
  * 只對網頁版有意義 —— 桌面版本來就能直接跑 exe 帶參數啟動（見 constants.ts
@@ -632,78 +622,21 @@ async function cmdWeb(args: string[]): Promise<number> {
     return await refresh(!args.includes("--no-launch"));
   }
 
-  // 擴充功能不需要快取 —— 它自己會在玩家從 Steam 開遊戲時把檔名記進
-  // chrome.storage，所以打包出來的東西跟遊戲版本無關，改版後不用重產。
-  const extensionDir = parseFlag(args, "--extension");
-  if (extensionDir !== undefined) {
-    const files = buildExtensionFiles();
-    mkdirSync(extensionDir, { recursive: true });
-    for (const [name, content] of Object.entries(files)) {
-      writeFileSync(join(extensionDir, name), content, "utf8");
-      console.log(`  寫入 ${join(extensionDir, name)}`);
-    }
-    console.log("");
-    console.log("README.txt 是給拿到這個資料夾的人看的 —— 整包直接分享即可。");
-    console.log("安裝：chrome://extensions → 開發人員模式 →「載入未封裝項目」→ 選這個資料夾");
-    console.log("（--load-extension 在新版 Chrome 會被忽略，只能手動載入）");
-    console.log("");
-    console.log("裝好之後第一次要先從 Steam 開一次遊戲，讓它記下這個版本的檔案清單。");
-    console.log("之後點書籤就能直接進遊戲，改版後也只要再從 Steam 開一次，不用重產。");
-    return 0;
-  }
-
-  // 其餘三種都要有快取。沒有的話直接去弄一份，不要叫使用者自己先跑一次 refresh。
-  let cache;
-  try {
-    cache = readBundleCache();
-  } catch (err) {
-    if (!(err instanceof NoBundleCacheError)) throw err;
-    console.log("還沒有 bundle 檔名快取，先取得一份…");
-    await refresh(true);
-    cache = readBundleCache();
-  }
-
-  const steamId = parseFlag(args, "--steamid");
-  if (steamId === undefined) {
-    console.error("要給 --steamid <SteamID64>。它會出現在網址上，不會被寫進腳本或記錄。");
-    return 1;
-  }
-
-  if (args.includes("--bookmarklet")) {
-    const url = buildBookmarkUrl(steamId, GAME_ORIGIN);
-    console.log("① 把這個網址存成書籤（已經帶好 port，才能一點就用）：");
-    console.log(`   ${url}`);
-    console.log("");
-    console.log("② 再把這一整串存成第二個書籤（開啟①看到 403 之後點它）：");
-    console.log("");
-    console.log(buildBookmarklet(cache.bundles));
-    console.log("");
-    console.log("⚠ 書籤沒辦法在 document-start 執行，所以要點兩下。");
-    console.log("  想要一鍵請改用 --extension。");
-    return 0;
-  }
-
-  const gamePortRaw = parseFlag(args, "--game-port");
-  await browser();
-  const result = await openGameTab({
-    port,
-    steamId,
-    bundles: cache.bundles,
-    ...(gamePortRaw !== undefined ? { gamePort: Number(gamePortRaw) } : {}),
-  });
-  console.log(`✓ 已開新分頁 ${result.safeUrl}`);
-  console.log(`  用的是 ${cache.discoveredAt} 讀到的 bundle 檔名`);
-  console.log("  換帳號：換一個 --steamid 再跑一次就好，跟 Steam 登入的是誰無關。");
-  console.log("  遊戲沒出來的話多半是改版了 —— 從 Steam 開一次再 web --refresh。");
-  return 0;
+  // ⚠ `--steamid`（重建外殼直開）、`--bookmarklet`、`--extension`（產 ULR Boot）都拿掉了：
+  // 2026-10-15 起官方驗 access_token，只帶 steamid 的外殼登不進去（getid 回 null）。
+  // 改用 Steam 登入擴充（托盤 設置 › 網頁版 放好；說明見 apps/tray/src/web-client.ts）。
+  console.error("免 Steam 直開（--steamid／--bookmarklet／--extension）2026-10-15 起登不進去了：");
+  console.error(
+    "官方開始驗 access_token。改用 Steam 登入擴充 —— 托盤 設置 › 網頁版 ② 放好、③ 登入。",
+  );
+  console.error("只要帶除錯埠的瀏覽器：companion browser");
+  return 1;
 }
 
 /**
  * 只開一個帶 debug port 的瀏覽器，其他什麼都不做。
  *
- * 為什麼要跟 `web --steamid` 分開：那支會**順便**開好遊戲分頁，需要 steamid
- * 與 bundle 快取。但玩家常常只是要一個能接 CDP 的瀏覽器，進去之後自己點
- * 書籤就好 —— 那條路不需要 steamid，也不該被逼著給一個。
+ * 玩家常常只是要一個能接 CDP 的瀏覽器，進去之後用 Steam 登入擴充開遊戲就好。
  */
 async function cmdBrowser(args: string[]): Promise<number> {
   const family = parseBrowserFamily(args);
@@ -731,7 +664,9 @@ async function cmdBrowser(args: string[]): Promise<number> {
   console.log(
     `  托盤那邊把配置的「客戶端」選成 ${result.browser.family === "edge" ? "Edge" : "Chrome"}。`,
   );
-  console.log("  進去之後點書籤開遊戲即可。接事件：companion watch --port " + result.port);
+  console.log(
+    "  進去之後用 Steam 登入擴充開遊戲即可。接事件：companion watch --port " + result.port,
+  );
   return 0;
 }
 

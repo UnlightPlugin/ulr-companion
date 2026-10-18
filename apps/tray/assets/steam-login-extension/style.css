@@ -1,0 +1,257 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f6f4f1;
+  --panel: #ffffff;
+  --text: #1d1b19;
+  --muted: #6b655f;
+  --border: #d9d3cc;
+  --accent: #9c2b3a;
+  --accent-text: #ffffff;
+  --error: #b3261e;
+  font-family: system-ui, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161412;
+    --panel: #211e1b;
+    --text: #ece7e1;
+    --muted: #a39b93;
+    --border: #3a352f;
+    --accent: #c9485a;
+    --error: #f2867d;
+  }
+}
+
+[hidden] {
+  display: none !important;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+  color: var(--text);
+  /* Chrome shrinks extension pages to 75% by default. */
+  font-size: 1rem;
+}
+
+main {
+  width: min(360px, 100% - 32px);
+  padding: 24px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+h1 {
+  margin: 0 0 8px;
+  font-size: 1.25rem;
+}
+
+#status {
+  margin: 0 0 16px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+#status[data-kind="error"] {
+  color: var(--error);
+}
+
+form {
+  display: grid;
+  gap: 12px;
+}
+
+label {
+  display: grid;
+  gap: 4px;
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+
+input,
+select,
+textarea {
+  font: inherit;
+  padding: 8px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+textarea {
+  font-family: ui-monospace, monospace;
+  font-size: 0.75rem;
+  resize: vertical;
+}
+
+button {
+  font: inherit;
+  padding: 8px 16px;
+  color: var(--accent-text);
+  background: var(--accent);
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+button.secondary {
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--border);
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+}
+
+.actions button {
+  flex: 1;
+}
+
+main.wide {
+  width: min(640px, 100% - 32px);
+  margin: 32px 0;
+}
+
+h2 {
+  margin: 0 0 12px;
+  font-size: 1rem;
+}
+
+section + section {
+  margin-top: 24px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+}
+
+.section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.subtitle {
+  margin: 0 0 4px;
+  font-weight: 600;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.small {
+  font-size: 0.8125rem;
+}
+
+.small-button {
+  padding: 4px 10px;
+  font-size: 0.8125rem;
+}
+
+.footer {
+  margin: 16px 0 0;
+  font-size: 0.8125rem;
+}
+
+a {
+  color: var(--accent);
+}
+
+label.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.actions.wrap {
+  flex-wrap: wrap;
+}
+
+.actions.wrap button {
+  flex: none;
+  padding: 6px 12px;
+  font-size: 0.875rem;
+}
+
+button.danger {
+  color: var(--error);
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+ul.accounts,
+ul.picker {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+li.account {
+  display: grid;
+  gap: 8px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+li.account:first-child {
+  padding-top: 0;
+}
+
+li.account .small {
+  overflow-wrap: anywhere;
+}
+
+ul.notes {
+  margin: 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 6px;
+}
+
+body.popup {
+  min-height: 0;
+  display: block;
+}
+
+body.popup main {
+  width: 280px;
+  padding: 16px;
+  border: none;
+  border-radius: 0;
+}
+
+ul.picker {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+ul.picker button,
+body.popup #manage {
+  width: 100%;
+}
+
+ul.picker button {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  text-align: left;
+}
+
+ul.picker button span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

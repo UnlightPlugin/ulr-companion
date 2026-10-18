@@ -63,7 +63,6 @@ import {
   canAffordDuel,
   costTiersFor,
   DEBUG_PORT_SWITCH_AUTO,
-  detectGameInstall,
   duelApCost,
   ENV_KEYS_TO_STRIP,
   ensureBrowser,
@@ -248,13 +247,7 @@ import { BUNDLE_REPORT_INTERVAL_MS, createBundleReporter, readPushToken } from "
 import type { AutoUpdater } from "./updater.js";
 import { consumeUpdatedFlag, startAutoUpdate } from "./updater.js";
 import { cleanupStaleFiles, cleanupUpdateLeftovers } from "./zip-update.js";
-import {
-  BOOT_EXT_DIR,
-  bootExtVersion,
-  exportBootExtension,
-  gameFontDirs,
-  USERSCRIPT_GUIDE_URL,
-} from "./web-client.js";
+import { exportExtension, extVersion, STEAM_EXT_DIR, STEAM_EXT_GUIDE_URL } from "./web-client.js";
 
 /**
  * 版本號。**建置時烤進去的**（`scripts/build-tray.mjs` 的 `define`）。
@@ -603,10 +596,10 @@ interface Snapshot {
    */
   debugFlag: string;
   /**
-   * ULR Boot 擴充：放在哪、那裡現在是哪一版、安裝包帶的是哪一版。
+   * Steam 登入擴充：放在哪、那裡現在是哪一版、安裝包帶的是哪一版。
    * `installed` 跟 `bundled` 不一樣 = 按一下「放好」就會更新。
    */
-  bootExt: { dir: string; installed: string | null; bundled: string | null; guideUrl: string };
+  steamExt: { dir: string; installed: string | null; bundled: string | null; guideUrl: string };
   /** 網頁版教學頁用：這台機器上的 Chrome／Edge 怎麼帶除錯埠開。 */
   browsers: { chrome: BrowserSetup; edge: BrowserSetup };
   /** 配置 id → 那份的客戶端有沒有在回話。見 `gameAlive` 的註解。 */
@@ -3421,15 +3414,18 @@ function officialTick(now: DeckRead, entered: boolean): boolean {
   return dirty;
 }
 
-/** 安裝包帶的 ULR Boot 原始檔（`scripts/build-tray.mjs` 把 assets 整包複製過去）。 */
-const BOOT_EXT_SRC = join(__dirname, "assets", "ulr-boot-extension");
-const BOOT_EXT_BUNDLED = bootExtVersion(BOOT_EXT_SRC);
+/** 安裝包帶的 Steam 登入擴充原始檔（`scripts/build-tray.mjs` 把 assets 整包複製過去）。 */
+const STEAM_EXT_SRC = join(__dirname, "assets", "steam-login-extension");
+const STEAM_EXT_BUNDLED = extVersion(STEAM_EXT_SRC);
 /** 玩家那邊放著哪一版。快照很常送，不每次讀檔 —— 開機讀一次、放好之後更新。 */
-let bootExtInstalled = bootExtVersion(BOOT_EXT_DIR);
+let steamExtInstalled = extVersion(STEAM_EXT_DIR);
 
-/** 哪一族啟動時要臨時掛 ULR Boot：只有 Edge，而且要已經放好。理由見 `loadExtensionArgs`。 */
+/**
+ * 哪一族啟動時要臨時掛 Steam 登入擴充：只有 Edge，而且要已經放好。理由見 `loadExtensionArgs`。
+ * manifest 帶 key，臨時掛上的 ID 跟手動載入的一樣，存的 Steam 帳號不會因此不見。
+ */
 function autoLoadExtDir(family: "chrome" | "edge"): string | null {
-  return family === "edge" && bootExtInstalled !== null ? BOOT_EXT_DIR : null;
+  return family === "edge" && steamExtInstalled !== null ? STEAM_EXT_DIR : null;
 }
 
 /**
@@ -3463,11 +3459,11 @@ function snapshot(): Snapshot {
     launchAtLogin: launchAtLoginEnabled(),
     logPath: logFile.path,
     debugFlag: DEBUG_PORT_SWITCH_AUTO,
-    bootExt: {
-      dir: BOOT_EXT_DIR,
-      installed: bootExtInstalled,
-      bundled: BOOT_EXT_BUNDLED,
-      guideUrl: USERSCRIPT_GUIDE_URL,
+    steamExt: {
+      dir: STEAM_EXT_DIR,
+      installed: steamExtInstalled,
+      bundled: STEAM_EXT_BUNDLED,
+      guideUrl: STEAM_EXT_GUIDE_URL,
     },
     browsers: { chrome: browserSetup("chrome"), edge: browserSetup("edge") },
     gameAlive: Object.fromEntries(gameAlive),
@@ -5269,9 +5265,9 @@ app.whenReady().then(() => {
         port: browserDebugPort(family),
         profileDir: userDataDirFor(family),
         alwaysAutoPort: true,
-        // Edge 每次啟動都臨時掛上 ULR Boot（見 loadExtensionArgs）。資料夾裡沒有
+        // Edge 每次啟動都臨時掛上 Steam 登入擴充（見 loadExtensionArgs）。資料夾裡沒有
         // 擴充就不帶，照常開。
-        ...(autoLoadExtDir(family) !== null ? { extraArgs: loadExtensionArgs(BOOT_EXT_DIR) } : {}),
+        ...(autoLoadExtDir(family) !== null ? { extraArgs: loadExtensionArgs(STEAM_EXT_DIR) } : {}),
         startUrl: extPage,
         onNotice: (m) => log(`· ${m}`),
       });
@@ -5313,7 +5309,7 @@ app.whenReady().then(() => {
 
   /**
    * 指定哪一族開，跟這份配置接哪種客戶端無關。只收 chrome／edge；
-   * `page` 只收 `"extensions"`（裝 ULR Boot 那一步）。
+   * `page` 只收 `"extensions"`（裝 Steam 登入擴充那一步）。
    */
   ipcMain.handle("ulr:browser-launch", async (_event, raw: unknown, page?: unknown) => {
     if (raw !== "chrome" && raw !== "edge") return { ok: false, text: "" };
@@ -5370,23 +5366,18 @@ app.whenReady().then(() => {
     return { ok: true, text: `已存到 ${r.filePath}` };
   });
 
-  /**
-   * 把 ULR Boot 放到 `BOOT_EXT_DIR`，打開那個資料夾。字型從玩家的桌面版遊戲拿
-   * （見 `gameFontDirs`），拿不到就只放程式。
-   */
-  ipcMain.handle("ulr:boot-ext-install", async () => {
+  /** 把 Steam 登入擴充放到 `STEAM_EXT_DIR`，打開那個資料夾。 */
+  ipcMain.handle("ulr:steam-ext-install", async () => {
     try {
-      const install = detectGameInstall();
-      const fontDirs = install === null ? [] : gameFontDirs(install.resourcesDir);
-      const r = exportBootExtension(BOOT_EXT_SRC, BOOT_EXT_DIR, fontDirs);
-      bootExtInstalled = r.version;
-      log(`· ULR Boot ${r.version ?? "?"} 放到 ${r.dir}（字型 ${r.fonts} 個）`);
+      const r = exportExtension(STEAM_EXT_SRC, STEAM_EXT_DIR);
+      steamExtInstalled = r.version;
+      log(`· Steam 登入擴充 ${r.version ?? "?"} 放到 ${r.dir}`);
       void shell.openPath(r.dir);
       pushState();
-      return { ok: true, text: r.fonts > 0 ? "已放好" : "已放好（沒找到遊戲字型，會用系統字）" };
+      return { ok: true, text: "已放好" };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      log(`⚠ 放 ULR Boot 失敗：${msg}`);
+      log(`⚠ 放 Steam 登入擴充失敗：${msg}`);
       return { ok: false, text: msg };
     }
   });

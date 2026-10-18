@@ -122,12 +122,18 @@ chrome.exe --remote-debugging-port=59223 --user-data-dir=<插件自己的 profil
 ```
 
 **已實作**：`cdp-adapter` 的 `ensureBrowser()`（`src/browser.ts`）。
-`companion web --steamid <id>` 會先呼叫它 —— 埠有人在聽就沿用，沒有就自己開一個。
+`companion browser` 呼叫它 —— 埠有人在聽就沿用，沒有就自己開一個。遊戲在那個瀏覽器裡
+用 **Steam 登入擴充**開（托盤 設置 › 網頁版；原始檔 `apps/tray/assets/steam-login-extension/`）。
 
 ```
-npx tsx apps/companion/src/index.ts web --steamid <SteamID64>
+npx tsx apps/companion/src/index.ts browser
     [--edge] [--port 59223] [--profile <目錄>] [--browser <chrome.exe>]
 ```
+
+> ⚠ 以前的 `web --steamid <id>`（重建官方外殼、只帶 steamid 直開）與 ULR Boot 擴充，
+> **2026-10-15 起登不進去**：官方外殼多了 `ACCESS_TOKEN`，登入時 `getid` 連 token 一起驗。
+> Steam 登入擴充是在瀏覽器裡登入 Steam 帳號、向 Steam 拿 UNLIGHT 的票證換一顆新 token，
+> 開的是伺服器真的給的頁面。它也認舊的 `?steamid=` 書籤（打到 403 → 換 token 重開）。
 
 ### Chrome 與 Edge 是兩個客戶端，不是一個「網頁版」
 
@@ -159,7 +165,9 @@ npx tsx apps/companion/src/index.ts web --steamid <SteamID64>
 為什麼要這樣做，而不是「換一個好一點的埠號」：見
 [埠被 Windows 保留](#埠被-windows-保留吃掉整段)。
 
-### 這條路完全不經過 Steam
+### （已失效，2026-10-15 前）這條路完全不經過 Steam
+
+下面是 `web --steamid` 還能用時的紀錄，留著說明當時為什麼這樣設計。
 
 2026-08-02 實測（`web --steamid` → `probe --port 9334`）：
 

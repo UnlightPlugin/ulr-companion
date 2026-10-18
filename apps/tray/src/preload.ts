@@ -244,7 +244,7 @@ contextBridge.exposeInMainWorld("ulr", {
       ipcRenderer.invoke("ulr:browser-copy-target", family),
     saveCmd: () => ipcRenderer.invoke("ulr:browser-save-cmd"),
   },
-  bootExt: {
-    install: () => ipcRenderer.invoke("ulr:boot-ext-install"),
+  steamExt: {
+    install: () => ipcRenderer.invoke("ulr:steam-ext-install"),
   },
 });

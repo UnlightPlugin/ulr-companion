@@ -12,3 +12,6 @@ packages/rule-schema/test-vectors/canonical.json
 # 對著跑著的遊戲查東西的一次性探測腳本（/probe-game）：不進版控、不該擋發版
 tools/.probe-*
 tools/.shot-*
+
+# 別人寫的 Steam 登入擴充，原樣收進來（上游更新時整包蓋過去），不重排
+apps/tray/assets/steam-login-extension/

@@ -1,0 +1,20 @@
+[
+  {
+    "id": 1,
+    "condition": {
+      "requestDomains": ["steamserver.net"],
+      "initiatorDomains": ["lechoahegigppgncoehminhncchchpmp"],
+      "resourceTypes": ["websocket"]
+    },
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        {
+          "header": "Origin",
+          "operation": "set",
+          "value": "https://steamcommunity.com"
+        }
+      ]
+    }
+  }
+]

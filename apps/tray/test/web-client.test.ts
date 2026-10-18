@@ -1,8 +1,9 @@
-import { mkdirSync, mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { bootExtVersion, exportBootExtension, gameFontDirs } from "../src/web-client.js";
+import { exportExtension, extVersion } from "../src/web-client.js";
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "ulr-webclient-"));
@@ -11,64 +12,52 @@ function tmp(): string {
 function fakeExtension(version = "9.9.9"): string {
   const dir = tmp();
   writeFileSync(join(dir, "manifest.json"), JSON.stringify({ version }));
-  writeFileSync(join(dir, "content.js"), "// content");
+  writeFileSync(join(dir, "background.js"), "// bg");
+  mkdirSync(join(dir, "icons"));
+  writeFileSync(join(dir, "icons", "icon16.png"), "png");
   return dir;
 }
 
-describe("exportBootExtension", () => {
-  it("放好擴充、回報版本；沒有字型來源時 fonts = 0", () => {
-    const dest = join(tmp(), "ulr-boot-extension");
-    const r = exportBootExtension(fakeExtension(), dest);
-    expect(r).toEqual({ dir: dest, version: "9.9.9", fonts: 0 });
-    expect(readFileSync(join(dest, "content.js"), "utf8")).toBe("// content");
+describe("exportExtension", () => {
+  it("放好擴充、回報版本；子資料夾（icons）一起複製", () => {
+    const dest = join(tmp(), "ulr-steam-login");
+    const r = exportExtension(fakeExtension(), dest);
+    expect(r).toEqual({ dir: dest, version: "9.9.9" });
+    expect(readFileSync(join(dest, "background.js"), "utf8")).toBe("// bg");
+    expect(readFileSync(join(dest, "icons", "icon16.png"), "utf8")).toBe("png");
   });
 
   it("蓋掉舊版的檔，但不清空資料夾（玩家自己放的東西留著）", () => {
     const dest = tmp();
     writeFileSync(join(dest, "manifest.json"), JSON.stringify({ version: "1.0.0" }));
     writeFileSync(join(dest, "mine.txt"), "keep");
-    exportBootExtension(fakeExtension("2.0.0"), dest);
-    expect(bootExtVersion(dest)).toBe("2.0.0");
+    exportExtension(fakeExtension("2.0.0"), dest);
+    expect(extVersion(dest)).toBe("2.0.0");
     expect(readFileSync(join(dest, "mine.txt"), "utf8")).toBe("keep");
   });
-
-  it("從第一個有字型的來源複製，只收字型檔", () => {
-    const empty = tmp();
-    const fonts = tmp();
-    writeFileSync(join(fonts, "A.ttc"), "aaaa");
-    writeFileSync(join(fonts, "B.otf"), "bb");
-    writeFileSync(join(fonts, "notes.txt"), "x");
-    const dest = tmp();
-    const r = exportBootExtension(fakeExtension(), dest, [join(tmp(), "nope"), empty, fonts]);
-    expect(r.fonts).toBe(2);
-    expect(readFileSync(join(dest, "fonts", "A.ttc"), "utf8")).toBe("aaaa");
-  });
-
-  it("大小相同的字型不重寫（96MB，每按一次就寫一次沒有意義）", () => {
-    const fonts = tmp();
-    writeFileSync(join(fonts, "A.ttc"), "aaaa");
-    const dest = tmp();
-    mkdirSync(join(dest, "fonts"));
-    const existing = join(dest, "fonts", "A.ttc");
-    writeFileSync(existing, "zzzz");
-    const old = new Date("2020-01-01");
-    utimesSync(existing, old, old);
-    exportBootExtension(fakeExtension(), dest, [fonts]);
-    expect(readFileSync(existing, "utf8")).toBe("zzzz");
-    expect(statSync(existing).mtime.getFullYear()).toBe(2020);
-  });
 });
 
-describe("bootExtVersion", () => {
+describe("extVersion", () => {
   it("沒裝回 null", () => {
-    expect(bootExtVersion(join(tmp(), "nope"))).toBeNull();
+    expect(extVersion(join(tmp(), "nope"))).toBeNull();
   });
 });
 
-describe("gameFontDirs", () => {
-  it("新版（fonts）排在舊版（public/fonts）前面，都在 resources 底下", () => {
-    const dirs = gameFontDirs("R");
-    expect(dirs[0]).toBe(join("R", "app.asar", "fonts"));
-    expect(dirs).toContain(join("R", "app.asar", "public", "fonts"));
+describe("內建的 Steam 登入擴充", () => {
+  const src = fileURLToPath(new URL("../assets/steam-login-extension", import.meta.url));
+  const manifest = JSON.parse(readFileSync(join(src, "manifest.json"), "utf8")) as {
+    key?: string;
+    version?: string;
+  };
+
+  it("manifest 帶 key —— rules.json 用擴充 ID 認 Steam 連線，ID 不能隨資料夾路徑變", () => {
+    expect(manifest.key).toBeTruthy();
+    expect(readFileSync(join(src, "rules.json"), "utf8")).toContain(
+      "lechoahegigppgncoehminhncchchpmp",
+    );
+  });
+
+  it("讀得到版本（托盤靠它判斷要不要叫玩家更新）", () => {
+    expect(extVersion(src)).toBe(manifest.version);
   });
 });

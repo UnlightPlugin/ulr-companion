@@ -1146,7 +1146,7 @@
           subs: [
             { id: "link", label: "連線" },
             // 用瀏覽器玩的整套：帶除錯埠的瀏覽器（按鈕／桌面捷徑／手動教學）＋
-            // ULR Boot＋書籤。放在連線底下：它跟「怎麼開遊戲」是同一件事。
+            // Steam 登入擴充＋登入。放在連線底下：它跟「怎麼開遊戲」是同一件事。
             { id: "web", label: "網頁版" },
             { id: "startup", label: "啟動" },
             { id: "log", label: "記錄" },
@@ -1971,8 +1971,8 @@
        * `explainDebugPort()` 在真的出事時講一句，而且是講**那一次**的原因 ——
        * 比預先把四種可能都攤在玩家面前準。
        *
-       * ⚠ **瀏覽器（Chrome／Edge）走另一條。** 網頁版玩家是用書籤＋竄改猴（或
-       * ULR Boot）開遊戲的，那條路本身不需要除錯埠 —— 插件需要。所以給的是
+       * ⚠ **瀏覽器（Chrome／Edge）走另一條。** 網頁版玩家是用 Steam 登入擴充開遊戲的
+       * （2026-10-15 起取代書籤＋竄改猴／ULR Boot），那條路本身不需要除錯埠 —— 插件需要。所以給的是
        * 「用專用設定檔帶除錯埠開瀏覽器」，不是 Steam 啟動選項（Steam 的網頁版
        * 啟動器會把參數吃掉，見 docs）。判斷寫成「不是桌面版」而不是列舉瀏覽器，
        * 這樣以後多一種瀏覽器也不會落到 Steam 那段去。
@@ -2003,7 +2003,7 @@
 
       function browserConnect(p) {
         const name = kindText(p.kind);
-        const guide = snap?.bootExt?.guideUrl ?? "";
+        const guide = snap?.steamExt?.guideUrl ?? "";
         return `<div class="card">
              <div class="row"><span><b>開 ${esc(name)}</b></span>
                <span><button id="browserOpen">開啟</button> <button id="browserCmd">存成 .cmd</button></span></div>
@@ -2013,9 +2013,9 @@
            </div>
            <div class="card">
              <div class="row"><span><b>在瀏覽器裡開遊戲</b></span></div>
-             <div class="hint">這個設定檔是獨立的，書籤和腳本要在裡面裝一次，二選一：</div>
-             <div class="row"><span>竄改猴腳本</span><span><button data-link="${esc(guide)}">安裝說明</button></span></div>
-             <div class="row"><span>ULR Boot 擴充</span><span><button data-goto="web">設置 › 網頁版</button></span></div>
+             <div class="hint">這個設定檔是獨立的，要在裡面裝一次 Steam 登入擴充、登入 Steam 帳號。</div>
+             <div class="row"><span>Steam 登入擴充</span><span>
+               <button data-goto="web">設置 › 網頁版</button> <button data-link="${esc(guide)}">安裝說明</button></span></div>
            </div>`;
       }
 
@@ -4979,16 +4979,20 @@
                <li>「載入未封裝項目」→ 選那個資料夾</li>
              </ol>
              <div class="hint">Edge 用 ① 的按鈕或捷徑開會自動掛上，可以跳過 2、3 步。<br />
-               <b>更新</b>：插件更新後這裡會出現「更新到 …」，按它，再到擴充功能頁按 ⟳。
-               遊戲每週改版不用更新 —— 擴充自己去 Cloudflare Workers 拿新的檔名清單。</div>
+               <b>更新</b>：插件更新後這裡會出現「更新到 …」，按它，再到擴充功能頁按 ⟳。<br />
+               ⚠ 裝過 <b>ULR Boot</b> 或竄改猴的 ulr_steam 腳本的話，先在擴充功能頁把它們移除／停用 ——
+               10/15 改版後它們登不進去，留著會跟新的搶。</div>
            </div>
            <div class="card">
-             <div class="row"><span><b>③ 書籤</b></span></div>
-             <div class="hint">在 ① 開的瀏覽器裡，把這個網址存成書籤，<code>你的SteamID</code> 換成自己的：</div>
-             <code class="line">https://www.playunlight.online/?steamid=你的SteamID</code>
-             <div class="hint">SteamID 是 17 位數字（7656 開頭），Steam 個人檔案網址裡那串；改過自訂網址的話
-               到 Steam › 帳戶明細 看。<br />
-               不想裝擴充的話，用竄改猴腳本也行：<button data-link="${esc(b?.guideUrl ?? "")}">安裝說明</button></div>
+             <div class="row"><span><b>③ 登入 Steam、開遊戲</b></span></div>
+             <ol class="steps">
+               <li>點瀏覽器右上角的擴充圖示（拼圖裡的「UNLIGHT:Revive Steam 登入」）→「新增帳號」</li>
+               <li>填 Steam 帳號名稱（不是 Email）和密碼；Steam 要驗證碼就照它問的填</li>
+               <li>之後點擴充圖示裡的帳號就開遊戲。想用書籤的話，在「管理帳號」按「複製連結」存起來</li>
+             </ol>
+             <div class="hint">密碼只會加密送給 Steam，擴充不存密碼。以前存的
+               <code>?steamid=</code> 書籤照樣能用，第一次點會要你登入那個帳號。<br />
+               詳細說明（含手機版）：<button data-link="${esc(b?.guideUrl ?? "")}">安裝說明</button></div>
            </div>`
         );
       };
@@ -5250,6 +5254,27 @@
             rstate = s;
             renderBody();
           });
+        }
+        if (t.id === "raidDiscoverRulesOn") {
+          return void window.ulr.raid.discoverRulesOn(t.checked).then((s) => {
+            rstate = s;
+            renderBody();
+          });
+        }
+        if (t.id === "raidDiscoverSkipOn") {
+          return void window.ulr.raid.discoverSkip(t.checked).then((s) => {
+            rstate = s;
+            renderBody();
+          });
+        }
+        // 發現渦的規則格（一格或整組）：data-dkeys 是逗號隔開的規則鍵
+        if (t.dataset.dkeys && t.value) {
+          return void window.ulr.raid
+            .discoverRule(t.dataset.dkeys.split(","), t.value)
+            .then((s) => {
+              rstate = s;
+              renderBody();
+            });
         }
         if (t.id === "raidItemShortcutOn") {
           return void window.ulr.raid.itemShortcut(t.checked).then((s) => {
@@ -5722,10 +5747,10 @@
           return web(window.ulr.browser.copyTarget(btn.dataset.copytarget), "copy");
         if (btn.dataset.extpage) {
           btn.disabled = true;
-          return web(window.ulr.browser.launch(btn.dataset.extpage, "extensions"), "boot");
+          return web(window.ulr.browser.launch(btn.dataset.extpage, "extensions"), "ext");
         }
         if (btn.id === "browserCmd") return web(window.ulr.browser.saveCmd());
-        if (btn.id === "bootExtInstall") return web(window.ulr.bootExt.install(), "boot");
+        if (btn.id === "steamExtInstall") return web(window.ulr.steamExt.install(), "ext");
 
         const row = btn.closest("tr[data-id]");
         if (!row) return;

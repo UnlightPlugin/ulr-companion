@@ -187,9 +187,9 @@ describe("buildBrowserShortcutArgs", () => {
   });
 
   it("給了擴充資料夾就帶 kill-switch＋--load-extension（少了 kill-switch，137+ 安靜地不載）", () => {
-    const s = buildBrowserShortcutArgs(PROFILE, "C:\\Users\\someone\\ulr-boot-extension");
+    const s = buildBrowserShortcutArgs(PROFILE, "C:\\Users\\someone\\ulr-steam-login");
     expect(s).toContain("--disable-features=DisableLoadExtensionCommandLineSwitch");
-    expect(s).toContain("--load-extension=C:\\Users\\someone\\ulr-boot-extension");
+    expect(s).toContain("--load-extension=C:\\Users\\someone\\ulr-steam-login");
     expect(loadExtensionArgs("X")).toEqual([
       "--disable-features=DisableLoadExtensionCommandLineSwitch",
       "--load-extension=X",

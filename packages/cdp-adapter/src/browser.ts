@@ -49,7 +49,7 @@ export type BrowserFamily = "chrome" | "edge";
  * profile 再啟動只會在既有實例開一個分頁，**命令列參數整個被忽略**，port 不會開。
  * 專屬 profile 才保證是全新實例，也完全不影響玩家平常的瀏覽器。
  *
- * 放在家目錄底下而不是暫存區：`ulr-boot` 擴充功能、書籤、視窗大小都存在這裡，
+ * 放在家目錄底下而不是暫存區：Steam 登入擴充（含登入的帳號）、書籤、視窗大小都存在這裡，
  * 清掉就要重裝一次。
  */
 export const DEFAULT_BROWSER_PROFILE_DIR = join(homedir(), "ulr-cdp-profile");
@@ -271,7 +271,7 @@ export function buildBrowserLaunchCmd(family: BrowserFamily): string {
 }
 
 /**
- * 每次啟動都臨時掛上一個未封裝擴充（ULR Boot）。
+ * 每次啟動都臨時掛上一個未封裝擴充（Steam 登入擴充；以前是 ULR Boot）。
  *
  * Chromium 137+ 預設忽略 `--load-extension`，要這個 kill-switch 才吃 ——
  * Edge 152 實測有效（2026-09-08，ulr-boot-dist 的小號 .cmd）。品牌版 Chrome

@@ -8,7 +8,15 @@ export default tseslint.config(
     // 不擋的話 lint 會去檢查那份 bundle，然後對著 Cloudflare 的全域
     // （Response、WebSocketPair…）報一整排 no-undef。
     // tools/.probe-* 是對著跑著的遊戲查東西的一次性腳本（/probe-game），不進版控、不該擋發版。
-    ignores: ["**/dist/**", "**/node_modules/**", "**/.wrangler/**", "**/*.json", "tools/.probe-*"],
+    // steam-login-extension 是別人寫的 Steam 登入擴充，原樣收進來（上游更新時整包蓋過去），不改它的寫法。
+    ignores: [
+      "**/dist/**",
+      "**/node_modules/**",
+      "**/.wrangler/**",
+      "**/*.json",
+      "tools/.probe-*",
+      "apps/tray/assets/steam-login-extension/**",
+    ],
   },
   {
     // scripts/ 底下是給 Node 直接跑的建置腳本，不是 package 的一部分。
@@ -23,28 +31,6 @@ export default tseslint.config(
         Buffer: "readonly",
         fetch: "readonly",
         setTimeout: "readonly",
-      },
-    },
-  },
-  {
-    // 網頁版開機用的 Chrome 擴充：原樣複製進使用者資料夾給瀏覽器載，
-    // 跑在頁面（content script）跟 service worker 裡，不經過 tsc。
-    files: ["apps/tray/assets/ulr-boot-extension/**/*.js"],
-    languageOptions: {
-      globals: {
-        chrome: "readonly",
-        window: "readonly",
-        document: "readonly",
-        location: "readonly",
-        fetch: "readonly",
-        URL: "readonly",
-        URLSearchParams: "readonly",
-        AbortController: "readonly",
-        Event: "readonly",
-        HTMLMediaElement: "readonly",
-        setTimeout: "readonly",
-        clearTimeout: "readonly",
-        setInterval: "readonly",
       },
     },
   },
