@@ -216,12 +216,15 @@
  * 目標分兩組（玩家：「要先分勝場、敗場」，勝場 75 層起、敗場 55 層起）：看 Result 場景的
  * result_params.result，win 是勝場、其他（lose／draw／timeup）是敗場。每一組可以勾：
  *
- * - GEM、渦一、牌組第一／二／三位角色的卡：各自填「前 X 層」—— 從**這一場開局那一層**算起
+ * - GEM、牌組第一／二／三位角色的卡：各自填「前 X 層」—— 從**這一場開局那一層**算起
  *   X 層裡（含開局那層）出現才拿。角色卡看現在這副牌組（registry 的 deck／deck_now）三個
  *   位置的角色；**x1 而且 Lv1 的不算**（玩家：「那是野生的，不是牌組的」，牌組的卡一次 6 張以上）
- * - 渦二：填「最多爬到第幾層」。看得到就拿（不管前幾層）；還沒到那一層就一路往上找；
- *   到了還沒有 → 改拿 GEM 或渦一（玩家：「渦二沒拿到，是改拿 GEM、渦一才對」；不管那兩樣
- *   有沒有勾、在不在前幾層，看得到就拿、渦一先，看不到繼續往上直到出現）
+ * - 渦二（只有勝場那組，玩家 2026-10-18：「敗場也拿掉拿渦二、渦一」）：填「最多爬到第幾層」
+ *   （止損點，預設 160）。看得到就拿（不管前幾層）；還沒到那一層就一路往上找；到了還沒有 →
+ *   改拿 GEM（不管有沒有勾、在不在前幾層，看得到就拿，看不到繼續往上直到出現；路上冒出渦二
+ *   照樣先拿渦二）。跟 Moon 的 _上限後的退路 一樣，只是**不拿渦一**（玩家 2026-10-18：渦二約
+ *   10000 GEM、渦一約 1000，渦一爬星路上本來就有；要收圖鑑的話 100 層交還後自己拿）
+ * - 渦一不是目標了（同一天拿掉）：爬到它腳下也不收
  * - 100 層：一路爬到 100 層就停、交還給玩家，路上不拿獎勵（跟渦二一起勾時以渦二為準）
  * - 白色石楠3（道具 6）：一樣填「前 X 層」。玩家要的是敗場那組才有，托盤只在敗場畫這一格；
  *   資料上兩組都有欄位，勝場那格永遠是沒勾
@@ -229,7 +232,7 @@
  * - EXP（加成卡 id 1）：一樣填「前 X 層」。滿等拿了沒用，所以是可選的；值很低（照 Moon 的
  *   算法 exp_base × 倍率 × 0.1，兩位數 GEM），猜錯不會為它花道具
  *
- * 同時看到好幾種，一層一層比：渦二 → 渦一（玩家：「渦一比角色卡稀有」）→ 角色卡／GEM／石楠3
+ * 同時看到好幾種，一層一層比：渦二 → 角色卡／GEM／石楠3
  * **誰近拿誰**（玩家：「角色卡 GEM 花3 是就近優先」）→ EXP；同一種拿近的。腳下那張就是目標 → 得到卡片。
  * 都沒有、但「前 X 層」還有沒露出來的 → 往上一層讓下一張出來；全看過了 → **停下來交還給玩家**
  * （不替他收下用不到的卡）。停了這一場就不再動，換設定才重新來。
@@ -238,10 +241,12 @@
  * 「花3、GEM 都要考量 CP 值」），全部換成 GEM（價錢表見 BONUS_ITEM_PRICES 那一段）：
  *
  * - 一定要到的（渦二、往上找渦二、100 層）：不算，有能用的道具就用
- * - 稀有的（渦一、角色卡）：什麼道具都能用，但要比「救起來的期望」便宜；期望＝價值 −
+ * - 勾了渦二時的 GEM（前幾層的、過了止損點的、過了止損點往上找 GEM）：一樣不算 —— 照 Moon
+ *   （先撿 GEM 與退路都是「硬拿」）：摔了這一場就結束，前面爬的全白付，救一朵比較便宜
+ * - 稀有的（角色卡）：什麼道具都能用，但要比「救起來的期望」便宜；期望＝價值 −
  *   還剩幾層 × 每層平均的花費（約 246）。角色卡一張值多少玩家自己填（乘上張數）
- * - 買得到的（GEM、石楠3、EXP）：**只准石楠1**，而且期望＝價值 × 0.687^層數 要比它貴
- * - 沒有特定目標（往上看前幾層、渦二沒了找 GEM／渦一）：不救
+ * - 買得到的（沒勾渦二時的 GEM、石楠3、EXP）：**只准石楠1**，而且期望＝價值 × 0.687^層數 要比它貴
+ * - 沒有特定目標（往上看前幾層）：不救
  *
  * 不救、或沒有能用的道具：玩家開了「允許直接結束」就按結束遊戲（check_bonus_quit），
  * 沒開就停下來交還給玩家。
@@ -269,7 +274,7 @@ import { WEBPACK_REQUIRE_SNIPPET } from "./patch-penalty.js";
 const FLAG = "__ulrItemPanel";
 
 /** 腳本版本。**改動注入腳本裡任何一行就 +1**，修 bug 也算。 */
-export const ITEM_PANEL_SCRIPT_VERSION = 11;
+export const ITEM_PANEL_SCRIPT_VERSION = 12;
 
 /** 官方 AvatarItem.APRestoreID（2026-09-26）：精靈、古代、魔女、特製蘑菇萃取液、聖杯的碎片。 */
 export const AP_RESTORE_ITEM_IDS = [1, 2, 3, 38, 133] as const;
@@ -367,13 +372,11 @@ export interface BonusClimbGoals {
   chara2Within: number;
   chara3: boolean;
   chara3Within: number;
-  /** 渦二：一路爬到 `raid2Max` 層去找，過了還沒有就拿 GEM 或渦一。 */
+  /** 渦二：一路爬到 `raid2Max` 層（止損點）去找，過了還沒有就改拿 GEM。只有勝場那組，敗場永遠 false。 */
   raid2: boolean;
   raid2Max: number;
   /** 爬到 100 層就停，路上不拿獎勵。 */
   floor100: boolean;
-  raid1: boolean;
-  raid1Within: number;
   /** 白色石楠3（玩家 2026-10-11：「敗場增加選項：花3」；托盤只在敗場那組畫出來）。 */
   heather3: boolean;
   heather3Within: number;
@@ -403,7 +406,8 @@ export const BONUS_CLIMB_FLOOR = 100;
 
 export const DEFAULT_BONUS_CLIMB_GOALS: BonusClimbGoals = {
   gem: false,
-  gemWithin: 6,
+  // 玩家 2026-10-18：「GEM 在前八格拿」
+  gemWithin: 8,
   chara1: false,
   chara1Within: 6,
   chara2: false,
@@ -411,10 +415,9 @@ export const DEFAULT_BONUS_CLIMB_GOALS: BonusClimbGoals = {
   chara3: false,
   chara3Within: 6,
   raid2: false,
-  raid2Max: 105,
+  // 玩家 2026-10-18：「止損點設為 160」
+  raid2Max: 160,
   floor100: false,
-  raid1: false,
-  raid1Within: 6,
   heather3: false,
   heather3Within: 6,
   exp: false,
@@ -435,12 +438,11 @@ export const DEFAULT_BONUS_CLIMB: BonusClimbConfig = {
 
 /**
  * 看到好幾種勾選的目標時先拿哪一種，一層一層比（玩家 2026-10-11）：
- * 渦二 → 渦一（「渦一比角色卡稀有」）→ 角色卡／GEM／石楠3 **誰近拿誰**（「就近優先」）→ EXP
- * （照 Moon 的算法只值兩位數 GEM，墊底）。
+ * 渦二 → 角色卡／GEM／石楠3 **誰近拿誰**（「就近優先」）→ EXP（照 Moon 的算法只值兩位數 GEM，墊底）。
+ * 渦一 2026-10-18 拿掉了（見檔頭 ⑬）。
  */
 export const BONUS_CLIMB_TIERS = [
   ["raid2"],
-  ["raid1"],
   ["chara1", "chara2", "chara3", "gem", "heather3"],
   ["exp"],
 ] as const;
@@ -462,7 +464,7 @@ export const BONUS_CLIMB_EASY_DICE = [2, 3, 11, 12] as const;
  * （玩家 2026-10-11：「要像 Moon 腳本一樣計算 CP 值」）。
  *
  * - 道具的價錢：石楠是商店價；四葉草、跳越星商店沒賣，比照石楠5（估的）
- * - 目標的價值：渦二 8000、渦一 2500、石楠3 540；角色卡一張多少玩家自己填（預設 150，
+ * - 目標的價值：渦二 10000（玩家 2026-10-18；一定要到，其實用不到）、石楠3 540；角色卡一張多少玩家自己填（預設 150，
  *   等級不算，只看張數）；GEM 卡＝結算的 gem_base × 卡上的倍率 × GEM 加成、經驗卡＝
  *   exp_base × 卡上的倍率 × 0.1（都是當場讀 Result 的 result_params）
  * - 爬一層猜對的機率：兩顆骰子的和、猜好的那邊，對所有底數取期望 ≈ 0.687
@@ -476,8 +478,7 @@ export const BONUS_ITEM_PRICES: Readonly<Record<number, number>> = {
   [BONUS_STAR]: 900,
 };
 export const BONUS_CLIMB_VALUES = {
-  raid2: 8000,
-  raid1: 2500,
+  raid2: 10000,
   heather3: HEATHER_3_PRICE,
 } as const;
 
@@ -517,7 +518,7 @@ function clampInt(v: unknown, range: { min: number; max: number }, fallback: num
   return Math.min(range.max, Math.max(range.min, Math.round(v)));
 }
 
-function normalizeBonusClimbGoals(v: unknown): BonusClimbGoals {
+function normalizeBonusClimbGoals(v: unknown, group: "win" | "lose"): BonusClimbGoals {
   const o = (typeof v === "object" && v !== null ? v : {}) as Record<string, unknown>;
   const d = DEFAULT_BONUS_CLIMB_GOALS;
   const within = (k: keyof BonusClimbGoals): number =>
@@ -531,11 +532,10 @@ function normalizeBonusClimbGoals(v: unknown): BonusClimbGoals {
     chara2Within: within("chara2Within"),
     chara3: o["chara3"] === true,
     chara3Within: within("chara3Within"),
-    raid2: o["raid2"] === true,
+    // 敗場不找渦二：舊設定檔勾著的也當沒勾（托盤不畫那一格，留著會看不見地一直爬）
+    raid2: group === "win" && o["raid2"] === true,
     raid2Max: clampInt(o["raid2Max"], BONUS_CLIMB_RAID2_MAX_RANGE, d.raid2Max),
     floor100: o["floor100"] === true,
-    raid1: o["raid1"] === true,
-    raid1Within: within("raid1Within"),
     heather3: o["heather3"] === true,
     heather3Within: within("heather3Within"),
     exp: o["exp"] === true,
@@ -554,8 +554,8 @@ export function normalizeBonusClimb(v: unknown): BonusClimbConfig {
       BONUS_CLIMB_CHARA_VALUE_RANGE,
       DEFAULT_BONUS_CLIMB.charaValue,
     ),
-    win: normalizeBonusClimbGoals(o["win"]),
-    lose: normalizeBonusClimbGoals(o["lose"]),
+    win: normalizeBonusClimbGoals(o["win"], "win"),
+    lose: normalizeBonusClimbGoals(o["lose"], "lose"),
   };
 }
 
@@ -800,7 +800,6 @@ export function buildItemPanelPatchScript(options: ItemPanelPatchOptions): strin
     climbItemsTarget: BONUS_CLIMB_ITEMS_NEXT_IS_TARGET,
     climbEasy: BONUS_CLIMB_EASY_DICE,
     climbFloor: BONUS_CLIMB_FLOOR,
-    climbRaid1: RAID_DETECTOR_1,
     climbRaid2: RAID_DETECTOR_2,
     climbHeather3: BONUS_HEATHER_3,
     // 猜錯時的估價（跟 Moon 同一套）
@@ -1887,8 +1886,7 @@ export function buildItemPanelPatchScript(options: ItemPanelPatchOptions): strin
   function climbKind(r, charas) {
     if (!r) return null;
     if (r.reward_type === 3) {
-      return r.reward_id === CFG.climbRaid2 ? "raid2" : r.reward_id === CFG.climbRaid1 ? "raid1"
-        : r.reward_id === CFG.climbHeather3 ? "heather3" : null;
+      return r.reward_id === CFG.climbRaid2 ? "raid2" : r.reward_id === CFG.climbHeather3 ? "heather3" : null;
     }
     if (r.reward_type === 5) return "gem";
     if (r.reward_type === 9) return r.reward_id === 2 ? "gem" : r.reward_id === 1 ? "exp" : null;
@@ -1900,8 +1898,8 @@ export function buildItemPanelPatchScript(options: ItemPanelPatchOptions): strin
     for (var i = 0; i < 3; i++) if (charas[i] !== null && charas[i] === c.chara) return "chara" + (i + 1);
     return null;
   }
-  // 腳下（rewards[3]）加後面三張裡挑。回 { act: get／next／stop, what, cell, off }；
-  // off 是目標離腳下幾層，往上找（沒有特定目標）時是 null
+  // 腳下（rewards[3]）加後面三張裡挑。回 { act: get／next／stop, what, cell, off, hard }；
+  // off 是目標離腳下幾層，往上找（沒有特定目標）時是 null；hard＝猜錯一律救（勾了渦二時的 GEM）
   function climbPlan(goals, start, step, rewards, charas) {
     var near = {};
     for (var k = 0; k <= CFG.climbSee; k++) {
@@ -1916,14 +1914,18 @@ export function buildItemPanelPatchScript(options: ItemPanelPatchOptions): strin
       for (var t = 0; t < CFG.climbTiers[i].length; t++) {
         var kd = CFG.climbTiers[i][t], off = near[kd];
         if (off === undefined) continue;
+        // 過了止損點只改拿 GEM（不拿渦一，玩家 2026-10-18）
         var want = kd === "raid2" ? goals.raid2
-          : (goals[kd] && inFirst(goals[kd + "Within"], off)) || (pastCap && (kd === "gem" || kd === "raid1"));
+          : (goals[kd] && inFirst(goals[kd + "Within"], off)) || (pastCap && kd === "gem");
         if (want && (best === null || off < best.off)) best = { what: kd, off: off };
       }
-      if (best !== null) return { act: best.off === 0 ? "get" : "next", what: best.what, cell: step + best.off, off: best.off };
+      if (best !== null) {
+        return { act: best.off === 0 ? "get" : "next", what: best.what, cell: step + best.off, off: best.off,
+          hard: goals.raid2 && best.what === "gem" };
+      }
     }
     if (goals.raid2) {
-      return pastCap ? { act: "next", what: "seekGem", cell: null, off: null }
+      return pastCap ? { act: "next", what: "seekGem", cell: null, off: null, hard: true }
         : { act: "next", what: "seekRaid2", cell: goals.raid2Max, off: null };
     }
     if (goals.floor100) {
@@ -1960,16 +1962,16 @@ export function buildItemPanelPatchScript(options: ItemPanelPatchOptions): strin
     return (CFG.climbValues[kind] || 0) * n;
   }
   // 猜錯要不要救、用哪一個。回 { id } 或 { id: null, why: notWorth／noItem }。跟 Moon 的 選花() 同一套：
-  // - 一定要到的（渦二、往上找渦二、100 層）：不算划不划算，有能用的就用
-  // - 稀有的（渦一、角色卡）：什麼道具都能用，但第一個能用的要比「救起來的期望」便宜；
+  // - 一定要到的（渦二、往上找渦二、100 層、勾了渦二時的 GEM 與往上找 GEM）：不算划不划算，有能用的就用
+  // - 稀有的（角色卡）：什麼道具都能用，但第一個能用的要比「救起來的期望」便宜；
   //   期望＝價值 − 還剩幾層 x 每層的花費
-  // - 買得到的（GEM、石楠3）：只准石楠1，而且期望＝價值 x 勝率^層數（猜錯就不再救）要比它貴
-  // - 沒有特定目標（往上看、渦二沒了找 GEM）：不救
+  // - 買得到的（沒勾渦二時的 GEM、石楠3）：只准石楠1，而且期望＝價值 x 勝率^層數（猜錯就不再救）要比它貴
+  // - 沒有特定目標（往上看前幾層）：不救
   // 道具順序：夠用的小石楠先；大的照 石楠5、跳越星、四葉草。下一層就是目標、而且拿骰壞的
   // 那一顆當底數重猜幾乎必中（2、3、11、12）時四葉草先 —— 過關道具白送的那個好猜底數用不到
   function climbRescue(plan, have, d, rewards, charaValue) {
-    var hard = plan.what === "raid2" || plan.what === "seekRaid2" || plan.what === "floor100";
-    var rare = hard || plan.what === "raid1" || plan.what.indexOf("chara") === 0;
+    var hard = plan.hard === true || plan.what === "raid2" || plan.what === "seekRaid2" || plan.what === "floor100";
+    var rare = hard || plan.what.indexOf("chara") === 0;
     var expect = 0;
     if (!hard) {
       if (plan.off === null) return { id: null, why: "notWorth" };
