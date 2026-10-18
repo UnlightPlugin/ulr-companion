@@ -2098,6 +2098,27 @@ describe("獎勵遊戲自動爬星", () => {
     run(ITEM_PANEL_UNINSTALL_EXPRESSION);
   });
 
+  it("看得到好幾張 GEM：挑期望值最高的，不是最近的（玩家 2026-10-18）", async () => {
+    // 結算基數 37、加成 150：x19 → 1054、x30 → 1665
+    const big: Reward = { reward_type: 9, reward_id: 2, reward_amount: 3000 };
+    const cells = { 75: GEM_CARD, 77: big };
+    // 沒勾渦二（猜錯只准石楠1）：1665 x 0.687² ≈ 786 < 1054 → 腳下那張
+    const a = climbGame({ start: 75, base: 5, cells });
+    const ra = start(a, climb({ gem: true, gemWithin: 8 }));
+    expect(ra.status()).toMatchObject({ what: "gem", cell: 75 });
+    ra.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+    // 勾了渦二（猜錯一律救）：1665 − 2 x 90 = 1485 > 1054 → 往上追 x30 那張
+    const b = climbGame({ start: 75, base: 5, cells });
+    const rb = start(b, climb({ gem: true, gemWithin: 8, raid2: true }));
+    expect(rb.status()).toMatchObject({ what: "gem", cell: 77 });
+    rb.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+    // 窗外（前 2 層以外）的那張再值錢也不算
+    const c = climbGame({ start: 75, base: 5, cells });
+    const rc = start(c, climb({ gem: true, gemWithin: 2, raid2: true }));
+    expect(rc.status()).toMatchObject({ what: "gem", cell: 75 });
+    rc.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
+  });
+
   it("經驗的加成卡（同一種 type、id 不同）不是 GEM", async () => {
     const game = climbGame({ start: 75, base: 5, cells: { 75: EXP_CARD, 76: GEM_CARD } });
     const { run } = start(game, climb({ gem: true }));
@@ -2409,17 +2430,18 @@ describe("獎勵遊戲自動爬星", () => {
 
   it("角色卡的價值照玩家填的算（x 張數）：填得低就不值得花石楠5", async () => {
     const mk = () => climbGame({ start: 75, base: 6, cells: { 76: card(461, 7) }, rolls: [2] });
-    // 預設一張 150：150 x 7 − 246 = 804，比四葉草／石楠5（900）便宜 → 差 4 不救
+    // 一張填 120：120 x 7 − 90 = 750，比四葉草／石楠5（900）便宜 → 差 4 不救
+    // （預設 150 的話 1050 − 90 = 960，會救）
     const a = mk();
-    const ra = start(a, climb({ chara1: true }));
+    const ra = start(a, { ...climb({ chara1: true }), charaValue: 120 });
     await play();
     expect(a.B["use_bonus_item"]).not.toHaveBeenCalled();
     expect(ra.status().stopped).toBe("notWorth");
     ra.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
 
-    // 同一張卡差 3：石楠3（540）比 804 便宜 → 救
+    // 同一張卡差 3：石楠3（540）比 750 便宜 → 救
     const near = climbGame({ start: 75, base: 5, cells: { 76: card(461, 7) }, rolls: [2] });
-    const rn = start(near, climb({ chara1: true }));
+    const rn = start(near, { ...climb({ chara1: true }), charaValue: 120 });
     await play();
     expect(near.log).toMatchObject({ items: [6], got: 76 });
     rn.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
@@ -2472,9 +2494,9 @@ describe("獎勵遊戲自動爬星", () => {
     rb.run(ITEM_PANEL_UNINSTALL_EXPRESSION);
   });
 
-  it("估價的常數跟 Moon 對得上：一層的勝率 0.687、每層花費 246", () => {
+  it("估價的常數：一層的勝率 0.687（跟 Moon 一樣）、每層花費 90（Moon 爬星紀錄的實際值）", () => {
     expect(BONUS_CLIMB_WIN_RATE).toBeCloseTo(0.687, 3);
-    expect(Math.round(BONUS_CLIMB_STEP_COST)).toBe(246);
+    expect(BONUS_CLIMB_STEP_COST).toBe(90);
     expect(bonusGuessWinRate(2)).toBeCloseTo(35 / 36, 6);
     expect(bonusGuessWinRate(7)).toBeCloseTo(15 / 36, 6);
   });

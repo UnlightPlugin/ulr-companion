@@ -244,7 +244,7 @@
  * - 勾了渦二時的 GEM（前幾層的、過了止損點的、過了止損點往上找 GEM）：一樣不算 —— 照 Moon
  *   （先撿 GEM 與退路都是「硬拿」）：摔了這一場就結束，前面爬的全白付，救一朵比較便宜
  * - 稀有的（角色卡）：什麼道具都能用，但要比「救起來的期望」便宜；期望＝價值 −
- *   還剩幾層 × 每層平均的花費（約 246）。角色卡一張值多少玩家自己填（乘上張數）
+ *   還剩幾層 × 每層平均的花費（90，見 BONUS_CLIMB_STEP_COST）。角色卡一張值多少玩家自己填（乘上張數）
  * - 買得到的（沒勾渦二時的 GEM、石楠3、EXP）：**只准石楠1**，而且期望＝價值 × 0.687^層數 要比它貴
  * - 沒有特定目標（往上看前幾層）：不救
  *
@@ -274,7 +274,7 @@ import { WEBPACK_REQUIRE_SNIPPET } from "./patch-penalty.js";
 const FLAG = "__ulrItemPanel";
 
 /** 腳本版本。**改動注入腳本裡任何一行就 +1**，修 bug 也算。 */
-export const ITEM_PANEL_SCRIPT_VERSION = 12;
+export const ITEM_PANEL_SCRIPT_VERSION = 13;
 
 /** 官方 AvatarItem.APRestoreID（2026-09-26）：精靈、古代、魔女、特製蘑菇萃取液、聖杯的碎片。 */
 export const AP_RESTORE_ITEM_IDS = [1, 2, 3, 38, 133] as const;
@@ -509,9 +509,14 @@ export const BONUS_CLIMB_WIN_RATE = Object.entries(DICE_WAYS).reduce(
   (sum, [k, ways]) => sum + (ways / 36) * bonusGuessWinRate(Number(k)),
   0,
 );
-/** 會花道具去救的目標，每爬一層平均要付多少 GEM：(1−p)/p 朵石楠3。 */
-export const BONUS_CLIMB_STEP_COST =
-  ((1 - BONUS_CLIMB_WIN_RATE) / BONUS_CLIMB_WIN_RATE) * HEATHER_3_PRICE;
+/**
+ * 會花道具去救的目標，每爬一層平均要付多少 GEM。
+ *
+ * ⚠ 不是公式 (1−p)/p 朵石楠3（≈ 246）：那假設每次猜錯都花一朵石楠3，實際上差距小的
+ * 多半石楠1 就救起來了。玩家 2026-10-18：「爬星一步期望大約 90 GEM」；Moon 的爬星紀錄
+ * （10-01 起主號 1571 場、9916 步）是每步 86.7，找渦二那 143 場 89.7。
+ */
+export const BONUS_CLIMB_STEP_COST = 90;
 
 function clampInt(v: unknown, range: { min: number; max: number }, fallback: number): number {
   if (typeof v !== "number" || !Number.isFinite(v)) return fallback;
@@ -1901,13 +1906,25 @@ export function buildItemPanelPatchScript(options: ItemPanelPatchOptions): strin
   // 腳下（rewards[3]）加後面三張裡挑。回 { act: get／next／stop, what, cell, off, hard }；
   // off 是目標離腳下幾層，往上找（沒有特定目標）時是 null；hard＝猜錯一律救（勾了渦二時的 GEM）
   function climbPlan(goals, start, step, rewards, charas) {
+    var pastCap = goals.raid2 && step >= goals.raid2Max;
+    var inFirst = function (within, k) { return step + k <= start + within - 1; };
     var near = {};
     for (var k = 0; k <= CFG.climbSee; k++) {
       var kind = climbKind(rewards[3 + k], charas);
-      if (kind !== null && near[kind] === undefined) near[kind] = k;
+      if (kind !== null && kind !== "gem" && near[kind] === undefined) near[kind] = k;
     }
-    var pastCap = goals.raid2 && step >= goals.raid2Max;
-    var inFirst = function (within, k) { return step + k <= start + within - 1; };
+    // GEM 不挑最近的，挑期望值最高的那張（玩家 2026-10-18：「可以追期望高的」；跟 Moon 的
+    // _看得到的GEM 同一套）：勾了渦二（猜錯一律救）＝價值 − 層數 × 每層花費，沒勾＝價值 × 勝率^層數。
+    // 讀不到結算基數時每張都是 0，一樣大就留最近的
+    var gemBest = -Infinity;
+    for (var g = 0; g <= CFG.climbSee; g++) {
+      var gr = rewards[3 + g];
+      if (climbKind(gr, charas) !== "gem") continue;
+      if (!((goals.gem && inFirst(goals.gemWithin, g)) || pastCap)) continue;
+      var gv = climbValue("gem", gr, 0);
+      var ge = goals.raid2 ? gv - g * CFG.climbStepCost : gv * Math.pow(CFG.climbWinRate, g);
+      if (ge > gemBest) { gemBest = ge; near.gem = g; }
+    }
     // 一層一層比：前面那層有就不看後面的；同一層裡誰近拿誰
     for (var i = 0; i < CFG.climbTiers.length; i++) {
       var best = null;
