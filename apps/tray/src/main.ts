@@ -59,13 +59,10 @@ import {
   findBrowser,
   HIDDEN_STAGES,
   loadExtensionArgs,
-  isCharaPickerMode,
   resolveDebugPort,
   SELECTABLE_STAGES,
 } from "@ulr/cdp-adapter";
-import type { CharaPickerMode, HiddenStageStatus } from "@ulr/cdp-adapter";
-import { catalogSize } from "@ulr/rule-schema";
-import { writeCatalog } from "./catalog-store.js";
+import type { HiddenStageStatus } from "@ulr/cdp-adapter";
 import { ensureCardArtDir } from "./card-art.js";
 import { trayIconPng } from "./icon.js";
 import type { IconState } from "./icon.js";
@@ -75,26 +72,15 @@ import { readRaidBattles, writeRaidBattles } from "./raid-battle-store.js";
 import { readRaidOutcomes, writeRaidOutcomes } from "./raid-outcome-store.js";
 import { readRaidLearned, writeRaidLearned } from "./raid-learned-store.js";
 import { readQuestBonus, writeQuestBonus } from "./quest-bonus-store.js";
-import type {
-  ClientKind,
-  CostRuleMode,
-  DeckMode,
-  MatchPrefs,
-  Profile,
-  ProfileStore,
-} from "./profiles.js";
+import type { ClientKind, CostRuleMode, MatchPrefs, Profile, ProfileStore } from "./profiles.js";
 import {
   addProfile,
   clientLabel,
-  isDeckMode,
   kindTaken,
   loadStore,
   markUsed,
   MAX_APPLY_DELAY_SECONDS,
   MIN_APPLY_DELAY_SECONDS,
-  normalizeApplyDelaySeconds,
-  normalizeEditStep,
-  normalizeEditUnit,
   normalizeMatchPrefs,
   removeProfile,
   resolveProfile,
@@ -105,28 +91,15 @@ import {
 import {
   applyCostRule,
   applyPendingReload,
-  changeCostRule,
   COST_FILE_FILTERS,
   costRule,
   costRuleError,
   costRuleFull,
   costRuleOrigin,
-  editorPayload,
   forgetAutoReload,
-  gameVersionNow,
   initCostRuleRuntime,
-  loadCostRule,
-  pushCostRuleToEngine,
-  saveEditedRule,
-  setCatalog,
 } from "./cost-rule-runtime.js";
-import type {
-  CostRuleFailure,
-  CostRuleInfo,
-  CostRuleOrigin,
-  EditorPayload,
-  EditorSaveResult,
-} from "./cost-rule-runtime.js";
+import type { CostRuleFailure, CostRuleInfo, CostRuleOrigin } from "./cost-rule-runtime.js";
 import { APP_DIR } from "./app-dir.js";
 import {
   CARD_ART_BLANKS_PATH,
@@ -147,17 +120,15 @@ import {
   currentDeckSyncStatus,
   initDeckRuntime,
   onDeckPageReload,
-  pushCharaPicker,
-  pushDeckState,
   repushDeckOverlays,
   resetDeckSession,
-  runDeckSync,
   startDeckRuntime,
-  stopDeckCloudSync,
   stopDeckRuntime,
 } from "./deck-runtime.js";
 import type { DeckSyncStatus } from "./deck-runtime.js";
 import { registerBonusPage } from "./pages/bonus-page.js";
+import { registerCostPage } from "./pages/cost-page.js";
+import { registerDeckPage } from "./pages/deck-page.js";
 import { battleSurrenderOptions, registerDietPage } from "./pages/diet-page.js";
 import { registerQuestPage } from "./pages/quest-page.js";
 import {
@@ -1046,64 +1017,6 @@ app.whenReady().then(() => {
     },
   );
   /**
-   * 選一份 COST 規則檔。
-   *
-   * ⚠ 檔案選擇框開在**主程序**，渲染層永遠碰不到路徑字串以外的東西 ——
-   * `preload.ts` 的介面刻意小，這裡不能為了方便就把 fs 攤出去。
-   */
-  ipcMain.handle("ulr:cost-pick", async () => {
-    const owner = window;
-    const result = await (owner === null
-      ? dialog.showOpenDialog({ properties: ["openFile"], filters: COST_FILE_FILTERS })
-      : dialog.showOpenDialog(owner, { properties: ["openFile"], filters: COST_FILE_FILTERS }));
-
-    const picked = result.canceled ? undefined : result.filePaths[0];
-    if (picked === undefined) return snapshot();
-
-    // ⚠ 選了檔就等於離開預設模式。少了 `costRuleMode` 這一格的話，下次開機
-    // 會被預設規則蓋回去 —— 而畫面上寫著他選的那個檔名。
-    editProfile(profile.id, { costRulePath: picked, costRuleMode: "file" });
-    changeCostRule();
-    pushState();
-    return snapshot();
-  });
-
-  /**
-   * 換 COST 規則的來源（預設／自己的檔／停用）。
-   *
-   * ⚠ 切回 `file` 時**沿用上次選過的路徑**，沒選過就什麼都不載 —— 畫面那邊
-   * 會顯示「還沒選檔」並附上選檔按鈕。這比「切過去就跳檔案選擇框」好：
-   * 玩家可能只是想看看有哪些選項。
-   */
-  ipcMain.handle("ulr:cost-mode", (_event, raw: unknown) => {
-    const mode: CostRuleMode = raw === "file" || raw === "off" ? raw : "default";
-    editProfile(profile.id, { costRuleMode: mode });
-    changeCostRule();
-    if (mode === "off") log("· 自訂 COST 已停用（遊戲畫面當場換回原版數字）");
-    pushState();
-    return snapshot();
-  });
-
-  /** 取消套用，回到原版數字。 */
-  ipcMain.handle("ulr:cost-clear", () => {
-    editProfile(profile.id, { costRuleMode: "off" });
-    changeCostRule();
-    log("· 自訂 COST 已停用（遊戲畫面當場換回原版數字）");
-    pushState();
-    return snapshot();
-  });
-
-  /**
-   * 遊戲畫面上套不套自訂 COST（見 `Profile.customCostInGame`）。規則不動。
-   *
-   * ⚠ **不重載**（玩家 2026-10-11：「官方和自訂 COST 切換都不用重載」）。兩個方向
-   * 都由引擎當場改快取：打開走 `installCostOverridesLive`，關掉走
-   * `revertCostOverrides`（把頁面上留著的自訂價與自訂表收掉）。
-   *
-   * ⚠ 走 `profile = {...}` 而不是 `editProfile`：臨時配置不在清單裡，
-   * `editProfile` 對它是空操作。
-   */
-  /**
    * 設置 › 關於 的「檢查更新」：現在就問一次，不必等每小時那一輪。
    *
    * 跟自動的同一條路（updater.ts 的 `checkNow`）：有新版就下載，不在對戰中就當場
@@ -1115,190 +1028,20 @@ app.whenReady().then(() => {
     return await updater.checkNow();
   });
 
-  ipcMain.handle("ulr:cost-in-game", (_event, on: unknown) => {
-    if (typeof on === "boolean" && on !== profile.customCostInGame) {
-      patchProfile({ customCostInGame: on });
-      pushCostRuleToEngine();
-      log(
-        on
-          ? "· 遊戲裡套用自訂 COST（迪特赫姆、牌組編輯）"
-          : "· 遊戲裡不套用自訂 COST（迪特赫姆、牌組編輯都是官方價）",
-      );
-      pushState();
-    }
-    return snapshot();
+  // 自訂COST 與 牌組 那幾頁（pages/cost-page.ts、pages/deck-page.ts）
+  registerCostPage(ipcMain, trayCtx, {
+    pickCostFile: async () => {
+      const owner = window;
+      const result = await (owner === null
+        ? dialog.showOpenDialog({ properties: ["openFile"], filters: COST_FILE_FILTERS })
+        : dialog.showOpenDialog(owner, { properties: ["openFile"], filters: COST_FILE_FILTERS }));
+      return result.canceled ? undefined : result.filePaths[0];
+    },
+    editProfile: (id, patch) => editProfile(id, patch),
+    snapshot: () => snapshot(),
+    latest: () => latest,
   });
-
-  // -------------------------------------------------------------------------
-  // 編輯 COST
-  // -------------------------------------------------------------------------
-
-  ipcMain.handle("ulr:editor-load", (): EditorPayload => editorPayload());
-
-  /**
-   * 改上下鍵的幅度並**記進配置**。不碰遊戲、不碰規則檔，只是偏好。
-   *
-   * ⚠ 走 `profile = {...}` 而不是 `editProfile`：臨時配置（`--port` 對不上任何
-   * 一份時建的）不在清單裡，`editProfile` 對它是完全的空操作 —— 症狀是「改了
-   * 幅度，下一次重畫又跳回去」。跟 `ulr:set-tint`、`ulr:match-prefs` 同一招。
-   */
-  /**
-   * 改「等候套用」的秒數並記進配置。
-   *
-   * ⚠ 跟 `ulr:editor-step` 同一招（`profile = {...}` 而不是 `editProfile`）：
-   * 臨時配置不在清單裡，`editProfile` 對它是空操作 —— 症狀是「改了秒數，下一次
-   * 重畫又跳回去」。
-   *
-   * ⚠ **不必去通知頁面**。閘門那邊只認「有沒有東西沒寫」這個布林，秒數是托盤
-   * 這一端在算的（`deckApplyTick`）。
-   */
-  ipcMain.handle("ulr:deck-apply-delay", (_event, raw: unknown): number => {
-    const next = normalizeApplyDelaySeconds(raw);
-    patchProfile({ applyDelaySeconds: next });
-    pushState();
-    return next;
-  });
-
-  /**
-   * 牌組替換模式（插件／官方三牌組／關閉）。
-   *
-   * 切換時牌組庫**整份重新接上**（`resetDeckSession()`，下一拍 `initDeckLibrary()`）：
-   * 兩種模式對伺服器三格的用法不一樣 —— 插件模式要把 Deck2／Deck3 收進庫裡清空，
-   * 官方模式三格都是玩家的牌 —— 而接上那一步正是分流的地方。關閉就把選單拆掉、
-   * 房間不再預載不再攔。
-   */
-  ipcMain.handle("ulr:deck-mode", async (_event, raw: unknown): Promise<DeckMode> => {
-    if (!isDeckMode(raw) || raw === profile.deckMode) return profile.deckMode;
-    patchProfile({ deckMode: raw });
-    log(
-      raw === "plugin"
-        ? "· 牌組替換：插件模式（四房各存牌組、只用 Deck1；Deck2／Deck3 會收進庫裡清空）"
-        : raw === "official"
-          ? "· 牌組替換：官方三牌組（進房換上那一房的前三副）"
-          : "· 牌組替換：關閉（插件不碰牌組）",
-    );
-    resetDeckSession();
-    await pushDeckState();
-    pushState();
-    return profile.deckMode;
-  });
-
-  /**
-   * 牌組編輯畫面 [Chara] 鈕的代表卡（`L1`..`L5`／`R`），`off` = 不畫那顆鈕。
-   * 立刻生效：只是推新狀態，頁面下次打開角色一覽就用新的挑法。
-   */
-  ipcMain.handle("ulr:chara-picker", (_event, raw: unknown): CharaPickerMode => {
-    if (!isCharaPickerMode(raw) || raw === profile.charaPicker) return profile.charaPicker;
-    patchProfile({ charaPicker: raw });
-    pushCharaPicker();
-    pushState();
-    return profile.charaPicker;
-  });
-
-  /** 雲端牌組同步開關。打開時馬上同步一輪。 */
-  ipcMain.handle("ulr:deck-cloud-sync", (_event, on: unknown): boolean => {
-    if (typeof on === "boolean") {
-      // 跟 `ulr:stages-set` 同一招：先改記憶體、非臨時配置才落地。
-      patchProfile({ deckCloudSync: on });
-      if (on) {
-        log("· 牌組跨電腦同步已開啟");
-        void runDeckSync();
-      } else {
-        stopDeckCloudSync();
-        log("· 牌組跨電腦同步已關閉（只用這台電腦的）");
-      }
-      pushState();
-    }
-    return profile.deckCloudSync;
-  });
-
-  ipcMain.handle("ulr:editor-step", (_event, raw: unknown): number => {
-    const next = normalizeEditStep(raw);
-    patchProfile({ editStep: next });
-    return next;
-  });
-
-  /**
-   * 改「最小單位」檢查的值並記進配置。**0 = 不檢查。**
-   *
-   * ⚠ 這**不會動到規則檔**。最小單位不是規則的欄位，是編輯器的工具設定 ——
-   * 作者要讓拿到規則的人知道，得自己寫進「編輯描述」的說明欄（那一欄現在在
-   * 「Cost 表」那一頁讀得到）。完整理由見 `profiles-core.ts` 的
-   * `normalizeEditUnit`。
-   */
-  ipcMain.handle("ulr:editor-unit", (_event, raw: unknown): number => {
-    const next = normalizeEditUnit(raw);
-    patchProfile({ editUnit: next });
-    return next;
-  });
-
-  /**
-   * 從跑著的遊戲重讀名冊。
-   *
-   * ⚠ **套用中的客戶端讀不得。** `patch-cost` 是就地改寫 Phaser 快取，套過之後
-   * 讀回來的「原價」會是上一份規則的數字 —— 而編輯器的「改回原價」與價差色階
-   * 正是拿它當基準，於是玩家按下去會改回一個他從來沒設過的值。
-   *
-   * ⚠ 下面這道閘**只是快路**（省一趟 CDP 往返，訊息也講得清楚一點）。它問的是
-   * 插件記著的狀態，而那擋不住「停用了但沒重載」「剛換一份規則」「托盤重開過」
-   * 這三種頁面仍然是髒的情況 —— 真正的判斷在 `readCardCatalog` 裡問頁面自己。
-   * **不要**因為這裡有檢查就把那邊的拿掉。
-   */
-  ipcMain.handle("ulr:editor-catalog", async (): Promise<EditorPayload> => {
-    if (engine === null) return { ...editorPayload(), catalogError: "還沒接上遊戲。" };
-    if (latest?.cost.phase === "applied") {
-      return {
-        ...editorPayload(),
-        catalogError:
-          "目前的客戶端正套著自訂 COST，讀回來的「原價」會是改過的數字。" +
-          "請先在「Cost 表」按停用、重載遊戲，再回來讀一次。",
-      };
-    }
-    try {
-      const fresh = await engine.readCardCatalog(costRule?.gameVersion ?? gameVersionNow());
-      writeCatalog(fresh);
-      setCatalog(fresh);
-      const n = catalogSize(fresh);
-      log(
-        `✓ 已讀取卡片名冊：角色 ${n.characters}、怪物 ${n.monsters}、` +
-          `裝備 ${n.equipment}、事件卡 ${n.eventCards}`,
-      );
-      return editorPayload();
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      log(`✗ 讀取卡片名冊失敗：${message}`);
-      return { ...editorPayload(), catalogError: message };
-    }
-  });
-
-  /**
-   * 把編輯好的東西寫回**目前選著的那個檔**。
-   *
-   * 兩頁共用這一支：編輯 COST 送 `tables`、編輯規則送 `compression`。
-   * ⚠ **沒送到的部分會沿用檔案裡原本那份**（見 `saveEditedRule`）——
-   * 一頁存檔不該把另一頁的東西洗掉。
-   *
-   * ⚠ 就地覆寫、**不改檔名**。之前 `unpack` 的產物留在同一個資料夾裡，造成
-   * 「同一份規則有兩個檔」的困惑；每存一次就多一個檔會把同樣的問題放大。
-   * 版本號要不要動由作者自己決定（`version` 欄位），核對碼一律重算。
-   */
-  ipcMain.handle("ulr:editor-save", (_e, payload: unknown): EditorSaveResult => {
-    if (costRule === null || costRuleFull === null) {
-      return { ok: false, error: "還沒選規則檔。請先到「Cost 表」選一份。" };
-    }
-    try {
-      const saved = saveEditedRule(costRuleFull, costRule.path, payload);
-      // 存完立刻重新載入 —— 不重載的話畫面顯示的核對碼還是舊的，而那正是
-      // 玩家要拿去跟對手核對的東西。
-      loadCostRule(costRule.path);
-      pushState();
-      return { ok: true, shortHash: saved.short, version: saved.version };
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      log(`✗ 儲存 COST 表失敗：${message}`);
-      return { ok: false, error: message };
-    }
-  });
+  registerDeckPage(ipcMain, trayCtx);
 
   // -------------------------------------------------------------------------
   // 對戰地點（WP-18）
