@@ -67,6 +67,25 @@
  * registry 被別的場景刷新之後那份就已經含了 —— 再加會重複算。判斷方式是
  * **陣列參考換了沒**：記的時候順便記下當時的陣列，換了就把記錄丟掉。
  *
+ * ## ⚠ 開機時根本沒有 avatar_parts（2026-10-15 實測）
+ *
+ * 開機那一批 `update_data` 抓了 `chara_card`／`weapon_card`／`event_card`，
+ * **沒有 `avatar_parts`** —— registry 裡連那個鍵都沒有。只有物品房間（Item）
+ * 與商店（Shop）進場時才 `update_data(this, "avatar_parts")`。所以一開機直接
+ * 進暗房，Avatar 裝飾全都不會暗（專武、角色卡不受影響）。
+ *
+ * 不為這個多送請求。改成**記在遊戲頁面的 localStorage**：registry 裡有
+ * `avatar_parts`（玩家進過物品房間或商店）就把 parts_id 清單存下來；暗房裡
+ * registry 沒有時拿存的那份用。抽到的裝飾也順手加進去。一個角色一筆，鍵是
+ * 角色名＋`regist_at`（player_id 每次登入都換，不能當鍵）。
+ *
+ * 存的那份可能舊（別處拿到的裝飾要等下次進物品房間才會補上），舊的結果只是
+ * 「該暗沒暗」，不會把沒有的東西調暗。裝飾拿到就不會少，所以只加不減也安全；
+ * 但 registry 有的時候還是整份照它蓋過去。
+ *
+ * ⚠ 官方 `update_avatar_parts` 是**原地 push 進同一個陣列**再 set 回去，參考
+ * 不變 —— 偵測「清單變了」要連長度一起看。
+ *
  * ## 勾選放哪
  *
  * 官方兩個勾選在右邊：十連抽卡 y=406、自動選卡 y=424，間距 18。我們接在
@@ -91,13 +110,19 @@ const FLAG = "__ulrLot";
  * 腳本版本。**改動注入腳本裡任何一行就 +1**，修 bug 也算。
  * 先拆再裝，版本號是回報用的。
  */
-export const LOT_SCRIPT_VERSION = 2;
+export const LOT_SCRIPT_VERSION = 3;
 
 /** 輪詢間隔：等玩家進暗房、等 Lot 場景重建勾選。 */
 export const DEFAULT_LOT_POLL_MS = 300;
 
 /** 勾選狀態存在遊戲頁面 localStorage 的哪個鍵。 */
 export const LOT_DIM_STORAGE_KEY = "ulr.lot.dimOwned";
+
+/**
+ * 記下來的 Avatar 裝飾清單存在哪。後面接「角色名|regist_at」，一個角色一筆。
+ * 理由見檔頭「開機時根本沒有 avatar_parts」。
+ */
+export const LOT_PARTS_STORAGE_PREFIX = "ulr.lot.parts.";
 
 /** 調暗用的 tint。子物件逐一乘上這個色。 */
 export const LOT_DIM_TINT = 0x505050;
@@ -163,6 +188,11 @@ export interface LotStatus {
   mounted: boolean;
   /** 從官方回應記下、registry 還沒反映的獎品件數。 */
   won: number;
+  /**
+   * 這個角色記在 localStorage 的 Avatar 裝飾件數（讀不到角色或沒記過是 0）。
+   * registry 沒有 `avatar_parts` 時調暗靠這份。
+   */
+  savedParts: number;
   reason: string | null;
 }
 
@@ -260,6 +290,7 @@ const SHARED = `
       dimOwned: !!st.dim,
       mounted: alive(st.check),
       won: wonCount(st),
+      savedParts: st.parts ? Object.keys(st.parts.ids).length : 0,
       reason: st.reason
     };
   }
@@ -276,6 +307,7 @@ export function buildLotPatchScript(options: LotPatchOptions = {}): string {
     version: LOT_SCRIPT_VERSION,
     pollIntervalMs: options.pollIntervalMs ?? DEFAULT_LOT_POLL_MS,
     storageKey: LOT_DIM_STORAGE_KEY,
+    partsPrefix: LOT_PARTS_STORAGE_PREFIX,
     tint: LOT_DIM_TINT,
     label: DIM_LABEL,
     tooltip: DIM_TOOLTIP,
@@ -320,6 +352,11 @@ export function buildLotPatchScript(options: LotPatchOptions = {}): string {
     if (!k) return 0;
     var list = null;
     try { list = sc.registry.get(k.list); } catch (e) {}
+    // 開機後還沒進過物品房間／商店：registry 沒有 avatar_parts，用記下來的那份。
+    if (k.list === "avatar_parts" && !isList(list)) {
+      var sp = partsOf(sceneRegistry(sc));
+      return sp && sp.ids[item.id] ? 1 : 0;
+    }
     var n = 0;
     if (list && list.length) {
       for (var i = 0; i < list.length; i++) {
@@ -352,7 +389,90 @@ export function buildLotPatchScript(options: LotPatchOptions = {}): string {
       if (!w || w.ref !== list) w = st.won[k.list] = { ref: list, add: {} };
       var amt = typeof item.amount === "number" && item.amount > 0 ? item.amount : 1;
       w.add[item.id] = (w.add[item.id] || 0) + amt;
+      if (k.list === "avatar_parts") rememberPart(sceneRegistry(sc), item.id);
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // 記下來的 Avatar 裝飾（localStorage，一個角色一筆）
+  // -------------------------------------------------------------------------
+
+  function isList(v) {
+    return !!v && typeof v.length === "number";
+  }
+
+  /** 場景的 registry 就是 game.registry；不在暗房時直接拿 game 的。 */
+  function sceneRegistry(sc) {
+    if (sc && sc.registry) return sc.registry;
+    var g = window.game;
+    return g && g.registry ? g.registry : null;
+  }
+
+  /** 角色名＋註冊時間。player_id 每次登入都換，不能拿來當鍵。 */
+  function partsKey(reg) {
+    try {
+      var p = reg && reg.get("player");
+      if (!p || typeof p.player_name !== "string" || p.player_name.length === 0) return null;
+      return CFG.partsPrefix + p.player_name + "|" + String(p.regist_at || "");
+    } catch (e) { return null; }
+  }
+
+  /** 這個角色記著的那份。換了角色（登入別的帳號）就重讀。讀不到角色回 null。 */
+  function partsOf(reg) {
+    var st = window[FLAG];
+    var key = partsKey(reg);
+    if (!st || key === null) return null;
+    if (st.parts && st.parts.key === key) return st.parts;
+    var ids = {};
+    try {
+      var raw = window.localStorage.getItem(key);
+      var arr = raw ? JSON.parse(raw) : null;
+      if (isList(arr)) {
+        for (var i = 0; i < arr.length; i++) if (typeof arr[i] === "number") ids[arr[i]] = true;
+      }
+    } catch (e) {}
+    st.parts = { key: key, ids: ids, ref: null, len: -1 };
+    return st.parts;
+  }
+
+  function writeParts(sp) {
+    var arr = Object.keys(sp.ids).map(Number).sort(function (a, b) { return a - b; });
+    try { window.localStorage.setItem(sp.key, JSON.stringify(arr)); } catch (e) {}
+  }
+
+  /** 抽到一個裝飾：registry 不會跟著更新，直接加進記下來的那份。 */
+  function rememberPart(reg, id) {
+    var sp = partsOf(reg);
+    if (!sp || sp.ids[id]) return;
+    sp.ids[id] = true;
+    writeParts(sp);
+  }
+
+  /**
+   * registry 有 avatar_parts（進過物品房間或商店）就整份照它存起來，加上暗房
+   * 抽到、registry 還沒反映的。官方是原地 push，所以參考跟長度都沒變才跳過。
+   */
+  function syncParts(reg) {
+    var st = window[FLAG];
+    var sp = partsOf(reg);
+    if (!st || !sp) return;
+    var list = null;
+    try { list = reg.get("avatar_parts"); } catch (e) {}
+    if (!isList(list)) return;
+    if (sp.ref === list && sp.len === list.length) return;
+    var ids = {};
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && typeof list[i].parts_id === "number") ids[list[i].parts_id] = true;
+    }
+    var w = st.won.avatar_parts;
+    if (w && w.ref === list) {
+      var ks = Object.keys(w.add);
+      for (var j = 0; j < ks.length; j++) ids[ks[j]] = true;
+    }
+    sp.ids = ids;
+    sp.ref = list;
+    sp.len = list.length;
+    writeParts(sp);
   }
 
   function isExclusiveWeapon(sc, id) {
@@ -633,6 +753,8 @@ export function buildLotPatchScript(options: LotPatchOptions = {}): string {
     if (!st) return;
     try {
       var sc = sceneOf("Lot");
+      // 不管在哪個場景都看：物品房間／商店抓到 avatar_parts 的那一刻就記下來。
+      try { syncParts(sceneRegistry(sc)); } catch (e) {}
       if (!sc) return;
       hookPreview(sc);
       if (!sc.sys || !sc.sys.isActive || !sc.sys.isActive()) return;
@@ -660,6 +782,7 @@ export function buildLotPatchScript(options: LotPatchOptions = {}): string {
     dim: loadDim(),
     won: keepWon,
     cc: null,
+    parts: null,
     check: null,
     label: null,
     tip: null,
@@ -687,13 +810,14 @@ export const LOT_STATUS_EXPRESSION = `(function () {
     var st = window[FLAG];
     if (!st) {
       return JSON.stringify({
-        installed: false, version: null, dimOwned: false, mounted: false, won: 0, reason: null
+        installed: false, version: null, dimOwned: false, mounted: false, won: 0, savedParts: 0,
+        reason: null
       });
     }
     return JSON.stringify(statusOf(st));
   } catch (e) {
     return JSON.stringify({
-      installed: false, version: null, dimOwned: false, mounted: false, won: 0,
+      installed: false, version: null, dimOwned: false, mounted: false, won: 0, savedParts: 0,
       reason: String((e && e.message) || e)
     });
   }
@@ -729,6 +853,7 @@ export function parseLotStatus(raw: string): LotStatus {
       dimOwned: false,
       mounted: false,
       won: 0,
+      savedParts: 0,
       reason: `頁面回了讀不懂的東西：${raw.slice(0, 120)}`,
     };
   }
@@ -739,6 +864,7 @@ export function parseLotStatus(raw: string): LotStatus {
     dimOwned: o.dimOwned === true,
     mounted: o.mounted === true,
     won: typeof o.won === "number" ? o.won : 0,
+    savedParts: typeof o.savedParts === "number" ? o.savedParts : 0,
     reason: typeof o.reason === "string" ? o.reason : null,
   };
 }

@@ -28,6 +28,7 @@ import {
   DIM_TOOLTIP,
   LOT_DIM_STORAGE_KEY,
   LOT_DIM_TINT,
+  LOT_PARTS_STORAGE_PREFIX,
   LOT_SCRIPT_VERSION,
   LOT_STATUS_EXPRESSION,
   LOT_UNINSTALL_EXPRESSION,
@@ -203,7 +204,11 @@ class FakeLot {
   active = true;
   sys = { isActive: () => this.active };
   reg: Record<string, unknown[]> = {};
-  registry = { get: (k: string) => this.reg[k] };
+  player: { player_name: string; regist_at: string } | null = {
+    player_name: "燈皇",
+    regist_at: "2026-09-22T04:36:50.123Z",
+  };
+  registry = { get: (k: string) => (k === "player" ? this.player : this.reg[k]) };
   cache = {
     json: {
       get: (k: string) =>
@@ -275,7 +280,7 @@ class FakeLot {
 };
 
 interface FakeWindow {
-  game: { scene: { keys: Record<string, unknown> } };
+  game: { scene: { keys: Record<string, unknown> }; registry: unknown };
   lang: string;
   localStorage: { getItem(k: string): string | null; setItem(k: string, v: string): void };
   [k: string]: unknown;
@@ -310,7 +315,7 @@ function makeGame(storage: Record<string, string> = {}) {
     avatar_parts: [{ parts_id: 48, quantity: 1 }],
   };
   const window: FakeWindow = {
-    game: { scene: { keys: { Lot: lot } } },
+    game: { scene: { keys: { Lot: lot } }, registry: lot.registry },
     lang: "tcn",
     localStorage: {
       getItem: (k) => (k in storage ? storage[k]! : null),
@@ -652,6 +657,84 @@ describe("暗房預覽", () => {
     } finally {
       orig.create_preview = saved;
     }
+  });
+
+  describe("開機沒進過物品房間（registry 沒有 avatar_parts）", () => {
+    const KEY = `${LOT_PARTS_STORAGE_PREFIX}燈皇|2026-09-22T04:36:50.123Z`;
+
+    it("沒記過：裝飾不暗（跟以前一樣），專武照常", () => {
+      const game = makeGame();
+      delete game.lot.reg.avatar_parts;
+      install(game);
+      const [, ribbon, doll] = game.lot.show("bronze");
+      expect(plain(ribbon!)).toBe(true);
+      expect(plain(doll!)).toBe(true);
+      expect(dimmed(game.lot.show("gold")[2]!)).toBe(true);
+    });
+
+    it("記過：拿記下來的那份調暗", () => {
+      const game = makeGame({ [KEY]: "[48]" });
+      delete game.lot.reg.avatar_parts;
+      install(game);
+      const [, ribbon, doll] = game.lot.show("bronze");
+      expect(dimmed(ribbon!)).toBe(true);
+      expect(plain(doll!)).toBe(true);
+      expect(status(game).savedParts).toBe(1);
+    });
+
+    it("別的角色記的那份不算", () => {
+      const game = makeGame({ [KEY]: "[48]" });
+      delete game.lot.reg.avatar_parts;
+      game.lot.player = { player_name: "小號", regist_at: "2026-10-01T00:00:00.000Z" };
+      install(game);
+      expect(plain(game.lot.show("bronze")[1]!)).toBe(true);
+    });
+
+    it("registry 有的時候整份存起來（不在暗房也存）；官方原地 push 也跟上", () => {
+      const game = makeGame({ [KEY]: "[1, 2, 3]" });
+      game.lot.active = false;
+      install(game);
+      expect(JSON.parse(game.storage[KEY]!)).toEqual([48]); // 照 registry 蓋過去
+      game.lot.reg.avatar_parts!.push({ parts_id: 7, quantity: 1 });
+      tick();
+      expect(JSON.parse(game.storage[KEY]!)).toEqual([7, 48]);
+    });
+
+    it("讀不到角色：不存也不讀", () => {
+      const game = makeGame();
+      game.lot.player = null;
+      install(game);
+      expect(Object.keys(game.storage)).toEqual([]);
+    });
+
+    it("抽到的裝飾加進記下來的那份，下次開機也算", async () => {
+      const game = makeGame({ [KEY]: "[48]" });
+      delete game.lot.reg.avatar_parts;
+      install(game);
+      const sock = game.lot.socket;
+      void (sock as unknown as { fetch(n: string): Promise<unknown> }).fetch("lot_start");
+      sock.pending[0]!({ result: [{ tier: 5, type: 4, slot: 0, id: 535, amount: 1 }] });
+      await flush();
+      expect(dimmed(game.lot.show("bronze")[2]!)).toBe(true);
+      expect(JSON.parse(game.storage[KEY]!)).toEqual([48, 535]);
+
+      const next = makeGame(game.storage);
+      delete next.lot.reg.avatar_parts;
+      install(next);
+      expect(dimmed(next.lot.show("bronze")[2]!)).toBe(true);
+    });
+
+    it("抽到之後進物品房間：registry 還沒含那件的話照樣留著", async () => {
+      const game = makeGame();
+      install(game);
+      const sock = game.lot.socket;
+      void (sock as unknown as { fetch(n: string): Promise<unknown> }).fetch("lot_start");
+      sock.pending[0]!({ result: [{ tier: 5, type: 4, slot: 0, id: 535, amount: 1 }] });
+      await flush();
+      game.lot.reg.avatar_parts!.push({ parts_id: 9, quantity: 1 }); // 原地 push，參考沒換
+      tick();
+      expect(JSON.parse(game.storage[KEY]!)).toEqual([9, 48, 535]);
+    });
   });
 
   it("讀不懂的狀態當成沒裝", () => {
