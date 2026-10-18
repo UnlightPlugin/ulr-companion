@@ -746,6 +746,61 @@ describe("渦幾（BOSS 代碼）與自己公開", () => {
   });
 });
 
+describe("分享渦碼（source: code，2026-10-17）", () => {
+  const CODE = "ABCDEFGHIJKL";
+  const later = NOW + RAID_FEED_BATCH_MS;
+
+  it("只收英數字的碼：壞的碼整筆不收；別的來源帶碼也不收碼", () => {
+    expect(parse("code", [own({ code: CODE })]).raids[0]?.code).toBe(CODE);
+    expect(parse("code", [own({ code: "<@&123>" })]).raids).toEqual([]);
+    expect(parse("code", [own({ code: "abc def" })]).raids).toEqual([]);
+    expect(parse("code", [own()]).raids).toEqual([]);
+    expect(parse("own", [own({ code: CODE })]).raids[0]).not.toHaveProperty("code");
+    expect(parse("support", [support({ code: CODE })]).raids[0]).not.toHaveProperty("code");
+  });
+
+  it("能新增；訊息那一行附碼，GET 不給碼", () => {
+    const book = new RaidFeedBook();
+    book.ingest(parse("code", [own({ code: CODE, name: "靈龜" })]), NOW);
+    const batch = book.dueBatch(later);
+    expect(batch).toHaveLength(1);
+    expect(formatRaidFeedBatch(batch, null, later)).toContain("渦碼 `" + CODE + "`");
+    expect(JSON.stringify(book.list(later))).not.toContain(CODE);
+  });
+
+  it("死了就不附碼", () => {
+    expect(formatRaidFeedLine(raid({ code: CODE, hp: 0 }), NOW)).not.toContain(CODE);
+    expect(formatRaidFeedLine(raid({ code: CODE }), NOW)).toContain(CODE);
+  });
+
+  it("沒送出、本來就不在 SUPPORT：整份 SUPPORT 沒有它不算打倒", () => {
+    const book = new RaidFeedBook();
+    book.ingest(parse("code", [own({ code: CODE })]), NOW);
+    const u = normalizeRaidFeedUpload(
+      {
+        source: "support",
+        raids: [support({ foundAt: NOW - HOUR, founder: "別人" })],
+        complete: true,
+      },
+      NOW,
+    );
+    if (u === null) throw new Error("rejected");
+    book.ingest(u, NOW);
+    const r = book.raid(raidFeedId({ founder: "燈皇", foundAt: 1_791_029_788_126 }));
+    expect(r?.hp).toBe(325);
+  });
+
+  it("先公開發過、後來才分享碼：那則訊息重畫補上碼", () => {
+    const book = new RaidFeedBook();
+    book.ingest(parse("publish", [own()]), NOW);
+    const ids = book.dueBatch(later).map(raidFeedId);
+    const m = book.markPosted(ids, "m1", false, later);
+    book.ingest(parse("code", [own({ code: CODE })]), later);
+    expect(book.dirtyMessages().map((x) => x.id)).toEqual(["m1"]);
+    expect(book.renderMessage(m, null, later)).toContain(CODE);
+  });
+});
+
 describe("僅限好友（2026-10-09：僅限好友的渦會列在發現者好友的 SUPPORT）", () => {
   const later = NOW + RAID_FEED_BATCH_MS;
 

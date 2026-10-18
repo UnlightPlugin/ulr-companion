@@ -34,7 +34,9 @@ import {
   isRaidRewardMode,
   isRenderMode,
   isSizeMode,
+  legacyRaidDiscoverRules,
   normalizeBonusClimb,
+  normalizeRaidDiscoverRules,
   normalizeTint,
 } from "@ulr/cdp-adapter";
 import type {
@@ -44,6 +46,7 @@ import type {
   CharaPickerMode,
   DisplayState,
   QuestPanelMode,
+  RaidDiscoverAction,
   RaidRewardMode,
 } from "@ulr/cdp-adapter";
 
@@ -382,6 +385,18 @@ export interface Profile {
    * 關掉只是不畫鈕，渦獎勵照樣記進 raid-outcomes.json（玩家 2026-10-13：要能在插件面板設）。
    */
   raidHistoryButton: boolean;
+  /** 發現渦時不播開場動畫（每一種渦都一樣）。預設關（玩家 2026-10-17：跟公開分開）。 */
+  raidDiscoverSkipOpening: boolean;
+  /**
+   * 發現渦之後照「BOSS × 碎片」做什麼（公開／僅限好友／刪除；沒寫＝不動）。鍵見
+   * cdp-adapter 的 `raidDiscoverRuleKey`。預設空（玩家 2026-10-17）。
+   */
+  raidDiscoverRules: Record<string, RaidDiscoverAction>;
+  /**
+   * 規則表整個開／關。關掉時規則留著、只是不推下去（玩家 2026-10-17：「有時候要先暫時關閉」）。
+   * 跳過開場不歸它管。預設關（玩家 2026-10-17：兩個開關預設都關）。
+   */
+  raidDiscoverRulesOn: boolean;
   /**
    * 任務房的水沙捷徑：FRIENDLIST 上方疊水與沙漏（一點就用）。
    * 預設關，跟渦房那個一樣。跟通行證捷徑分開開關（玩家 2026-09-26：「兩者分開」）。
@@ -716,6 +731,24 @@ export function normalizeProfile(raw: unknown): Profile | null {
     raidItemShortcut: r["raidItemShortcut"] === true,
     // 舊設定檔沒有這一欄 → 開。
     raidHistoryButton: r["raidHistoryButton"] !== false,
+    // 2026-10-15 版是兩個開關（渦一～三跳過＋公開、渦四／妖精僅限好友）→ 換成跳過開關＋規則
+    raidDiscoverSkipOpening:
+      typeof r["raidDiscoverSkipOpening"] === "boolean"
+        ? r["raidDiscoverSkipOpening"]
+        : r["raidDiscoverPublic"] === true,
+    raidDiscoverRules:
+      r["raidDiscoverRules"] !== undefined
+        ? normalizeRaidDiscoverRules(r["raidDiscoverRules"])
+        : legacyRaidDiscoverRules(
+            r["raidDiscoverPublic"] === true,
+            r["raidDiscoverFriends"] === true,
+          ),
+    // 沒有這一欄 → 關（玩家 2026-10-17：兩個開關預設都關）。只有 10-15 版開過舊開關的照舊開著，
+    // 不然換版之後自動公開會安靜停掉
+    raidDiscoverRulesOn:
+      typeof r["raidDiscoverRulesOn"] === "boolean"
+        ? r["raidDiscoverRulesOn"]
+        : r["raidDiscoverPublic"] === true || r["raidDiscoverFriends"] === true,
     // 舊設定檔沒有這三欄 → 關（官方原樣）。
     questStackShortcut: r["questStackShortcut"] === true,
     questPassShortcut: r["questPassShortcut"] === true,
@@ -817,6 +850,9 @@ export function defaultProfile(kind: ClientKind = "desktop"): Profile {
     raidAutoDeletePrompt: true,
     raidItemShortcut: false,
     raidHistoryButton: true,
+    raidDiscoverSkipOpening: false,
+    raidDiscoverRules: {},
+    raidDiscoverRulesOn: false,
     questStackShortcut: false,
     questPassShortcut: false,
     questTreasureMarks: false,

@@ -50,6 +50,9 @@
  * **不是**僅限好友，就記下來（`window.__ulrRaidPublished`，同一個渦只記一次）、叫托盤馬上傳。
  * 僅限好友的一律不記。換了連線，raid-view 下一拍（300ms）就包到新的上。
  *
+ * 送出之後玩家可能馬上刪掉（2026-10-17：公開後才發現是硬渦）。所以讀的時候附上「渦房清單上還在不在」，
+ * 托盤（raid-feed-client 的 `RAID_PUBLISH_HOLD_MS`）先等一下、還在才發。
+ *
  * ⚠ **`emit` 不能包在原型上**（2026-10-04 事故）。patch-ok 每 200ms 看原型的 `emit`，
  * 不是它自己那支就把**當下那支**存成 originalEmit 再換回自己 —— 我們包在它上面的那層
  * （裡面叫的是它）就被它存走，變成 patchedEmit → 我們 → patchedEmit → … 繞成環。
@@ -62,7 +65,9 @@
  * 清單只給 `monster_id`，`CharaCards` 查得到它的 `chara`（`mc1006_02`）——官方 SUPPORT 畫 BOSS 名
  * 也是這樣查的。代碼尾碼 `_01/_02/_03` 是渦I／渦II·III／渦IV（照 Moon/打渦.py 的 渦階()）。
  *
- * ⚠ **`profound_code` 是渦碼＝門票，在頁面裡就丟掉**，不會進到托盤。
+ * ⚠ **`profound_code` 是渦碼＝門票，在頁面裡就丟掉**，不會進到托盤。唯一的例外是玩家在「發現渦」
+ * 規則表挑了「分享渦碼」的自己的渦（2026-10-17）：patch-raid-view ⑭ 把碼寫進公開紀錄的 `code`，
+ * 這裡原樣交給托盤發 Discord。
  */
 
 /** SUPPORT 的一列（沒有渦碼）。 */
@@ -101,6 +106,17 @@ export interface RaidPublishedRow {
   mapIndex: number | null;
   /** 按下送出的時刻 */
   at: number;
+  /**
+   * 渦房清單（`Raid.raid_list`）上已經沒有它了：送出之後被刪掉（放棄）、或死了到期。
+   * 托盤先等一下再發 Discord，等的時候不見了就不發（玩家 2026-10-17：公開後發現是硬渦就刪）。
+   * 讀不到清單（舊版頁面、渦房還沒建）是 undefined。
+   */
+  gone?: boolean;
+  /**
+   * 渦碼：只有「發現渦」規則挑了「分享渦碼」的那種才有（patch-raid-view ⑭ 記的；參加資格無限制、
+   * 沒送出）。托盤拿它走 `source: "code"` 交給機器人發 Discord。**不能寫進記錄。**
+   */
+  code?: string;
 }
 
 /** 頁面通知托盤用的 binding（跟 adapter.ts 的 `REPORT_BINDING_NAME` 同一個，測試會對）。 */
@@ -232,13 +248,29 @@ export const RAID_SUPPORT_SNAPSHOT_EXPRESSION = `(function () {
   }
 })()`;
 
-/** 自己按送出公開的渦（{@link RAID_PUBLISHED_KEEP_MS} 內的）。不清掉：托盤自己記傳過哪些。 */
+/**
+ * 自己按送出公開的渦（{@link RAID_PUBLISHED_KEEP_MS} 內的）。不清掉：托盤自己記傳過哪些。
+ * 每一列附上 `gone`：渦房清單上還有沒有它（發現者＋發現時刻對）。官方「放棄」完會重拿 db_raid，
+ * 刪掉的渦下一刻就不在清單上了。不送請求。
+ */
 export const RAID_PUBLISHED_SNAPSHOT_EXPRESSION = `(function () {
   try {${PAGE_HELPERS}${PAGE_INSTALL}
     var P = window.__ulrRaidPublished || [];
     var now = Date.now();
     for (var i = P.length - 1; i >= 0; i--) if (!P[i] || now - P[i].at > ${RAID_PUBLISHED_KEEP_MS}) P.splice(i, 1);
-    return JSON.stringify({ rows: P });
+    var list = R && Array.isArray(R.raid_list) ? R.raid_list : null;
+    var rows = [];
+    for (var k = 0; k < P.length; k++) {
+      var row = {};
+      for (var f in P[k]) row[f] = P[k][f];
+      if (list) {
+        var hit = false;
+        for (var j = 0; j < list.length; j++) if (list[j] && list[j].founder === P[k].founder && list[j].found_at === P[k].foundAt) hit = true;
+        row.gone = !hit;
+      }
+      rows.push(row);
+    }
+    return JSON.stringify({ rows: rows });
   } catch (e) {
     return JSON.stringify({ rows: [], reason: String((e && e.message) || e) });
   }

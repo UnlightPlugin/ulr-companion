@@ -148,6 +148,13 @@ contextBridge.exposeInMainWorld("ulr", {
     autoDelete: (on: boolean) => ipcRenderer.invoke("ulr:raid-auto-delete", on),
     itemShortcut: (on: boolean) => ipcRenderer.invoke("ulr:raid-item-shortcut", on),
     historyButton: (on: boolean) => ipcRenderer.invoke("ulr:raid-history-button", on),
+    /** 發現渦時跳過開場動畫。 */
+    discoverSkip: (on: boolean) => ipcRenderer.invoke("ulr:raid-discover-skip", on),
+    /** 「發現後做什麼」規則表整個開關（關掉時規則留著）。 */
+    discoverRulesOn: (on: boolean) => ipcRenderer.invoke("ulr:raid-discover-rules-on", on),
+    /** 發現渦的規則：這幾格（`mc1008_02:soul`）都設成 action（keep／public／friends／delete）。 */
+    discoverRule: (keys: string[], action: string) =>
+      ipcRenderer.invoke("ulr:raid-discover-rule", keys, action),
   },
 
   /** 任務：物品捷徑與寶箱標註的開關與狀態。 */

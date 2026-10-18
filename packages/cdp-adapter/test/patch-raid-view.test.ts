@@ -28,6 +28,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildRaidViewPatchScript,
   buildRaidViewSetAutoDeleteExpression,
+  buildRaidViewSetDiscoverExpression,
   buildRaidViewSetHistoryExpression,
   buildRaidViewSetLearnedExpression,
   buildRaidViewSetPublicExpression,
@@ -47,6 +48,10 @@ import {
   RAID_VIEW_STATUS_EXPRESSION,
   RAID_VIEW_UNINSTALL_EXPRESSION,
   isRaidHistoryRequestReport,
+  legacyRaidDiscoverRules,
+  normalizeRaidDiscoverRules,
+  RAID_DISCOVER_BOSSES,
+  type RaidDiscoverAction,
   type RaidFragment,
   type RaidLearnedTable,
   type RaidLearnSample,
@@ -2062,5 +2067,388 @@ describe("⑪ 渦碼沒回應：解開渦房", () => {
     for (const labels of Object.values(RAID_VIEW_LABELS)) {
       expect(labels.codeNoReply.length).toBeGreaterThan(0);
     }
+  });
+});
+
+/**
+ * ⑭ 2026-10-15 實機讀的：發現渦 → 伺服器推 raid_title → Raid.create 裡的
+ * socket.on("raid_title", t => this.scene.launch("Raid_Title", { raid_data: t }))。
+ * 公開＝渦碼視窗的 fetch("raid_code_update", id, 0|1)（回 only_friend 的新值）＋ emit("raid_code_send", id)。
+ * 2026-10-17 改成：跳過開場一個開關＋「BOSS × 碎片」規則（公開／好友／刪除／不動）。
+ */
+describe("⑭ 發現渦：跳過開場、照規則公開／刪除", () => {
+  // BOSS 代碼（2026-10-17 實機 CharaCards）：_02 渦II/III、_03 渦IV、妖精只有 mc1004_01、
+  // 吸血女王 mc1005 沒有尾碼；龍鯉 30129 碎片隨機
+  const BOSS_CARDS = [
+    { id: 30130, chara: "mc1012_02" },
+    { id: 30129, chara: "mc1012_03" },
+    { id: 30017, chara: "mc1004_01" },
+    { id: 30018, chara: "mc1005" },
+  ];
+  const TITLE = (chara: number, stage = 2) => ({
+    raid_data: { raid_name: "龍鯰", raid_chara_id: chara, raid_ttl: 6, raid_stage: stage },
+  });
+  type Rules = Record<string, RaidDiscoverAction>;
+  const opts = (rules: Rules, skipOpening = false) => ({
+    bindingName: BINDING,
+    discover: { skipOpening, rules },
+  });
+
+  function setupFound(rows: Row[] = []) {
+    const env = setup(rows);
+    const { raid, game } = env;
+    const json = game.cache.json.get;
+    game.cache.json.get = (k: string) =>
+      k === "CharaCards" ? [...CHARA_CARDS, ...BOSS_CARDS] : json(k);
+    // 官方 launch：開 Raid_Title（raid_data 掛在場景上，noteTitle 從那裡讀）
+    const launched: string[] = [];
+    const launch = function (this: unknown, key: string, data: { raid_data: unknown }) {
+      launched.push(key);
+      game.scene.keys.Raid_Title = { raid_data: data.raid_data };
+      return this;
+    };
+    (raid.scene as Record<string, unknown>).launch = launch;
+    /** 伺服器推 raid_title：走官方 handler 那一行 */
+    const title = (chara: number, stage?: number) =>
+      (raid.scene as unknown as { launch: typeof launch }).launch(
+        "Raid_Title",
+        TITLE(chara, stage),
+      );
+    /** raid_code_update 回什麼（官方：回 only_friend 的新值） */
+    let updateReply: unknown = null;
+    raid.socket.fetch = (ev: string, ...a: unknown[]) => {
+      raid.sent.push([ev, ...a]);
+      if (ev === "db_raid") return Promise.resolve(raid.next);
+      if (ev === "raid_code_update") return Promise.resolve(updateReply ?? a[1] === 1);
+      return Promise.resolve(true);
+    };
+    return {
+      ...env,
+      launch,
+      launched,
+      title,
+      setUpdateReply: (v: unknown) => void (updateReply = v),
+    };
+  }
+  const MINE = (over: Partial<Row> = {}) =>
+    ROW({ founder: "燈皇", found_at: Date.now(), profound_id: "new", ...over }) as Row & {
+      only_friend?: boolean;
+    };
+  const publishes = (raid: Raid) => raid.sent.filter((m) => m[0] !== "db_raid");
+  const discovered = (reports: { type: string }[]) =>
+    reports.filter((r) => r.type === "raid-discover");
+
+  it("預設什麼都不做：開場照播、什麼都不送", async () => {
+    const { raid, window, launched, title, reports } = setupFound();
+    run(window, buildRaidViewPatchScript({ bindingName: BINDING }));
+    title(30130);
+    raid.raid_list = [{ ...MINE(), only_friend: false } as Row];
+    poll?.();
+    await flush();
+    expect(launched).toEqual(["Raid_Title"]);
+    expect(publishes(raid)).toEqual([]);
+    expect(discovered(reports)).toEqual([]);
+  });
+
+  it("只開跳過開場：開場不開、stage 照記，不送任何東西", async () => {
+    const { raid, window, launched, title, reports } = setupFound();
+    run(window, buildRaidViewPatchScript(opts({}, true)));
+    title(30130, 3);
+    expect(launched).toEqual([]);
+    raid.raid_list = [{ ...MINE(), only_friend: false } as Row];
+    poll?.();
+    await flush();
+    expect(publishes(raid)).toEqual([]);
+    expect(discovered(reports)).toEqual([]);
+    expect((window.__ulrRaidStages as Record<string, unknown>)["new"]).toMatchObject({
+      stage: 3,
+      src: "title",
+    });
+  });
+
+  it("規則挑碎片：龍鯰 stage 3（★1 → 藍）公開；清單拉到新渦才送，同一個渦只做一次", async () => {
+    const { raid, game, window, launched, title, reports } = setupFound([
+      ROW({ founder: "燈皇", found_at: Date.now() - 3_600_000, profound_id: "old" }),
+    ]);
+    run(window, buildRaidViewPatchScript(opts({ "mc1012_02:soul": "public" }, true)));
+    title(30130, 3);
+    expect(launched).toEqual([]);
+    expect(game.scene.keys.Raid_Title).toBeUndefined();
+    poll?.();
+    await flush();
+    // 清單還沒有新渦：不動舊的同怪渦
+    expect(publishes(raid)).toEqual([]);
+    raid.raid_list = [...raid.raid_list, { ...MINE(), only_friend: false } as Row];
+    poll?.();
+    await flush();
+    expect(publishes(raid)).toEqual([["emit:raid_code_send", "new"]]);
+    expect(discovered(reports)).toEqual([
+      {
+        type: "raid-discover",
+        name: "龍鯰",
+        action: "public",
+        fragment: "soul",
+        ok: true,
+        skipped: true,
+        reason: null,
+      },
+    ]);
+    title(30130, 3);
+    poll?.();
+    await flush();
+    expect(publishes(raid)).toEqual([["emit:raid_code_send", "new"]]);
+  });
+
+  it("公開但參加資格是僅限好友：先照官方下拉改成無限制（0），再送出；列上 only_friend 跟著改", async () => {
+    const { raid, window, title } = setupFound();
+    run(window, buildRaidViewPatchScript(opts({ "mc1012_02:time": "public" })));
+    title(30130, 2);
+    const row = { ...MINE(), only_friend: true };
+    raid.raid_list = [row as Row];
+    poll?.();
+    await flush();
+    expect(publishes(raid)).toEqual([
+      ["raid_code_update", "new", 0],
+      ["emit:raid_code_send", "new"],
+    ]);
+    expect(row.only_friend).toBe(false);
+  });
+
+  it("好友：改成僅限好友（1）再送出；沒開跳過的開場照播", async () => {
+    const { raid, window, launched, title, reports } = setupFound();
+    run(window, buildRaidViewPatchScript(opts({ "mc1012_02:time": "friends" })));
+    title(30130, 2);
+    expect(launched).toEqual(["Raid_Title"]);
+    raid.raid_list = [{ ...MINE(), only_friend: false } as Row];
+    poll?.();
+    await flush();
+    expect(publishes(raid)).toEqual([
+      ["raid_code_update", "new", 1],
+      ["emit:raid_code_send", "new"],
+    ]);
+    expect(discovered(reports)[0]).toMatchObject({ action: "friends", ok: true, skipped: false });
+  });
+
+  it("渦碼：參加資格改成無限制（僅限好友時非好友輸入不了碼）、不送出，碼記進公開紀錄交給托盤", async () => {
+    const { raid, window, title, reports } = setupFound();
+    run(window, buildRaidViewPatchScript(opts({ "mc1012_02:time": "discord" })));
+    title(30130, 2);
+    raid.raid_list = [{ ...MINE({ code: "ABCDEFGHIJKL" }), only_friend: true } as Row];
+    poll?.();
+    await flush();
+    // 沒有 raid_code_send：不進 SUPPORT
+    expect(publishes(raid)).toEqual([["raid_code_update", "new", 0]]);
+    const P = window.__ulrRaidPublished as { code?: string; founder: string; name: string }[];
+    expect(P).toHaveLength(1);
+    expect(P[0]).toMatchObject({ founder: "燈皇", name: "龍鯰", code: "ABCDEFGHIJKL" });
+    expect(reports.some((r) => r.type === "raid-stage")).toBe(true);
+    expect(discovered(reports)[0]).toMatchObject({ action: "discord", ok: true });
+    // 回報裡沒有碼
+    expect(JSON.stringify(discovered(reports))).not.toContain("ABCDEFGHIJKL");
+  });
+
+  it("渦碼格式不是英數字：什麼都不送、回報失敗（碼會原樣貼進 Discord）", async () => {
+    const { raid, window, title, reports } = setupFound();
+    run(window, buildRaidViewPatchScript(opts({ "mc1012_02:time": "discord" })));
+    title(30130, 2);
+    raid.raid_list = [{ ...MINE({ code: "<@&123>" }), only_friend: false } as Row];
+    poll?.();
+    await flush();
+    expect(raid.sent).toEqual([]);
+    expect(window.__ulrRaidPublished).toBeUndefined();
+    expect(discovered(reports)[0]).toMatchObject({ action: "discord", ok: false });
+  });
+
+  it("刪除：黃的直接放棄（raid_delete → db_raid 重畫），藍的照公開（玩家 2026-10-17：公開藍龜、黃龜刪除）", async () => {
+    const { raid, window, title, reports } = setupFound();
+    run(
+      window,
+      buildRaidViewPatchScript(
+        opts({ "mc1012_02:soul": "public", "mc1012_02:memory": "delete" }, true),
+      ),
+    );
+    title(30130, 1);
+    raid.raid_list = [{ ...MINE(), only_friend: false } as Row];
+    raid.next = [];
+    poll?.();
+    await flush();
+    await flush();
+    expect(raid.sent).toEqual([["raid_delete", "new"], ["db_raid"]]);
+    expect(raid.raid_list).toBe(raid.next);
+    expect(discovered(reports)).toEqual([
+      expect.objectContaining({ action: "delete", fragment: "memory", ok: true }),
+    ]);
+  });
+
+  it("刪除等畫面閒下來（結算正在演就先不動）", async () => {
+    const { raid, window, title } = setupFound();
+    run(window, buildRaidViewPatchScript(opts({ "mc1012_02:memory": "delete" })));
+    title(30130, 1);
+    raid.raid_list = [{ ...MINE(), only_friend: false } as Row];
+    raid.__ulrRaidRewardBatch = {};
+    poll?.();
+    await flush();
+    expect(raid.sent).toEqual([]);
+    raid.__ulrRaidRewardBatch = undefined;
+    poll?.();
+    await flush();
+    expect(raid.sent[0]).toEqual(["raid_delete", "new"]);
+  });
+
+  it("規則沒寫到這一格：不動、回報 keep（記錄看得到為什麼沒公開）", async () => {
+    const { raid, window, title, reports } = setupFound();
+    run(window, buildRaidViewPatchScript(opts({ "mc1012_02:soul": "public" })));
+    title(30130, 1);
+    raid.raid_list = [{ ...MINE(), only_friend: false } as Row];
+    poll?.();
+    await flush();
+    expect(publishes(raid)).toEqual([]);
+    expect(discovered(reports)).toEqual([
+      expect.objectContaining({ action: "keep", fragment: "memory", ok: true }),
+    ]);
+  });
+
+  it("妖精與龍鯉看 any 那格，不管 stage", async () => {
+    const { raid, window, title } = setupFound();
+    run(
+      window,
+      buildRaidViewPatchScript(opts({ "mc1004_01:any": "friends", "mc1012_03:any": "public" })),
+    );
+    title(30017, 3);
+    raid.raid_list = [{ ...MINE({ monster_id: 30017 }), only_friend: false } as Row];
+    poll?.();
+    await flush();
+    expect(publishes(raid)).toEqual([
+      ["raid_code_update", "new", 1],
+      ["emit:raid_code_send", "new"],
+    ]);
+    title(30129, 4);
+    raid.raid_list = [
+      ...raid.raid_list,
+      { ...MINE({ monster_id: 30129, profound_id: "carp" }), only_friend: false } as Row,
+    ];
+    poll?.();
+    await flush();
+    expect(publishes(raid).slice(2)).toEqual([["emit:raid_code_send", "carp"]]);
+  });
+
+  it("吸血女王（mc1005，沒有尾碼）照碎片挑", async () => {
+    const { raid, window, title } = setupFound();
+    run(window, buildRaidViewPatchScript(opts({ "mc1005:soul": "public" })));
+    title(30018, 3);
+    raid.raid_list = [{ ...MINE({ monster_id: 30018 }), only_friend: false } as Row];
+    poll?.();
+    await flush();
+    expect(publishes(raid)).toEqual([["emit:raid_code_send", "new"]]);
+  });
+
+  it("沒收到 stage 就判不出碎片：不動，回報原因", async () => {
+    const { raid, window, title, reports } = setupFound();
+    run(window, buildRaidViewPatchScript(opts({ "mc1012_02:soul": "delete" })));
+    (raid.scene as unknown as { launch: (k: string, d: unknown) => void }).launch("Raid_Title", {
+      raid_data: { raid_name: "龍鯰", raid_chara_id: 30130, raid_stage: "?" },
+    });
+    void title;
+    raid.raid_list = [{ ...MINE(), only_friend: false } as Row];
+    poll?.();
+    await flush();
+    expect(raid.sent).toEqual([]);
+    expect(discovered(reports)).toEqual([
+      expect.objectContaining({ action: "keep", fragment: null, ok: false }),
+    ]);
+  });
+
+  it("認不得的 BOSS、別人開的、發現時刻對不上的不碰", async () => {
+    const { raid, window, launched, title } = setupFound();
+    const all: Rules = {};
+    for (const b of RAID_DISCOVER_BOSSES) all[`${b.mons}:soul`] = "delete";
+    run(window, buildRaidViewPatchScript(opts(all)));
+    title(99999, 3);
+    expect(launched).toEqual(["Raid_Title"]);
+    title(30130, 3);
+    raid.raid_list = [
+      { ...MINE({ founder: "咕嚕", profound_id: "theirs" }), only_friend: false } as Row,
+      {
+        ...MINE({ found_at: Date.now() - 10 * 60_000, profound_id: "old" }),
+        only_friend: false,
+      } as Row,
+    ];
+    poll?.();
+    await flush();
+    expect(raid.sent).toEqual([]);
+  });
+
+  it("伺服器沒改成：不送出、回報失敗", async () => {
+    const { raid, window, title, setUpdateReply, reports } = setupFound();
+    run(window, buildRaidViewPatchScript(opts({ "mc1012_02:time": "public" })));
+    setUpdateReply(true);
+    title(30130, 2);
+    raid.raid_list = [{ ...MINE(), only_friend: true } as Row];
+    poll?.();
+    await flush();
+    expect(publishes(raid)).toEqual([["raid_code_update", "new", 0]]);
+    expect(discovered(reports)[0]).toMatchObject({ action: "public", ok: false });
+  });
+
+  it("托盤推設定下來就照新的；等的時候規則全關了就不做；拆掉時 launch 還給官方", async () => {
+    const { raid, window, launch, launched, title } = setupFound();
+    run(window, buildRaidViewPatchScript({}));
+    poll?.();
+    expect(
+      run(
+        window,
+        buildRaidViewSetDiscoverExpression({
+          skipOpening: true,
+          rules: { "mc1012_02:time": "public" },
+        }),
+      ),
+    ).toBe("ok");
+    title(30130, 2);
+    expect(launched).toEqual([]);
+    run(window, buildRaidViewSetDiscoverExpression({ skipOpening: false, rules: {} }));
+    raid.raid_list = [{ ...MINE(), only_friend: false } as Row];
+    poll?.();
+    await flush();
+    expect(publishes(raid)).toEqual([]);
+    title(30130, 2);
+    expect(launched).toEqual(["Raid_Title"]);
+    // 重裝不疊兩層
+    run(window, buildRaidViewPatchScript({}));
+    const wrapped = (raid.scene as Record<string, unknown>).launch as { __ulrRaidView?: unknown };
+    expect(wrapped.__ulrRaidView).toBe(launch);
+    expect(run(window, RAID_VIEW_UNINSTALL_EXPRESSION)).toBe("ok");
+    expect((raid.scene as Record<string, unknown>).launch).toBe(launch);
+  });
+});
+
+describe("⑭ 規則存檔", () => {
+  it("舊的兩個開關換成規則：渦一～三每格公開、渦四與妖精每格僅限好友", () => {
+    const r = legacyRaidDiscoverRules(true, true);
+    expect(r["mc1008_02:memory"]).toBe("public");
+    expect(r["mc1005:death"]).toBe("public");
+    expect(r["mc1008_03:soul"]).toBe("friends");
+    expect(r["mc1004_01:any"]).toBe("friends");
+    expect(r["mc1012_03:any"]).toBe("friends");
+    expect(legacyRaidDiscoverRules(false, false)).toEqual({});
+    expect(Object.values(legacyRaidDiscoverRules(true, false))).not.toContain("friends");
+  });
+
+  it("讀回來：認不得的鍵與動作丟掉、keep 不存", () => {
+    expect(
+      normalizeRaidDiscoverRules({
+        "mc1008_02:soul": "public",
+        "mc1008_02:memory": "delete",
+        "mc1008_02:time": "keep",
+        "mc1004_01:soul": "public",
+        "mc9999_01:soul": "public",
+        "mc1008_02:life": "nuke",
+        "mc1008_02:death": "discord",
+      }),
+    ).toEqual({
+      "mc1008_02:soul": "public",
+      "mc1008_02:memory": "delete",
+      "mc1008_02:death": "discord",
+    });
+    expect(normalizeRaidDiscoverRules(null)).toEqual({});
   });
 });

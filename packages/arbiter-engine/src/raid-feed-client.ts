@@ -36,6 +36,13 @@ import { DEFAULT_RAID_PUBLIC_TIMEOUT_MS, type FetchLike, withTimeout } from "./r
 
 export const DEFAULT_RAID_FEED_URL = `${SERVICE_ORIGIN}${RAID_FEED_PATH}`;
 
+/**
+ * 自己按送出公開的渦，等這麼久、確定渦房清單上還在（沒被刪）才傳 —— 傳了就會發 Discord。
+ * 玩家 2026-10-17：公開之後才發現是硬渦（黃龜）就刪掉，Discord 上卻已經發出去了。
+ * 雲端那邊另有 30 秒的批次窗（RAID_FEED_BATCH_MS），所以從送出到發出大約 1.5 分鐘。
+ */
+export const RAID_PUBLISH_HOLD_MS = 60_000;
+
 const feedKey = (founder: string, foundAt: number) => `${founder}@${foundAt}`;
 
 /**
@@ -86,9 +93,13 @@ export function ownToFeed(rows: readonly RaidSnapshotRow[]): RaidFeedIn[] {
   return out;
 }
 
-/** 自己按「送出」公開的渦 → 上傳的形狀（`publish` 能新增渦）。 */
+/**
+ * 自己按「送出」公開的渦 → 上傳的形狀（`publish` 能新增渦）。分享渦碼的那種（有 `code`）
+ * 帶上碼，走 `code`（見 {@link RaidFeedSync.sync}）。
+ */
 export function publishedToFeed(rows: readonly RaidPublishedRow[]): RaidFeedIn[] {
   return rows.map((r) => ({
+    ...(typeof r.code === "string" ? { code: r.code } : {}),
     founder: r.founder,
     foundAt: r.foundAt,
     limit: r.limit,
@@ -176,6 +187,12 @@ export interface RaidFeedSyncResult {
   /** 這一輪傳了幾筆 SUPPORT／幾筆自己清單 */
   support: number;
   own: number;
+  /** 還在等的公開（{@link RAID_PUBLISH_HOLD_MS}）最早什麼時候可以傳；沒有在等的是 null */
+  heldUntil: number | null;
+  /** 這一輪發現「公開了又被刪掉」、所以不傳的渦名（每個渦只算一次） */
+  dropped: string[];
+  /** 這一輪交給機器人發 Discord 的分享渦碼（只有渦名，碼不出來 —— 記錄不能有碼） */
+  sharedCodes: string[];
 }
 
 /**
@@ -185,6 +202,8 @@ export class RaidFeedSync {
   #lastSupport: string | null = null;
   /** 傳成功過的公開（發現者＋發現時刻） */
   #sentPublished = new Set<string>();
+  /** 公開了、還沒傳就被刪掉的（發現者＋發現時刻）：不傳，也不再算 */
+  #droppedPublished = new Set<string>();
   /**
    * 在 SUPPORT 看過、但發現者是好友（可能僅限好友、雲端不新增）的渦 → 到期時刻。加入後清單上
    * 讀到 `only_friend: false` 就拿它證明公開。只放記憶體：托盤重開就忘（通常看到就加入了）。
@@ -220,17 +239,40 @@ export class RaidFeedSync {
     own: readonly RaidSnapshotRow[],
     upload: boolean,
     published: readonly RaidPublishedRow[] = [],
+    now: number = Date.now(),
   ): Promise<RaidFeedSyncResult> {
     let sentSupport = 0;
     let sentOwn = 0;
-    this.#rememberFriendSeen(support, Date.now());
-    // 自己按送出公開的：傳過的不再傳
-    const fresh = upload
-      ? published.filter((r) => !this.#sentPublished.has(feedKey(r.founder, r.foundAt)))
-      : [];
-    if (fresh.length > 0 && (await this.#post("publish", publishedToFeed(fresh)))) {
-      for (const r of fresh) this.#sentPublished.add(feedKey(r.founder, r.foundAt));
-      sentSupport += fresh.length;
+    let heldUntil: number | null = null;
+    const dropped: string[] = [];
+    const sharedCodes: string[] = [];
+    this.#rememberFriendSeen(support, now);
+    // 自己按送出公開的：傳過的不再傳；渦房清單上不見了（刪掉了）的不傳；剛送出的先等一下
+    const fresh: RaidPublishedRow[] = [];
+    if (upload) {
+      for (const r of published) {
+        const k = feedKey(r.founder, r.foundAt);
+        if (this.#sentPublished.has(k) || this.#droppedPublished.has(k)) continue;
+        if (r.gone === true) {
+          this.#droppedPublished.add(k);
+          dropped.push(r.name ?? "");
+          continue;
+        }
+        const due = r.at + RAID_PUBLISH_HOLD_MS;
+        if (due <= now) fresh.push(r);
+        else heldUntil = heldUntil === null ? due : Math.min(heldUntil, due);
+      }
+    }
+    // 分享渦碼的（有 code）跟按送出的分開傳：雲端只在 code 那種收碼
+    for (const [source, rows] of [
+      ["publish", fresh.filter((r) => typeof r.code !== "string")],
+      ["code", fresh.filter((r) => typeof r.code === "string")],
+    ] as const) {
+      if (rows.length > 0 && (await this.#post(source, publishedToFeed(rows)))) {
+        for (const r of rows) this.#sentPublished.add(feedKey(r.founder, r.foundAt));
+        sentSupport += rows.length;
+        if (source === "code") sharedCodes.push(...rows.map((r) => r.name ?? ""));
+      }
     }
     const get = async () => {
       const body = await withTimeout(this.timeoutMs, (signal) =>
@@ -271,7 +313,14 @@ export class RaidFeedSync {
       const fill = pickOwnToFill(this.#ownToFeed(own), feed);
       if (fill.length > 0 && (await this.#post("own", fill))) sentOwn = fill.length;
     }
-    return { map: feedToPublicMap(feed), support: sentSupport, own: sentOwn };
+    return {
+      map: feedToPublicMap(feed),
+      support: sentSupport,
+      own: sentOwn,
+      heldUntil,
+      dropped,
+      sharedCodes,
+    };
   }
 
   /** 分批 POST；全部成功才算成功。`extra` 只跟第一批送（分批了就不是整份）。 */

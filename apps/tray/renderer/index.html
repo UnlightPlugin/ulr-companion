@@ -833,6 +833,74 @@
         color: var(--ink-on);
       }
 
+      /* --- 渦 › 發現渦的規則表（BOSS × 碎片） --- */
+      table.dgrid {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13.5px;
+        margin-top: 8px;
+      }
+      /* 規則表暫停：照樣能改，只是看得出現在不生效 */
+      table.dgrid.paused {
+        opacity: 0.45;
+      }
+      table.dgrid th {
+        font-weight: 500;
+        color: var(--dim);
+        padding: 0 3px 4px;
+        white-space: nowrap;
+      }
+      table.dgrid td {
+        padding: 2px 3px;
+        text-align: center;
+      }
+      table.dgrid td.boss {
+        text-align: left;
+        white-space: nowrap;
+        padding-right: 8px;
+      }
+      table.dgrid tr.tier td {
+        text-align: left;
+        color: var(--dim);
+        padding-top: 10px;
+        border-bottom: 1px solid var(--rule);
+      }
+      table.dgrid tr.tier select {
+        width: auto;
+      }
+      table.dgrid select {
+        width: 100%;
+        min-width: 4.2em;
+        font-size: 13px;
+        padding: 2px 3px;
+      }
+      table.dgrid td[colspan] select {
+        width: auto;
+        margin-right: 6px;
+      }
+      table.dgrid .dot {
+        display: inline-block;
+        width: 9px;
+        height: 9px;
+        margin-right: 4px;
+        transform: rotate(45deg);
+      }
+      select.dact.a-keep {
+        color: var(--dim);
+      }
+      select.dact.a-public {
+        color: var(--green);
+      }
+      select.dact.a-friends {
+        color: var(--amber);
+      }
+      select.dact.a-discord {
+        color: #8c9eff;
+      }
+      select.dact.a-delete {
+        color: #ff7a82;
+      }
+
       /* --- 配置清單 --- */
       table.profiles {
         width: 100%;
@@ -1080,6 +1148,7 @@
             { id: "vrank", label: "獎勵標記" },
             { id: "vreward", label: "結算通知" },
             { id: "vitem", label: "物品捷徑" },
+            { id: "vfound", label: "發現渦" },
             { id: "vfeed", label: "渦通報" },
           ],
         },
@@ -3518,7 +3587,11 @@
       let raidTimer = null;
       const onRaidPage = () =>
         tab === "vortex" &&
-        (sub === "vrank" || sub === "vreward" || sub === "vitem" || sub === "vfeed");
+        (sub === "vrank" ||
+          sub === "vreward" ||
+          sub === "vitem" ||
+          sub === "vfound" ||
+          sub === "vfeed");
 
       function startRaidPolling() {
         if (raidTimer !== null) return;
@@ -3714,6 +3787,122 @@
         return head("物品捷徑", "渦房常用的水與渦探知機，一點就用。") + state + toggle + always;
       };
 
+      // --- 渦 › 發現渦 -------------------------------------------------------
+      //
+      // 用渦探知機發現渦之後（patch-raid-view ⑭）。跳過開場一個開關；公開與否照「BOSS × 碎片」
+      // 一格一格挑（玩家 2026-10-17：「公開藍龜，黃龜刪除」）。預設全部「不動」。
+      // 列（BOSS）與欄（碎片）都從 main 拿（RAID_DISCOVER_BOSSES／RAID_FRAGMENTS），不在這裡抄一份。
+      const RAID_DISCOVER_TIP =
+        "公開／好友走的是官方渦碼視窗同一條路：參加資格不對才改（同一個請求），再按「送出」。" +
+        "刪除走官方「放棄」。碎片看的是發現時伺服器給的 stage，跟渦房清單上的碎片色同一套公式；" +
+        "判不出來（沒收到發現畫面）就不動。插件沒接著遊戲時發現的渦不會補做。";
+      const DISCOVER_ACTS = [
+        ["keep", "—"],
+        ["public", "公開"],
+        ["friends", "好友"],
+        ["discord", "渦碼"],
+        ["delete", "刪除"],
+      ];
+      const DISCOVER_TIERS = [
+        ["I", "渦一（幣，顏色同碎片）"],
+        ["II/III", "渦二·三"],
+        ["IV", "渦四"],
+        ["?", "碎片發現時看不出來"],
+      ];
+
+      /** 一格（或整組）的下拉。cur 是 null＝整組裡不一樣，顯示「整組…」。 */
+      const discoverSelect = (keys, cur, label) =>
+        `<select class="dact a-${cur ?? "mixed"}" data-dkeys="${esc(keys.join(","))}" aria-label="${esc(label)}">${
+          cur === null ? `<option value="" selected>整組…</option>` : ""
+        }${DISCOVER_ACTS.map(
+          ([v, t]) => `<option value="${v}"${cur === v ? " selected" : ""}>${t}</option>`,
+        ).join("")}</select>`;
+
+      PAGES["vortex/vfound"] = () => {
+        const s = rstate;
+        const rules = s?.discoverRules ?? {};
+        const frags = s?.discoverFragments ?? [];
+        const bosses = s?.discoverBosses ?? [];
+        const keysOf = (b) =>
+          b.byFragment ? frags.map((f) => `${b.mons}:${f.key}`) : [`${b.mons}:any`];
+        const actOf = (k) => rules[k] ?? "keep";
+        const same = (keys) => {
+          const a = keys.map(actOf);
+          return a.every((x) => x === a[0]) ? a[0] : null;
+        };
+        const toggle = `<div class="card">
+            <label class="toggle">
+              <input type="checkbox" id="raidDiscoverSkipOn" ${s?.discoverSkipOpening ? "checked" : ""} />
+              <span><b>跳過開場動畫</b>
+                <div class="hint">發現渦時不播開場（每一種渦都一樣），跟下面的規則無關。</div>
+              </span>
+            </label>
+          </div>`;
+        const head5 = frags
+          .map(
+            (f) =>
+              `<th><span class="dot" style="background:${esc(f.css)}"></span>${esc(f.short)}</th>`,
+          )
+          .join("");
+        let body = "";
+        for (const [tier, tierName] of DISCOVER_TIERS) {
+          const group = bosses.filter((b) => b.tier === tier);
+          if (group.length === 0) continue;
+          const all = group.flatMap(keysOf);
+          body += `<tr class="tier"><td>${esc(tierName)}</td><td colspan="${frags.length}">${discoverSelect(
+            all,
+            same(all),
+            `${tierName}整組`,
+          )}</td></tr>`;
+          for (const b of group) {
+            const keys = keysOf(b);
+            const cells = b.byFragment
+              ? keys
+                  .map(
+                    (k, i) =>
+                      `<td>${discoverSelect([k], actOf(k), `${b.name} ${frags[i]?.short ?? ""}`)}</td>`,
+                  )
+                  .join("")
+              : `<td colspan="${frags.length}">${discoverSelect(keys, actOf(keys[0]), b.name)}
+                   <span class="dim">碎片隨機／看不出來，一格管全部</span></td>`;
+            body += `<tr><td class="boss">${esc(b.name)}</td>${cells}</tr>`;
+          }
+        }
+        const rulesOn = s?.discoverRulesOn === true;
+        const grid = `<div class="card">
+            <label class="toggle">
+              <input type="checkbox" id="raidDiscoverRulesOn" ${rulesOn ? "checked" : ""} />
+              <span><b>發現後做什麼</b>${info(RAID_DISCOVER_TIP)}
+                <div class="hint">
+                  ${
+                    rulesOn
+                      ? "開著：發現渦時照下面的表做。"
+                      : "<b>暫停中</b>：發現渦什麼都不做，下面的表留著，打開就照舊。"
+                  }
+                </div>
+              </span>
+            </label>
+            <div class="hint">
+              公開＝參加資格「無限制」並送出（會進 Discord 渦通報）；好友＝「僅限好友」並送出；
+              渦碼＝參加資格「無限制」但不送出，渦碼由機器人發到 Discord，只有頻道裡的人能加入；
+              刪除＝直接放棄；—＝不動。每一組第一列可以整組一起改。
+            </div>
+            <div class="hint">
+              ⚠ 「渦碼」會把渦碼經 Cloudflare Workers 發到 Discord 頻道，看得到頻道的人都能用。
+              要「渦 › 渦通報」開著才會發；發出去之前一樣先等 1 分鐘、渦還在才發。
+            </div>
+            <table class="dgrid${rulesOn ? "" : " paused"}">
+              <thead><tr><th></th>${head5}</tr></thead>
+              <tbody>${body}</tbody>
+            </table>
+          </div>`;
+        return (
+          head("發現渦", "用渦探知機發現渦之後：跳過開場，照 BOSS 與碎片公開、分享給好友或刪掉。") +
+          toggle +
+          grid
+        );
+      };
+
       // --- 渦 › 渦通報 -------------------------------------------------------
       //
       // 公開渦的 Discord 通知（docs/raid-feed.md）。沒有自己的開關：上傳跟著「獎勵標記」的
@@ -3721,7 +3910,8 @@
       const RAID_FEED_TIP =
         "插件只在你本來就會做的操作裡順手抓：打開 SUPPORT 時那份公開清單、進渦房／Refresh 時自己的渦清單、開打那一刻看到的 stage 與 BOSS 狀態。" +
         "收到的渦由 Cloudflare Workers（插件作者架的）彙整，新渦湊 30 秒發一則到 Discord，之後有變化就編輯同一則。" +
-        "渦碼在遊戲頁面裡就丟掉，從不上傳；發現者名字會上傳，因為 Discord 訊息本來就公開它。";
+        "渦碼在遊戲頁面裡就丟掉，不上傳 —— 只有你在「發現渦」規則表挑了「渦碼」的自己的渦例外；" +
+        "發現者名字會上傳，因為 Discord 訊息本來就公開它。";
 
       PAGES["vortex/vfeed"] = () => {
         const s = rstate;
@@ -3746,7 +3936,8 @@
             <div class="hint" style="margin-top:0">
               <b>會發哪些渦</b><br />
               · SUPPORT 公開清單上的渦（有人打開 SUPPORT 時抓到）<br />
-              · 自己開的渦，參加資格選「無限制」按送出的那一刻<br />
+              · 自己開的渦，參加資格選「無限制」按送出後等 1 分鐘、渦還在才發（送出後馬上刪掉的不發）<br />
+              · 「發現渦」規則挑了「渦碼」的自己的渦：附上渦碼（不進 SUPPORT，只有頻道裡的人拿得到）<br />
               · 渦 I～IV 都發<br />
               · 不發：僅限好友、只靠渦碼加入的渦；已經打倒的
             </div>
@@ -4900,20 +5091,21 @@
 
       // --- 設置 › 網頁版 ----------------------------------------------------
       /**
-       * 用瀏覽器玩的整套，照玩家要做的順序排：① 帶除錯埠的瀏覽器 ② ULR Boot ③ 書籤。
+       * 用瀏覽器玩的整套，照玩家要做的順序排：① 帶除錯埠的瀏覽器 ② Steam 登入擴充 ③ 登入。
        *
        * ① 的捷徑目標是主程序照**這台機器**組出來的（`snap.browsers`：找到的執行檔＋
        * 這個人的家目錄），跟「開啟」按鈕、「建桌面捷徑」寫進 .lnk 的是同一行 ——
        * 玩家照抄的、按鈕開的、捷徑開的永遠是同一個瀏覽器同一個設定檔。
        *
-       * ULR Boot 原始檔跟著安裝包走，按一下放到固定的資料夾（`snap.bootExt.dir`）——
+       * 擴充原始檔跟著安裝包走，按一下放到固定的資料夾（`snap.steamExt.dir`）——
        * 之後插件更新時再按一次就是原地更新。
        *
-       * ⚠ 遊戲改版不用更新擴充：它每次開頁會去雲端拿這一版的檔名清單。
-       * 只有官方外殼本身改了（像 9/23 那次）才需要新版擴充，那時插件會一起更新。
+       * ⚠ 2026-10-15 起官方驗 access_token，ULR Boot／竄改猴的「只帶 steamid 直開」登不進去。
+       * 這個擴充是在瀏覽器裡登入 Steam 帳號、每次開遊戲向 Steam 拿一顆新 token。
+       * 擴充認得舊的 `?steamid=` 書籤，所以玩家原本的書籤不用換。
        */
       PAGES["settings/web"] = () => {
-        const b = snap?.bootExt;
+        const b = snap?.steamExt;
         const br = snap?.browsers ?? {};
         const stale = b?.installed && b?.bundled && b.installed !== b.bundled;
         const action = !b?.installed ? "放好" : stale ? `更新到 ${b.bundled}` : "重新放一次";
@@ -4947,7 +5139,7 @@
              ${openRows}
              ${webMsgLine("browser")}
              <div class="hint">建好的捷徑叫「ULR Chrome」「ULR Edge」，之後雙擊它就好，不用先開插件。
-               Edge 開的時候會順便掛上 ULR Boot（②放好的話）。</div>
+               Edge 開的時候會順便掛上 Steam 登入擴充（②放好的話）。</div>
            </div>
            <div class="card">
              <div class="row"><span><b>自己做捷徑</b></span></div>
@@ -4963,14 +5155,14 @@
                一定要連 <code>--user-data-dir</code> 一起。</div>
            </div>
            <div class="card">
-             <div class="row"><span><b>② ULR Boot 擴充</b></span></div>
-             <div class="hint">讓瀏覽器不經 Steam、點書籤就進遊戲。插件內建，不用另外下載。</div>
+             <div class="row"><span><b>② Steam 登入擴充</b></span></div>
+             <div class="hint">在瀏覽器裡用 Steam 帳號登入遊戲，不用開 Steam 用戶端。插件內建，不用另外下載。</div>
              <div class="row"><span class="dim">資料夾</span><span><code>${esc(b?.dir ?? "—")}</code></span></div>
              <div class="row"><span class="dim">版本</span><span>${
                b?.installed ? esc(b.installed) : "還沒放"
              }</span></div>
-             <div class="row"><span></span><span><button id="bootExtInstall">${esc(action)}</button></span></div>
-             ${webMsgLine("boot")}
+             <div class="row"><span></span><span><button id="steamExtInstall">${esc(action)}</button></span></div>
+             ${webMsgLine("ext")}
              <ol class="steps">
                <li>按上面的「${esc(action)}」，資料夾會打開</li>
                <li>開擴充功能頁：

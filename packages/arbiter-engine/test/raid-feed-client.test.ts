@@ -2,13 +2,18 @@
  * 公開渦通知的托盤端：同一份 SUPPORT 不重傳、只補帳本缺的、關掉互傳只讀不傳、失敗不丟例外。
  */
 
-import type { RaidFeedView } from "@ulr/arbiter-link/raid-feed";
-import type { RaidSnapshotRow, RaidSupportRow } from "@ulr/cdp-adapter";
+import { RAID_FEED_CODE_PATTERN, type RaidFeedView } from "@ulr/arbiter-link/raid-feed";
+import {
+  RAID_DISCOVER_CODE_PATTERN,
+  type RaidSnapshotRow,
+  type RaidSupportRow,
+} from "@ulr/cdp-adapter";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   feedToPublicMap,
   ownToFeed,
   pickOwnToFill,
+  RAID_PUBLISH_HOLD_MS,
   RaidFeedSync,
   supportToFeed,
 } from "../src/raid-feed-client.js";
@@ -326,6 +331,56 @@ describe("自己按送出公開", () => {
     await new RaidFeedSync(off.impl, "https://x/raid-feed").sync([], [], false, [pub]);
     expect(off.calls.every((c) => c.method === "GET")).toBe(true);
   });
+
+  it("分享渦碼的（有 code）走 source code、帶碼；按送出的照走 publish、不帶碼", async () => {
+    const w = fakeWorker([]);
+    const sync = new RaidFeedSync(w.impl, "https://x/raid-feed");
+    const shared = { ...pub, foundAt: FOUND + 7, code: "ABCDEFGHIJKL" };
+    const r = await sync.sync([], [], true, [pub, shared]);
+    const posts = w.calls.filter((c) => c.method === "POST");
+    expect(posts.map((c) => c.body?.source)).toEqual(["publish", "code"]);
+    expect(posts[0]?.body?.raids?.[0]).not.toHaveProperty("code");
+    expect(posts[1]?.body?.raids?.[0]).toMatchObject({ code: "ABCDEFGHIJKL" });
+    // 記錄用的只有渦名
+    expect(r.sharedCodes).toEqual(["爬行者"]);
+  });
+
+  it("頁面與雲端收的渦碼是同一條規則", () => {
+    expect(RAID_DISCOVER_CODE_PATTERN).toBe(RAID_FEED_CODE_PATTERN);
+  });
+
+  it("剛送出的先等 RAID_PUBLISH_HOLD_MS；等的時候被刪了（清單上不見了）就不傳（玩家 2026-10-17）", async () => {
+    const w = fakeWorker([]);
+    const sync = new RaidFeedSync(w.impl, "https://x/raid-feed");
+    const at = pub.at + 1000;
+    const r = await sync.sync([], [], true, [{ ...pub, at }], at + 5_000);
+    expect(r.heldUntil).toBe(at + RAID_PUBLISH_HOLD_MS);
+    expect(w.calls.filter((c) => c.body?.source === "publish")).toHaveLength(0);
+    // 時間到了但被刪了
+    const gone = await sync.sync(
+      [],
+      [],
+      true,
+      [{ ...pub, at, gone: true }],
+      at + RAID_PUBLISH_HOLD_MS,
+    );
+    expect(gone.heldUntil).toBeNull();
+    expect(gone.dropped).toEqual(["爬行者"]);
+    expect(w.calls.filter((c) => c.body?.source === "publish")).toHaveLength(0);
+    // 刪掉的只算一次，之後也不傳
+    const again = await sync.sync(
+      [],
+      [],
+      true,
+      [{ ...pub, at, gone: true }],
+      at + RAID_PUBLISH_HOLD_MS,
+    );
+    expect(again.dropped).toEqual([]);
+    // 別的渦還在就傳
+    const other = { ...pub, foundAt: FOUND + 5, at, gone: false };
+    await sync.sync([], [], true, [other], at + RAID_PUBLISH_HOLD_MS);
+    expect(w.calls.filter((c) => c.body?.source === "publish")).toHaveLength(1);
+  });
 });
 
 describe("feedToPublicMap", () => {
@@ -381,6 +436,9 @@ describe("RaidFeedSync", () => {
       map: {},
       support: 0,
       own: 0,
+      heldUntil: null,
+      dropped: [],
+      sharedCodes: [],
     });
     // 同一個實例換成好的 Worker 不行（fetch 是建構時給的），所以驗「沒記成傳過」：再傳一次還會打 POST
     await sync.sync([supportRow], [], true);

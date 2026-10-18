@@ -26,7 +26,37 @@
  *   ⑫ SUPPORT 公開清單：名字右邊接碎片色（只看公開渦表，見「⑫ SUPPORT 公開清單」那段）
  *   ⑬ BOSS 被動（硬化／吸收／潛伏／濁濫／夜霧／隱身／收穫／磁暴）：伺服器不送，照規則算（見「BOSS 被動」那段）。
  *      清單列與詳細面板排在 BOSS 狀態前面，SUPPORT 接在 BOSS 名右邊；狗的硬化／吸收帶剩餘時間
+ *   ⑭ 發現渦（預設什麼都不做）：跳過發現的開場（一個開關）；照「BOSS × 碎片」規則表
+ *      公開／僅限好友／渦碼發 Discord／刪除／不動（玩家 2026-10-17，見「⑭ 發現渦」那段）
  * ```
+ *
+ * ## ⑭ 發現渦（2026-10-15 從跑著的客戶端讀的）
+ *
+ * ```
+ *   用渦探知機 → use_avatar_item → 伺服器推 raid_title(raid_data) →
+ *     Raid.create 裡的 socket.on("raid_title", t => this.scene.launch("Raid_Title", { raid_data: t }))
+ *     Raid_Title：opening_effect 影片 → 日期＋渦名 → BOSS 名、HP、ATK、DEF、limit，約 20 秒；右上 SKIP
+ *   公開＝渦碼視窗（詳細面板的渦碼鈕 → raid_code_create）兩步：
+ *     參加資格下拉 → fetch("raid_code_update", profound_id, 0 無限制｜1 僅限好友) → 回 only_friend 的新值
+ *     送出 → 確認 OK → emit("raid_code_send", profound_id)（不等回應）
+ * ```
+ *
+ * raid_data 有 raid_chara_id（＝清單的 monster_id）、raid_stage、raid_name、raid_ttl，沒有 profound_id。
+ * BOSS 看 CharaCards 的 chara（mc1008_02），規則表的列在 RAID_DISCOVER_BOSSES。
+ *
+ * - 跳過（skipOpening）：包 Raid 場景的 scene.launch（實例上），Raid_Title 直接不開 —— 什麼都不載、BGM 不動。
+ *   發現時記 stage 的那條（noteTitle）平常讀 Raid_Title.raid_data，跳過的這邊直接交給它
+ * - 規則：等清單拉到新渦（官方用完探知機自己會重讀 db_raid），照記 stage 那條同一套對法認出是哪一個
+ *   （自己開的、同一隻怪、發現時刻差 3 分鐘內最近的）。碎片只用**自己看到的 stage**（發現時的
+ *   raid_title）套公式 —— 學到的表、照區塊推的是猜的，拿來刪渦太危險；判不出來就不動。
+ *   妖精（stage 一律 3、公式不準）與龍鯉（碎片隨機）只有一格 any
+ *   · public／friends：走官方渦碼視窗那兩步：參加資格不對才送 raid_code_update，然後 raid_code_send。
+ *     送出經過 raid-support 包的 emit，無限制的照樣進 Discord 公開渦通報（托盤先等一下、確定沒被刪才發）
+ *   · discord（分享渦碼）：參加資格改「無限制」（僅限好友時非好友連渦碼都輸入不了）但**不送出**，
+ *     渦碼記進 raid-support 那份公開紀錄（帶 code），托盤等一下、沒被刪才交給機器人發 Discord。
+ *     這是渦碼唯一會離開頁面的路，而且是玩家自己在規則表挑的
+ *   · delete：照 ⑧ 同一串（raid_delete → db_raid → 重排重畫）
+ * - 同一個渦只做一次（window.__ulrRaidDiscoverDone，重裝不清）；插件沒接著時發現的渦不補
  *
  * ## ⑪ 輸入渦碼後整個渦房點不動（2026-09-26 實機查到的）
  *
@@ -132,7 +162,7 @@ import type { RaidLearnedTable } from "./raid-learned.js";
 const FLAG = "__ulrRaidView";
 
 /** 腳本版本。**改動注入腳本裡任何一行就 +1**，修 bug 也算。 */
-export const RAID_VIEW_SCRIPT_VERSION = 34;
+export const RAID_VIEW_SCRIPT_VERSION = 36;
 
 /** ⑪ 塞進官方 RaidUITexts.error 的鍵（官方的 raid_error 拿鍵查字）。 */
 export const RAID_CODE_NO_REPLY_KEY = "ULR_CODE_NO_REPLY";
@@ -546,6 +576,151 @@ export function isRaidAutoDeleteReport(value: unknown): value is RaidAutoDeleteR
   );
 }
 
+/**
+ * ⑭ 發現一個渦之後對它做什麼：public 參加資格「無限制」並送出、friends「僅限好友」並送出、
+ * discord 參加資格「無限制」但不送出、渦碼交給機器人發 Discord（只有頻道裡的人拿得到）、
+ * delete 走官方「放棄」刪掉、keep 不動（官方原樣）。
+ */
+export type RaidDiscoverAction = "keep" | "public" | "friends" | "discord" | "delete";
+
+export const RAID_DISCOVER_ACTIONS: readonly RaidDiscoverAction[] = [
+  "keep",
+  "public",
+  "friends",
+  "discord",
+  "delete",
+];
+
+/**
+ * 分享到 Discord 的渦碼只收這種。碼會原樣貼進 Discord 訊息，只收英數字就夾帶不了 mention／連結。
+ * 跟 arbiter-link raid-feed 的 `RAID_FEED_CODE_PATTERN` 同一條（測試會對）。
+ */
+export const RAID_DISCOVER_CODE_PATTERN = "^[A-Za-z0-9]{4,32}$";
+
+/**
+ * ⑭ 發現渦之後自動做的事（玩家 2026-10-17 改成這樣：跳過開場獨立一個開關，公開與否照 BOSS×碎片挑）。
+ *
+ * - `skipOpening`：發現時不開 Raid_Title（每一種渦都一樣）
+ * - `rules`：{@link raidDiscoverRuleKey} → 動作。沒寫的＝keep。碎片看的是發現時伺服器給的 stage
+ */
+export interface RaidDiscoverSetting {
+  skipOpening: boolean;
+  rules: Record<string, RaidDiscoverAction>;
+}
+
+export const DEFAULT_RAID_DISCOVER: RaidDiscoverSetting = { skipOpening: false, rules: {} };
+
+/** 規則表的一列：一隻 BOSS（CharaCards 的 chara）。 */
+export interface RaidDiscoverBoss {
+  mons: string;
+  name: string;
+  tier: "I" | "II/III" | "IV" | "?";
+  /** 發現時看得出碎片嗎。妖精（stage 一律 3、公式不準）、龍鯉（碎片隨機）只有一格 any */
+  byFragment: boolean;
+}
+
+/**
+ * 規則表上列的 BOSS。名字與代碼是 2026-10-17 從跑著的客戶端 CharaCards／Characters 讀的。
+ * 惡魔之角（mc1010）、可可果（mc1011）是活動 BOSS，不列 —— 沒列的發現了什麼都不做。
+ */
+export const RAID_DISCOVER_BOSSES: readonly RaidDiscoverBoss[] = [
+  { mons: "mc1003_01", name: "赤死獸", tier: "I", byFragment: true },
+  { mons: "mc1006_01", name: "啃食者", tier: "I", byFragment: true },
+  { mons: "mc1007_01", name: "深沉之者", tier: "I", byFragment: true },
+  { mons: "mc1008_01", name: "贔屭", tier: "I", byFragment: true },
+  { mons: "mc1012_01", name: "龍魚", tier: "I", byFragment: true },
+  { mons: "mc1009_01", name: "W.M.貴族", tier: "I", byFragment: true },
+  { mons: "mc1013_01", name: "翔空蟲", tier: "I", byFragment: true },
+  { mons: "mc1005", name: "吸血女王蕾米雅", tier: "I", byFragment: true },
+  { mons: "mc1003_02", name: "黑死獸", tier: "II/III", byFragment: true },
+  { mons: "mc1006_02", name: "屠殺者", tier: "II/III", byFragment: true },
+  { mons: "mc1007_02", name: "誘引之者", tier: "II/III", byFragment: true },
+  { mons: "mc1008_02", name: "靈龜", tier: "II/III", byFragment: true },
+  { mons: "mc1012_02", name: "龍鯰", tier: "II/III", byFragment: true },
+  { mons: "mc1009_02", name: "W.M.公主", tier: "II/III", byFragment: true },
+  { mons: "mc1013_02", name: "翔天蟲", tier: "II/III", byFragment: true },
+  { mons: "mc1003_03", name: "瘟疫", tier: "IV", byFragment: true },
+  { mons: "mc1006_03", name: "爬行者", tier: "IV", byFragment: true },
+  { mons: "mc1007_03", name: "深奧之者", tier: "IV", byFragment: true },
+  { mons: "mc1008_03", name: "玄帝", tier: "IV", byFragment: true },
+  { mons: "mc1012_03", name: "龍鯉", tier: "IV", byFragment: false },
+  { mons: "mc1009_03", name: "W.M.王后", tier: "IV", byFragment: true },
+  { mons: "mc1013_03", name: "翔星蟲", tier: "IV", byFragment: true },
+  { mons: "mc1004_01", name: "妖精", tier: "?", byFragment: false },
+];
+
+/** 規則的鍵：`mc1008_02:soul`；看不出碎片的 BOSS 是 `mc1004_01:any`。 */
+export function raidDiscoverRuleKey(mons: string, fragment: RaidFragment | "any"): string {
+  return `${mons}:${fragment}`;
+}
+
+/** 規則表上所有的鍵（BOSS 順序、碎片照 RAID_FRAGMENTS）。 */
+export function raidDiscoverRuleKeys(boss: RaidDiscoverBoss): string[] {
+  return boss.byFragment
+    ? RAID_FRAGMENTS.map((f) => raidDiscoverRuleKey(boss.mons, f.key))
+    : [raidDiscoverRuleKey(boss.mons, "any")];
+}
+
+const RAID_DISCOVER_RULE_KEYS: ReadonlySet<string> = new Set(
+  RAID_DISCOVER_BOSSES.flatMap(raidDiscoverRuleKeys),
+);
+
+/** 存檔讀回來的規則：認不得的鍵／動作丟掉，keep 不存（沒寫就是 keep）。 */
+export function normalizeRaidDiscoverRules(raw: unknown): Record<string, RaidDiscoverAction> {
+  const out: Record<string, RaidDiscoverAction> = {};
+  if (typeof raw !== "object" || raw === null) return out;
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!RAID_DISCOVER_RULE_KEYS.has(k)) continue;
+    if (v === "public" || v === "friends" || v === "discord" || v === "delete") out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * 舊的兩個開關（2026-10-15）換成規則：「渦一～三公開」＝渦一～三（不是妖精）每一格 public；
+ * 「渦四與妖精僅限好友」＝渦四與妖精每一格 friends。
+ */
+export function legacyRaidDiscoverRules(
+  common: boolean,
+  rare: boolean,
+): Record<string, RaidDiscoverAction> {
+  const out: Record<string, RaidDiscoverAction> = {};
+  for (const b of RAID_DISCOVER_BOSSES) {
+    const act =
+      b.tier === "I" || b.tier === "II/III" ? (common ? "public" : null) : rare ? "friends" : null;
+    if (act !== null) for (const k of raidDiscoverRuleKeys(b)) out[k] = act;
+  }
+  return out;
+}
+
+/** ⑭ 發現的渦照規則做了什麼、成功沒有。 */
+export interface RaidDiscoverReport {
+  type: "raid-discover";
+  name: string;
+  action: RaidDiscoverAction;
+  /** 照哪一格碎片挑的（RaidFragment 的 key）；看不出碎片的 BOSS 是 "any"，沒判出來是 null */
+  fragment: string | null;
+  ok: boolean;
+  /** 開場有沒有跳過 */
+  skipped: boolean;
+  reason: string | null;
+}
+
+export function isRaidDiscoverReport(value: unknown): value is RaidDiscoverReport {
+  const o = value as { type?: unknown; name?: unknown; action?: unknown; ok?: unknown };
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    o.type === "raid-discover" &&
+    typeof o.name === "string" &&
+    RAID_DISCOVER_ACTIONS.includes(o.action as RaidDiscoverAction) &&
+    typeof o.ok === "boolean"
+  );
+}
+
+/** ⑭ 發現後多久還等不到清單上出現那個渦就放棄（人可能一直在任務裡）。 */
+export const RAID_DISCOVER_GIVE_UP_MS = 6 * 60 * 60 * 1000;
+
 /** SUPPORT 清單畫出來時回報：這一批公開渦的渦碼。托盤拿去查 TL／狀態。 */
 export interface RaidCodesReport {
   type: "raid-codes";
@@ -714,6 +889,8 @@ export interface RaidViewPatchOptions {
   learned?: RaidLearnedTable;
   /** 更新鈕左邊要不要畫「History」。沒給＝畫。 */
   history?: boolean;
+  /** ⑭ 發現渦之後自動做的事。沒給＝都不做。 */
+  discover?: RaidDiscoverSetting;
 }
 
 export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): string {
@@ -727,6 +904,9 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
     teams: options.teams ?? {},
     learned: options.learned ?? {},
     history: options.history !== false,
+    discover: options.discover ?? DEFAULT_RAID_DISCOVER,
+    discoverGiveUpMs: RAID_DISCOVER_GIVE_UP_MS,
+    codePattern: RAID_DISCOVER_CODE_PATTERN,
     manualCooldownMs: RAID_VIEW_MANUAL_REFRESH_COOLDOWN_MS,
     learnGiveUpMs: RAID_LEARN_GIVE_UP_MS,
     battleMaxMs: RAID_BATTLE_PENDING_MAX_MS,
@@ -2021,6 +2201,10 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
     var T = G.scene.keys.Raid_Title;
     var d = T && T.raid_data;
     if (!d || d === st.lastTitle) return;
+    addTitle(st, d);
+  }
+  /** 收一份 raid_title。⑭ 跳過開場的那份不會進 Raid_Title，直接從這裡收。 */
+  function addTitle(st, d) {
     st.lastTitle = d;
     var stage = typeof d.raid_stage === "number" ? d.raid_stage : parseInt(d.raid_stage, 10);
     if (!isFinite(stage)) return;
@@ -2052,6 +2236,177 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
       putStage(best.profound_id, p.stage, "title");
       return false;
     });
+  }
+
+  // ---- ⑭ 發現渦：跳過開場、照規則公開／刪除（檔頭有細節） -----------------------
+  var DISCOVER_DONE = "__ulrRaidDiscoverDone";
+  /** BOSS 代碼（CharaCards 的 chara，mc1008_02）；查不到是 null。 */
+  function monsOf(G, charaId) {
+    var card = byId(G, "CharaCards", charaId);
+    return card && typeof card.chara === "string" ? card.chara : null;
+  }
+  /** 規則表上有沒有任何一格不是「不動」 */
+  function anyRule(st) {
+    var rules = st.discover && st.discover.rules;
+    if (!rules) return false;
+    for (var k in rules) if (rules[k] && rules[k] !== "keep") return true;
+    return false;
+  }
+  /** 官方的 raid_title 要開 Raid_Title 時先經過這裡。回 true＝不開（跳過）。 */
+  function onTitle(st, d) {
+    var skip = !!(st.discover && st.discover.skipOpening);
+    if (anyRule(st)) {
+      st.found.push({ chara: d.raid_chara_id, name: String(d.raid_name || ""), skipped: skip, at: Date.now() });
+      if (st.found.length > 10) st.found.shift();
+    }
+    if (skip) addTitle(st, d);
+    return skip;
+  }
+  /**
+   * 這個渦照規則該怎麼辦：{ action, fragment }。碎片只用自己看到的 stage（發現時的 raid_title）；
+   * 妖精與碎片隨機的怪只看 any 那格。判不出碎片回 fragment null、action keep。
+   */
+  function discoverPlan(st, G, r) {
+    var rules = (st.discover && st.discover.rules) || {};
+    var mons = monsOf(G, r.monster_id);
+    if (mons === null) return { action: "keep", fragment: null, mons: null };
+    var fk = null;
+    if (mons.indexOf("mc1004") === 0 || CFG.randomFragMonsters.indexOf(r.monster_id) !== -1) {
+      fk = "any";
+    } else {
+      var own = seenStage(r);
+      var f = own && typeof r.rarity === "number" ? fragByFormula(r.rarity, own.stage) : null;
+      if (f) fk = f.key;
+    }
+    var act = fk !== null ? rules[mons + ":" + fk] : null;
+    var known = act === "public" || act === "friends" || act === "discord" || act === "delete";
+    return { action: known ? act : "keep", fragment: fk, mons: mons };
+  }
+  function hookTitleLaunch(st, G) {
+    var R = G.scene.keys.Raid;
+    var sp = R ? R.scene : null;
+    if (!sp || typeof sp.launch !== "function" || sp.launch.__ulrRaidView) return;
+    var orig = sp.launch;
+    var wrapped = function (key, data) {
+      try {
+        // 每次呼叫才拿現在的狀態：重裝後舊版的包裝還在也照新版走
+        var s = window[FLAG];
+        if (key === "Raid_Title" && s && data && data.raid_data && onTitle(s, data.raid_data)) return this;
+      } catch (e) {}
+      return orig.apply(this, arguments);
+    };
+    wrapped.__ulrRaidView = orig;
+    sp.launch = wrapped;
+  }
+  function unhookTitleLaunch() {
+    try {
+      var G = gameOf();
+      var sp = G && G.scene.keys.Raid ? G.scene.keys.Raid.scene : null;
+      if (sp && sp.launch && sp.launch.__ulrRaidView) sp.launch = sp.launch.__ulrRaidView;
+    } catch (e) {}
+  }
+  /** 清單拉到新渦了就照規則做（公開／僅限好友走渦碼視窗那兩步、刪除走放棄）。一次只做一個。 */
+  function discoverTick(st, R, G) {
+    if (!st.found.length || st.publishing || st.deleting) return;
+    var me = meMaybe(R);
+    if (me === null) return;
+    var done = window[DISCOVER_DONE] || (window[DISCOVER_DONE] = {});
+    var now = Date.now();
+    // 等的時候玩家把規則全關了：不做了
+    var on = anyRule(st);
+    st.found = st.found.filter(function (p) { return on && now - p.at < CFG.discoverGiveUpMs; });
+    for (var k = 0; k < st.found.length; k++) {
+      var p = st.found[k], best = null;
+      for (var i = 0; i < R.raid_list.length; i++) {
+        var r = R.raid_list[i];
+        if (!r || r.founder !== me || r.monster_id !== p.chara || !r.profound_id || done[r.profound_id]) continue;
+        if (typeof r.found_at !== "number" || Math.abs(r.found_at - p.at) > TITLE_MATCH_MS) continue;
+        if (best === null || Math.abs(r.found_at - p.at) < Math.abs(best.found_at - p.at)) best = r;
+      }
+      if (best === null) continue;
+      var plan = discoverPlan(st, G, best);
+      // 刪除要等畫面閒下來（跟 ⑧ 一樣：結算正在演、詳細面板的放棄框開著時不動清單）
+      if (plan.action === "delete" && (busy(st, R) || alive(R.raid_detail_give_up))) return;
+      st.found.splice(k, 1);
+      done[best.profound_id] = now;
+      var info = { type: "raid-discover", name: String(best.name || p.name), action: plan.action, fragment: plan.fragment,
+        ok: plan.action !== "keep" || plan.fragment !== null, skipped: p.skipped,
+        reason: plan.fragment === null ? (plan.mons === null ? "認不得這隻 BOSS" : "看不出碎片（沒收到發現時的 stage）") : null };
+      if (plan.action === "keep") report(info);
+      else if (plan.action === "delete") deleteFound(st, R, best, info);
+      else publishFound(st, R, best, info);
+      return;
+    }
+  }
+  function deleteFound(st, R, r, info) {
+    var sock = R.socket;
+    st.deleting = { id: r.profound_id, at: Date.now() };
+    Promise.resolve(sock.fetch("raid_delete", r.profound_id)).then(function (ok) {
+      if (ok === false) throw new Error("伺服器沒刪");
+      info.ok = true;
+      return sock.fetch("db_raid");
+    }).then(function (fresh) {
+      applyList(R, sock, fresh);
+    }).catch(function (e) {
+      if (!info.ok) info.reason = String((e && e.message) || e);
+      st.reason = "發現渦刪除失敗：" + String((e && e.message) || e);
+    }).then(function () {
+      st.deleting = null;
+      report(info);
+    });
+  }
+  /**
+   * public／friends：參加資格不對才改，再 raid_code_send。
+   * discord（分享渦碼）：參加資格改成「無限制」（僅限好友時非好友連渦碼都輸入不了，玩家 2026-10-17），
+   * **不送出**（不進 SUPPORT），渦碼記進公開紀錄交給托盤發 Discord —— 只有看得到那個頻道的人拿得到碼。
+   */
+  function publishFound(st, R, r, info) {
+    var sock = R.socket;
+    var want = info.action === "friends";
+    var code = typeof r.code === "string" ? r.code : "";
+    info.ok = false;
+    // 只收英數字：碼會原樣貼進 Discord 訊息，不能讓它夾帶 mention／連結
+    if (info.action === "discord" && !CODE_RE.test(code)) {
+      info.reason = "渦碼格式認不得（只收英數字）";
+      report(info);
+      return;
+    }
+    st.publishing = true;
+    Promise.resolve(r.only_friend === want ? want : sock.fetch("raid_code_update", r.profound_id, want ? 1 : 0)).then(function (got) {
+      // 官方下拉選單也是照回應寫回列上
+      if (got === true || got === false) r.only_friend = got;
+      if (got !== want) throw new Error("參加資格沒改成（伺服器回 " + String(got) + "）");
+      if (info.action === "discord") noteSharedCode(r, code);
+      else sock.emit("raid_code_send", r.profound_id);
+      info.ok = true;
+    }).catch(function (e) {
+      info.reason = String((e && e.message) || e);
+      st.reason = "發現渦公開失敗：" + info.reason;
+    }).then(function () {
+      st.publishing = false;
+      report(info);
+    });
+  }
+  /** 渦碼只收這種（跟 arbiter-link raid-feed 的 RAID_FEED_CODE_RE 同一條） */
+  var CODE_RE = new RegExp(CFG.codePattern);
+  /**
+   * 分享渦碼：記進 raid-support 那份公開紀錄（window.__ulrRaidPublished，同一個渦只一筆），帶 code。
+   * 托盤照樣等一下、確定沒被刪才傳（source "code"）。叫托盤用 raid-support 同一種回報。
+   */
+  function noteSharedCode(r, code) {
+    var G = gameOf();
+    var n = function (v) { return typeof v === "number" && isFinite(v) ? v : null; };
+    var P = window.__ulrRaidPublished || (window.__ulrRaidPublished = []);
+    var row = null;
+    for (var j = 0; j < P.length; j++) if (P[j] && P[j].founder === r.founder && P[j].foundAt === r.found_at) row = P[j];
+    if (row === null) {
+      row = { founder: r.founder, foundAt: r.found_at, limit: r.limit, name: typeof r.name === "string" ? r.name : null,
+        monsterId: n(r.monster_id), mons: G ? monsOf(G, r.monster_id) : null, hp: n(r.hp), hpMax: n(r.hp_max),
+        rarity: n(r.rarity), level: n(r.level), mapIndex: n(r.map_index), at: Date.now() };
+      P.push(row);
+    }
+    row.code = code;
+    report({ type: "raid-stage" });
   }
   function detailRow(R) {
     var row = R.__ulrRaidDetailRow;
@@ -2873,6 +3228,8 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
         st.primed = true;
         try { ensureStateIcons(G); } catch (e) {}
         try { noteTitle(st, G); } catch (e) { st.reason = "title stage: " + String((e && e.message) || e); }
+        // ⑭ 渦房睡著（人在任務裡）時 raid_title 也會來：不在渦房也先包好
+        try { hookTitleLaunch(st, G); } catch (e) { st.reason = "title launch: " + String((e && e.message) || e); }
       }
       var R = G ? raidScene(G) : null;
       if (!R) {
@@ -2886,6 +3243,7 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
       hookDetail(st, R);
       hookStart(st, R);
       matchTitles(st, R);
+      try { discoverTick(st, R, G); } catch (e) { st.reason = "discover: " + String((e && e.message) || e); }
       rememberMeta(st, R);
       try { trackRaids(st, R); } catch (e) { st.reason = "track: " + String((e && e.message) || e); }
       try { settleBattle(R); } catch (e) { st.reason = "battle: " + String((e && e.message) || e); }
@@ -2949,6 +3307,7 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
     try { if (typeof st.unhookDetail === "function") st.unhookDetail(); else unhookDetail(st); } catch (e) {}
     try { if (st.supportProto && st.supportProto.raid_support_list && st.supportProto.raid_support_list.__ulrRaidView) st.supportProto.raid_support_list = st.supportProto.raid_support_list.__ulrRaidView; } catch (e) {}
     try { if (typeof st.unhookDamage === "function") st.unhookDamage(); } catch (e) {}
+    unhookTitleLaunch();
     dropTextures();
     delete window[FLAG];
   }
@@ -2992,6 +3351,9 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
     lastRoom: null,
     lastTitle: null,
     titles: [],
+    discover: CFG.discover,
+    found: [],
+    publishing: false,
     autoDelete: CFG.autoDelete,
     deleting: null,
     tried: {},
@@ -3122,6 +3484,20 @@ export function buildRaidViewSetAutoDeleteExpression(setting: RaidAutoDeleteSett
 })()`;
 }
 
+/** 托盤推 ⑭ 發現渦的設定下來。回 "ok" / "not-installed"。之後發現的渦照新設定。 */
+export function buildRaidViewSetDiscoverExpression(setting: RaidDiscoverSetting): string {
+  return `(function () {
+  try {
+    var st = window["${FLAG}"];
+    if (!st) return "not-installed";
+    st.discover = JSON.parse(${embedJson({ skipOpening: setting.skipOpening, rules: setting.rules })});
+    return "ok";
+  } catch (e) {
+    return "error:" + String((e && e.message) || e);
+  }
+})()`;
+}
+
 /** 托盤推「要不要畫 History 鈕」下來。回 "ok" / "not-installed"。下一幀更新鈕那一組照新設定重畫。 */
 export function buildRaidViewSetHistoryExpression(on: boolean): string {
   return `(function () {
@@ -3191,6 +3567,10 @@ export const RAID_VIEW_UNINSTALL_EXPRESSION = `(function () {
     try { if (typeof st.unhookCode === "function") st.unhookCode(); } catch (e) {}
     try { if (typeof st.clearAll === "function") st.clearAll(); } catch (e) {}
     try { if (typeof st.unhookDetail === "function") st.unhookDetail(); } catch (e) {}
+    try {
+      var sp = window.game && window.game.scene.keys.Raid ? window.game.scene.keys.Raid.scene : null;
+      if (sp && sp.launch && sp.launch.__ulrRaidView) sp.launch = sp.launch.__ulrRaidView;
+    } catch (e) {}
     try {
       var G = window.game;
       ["__ulrRaidIcons", "__ulrVortexGray", "__ulrRaidPanel", "__ulrRaidPanelChar"].forEach(function (k) { if (G && G.textures.exists(k) && G.textures.remove) G.textures.remove(k); });

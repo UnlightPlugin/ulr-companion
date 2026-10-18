@@ -469,6 +469,40 @@ describe("這個實例要用哪一份", () => {
       normalizeProfile({ id: "x", port: 59222, customCostInGame: true })?.customCostInGame,
     ).toBe(true);
   });
+
+  // --- 發現渦 ---------------------------------------------------------------
+
+  it("發現渦：預設不跳過、規則空的；2026-10-15 的兩個開關讀進來換成跳過＋規則", () => {
+    const fresh = normalizeProfile({ id: "x", port: 59222 });
+    expect(fresh?.raidDiscoverSkipOpening).toBe(false);
+    expect(fresh?.raidDiscoverRules).toEqual({});
+    // 兩個開關預設都關（玩家 2026-10-17）；存了就照存的
+    expect(defaultProfile("desktop").raidDiscoverSkipOpening).toBe(false);
+    expect(defaultProfile("desktop").raidDiscoverRulesOn).toBe(false);
+    expect(fresh?.raidDiscoverRulesOn).toBe(false);
+    expect(
+      normalizeProfile({ id: "x", port: 59222, raidDiscoverRulesOn: true })?.raidDiscoverRulesOn,
+    ).toBe(true);
+    const old = normalizeProfile({ id: "x", port: 59222, raidDiscoverPublic: true });
+    expect(old?.raidDiscoverSkipOpening).toBe(true);
+    // 開過舊開關的：換版後照舊在做，不會安靜停掉
+    expect(old?.raidDiscoverRulesOn).toBe(true);
+    expect(old?.raidDiscoverRules["mc1008_02:memory"]).toBe("public");
+    expect(old?.raidDiscoverRules["mc1008_03:memory"]).toBeUndefined();
+    // 存過新格式就照新格式，舊欄位不管
+    const saved = normalizeProfile({
+      id: "x",
+      port: 59222,
+      raidDiscoverPublic: true,
+      raidDiscoverSkipOpening: false,
+      raidDiscoverRules: { "mc1008_02:soul": "public", "mc1008_02:memory": "delete" },
+    });
+    expect(saved?.raidDiscoverSkipOpening).toBe(false);
+    expect(saved?.raidDiscoverRules).toEqual({
+      "mc1008_02:soul": "public",
+      "mc1008_02:memory": "delete",
+    });
+  });
   // --- 自動配對的開房設定 ---------------------------------------------------
 
   it("舊設定檔沒有 match 這一欄 → 拿到一份可用的預設", () => {

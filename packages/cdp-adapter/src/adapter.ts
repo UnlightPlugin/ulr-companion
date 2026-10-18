@@ -192,6 +192,8 @@ import type {
   RaidAutoDeleteSettingReport,
   RaidBattleReport,
   RaidCodesReport,
+  RaidDiscoverReport,
+  RaidDiscoverSetting,
   RaidHistoryRequestReport,
   RaidPublicMap,
   RaidRefreshReport,
@@ -231,12 +233,14 @@ import {
 import {
   buildRaidViewPatchScript,
   buildRaidViewSetAutoDeleteExpression,
+  buildRaidViewSetDiscoverExpression,
   buildRaidViewSetHistoryExpression,
   buildRaidViewSetPublicExpression,
   buildRaidViewSetTeamsExpression,
   buildRaidViewSetLearnedExpression,
   isRaidAutoDeleteReport,
   isRaidAutoDeleteSettingReport,
+  isRaidDiscoverReport,
   isRaidBattleReport,
   isRaidCodesReport,
   isRaidHistoryRequestReport,
@@ -474,6 +478,7 @@ export class CdpAdapter {
   #questBonusHandlers = new Set<(report: QuestBonusReport) => void>();
   #raidAutoDeleteHandlers = new Set<(report: RaidAutoDeleteReport) => void>();
   #raidAutoDeleteSettingHandlers = new Set<(report: RaidAutoDeleteSettingReport) => void>();
+  #raidDiscoverHandlers = new Set<(report: RaidDiscoverReport) => void>();
   #raidRewardModeHandlers = new Set<(report: RaidRewardModeReport) => void>();
   #closeHandlers = new Set<(reason: string) => void>();
 
@@ -1864,6 +1869,7 @@ export class CdpAdapter {
     teams?: RaidTeamsMap,
     learned?: RaidLearnedTable,
     history?: boolean,
+    discover?: RaidDiscoverSetting,
   ): Promise<RaidViewStatus> {
     const raw = await this.evaluate<string>(
       buildRaidViewPatchScript({
@@ -1873,6 +1879,7 @@ export class CdpAdapter {
         ...(teams === undefined ? {} : { teams }),
         ...(learned === undefined ? {} : { learned }),
         ...(history === undefined ? {} : { history }),
+        ...(discover === undefined ? {} : { discover }),
       }),
     );
     return parseRaidViewStatus(raw);
@@ -1959,6 +1966,17 @@ export class CdpAdapter {
   /** 更新鈕左邊的「History」要不要畫。回 `"ok"` 或 `"not-installed"`。 */
   async setRaidHistoryButton(on: boolean): Promise<string> {
     return await this.evaluate<string>(buildRaidViewSetHistoryExpression(on));
+  }
+
+  /** 發現渦之後自動做的事（跳過開場、公開）。回 `"ok"` 或 `"not-installed"`。 */
+  async setRaidDiscover(setting: RaidDiscoverSetting): Promise<string> {
+    return await this.evaluate<string>(buildRaidViewSetDiscoverExpression(setting));
+  }
+
+  /** 發現的渦自動公開了（或沒公開成）。 */
+  onRaidDiscover(handler: (report: RaidDiscoverReport) => void): () => void {
+    this.#raidDiscoverHandlers.add(handler);
+    return () => this.#raidDiscoverHandlers.delete(handler);
   }
 
   /** SUPPORT 清單畫出來了：那一批公開渦的渦碼。 */
@@ -2315,6 +2333,10 @@ export class CdpAdapter {
     }
     if (isRaidAutoDeleteSettingReport(parsed)) {
       dispatch(this.#raidAutoDeleteSettingHandlers, parsed);
+      return;
+    }
+    if (isRaidDiscoverReport(parsed)) {
+      dispatch(this.#raidDiscoverHandlers, parsed);
       return;
     }
     if (isRaidCodesReport(parsed)) {

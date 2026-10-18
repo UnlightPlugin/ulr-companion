@@ -7,6 +7,7 @@
  * ```
  *   插件（玩家打開 SUPPORT）── POST /raid-feed {source:"support"} ─▶ 帳本：新渦 → 30 秒一批發 Discord
  *   插件（渦房裡每 30 秒）──── POST /raid-feed {source:"own"} ─────▶ 帳本：補 ★／stage → 改那則訊息
+ *   插件（發現者分享渦碼）──── POST /raid-feed {source:"code"} ────▶ 帳本：新渦，訊息附渦碼（GET 不給碼）
  *   插件 ─────────────────────── GET  /raid-feed ─────────────────▶ 還沒到期的渦（沒有渦碼）
  * ```
  *
@@ -86,7 +87,18 @@ export const RAID_FEED_CAPACITY = 2_000;
 /** 發 Discord 失敗幾次就放棄那一批（webhook 被刪掉時不要永遠重試）。 */
 export const RAID_FEED_MAX_ATTEMPTS = 3;
 
-export type RaidFeedSource = "support" | "own" | "publish";
+/**
+ * `code`：發現者用插件「分享渦碼」（參加資格無限制、**沒按送出**，不在 SUPPORT），帶渦碼。
+ * 能新增、訊息那一行附上渦碼；GET 不給碼（GET 是公開的，碼只進 Discord 頻道）。2026-10-17。
+ */
+export type RaidFeedSource = "support" | "own" | "publish" | "code";
+
+/**
+ * 渦碼只收英數字：碼原樣貼進 Discord 訊息，這樣夾帶不了 mention／連結／格式。
+ * 跟 cdp-adapter 的 `RAID_DISCOVER_CODE_PATTERN` 同一條（插件端的測試會對）。
+ */
+export const RAID_FEED_CODE_PATTERN = "^[A-Za-z0-9]{4,32}$";
+const CODE_RE = new RegExp(RAID_FEED_CODE_PATTERN);
 
 /** 一筆上傳（兩種來源共用；`support` 不會有 rarity／level／stage，`own` 不會有人數）。 */
 export interface RaidFeedIn {
@@ -124,6 +136,8 @@ export interface RaidFeedIn {
   onlyFriend?: boolean | null;
   /** `own` 才有：上傳的人之前在 SUPPORT 看過它（好友看到、當時不能新增的那種）＝發現者按過送出 */
   seenInSupport?: boolean | null;
+  /** `code` 才有：渦碼（{@link RAID_FEED_CODE_PATTERN}）。帳本存著給訊息重畫用，GET 不給 */
+  code?: string | null;
 }
 
 /** 一個 BOSS 狀態。`type` 是帶等級的整字（`movD9`）；`until` 是到期時刻 ms，`count` 是詛咒那種層數。 */
@@ -221,7 +235,14 @@ export function normalizeRaidFeedUpload(body: unknown, now: number): RaidFeedUpl
     present?: unknown;
   } | null;
   if (b === null || typeof b !== "object" || !Array.isArray(b.raids)) return null;
-  if (b.source !== "support" && b.source !== "own" && b.source !== "publish") return null;
+  if (
+    b.source !== "support" &&
+    b.source !== "own" &&
+    b.source !== "publish" &&
+    b.source !== "code"
+  ) {
+    return null;
+  }
   if (b.raids.length > MAX_RAID_FEED_PER_POST) return null;
   const raids: RaidFeedIn[] = [];
   for (const raw of b.raids) {
@@ -231,7 +252,11 @@ export function normalizeRaidFeedUpload(body: unknown, now: number): RaidFeedUpl
     const foundAt = int(r.foundAt, now - RAID_FEED_MAX_AGE_MS, now + CLOCK_SKEW_MS);
     const limit = int(r.limit, now - RAID_FEED_MAX_AGE_MS, now + RAID_FEED_MAX_AGE_MS);
     if (founder === null || foundAt === null || limit === null) continue;
+    // 分享渦碼那種：碼不合格整筆不收（沒有碼就不是這種上傳）；別的來源帶了碼也不收碼
+    const code = typeof r.code === "string" && CODE_RE.test(r.code) ? r.code : null;
+    if (b.source === "code" && code === null) continue;
     raids.push({
+      ...(b.source === "code" ? { code } : {}),
       founder,
       foundAt,
       limit,
@@ -598,7 +623,10 @@ export function formatRaidFeedLine(
   const alive = dead === "" && expired === "";
   const passive = alive ? formatRaidFeedPassive(r, now) : "";
   const states = alive && r.states ? formatRaidFeedStates(r.states, now) : "";
-  return `${r.founder} ${raid}${hp}${rarity}${passive === "" ? "" : `｜${passive}`}${states === "" ? "" : `｜${states}`}`;
+  // 分享渦碼的：活著才附碼（行內程式碼，手機長按就能複製）；碼在收的時候已經只剩英數字
+  const code =
+    alive && typeof r.code === "string" && CODE_RE.test(r.code) ? "｜渦碼 `" + r.code + "`" : "";
+  return `${r.founder} ${raid}${hp}${rarity}${passive === "" ? "" : `｜${passive}`}${states === "" ? "" : `｜${states}`}${code}`;
 }
 
 /** 一批：一個就一行，多個加標題。`roleId` 有給就在最後一行 mention。 */
@@ -652,13 +680,15 @@ export class RaidFeedBook {
    */
   ingest(upload: RaidFeedUpload, now: number): RaidFeedChanges {
     const changes: RaidFeedChanges = { raids: [], messages: [] };
-    for (const { founderFriend, onlyFriend, seenInSupport, ...r } of upload.raids) {
+    for (const { founderFriend, onlyFriend, seenInSupport, code, ...r } of upload.raids) {
       const id = raidFeedId(r);
       const old = this.#raids.get(id);
       // 這一筆證明它是公開的：非好友在 SUPPORT 看到、發現者按送出（頁面只記「無限制」的）、
-      // 或好友在 SUPPORT 看過（＝送出了）、加入後清單上不是僅限好友
+      // 發現者分享渦碼（參加資格無限制）、或好友在 SUPPORT 看過（＝送出了）、加入後清單上不是僅限好友
+      const shared = upload.source === "code" && typeof code === "string" ? code : null;
       const proven =
         upload.source === "publish" ||
+        shared !== null ||
         (upload.source === "support" && founderFriend === false) ||
         (upload.source === "own" && onlyFriend === false && seenInSupport === true);
       if (old === undefined) {
@@ -668,6 +698,7 @@ export class RaidFeedBook {
         const skip = r.hp !== null && r.hp <= 0;
         this.#raids.set(id, {
           ...r,
+          ...(shared !== null ? { code: shared } : {}),
           firstSeenAt: now,
           seenAt: now,
           status: skip ? "skipped" : "pending",
@@ -683,6 +714,9 @@ export class RaidFeedBook {
       }
       const before = raidFeedFragment(old);
       const next: RaidFeedEntry = { ...old, seenAt: now, limit: r.limit };
+      // 先公開、後來才分享渦碼（或碼換了）：訊息那一行補上碼
+      const codeChanged = shared !== null && shared !== (old.code ?? null);
+      if (codeChanged) next.code = shared;
       // 有值才蓋：SUPPORT 沒有 ★／stage、自己的清單沒有人數
       for (const k of [
         "name",
@@ -731,6 +765,7 @@ export class RaidFeedBook {
         next.mapIndex !== old.mapIndex ||
         next.limit !== old.limit ||
         newerStates ||
+        codeChanged ||
         died ||
         revived;
       if (persisted) changes.raids.push(id);
@@ -739,7 +774,14 @@ export class RaidFeedBook {
         newerStates && JSON.stringify(next.states) !== JSON.stringify(old.states ?? null);
       // HP 跨過門檻、被動換了（夜霧開了、潛伏換成濁濫）也算有事
       const passiveChanged = formatRaidFeedPassive(next) !== formatRaidFeedPassive(old);
-      if (raidFeedFragment(next) !== before || died || revived || statesChanged || passiveChanged) {
+      if (
+        raidFeedFragment(next) !== before ||
+        died ||
+        revived ||
+        statesChanged ||
+        passiveChanged ||
+        codeChanged
+      ) {
         this.#markDirty(next, changes);
       } else if (next.hp !== old.hp || next.hpMax !== old.hpMax) {
         // 只有 HP 變了：也改，但同一則最多一分鐘一次（排在上次改之後一分鐘）
@@ -759,8 +801,8 @@ export class RaidFeedBook {
   #markGone(upload: RaidFeedUpload, now: number, changes: RaidFeedChanges): void {
     const seen = new Set([...upload.raids, ...upload.present].map(raidFeedId));
     for (const [id, r] of this.#raids) {
-      // 僅限好友的：非好友的 SUPPORT 本來就看不到
-      if (seen.has(id) || r.friendOnly === true) continue;
+      // 僅限好友的：非好友的 SUPPORT 本來就看不到；分享渦碼的沒送出，本來就不在 SUPPORT
+      if (seen.has(id) || r.friendOnly === true || typeof r.code === "string") continue;
       if (r.hp !== null && r.hp <= 0) continue;
       if (r.limit <= now || r.foundAt > now - RAID_FEED_GONE_GRACE_MS) continue;
       if (r.memberLength !== null && r.memberLimit !== null && r.memberLength >= r.memberLimit) {
@@ -1031,7 +1073,7 @@ export class RaidFeedBook {
     return changes;
   }
 
-  /** GET：還沒到期的渦，發現時刻新的在前。 */
+  /** GET：還沒到期的渦，發現時刻新的在前。⚠ 欄位一個一個列 —— 渦碼（`code`）不能進來，GET 是公開的。 */
   list(now: number): RaidFeedView[] {
     const out: RaidFeedView[] = [];
     for (const r of this.#raids.values()) {

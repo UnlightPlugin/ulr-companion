@@ -302,8 +302,19 @@ describe("自己按送出公開（raid_code_send）", () => {
         level: 1,
         mapIndex: 4,
         at: 1_791_030_000_000,
+        gone: false,
       },
     ]);
+  });
+
+  it("送出之後被刪掉（官方放棄完重拿的清單上沒有它）：標 gone，托盤就不發（玩家 2026-10-17）", () => {
+    const { raid, read, readPublished } = setup([]);
+    raid.raid_list = [OWN()];
+    read();
+    raid.socket.emit("raid_code_send", "p1");
+    expect(parseRaidPublishedSnapshot(readPublished())[0]?.gone).toBe(false);
+    raid.raid_list = [OWN({ profound_id: "p2", found_at: 1 })];
+    expect(parseRaidPublishedSnapshot(readPublished())[0]?.gone).toBe(true);
   });
 
   it("連線身上另有一份 emit（被別的 patch 包過）：兩層都看到同一次送出也只記一次", () => {

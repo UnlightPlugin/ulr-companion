@@ -139,6 +139,9 @@ import type {
   RaidItemDeltaReport,
   RaidTrackReport,
   RaidAutoDeleteSetting,
+  RaidDiscoverReport,
+  RaidDiscoverSetting,
+  RaidFragment,
   RaidPublicMap,
   RaidSnapshotRow,
   RaidTeamsMap,
@@ -194,6 +197,8 @@ import {
   normalizeTint,
   PRESENT_SCRIPT_VERSION,
   DEFAULT_RAID_AUTO_DELETE,
+  DEFAULT_RAID_DISCOVER,
+  FRAGMENT_BY_KEY,
   DEFAULT_DISPLAY_STATE,
   DEFAULT_RAID_REWARD_MODE,
   DEFAULT_BONUS_CLIMB,
@@ -1568,6 +1573,7 @@ export class ArbiterEngine {
         this.#teamsForPage(),
         this.#raidLearned,
         this.#raidHistoryButton,
+        this.#raidDiscover,
       );
     } catch {
       return null;
@@ -1589,6 +1595,7 @@ export class ArbiterEngine {
         teams,
         this.#raidLearned,
         this.#raidHistoryButton,
+        this.#raidDiscover,
       );
       this.#raidTeamsPushed = JSON.stringify(teams);
       if (!status.installed) this.#log(`· 渦房獎勵標記還沒裝上：${status.reason ?? "原因不明"}`);
@@ -1817,6 +1824,33 @@ export class ArbiterEngine {
   #raidPublicBusy = false;
   /** 公開渦通知（raid-feed）：讀公開渦表、順手傳 SUPPORT 與自己清單。見 docs/raid-feed.md。 */
   #raidFeed = new RaidFeedSync();
+  /** 自己剛公開的渦在等（RAID_PUBLISH_HOLD_MS、確定沒被刪）：等完再傳一次的計時器。 */
+  #raidFeedHoldTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** 有公開在等的話，等到時間再叫一次當下上傳（人可能已經離開渦房，30 秒那一輪不會跑）。 */
+  #scheduleHeldPublish(heldUntil: number | null): void {
+    if (heldUntil === null) return;
+    if (this.#raidFeedHoldTimer !== null) clearTimeout(this.#raidFeedHoldTimer);
+    this.#raidFeedHoldTimer = setTimeout(
+      () => {
+        this.#raidFeedHoldTimer = null;
+        // 剛好有一輪在跑（它讀到的可能是等完之前的樣子）：晚一點再來
+        if (this.#raidFeedNowBusy || this.#raidPublicBusy) this.#scheduleHeldPublish(Date.now());
+        else void this.#pushRaidFeedNow();
+      },
+      Math.max(0, heldUntil - Date.now()) + 1_000,
+    );
+    this.#raidFeedHoldTimer.unref?.();
+  }
+  /** 這一輪公開的結果寫進記錄。⚠ 只寫渦名，渦碼不能進記錄。 */
+  #logPublishOutcome(r: { dropped: readonly string[]; sharedCodes: readonly string[] }): void {
+    for (const n of r.dropped)
+      this.#log(`· 公開渦通知：${n || "（沒有名字）"} 公開後被刪掉了，不發 Discord`);
+    for (const n of r.sharedCodes)
+      this.#log(
+        `· 公開渦通知：${n || "（沒有名字）"} 的渦碼交給機器人了（Discord 約 30 秒後出現）`,
+      );
+  }
   /** 自動刪除死渦的設定。托盤從配置推進來；玩家在遊戲裡切了也會回寫。 */
   #raidAutoDelete: RaidAutoDeleteSetting = { ...DEFAULT_RAID_AUTO_DELETE };
   #raidAutoDeleteHandlers = new Set<(setting: RaidAutoDeleteSetting) => void>();
@@ -1865,6 +1899,50 @@ export class ArbiterEngine {
       .setRaidHistoryButton(on)
       .then((r) => (r === "not-installed" ? this.#syncRaidView() : undefined))
       .catch(() => undefined);
+  }
+
+  /** 發現渦之後自動做的事（跳過開場；BOSS×碎片規則：公開／僅限好友／刪除）。托盤從配置推進來。 */
+  #raidDiscover: RaidDiscoverSetting = { ...DEFAULT_RAID_DISCOVER };
+
+  /** 換設定。立刻推到頁面上（頁面沒裝就整支補裝）。 */
+  setRaidDiscover(setting: RaidDiscoverSetting): void {
+    this.#raidDiscover = { skipOpening: setting.skipOpening, rules: { ...setting.rules } };
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    void adapter
+      .setRaidDiscover(this.#raidDiscover)
+      .then((r) => (r === "not-installed" ? this.#syncRaidView() : undefined))
+      .catch(() => undefined);
+  }
+
+  #onRaidDiscover(report: RaidDiscoverReport): void {
+    const frag =
+      report.fragment === null || report.fragment === "any"
+        ? ""
+        : `（${FRAGMENT_BY_KEY.get(report.fragment as RaidFragment)?.short ?? report.fragment}）`;
+    const who = `${report.name}${frag}`;
+    const skipped = report.skipped ? "，開場跳過" : "";
+    const what =
+      report.action === "public"
+        ? "公開（無限制）送出"
+        : report.action === "friends"
+          ? "僅限好友送出"
+          : report.action === "discord"
+            ? "設成無限制、渦碼等 1 分鐘後發 Discord"
+            : report.action === "delete"
+              ? "刪除"
+              : "不動";
+    if (report.action === "keep" && !report.ok) {
+      this.#log(`· 發現渦：${who} 沒動 —— ${report.reason ?? "原因不明"}${skipped}`);
+    } else if (report.ok) {
+      this.#log(`· 發現渦：${who} 照規則${what}${skipped}`);
+      // 上傳跟著渦通報（互傳）開關：關著的話碼不會出去
+      if (report.action === "discord" && !this.#raidShare) {
+        this.#log("⚠ 渦通報關著（渦 › 渦通報），渦碼不會發到 Discord");
+      }
+    } else {
+      this.#log(`✗ 發現渦：${who} 沒有${what}成：${report.reason ?? "原因不明"}`);
+    }
   }
 
   // ---- 今天有幾個渦沒拿到獎勵（見 raid-track.ts） ---------------------------
@@ -2206,6 +2284,8 @@ export class ArbiterEngine {
         mine.length > 0 ? syncSharedRaids(mine) : Promise.resolve({ map: {}, uploaded: 0 }),
         this.#raidFeed.sync(support, snap.rows, share, published),
       ]);
+      this.#scheduleHeldPublish(feed.heldUntil);
+      this.#logPublishOutcome(feed);
       if (feed.support > 0 || feed.own > 0) {
         this.#log(`· 公開渦通知：傳 SUPPORT ${feed.support} 個、補 ★／stage ${feed.own} 個`);
       }
@@ -2258,6 +2338,8 @@ export class ArbiterEngine {
         true,
         published,
       );
+      this.#scheduleHeldPublish(r.heldUntil);
+      this.#logPublishOutcome(r);
       if (r.support > 0 || r.own > 0) {
         this.#log(
           `· 公開渦通知（當下）：傳 SUPPORT ${r.support} 個、補 ★／stage／狀態 ${r.own} 個`,
@@ -3361,6 +3443,7 @@ export class ArbiterEngine {
         adapter.onRaidCodes((r) => this.#onRaidCodes(r.codes));
         adapter.onRaidAutoDelete((r) => this.#onRaidAutoDelete(r));
         adapter.onRaidAutoDeleteSetting((r) => this.#onRaidAutoDeleteSetting(r));
+        adapter.onRaidDiscover((r) => this.#onRaidDiscover(r));
         adapter.onRaidBattle((r) => this.#onRaidBattle(toBattleRecord(r)));
         adapter.onRaidLearn((r) => this.#onRaidLearn(r));
         // 玩家按了渦房的更新鈕：頁面已經照官方重進渦房送了三則讀取，這邊跟著馬上重查雲端
