@@ -716,32 +716,6 @@ export type {
 } from "./read-card-assets.js";
 
 export {
-  BUNDLE_DISCOVERY_EXPRESSION,
-  SERVED_BUNDLES_EXPRESSION,
-  buildBookmarklet,
-  buildBookmarkUrl,
-  buildBootShellScript,
-  AUTH_DATASET_KEY,
-  buildExtensionContentScript,
-  buildExtensionFiles,
-  buildExtensionReadme,
-  BUNDLES_DATASET_KEY,
-  InvalidBundleError,
-  isCompleteBundleSet,
-  parseDiscoveredBundles,
-  STORAGE_KEY,
-} from "./boot-shell.js";
-export type {
-  BootShellOptions,
-  BundlesSource,
-  ExtensionOptions,
-  GameBundles,
-} from "./boot-shell.js";
-
-export { detectGameInstall } from "./game-install.js";
-export type { ClientMode, GameInstall } from "./game-install.js";
-
-export {
   desktopUserDataDir,
   DEVTOOLS_ACTIVE_PORT_FILE,
   explainDebugPort,
@@ -780,24 +754,6 @@ export type {
   LaunchBrowserOptions,
   LaunchBrowserResult,
 } from "./browser.js";
-
-export {
-  BundlesNotFoundError,
-  DEFAULT_LAUNCH_POLL_MS,
-  DesktopClientActiveError,
-  DEFAULT_LAUNCH_TIMEOUT_MS,
-  discoverBundlesAcrossPages,
-  launchGameViaSteam,
-  openGameTab,
-  refreshBundles,
-  SteamLaunchUnsupportedError,
-} from "./boot.js";
-export type {
-  DiscoverBundlesResult,
-  OpenGameTabOptions,
-  OpenGameTabResult,
-  RefreshBundlesOptions,
-} from "./boot.js";
 
 export {
   buildWsWatchScript,

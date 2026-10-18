@@ -5248,7 +5248,7 @@
        * 之後加了牌組雲端、渦互傳、打渦隊伍、ulgg、配對佇列，這頁沒跟上，變成一份
        * 錯的隱私說明（2026-10-04 玩家要求更新時對著程式碼重查）。**加新的對外連線時
        * 這裡要跟著加一列** —— 連線清單在 `@ulr/arbiter-link/target.ts` 的 SERVICE_ORIGIN
-       * 那幾個常數、`raid-public.ts`（ulgg）與 `bundle-report.ts`。
+       * 那幾個常數與 `raid-public.ts`（ulgg）。
        *
        * ⚠ **照實際的目的地分組，寫出主機名。**（玩家 2026-10-04）不要寫「中間人」
        * 「雲端」「插件自己的伺服器」—— 玩家看不出那是哪裡，「自己的」還會被讀成
@@ -5281,11 +5281,6 @@
               "渦 › 獎勵標記",
             ],
           ],
-        },
-        {
-          host: "ulr-hash.lldavuull.workers.dev",
-          note: "Cloudflare Workers，插件作者架的",
-          rows: [["遊戲檔名", "官方改版後", "這一版遊戲程式的檔名（給書籤玩家用）", ""]],
         },
         {
           host: "ulgg.online",

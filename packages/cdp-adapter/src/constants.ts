@@ -73,7 +73,7 @@ export const DEBUG_PORT_SWITCH = `--remote-debugging-port=${DEFAULT_DEBUG_PORT}`
  * - 遊戲本來就會讀自訂 switch（x / y / fullscreen），不排斥額外參數
  *
  * ⚠ 2026-09-23 更新改名：`UNLIGHTRevive.exe` → `UNLIGHT Revive.exe`（多一個空格），
- *   位置也從 `win-unpacked\` 搬到遊戲根目錄（見 game-install.ts）。
+ *   位置也從 `win-unpacked\` 搬到遊戲根目錄。
  */
 export const GAME_EXECUTABLE = "UNLIGHT Revive.exe";
 
@@ -152,7 +152,7 @@ export const OVERLAY_ANCHOR_NOTE =
   "以 document.querySelector('canvas').getBoundingClientRect() 為原點";
 
 // ---------------------------------------------------------------------------
-// 官方 HTML 外殼（免 Steam 啟動要重建的東西，見 boot-shell.ts）
+// 官方網頁版頁面
 // ---------------------------------------------------------------------------
 
 /**
@@ -163,40 +163,7 @@ export const OVERLAY_ANCHOR_NOTE =
  */
 export const GAME_ORIGIN = "https://www.playunlight.online";
 
-/** 三個 webpack bundle 放的目錄（相對於來源）。 */
-export const GAME_BUNDLE_DIR = "client/";
-
-/**
- * 載入順序中**最後**那個 bundle 的檔名前綴。
- *
- * 用途不是載入，是**判斷一份清單完不完整**。webpack 的相依順序是
- * runtime → unlight-common → main，所以 `main.` 在場就代表整頁真的載完了。
- *
- * 為什麼需要這個判準（2026-08-02 實際踩到）：外殼重建（CDP 注入或擴充功能的
- * shell.js）是**一個一個非同步接**上去的 —— runtime.onload 才接 common，
- * common.onload 才接 main。所以在重建頁上任何時間點去掃 `document.scripts`，
- * 都可能只看到 1~2 個。把那個當成「伺服器給的真貨」記下來，就會用一份殘缺的
- * 清單蓋掉好的那份，症狀是遊戲從此開不起來（只載了 runtime，畫面全白）。
- *
- * 伺服器給的真頁面則是三個 `<script>` 都寫在 HTML 裡，一次到位。
- */
-export const GAME_MAIN_BUNDLE_PREFIX = "main.";
-
-/** 2026-09-23 改版後真頁面（連 Steam 流程）用的是 style-dmm.css，不再是 style-steam.css。 */
-export const GAME_STYLESHEET = "stylesheets/style-dmm.css";
-
 export const GAME_TITLE = "UNLIGHT:Revive";
-
-/**
- * 遊戲 canvas。id 與尺寸是**伺服器吐的外殼本來就長這樣**，不是我們挑的 ——
- * 2026-07-30 對照正常 Steam 流程載入的頁面確認過。
- * 尺寸跟 `OVERLAY_ANCHOR_NOTE` 講的 760x680 座標系是同一件事。
- */
-export const GAME_CANVAS = {
-  id: "myCustomCanvas",
-  width: 760,
-  height: 680,
-} as const;
 
 /**
  * 2026-09-23 改版後的卡片資料（`this.load.json(…)` 開機載入）。舊的

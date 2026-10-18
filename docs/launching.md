@@ -167,7 +167,9 @@ npx tsx apps/companion/src/index.ts browser
 
 ### （已失效，2026-10-15 前）這條路完全不經過 Steam
 
-下面是 `web --steamid` 還能用時的紀錄，留著說明當時為什麼這樣設計。
+下面是 `web --steamid` 還能用時的紀錄，留著說明當時為什麼這樣設計。文中的 `boot-shell.ts`、
+`refreshBundles()`、`web --refresh` 與托盤的檔名回報（`bundle-report.ts`）2026-10-18 都已刪除，
+要看原始碼請翻 git 歷史。
 
 2026-08-02 實測（`web --steamid` → `probe --port 9334`）：
 

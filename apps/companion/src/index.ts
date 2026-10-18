@@ -36,7 +36,6 @@ import {
   EDGE_BROWSER_PROFILE_DIR,
   EDGE_DEBUG_PORT,
   ensureBrowser,
-  refreshBundles,
   toCostTable,
 } from "@ulr/cdp-adapter";
 import { ArbiterEngine, SPEED_RENEW_MS } from "@ulr/arbiter-engine";
@@ -63,7 +62,6 @@ import {
   legacyWeaponId,
   legacyEventId,
 } from "@ulr/rule-schema";
-import { CACHE_PATH, writeBundleCache } from "./bundle-cache.js";
 
 /** 套用之後等頁面回報的時間。cc_asset 在載入序列偏後面。 */
 const REPORT_WAIT_MS = 15_000;
@@ -120,10 +118,6 @@ function usage(): void {
   console.log("  pack <規則檔> [--out F]     重算 contentHash 封成規則包給對手核對");
   console.log("                              ⚠ 改 COST 直接改 .ulrcost.json 就行，Hash 會重算");
   console.log("");
-  console.log("  web --refresh [--no-launch] 讀當前版本的 bundle 檔名（必要時自己開 Steam 版）");
-  console.log(
-    "                              （免 Steam 直開 --steamid 已失效，改用 Steam 登入擴充）",
-  );
   console.log(
     "  browser [--port N]          開一個帶 debug port 的瀏覽器，進去用 Steam 登入擴充開遊戲",
   );
@@ -549,86 +543,16 @@ async function cmdCost(args: string[]): Promise<number> {
 }
 
 /**
- * 網頁版的 bundle 檔名（`--refresh`）。免 Steam 直開的那幾支 2026-10-15 起登不進去，已拿掉。
+ * 舊的 `web` 指令（`--steamid`／`--bookmarklet`／`--extension`／`--refresh`）。
  *
- * 為什麼預設接 `BROWSER_DEBUG_PORT` 而不是 `DEFAULT_DEBUG_PORT`：這整組指令
- * 只對網頁版有意義 —— 桌面版本來就能直接跑 exe 帶參數啟動（見 constants.ts
- * 的 `GAME_EXECUTABLE`），不需要重建外殼。
+ * 2026-10-15 起官方驗 access_token，只帶 steamid 重建的外殼登不進去（getid 回 null），
+ * bundle 檔名也就沒有用處了，整組拿掉。只留一句說明，免得舊捷徑一跑就是「不認得的指令」。
  */
-async function cmdWeb(args: string[]): Promise<number> {
-  const family = parseBrowserFamily(args);
-  // 首選埠跟著瀏覽器走（Chrome 59223、Edge 59224）。共用一個埠的話，兩個
-  // 瀏覽器不可能同時掛著 —— 而「Chrome 掛任務、Edge 打對戰」正是要支援的用法。
-  const requestedPort = parsePort(args, browserDebugPort(family));
-  /**
-   * **實際**接得上的埠。
-   *
-   * ⚠ 不能整支都用 `requestedPort`：那個埠綁不上時（Windows 保留範圍）
-   * `ensureBrowser()` 會退回讓瀏覽器自己挑，挑到的埠只有它知道。後面的
-   * `refreshBundles` 與 `openGameTab` 都要接**那一個**，不然瀏覽器好好地開著、
-   * 這裡卻一路等到逾時。
-   */
-  let port = requestedPort;
-
-  /**
-   * 確保有一個帶 debug port 的瀏覽器在跑。
-   *
-   * `--remote-debugging-port` 只能在啟動時指定，所以「連不上就叫玩家自己加參數
-   * 重開」等於沒有解 —— 插件必須自己開。已經在跑的就沿用，不重開：玩家可能
-   * 正開著另一個帳號的分頁在打。
-   */
-  async function browser(): Promise<void> {
-    const profileDir = parseFlag(args, "--profile");
-    const browserPath = parseFlag(args, "--browser");
-    const result = await ensureBrowser({
-      port: requestedPort,
-      ...(family !== undefined ? { family } : {}),
-      ...(profileDir !== undefined ? { profileDir } : {}),
-      ...(browserPath !== undefined ? { browserPath } : {}),
-      onNotice: (m) => console.log(`  ${m}`),
-    });
-    port = result.port;
-    if (result.launched) {
-      console.log(`  已開 ${result.browser.name}（profile：${result.profileDir}）`);
-    }
-  }
-
-  /**
-   * 讀當前版本的 bundle 檔名並寫進快取。沒有活著的遊戲就自己去開一次 Steam 版。
-   *
-   * 沒有「偵測過期」這種東西可以用 —— 伺服器不刪舊 bundle，也沒有版本端點
-   * （見 boot-shell.ts 開頭的實測）。所以要確保是最新的，唯一的辦法就是真的
-   * 再載入一次。
-   */
-  async function refresh(launch: boolean): Promise<number> {
-    // 先把瀏覽器開起來，Steam 才有東西可以把網址交過去。
-    // ⚠ 這不保證 Steam 一定交到**這一個** —— openExternal 走的是系統預設
-    // 瀏覽器。玩家的預設瀏覽器若是另一個 profile 的 Chrome，遊戲會開在那邊，
-    // 這裡就讀不到（症狀是等到逾時）。見 docs/launching.md。
-    await browser();
-    const found = await refreshBundles({
-      port,
-      launch,
-      onProgress: (m) => console.log(`  ${m}`),
-    });
-    const cache = writeBundleCache(found.bundles);
-    console.log(`✓ 從 ${found.safeUrl} 讀到 ${cache.bundles.length} 個 bundle`);
-    for (const b of cache.bundles) console.log(`    ${b}`);
-    console.log(`  已寫入 ${CACHE_PATH}`);
-    return 0;
-  }
-
-  if (args.includes("--refresh")) {
-    return await refresh(!args.includes("--no-launch"));
-  }
-
-  // ⚠ `--steamid`（重建外殼直開）、`--bookmarklet`、`--extension`（產 ULR Boot）都拿掉了：
-  // 2026-10-15 起官方驗 access_token，只帶 steamid 的外殼登不進去（getid 回 null）。
-  // 改用 Steam 登入擴充（托盤 設置 › 網頁版 放好；說明見 apps/tray/src/web-client.ts）。
-  console.error("免 Steam 直開（--steamid／--bookmarklet／--extension）2026-10-15 起登不進去了：");
+function cmdWeb(): number {
   console.error(
-    "官方開始驗 access_token。改用 Steam 登入擴充 —— 托盤 設置 › 網頁版 ② 放好、③ 登入。",
+    "companion web 已拿掉：免 Steam 直開 2026-10-15 起登不進去（官方開始驗 access_token）。",
   );
+  console.error("改用 Steam 登入擴充 —— 托盤 設置 › 網頁版 ② 放好、③ 登入。");
   console.error("只要帶除錯埠的瀏覽器：companion browser");
   return 1;
 }
@@ -1161,7 +1085,7 @@ async function main(argv: string[]): Promise<number> {
       case "speed":
         return await cmdSpeed(args);
       case "web":
-        return await cmdWeb(args);
+        return cmdWeb();
       case "rule":
         return cmdRule(args);
       case "catalog":

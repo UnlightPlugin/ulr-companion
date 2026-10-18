@@ -1,23 +1,15 @@
 /**
  * 自己開一個帶 debug port 的瀏覽器
  * ==================================
- * `boot.ts` 的 `openGameTab()` 需要一個已經在聽 CDP 的瀏覽器。這裡負責把它
- * 生出來 —— 有了這一步，**整條路就完全不必經過 Steam**：
+ * 插件要接網頁版，瀏覽器就得帶著 `--remote-debugging-port` 啟動 —— 這個參數只能
+ * 在啟動時給，所以插件自己開，不叫玩家改捷徑。遊戲在裡面用 Steam 登入擴充開
+ * （apps/tray/assets/steam-login-extension；托盤 設置 › 網頁版）。
  *
- *     ensureBrowser()      ← 開 Chrome（帶 debug port + 專屬 profile）
- *       → openGameTab()    ← 注入外殼、導向 ?steamid=<id>
+ * 每個帳號一個專屬 profile（擴充裡登入的 Steam 帳號存在那裡），所以 Chrome 與
+ * Edge 可以各掛一個帳號同時開。
  *
- * 為什麼這件事值得做（不只是少按一次滑鼠）：
- *
- * - **換帳號**。身分只有網址上的 `steamid`（見 boot-shell.ts 開頭），所以換帳號
- *   就是換一個 `--steamid`，跟 Steam 客戶端登入的是哪個帳號無關。Steam 網頁版
- *   本身沒有換帳號的路，這裡繞過了整個問題。
- * - **不會卡在「正在停止」**。那是 Steam 在等遊戲行程收尾；我們根本沒讓 Steam
- *   參與，也就沒有那個狀態。反過來說，Steam 卡在停止中的時候 `steam://rungameid`
- *   會失效 —— 那正是 `refreshBundles()` 會失敗的時候，更需要這條備援路徑。
- *
- * Steam 只剩下**一個**用途：遊戲改版後重讀 bundle 檔名（`refreshBundles()`）。
- * 那是每週一次的事，不是每次開遊戲的事。
+ * ⚠ 2026-10-15 之前這裡還接著「重建官方外殼、只帶 steamid 直開」（boot.ts 的
+ * `openGameTab()`）。官方開始驗 access_token 之後那條路登不進去，已整個拿掉。
  */
 
 import { spawn } from "node:child_process";

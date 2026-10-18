@@ -12,12 +12,6 @@
  * （docs/launching.md 的「偵測與降級」第 3 點講的是同一件事。）
  */
 
-import type { GameBundles } from "./boot-shell.js";
-import {
-  BUNDLE_DISCOVERY_EXPRESSION,
-  parseDiscoveredBundles,
-  SERVED_BUNDLES_EXPRESSION,
-} from "./boot-shell.js";
 import { CdpClient } from "./client.js";
 import { DEFAULT_DEBUG_PORT } from "./constants.js";
 import type { GameExecutionContext } from "./game-context.js";
@@ -639,37 +633,6 @@ export class CdpAdapter {
       throw new Error(`注入的程式在遊戲裡拋例外：${detail ?? "(沒有細節)"}`);
     }
     return res.result?.value as T;
-  }
-
-  /**
-   * 讀出這個客戶端正在跑的三個 webpack bundle 檔名。
-   *
-   * 這是「免 Steam 啟動」不會因為遊戲改版而壞掉的關鍵：檔名帶 content hash，
-   * 每次改版都會變。上游那支 Greasyfork 腳本把檔名寫死，所以得靠作者每週發
-   * 新版；我們改成從**玩家自己跑著的客戶端**讀，正常從 Steam 開一次遊戲就
-   * 自己更新了。
-   *
-   * 要在正常 Steam 流程開起來的分頁上呼叫 —— 免 Steam 開的分頁是我們自己
-   * 用舊檔名重建的，從它身上讀只會讀回同一份舊資料。
-   */
-  async discoverBundles(): Promise<GameBundles> {
-    const raw = await this.evaluate<string>(BUNDLE_DISCOVERY_EXPRESSION);
-    return parseDiscoveredBundles(raw);
-  }
-
-  /**
-   * 伺服器真的吐了頁面（網址帶 token）才回清單，重建過的外殼、還沒載完的頁面
-   * 都回 `null`。理由見 `SERVED_BUNDLES_EXPRESSION`。**永遠不 throw 清單格式錯**
-   * —— 讀不到就是讀不到，呼叫端只是這次不回報。
-   */
-  async readServedBundles(): Promise<GameBundles | null> {
-    const raw = await this.evaluate<string>(SERVED_BUNDLES_EXPRESSION);
-    if (raw === "null") return null;
-    try {
-      return parseDiscoveredBundles(raw);
-    } catch {
-      return null;
-    }
   }
 
   // -------------------------------------------------------------------------
