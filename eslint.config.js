@@ -37,6 +37,18 @@ export default tseslint.config(
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
   {
+    // 托盤視窗的畫面（2026-10-18 從 index.html 的一整支 inline script 拆出來）。
+    // 是瀏覽器裡的 classic script、不經過 tsc：幾支共用同一個全域，一支宣告的
+    // 函式／常數另一支直接用，所以 no-undef 與「頂層沒用到」在單一檔案裡看不出對錯，關掉；
+    // 函式內的區域變數照樣檢查。全形空白是文案裡刻意放的（模板字串）。
+    files: ["apps/tray/renderer/**/*.js"],
+    languageOptions: { sourceType: "script" },
+    rules: {
+      "no-undef": "off",
+      "no-irregular-whitespace": ["error", { skipTemplates: true }],
+    },
+  },
+  {
     rules: {
       "@typescript-eslint/consistent-type-imports": "error",
       "@typescript-eslint/no-unused-vars": [
@@ -48,6 +60,16 @@ export default tseslint.config(
       "no-eval": "error",
       "no-implied-eval": "error",
       "no-new-func": "error",
+    },
+  },
+  {
+    // 托盤畫面：頂層宣告是給別支用的（見上面那段），只檢查區域變數。要放在通用那段後面才蓋得過。
+    files: ["apps/tray/renderer/**/*.js"],
+    rules: {
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        { vars: "local", argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
+      ],
     },
   },
 );
