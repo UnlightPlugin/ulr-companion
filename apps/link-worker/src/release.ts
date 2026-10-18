@@ -66,13 +66,13 @@ export interface SignedRelease {
 // Release notes 有寫。詳見 docs/release.md §2。
 export const CURRENT_RELEASE: SignedRelease | null = {
   manifest: {
-    version: "2.3.0",
-    url: "https://github.com/UnlightPlugin/ulr-companion/releases/download/v2.3.0/ULR-Companion-2.3.0-win.zip",
-    sha256: "ad92a11e8560b90e8f8b1a022e7f356931f86841de9a70fd29bd85ee25b81778",
-    notes: "自訂 COST 可以整個開關（預設不套用），切換不重載",
+    version: "2.4.0",
+    url: "https://github.com/UnlightPlugin/ulr-companion/releases/download/v2.4.0/ULR-Companion-2.4.0-win.zip",
+    sha256: "a11145c8de88be0db76ec197f83882ee62149ad767708fbaedb5b68dcf97450f",
+    notes: "網頁版改用 Steam 登入擴充；發現渦自動處理、獎勵自動爬星",
   },
   signature:
-    "ikrCtGgv0cu/bAVfcWojJ1xWz2pJyLpnOiuPo7XF143mpg+zsxB7vZLST8LkkCjHfiGUItCulHt2mnzCLfF6BQ==",
+    "6L54woRtfeKKJIYMgRppZqfuJWoOy2Txbjm4bp2kc5DqS1prw83hBU/dcd+8iwfExtdinzWLQRM3fvSsstFSCA==",
 };
 
 // 發版時把上面那行換成 `npm run release:sign` 印出來的那一段（形狀如下，
