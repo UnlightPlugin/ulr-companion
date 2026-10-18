@@ -24,8 +24,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdirSync, watch, writeFileSync } from "node:fs";
-import type { FSWatcher } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { MenuItemConstructorOptions } from "electron";
 import {
@@ -64,19 +63,10 @@ import {
   resolveDebugPort,
   SELECTABLE_STAGES,
 } from "@ulr/cdp-adapter";
-import type { CardArtStatus, CharaPickerMode, HiddenStageStatus } from "@ulr/cdp-adapter";
+import type { CharaPickerMode, HiddenStageStatus } from "@ulr/cdp-adapter";
 import { catalogSize } from "@ulr/rule-schema";
 import { writeCatalog } from "./catalog-store.js";
-import type { CardArtFile, CardArtScan, CardNames } from "./card-art.js";
-import {
-  CARD_ART_BLANKS_DIR,
-  countBlanks,
-  ensureCardArtDir,
-  installBundledBlanks,
-  installDefaultMods,
-  readCardNames,
-  scanCardArtDir,
-} from "./card-art.js";
+import { ensureCardArtDir } from "./card-art.js";
 import { trayIconPng } from "./icon.js";
 import type { IconState } from "./icon.js";
 import { launchAtLoginEnabled, launchInstance, setLaunchAtLogin } from "./launch.js";
@@ -137,6 +127,21 @@ import type {
   EditorPayload,
   EditorSaveResult,
 } from "./cost-rule-runtime.js";
+import { APP_DIR } from "./app-dir.js";
+import {
+  CARD_ART_BLANKS_PATH,
+  CARD_ART_DIR,
+  cardArtPageState,
+  cardNames,
+  initCardArtRuntime,
+  installBlanks,
+  installCardMods,
+  reloadCardArt,
+  startCardNamesFetch,
+  stopCardNamesFetch,
+  watchCardArtDir,
+} from "./card-art-runtime.js";
+import type { CardArtPageState } from "./card-art-runtime.js";
 import { initLobbyRuntime, startLobbyRuntime, stopLobbyRuntime } from "./lobby-runtime.js";
 import {
   currentDeckSyncStatus,
@@ -187,19 +192,6 @@ let store: ProfileStore = {
 let profile: Profile;
 /** 這份配置是命令列臨時建的，不在清單裡 —— 改它不落地。 */
 let ephemeral = false;
-
-/**
- * 插件自己的資料夾。**記錄檔就直接放在這裡**：
- *
- *     %APPDATA%\ulr-companion\companion.log
- *
- * ⚠ 以前是 `ulr-companion\port-59222\companion.log`。那一層是給多開用的，
- * 但代價落在**所有人**身上：請玩家貼記錄時得先教他那個資料夾叫什麼，而那個
- * 名字裡還有一個他從來沒設過的數字（現在大家都用 `--remote-debugging-port=0`，
- * 那個埠更是連聽都沒人在聽）。一句「打開 %APPDATA%\ulr-companion」就該結束的事，
- * 不值得多一層。
- */
-const APP_DIR = join(app.getPath("appData"), "ulr-companion");
 
 // ⚠ 關卡 1：兩份實例不能共用 userData。
 // 必須在 app ready 之前設，而且要在讀完配置之後 —— 資料夾名是從配置來的
@@ -514,6 +506,8 @@ initDeckRuntime({
 });
 // 迪特赫姆的快速比賽（lobby-runtime.ts）。
 initLobbyRuntime({ ctx: trayCtx, appDir: APP_DIR });
+// 模組 › 卡面替換（card-art-runtime.ts）。
+initCardArtRuntime({ ctx: trayCtx, latest: () => latest });
 // 自訂 COST（cost-rule-runtime.ts）。
 initCostRuleRuntime({
   ctx: trayCtx,
@@ -646,152 +640,7 @@ async function stageStatus(): Promise<HiddenStageStatus | null> {
   return (await engine?.hiddenStageStatus().catch(() => null)) ?? null;
 }
 
-// ---------------------------------------------------------------------------
-// 模組 › 卡面替換
-// ---------------------------------------------------------------------------
-
-/**
- * 玩家的卡面放這裡。**不分實例**（跟記錄檔一樣放 `APP_DIR`）：卡面是玩家的
- * 美術，多開的兩份客戶端本來就該看到同一套。
- */
-const CARD_ART_DIR = join(APP_DIR, "mods", "cards");
-/** 角色代號 → 中文名。第一次接上遊戲時讀的，之後離線也能對檔名。 */
-const CARD_NAMES_PATH = join(APP_DIR, "mods", "card-names.json");
-
-let cardNames: CardNames | null = readCardNames(CARD_NAMES_PATH);
-let cardArtScan: CardArtScan = { files: [], entries: [] };
-let cardArtWatcher: FSWatcher | null = null;
-let cardArtDebounce: ReturnType<typeof setTimeout> | null = null;
-/** 接上遊戲後每隔幾秒試著讀名字表，讀到就停（標題畫面時 profile 還沒載）。 */
-let cardNamesTimer: ReturnType<typeof setInterval> | null = null;
-
-/** 重讀資料夾並推給引擎。`quiet` 時不寫 log（開機那一次、檔案監看的抖動）。 */
-function reloadCardArt(quiet = false): void {
-  ensureCardArtDir(CARD_ART_DIR);
-  cardArtScan = scanCardArtDir(CARD_ART_DIR, cardNames);
-  engine?.setCardArt(cardArtScan.entries);
-  if (!quiet || cardArtScan.files.length > 0) {
-    const skipped = cardArtScan.files.length - cardArtScan.entries.length;
-    log(
-      `· 卡面替換：資料夾裡 ${cardArtScan.files.length} 張 PNG，送出 ${cardArtScan.entries.length} 張` +
-        (skipped > 0 ? `（${skipped} 張對不到或不合規格，見 模組 › 卡面替換）` : ""),
-    );
-  }
-}
-
-/**
- * 盯著資料夾：玩家丟一張圖進去，一秒內就換上。
- *
- * ⚠ Windows 的 `fs.watch` 一次存檔會連發好幾個事件（建檔、寫入、改時間），
- * 而且寫到一半就會來 —— 所以等 800ms 沒新事件才重讀，讀到半張檔會被
- * `pngSize` 當成不是 PNG 而跳過，下一次事件再補。
- */
-function watchCardArtDir(): void {
-  if (cardArtWatcher !== null) return;
-  try {
-    ensureCardArtDir(CARD_ART_DIR);
-    cardArtWatcher = watch(CARD_ART_DIR, { persistent: false }, () => {
-      if (cardArtDebounce !== null) clearTimeout(cardArtDebounce);
-      cardArtDebounce = setTimeout(() => {
-        cardArtDebounce = null;
-        reloadCardArt();
-        pushState();
-      }, 800);
-    });
-    cardArtWatcher.on("error", () => {
-      cardArtWatcher = null;
-    });
-  } catch {
-    cardArtWatcher = null;
-  }
-}
-
-/** 接上遊戲就去讀名字表；讀到之後名字有變的話重對一次檔名。 */
-function startCardNamesFetch(): void {
-  if (cardNamesTimer !== null) return;
-  const attempt = async (): Promise<void> => {
-    if (engine === null || latest?.connected !== true) return;
-    try {
-      const fresh = await engine.readCardNames();
-      stopCardNamesFetch();
-      const changed = JSON.stringify(fresh) !== JSON.stringify(cardNames);
-      cardNames = fresh;
-      if (changed) {
-        try {
-          mkdirSync(dirname(CARD_NAMES_PATH), { recursive: true });
-          writeFileSync(CARD_NAMES_PATH, `${JSON.stringify(fresh, null, 2)}\n`, "utf8");
-        } catch {
-          // 存不了只是下次開機沒有中文名可對，不是壞
-        }
-        if (cardArtScan.files.some((f) => f.frame === null)) reloadCardArt();
-      }
-    } catch {
-      // 標題畫面 profile 還沒載；下一拍再試
-    }
-  };
-  cardNamesTimer = setInterval(() => void attempt(), 10_000);
-  void attempt();
-}
-
-function stopCardNamesFetch(): void {
-  if (cardNamesTimer !== null) clearInterval(cardNamesTimer);
-  cardNamesTimer = null;
-}
-
-/** 卡面替換那一頁要畫的東西。 */
-interface CardArtPageState {
-  dir: string;
-  files: CardArtFile[];
-  /** 送去頁面的張數。 */
-  sent: number;
-  /** 有沒有中文名可以對檔名。 */
-  names: boolean;
-  /** 空框資料夾裡每種尺寸各有幾張（`168x240` → 15）。 */
-  blanks: Record<string, number>;
-  /** 遊戲那端的狀態。沒接上是 null。 */
-  status: CardArtStatus | null;
-}
-
-const CARD_ART_BLANKS_PATH = join(CARD_ART_DIR, CARD_ART_BLANKS_DIR);
-
-/**
- * 內建空框複製到玩家資料夾。開機一次、按「開空框資料夾」時再補一次
- * （玩家可能整個刪掉過）。build-tray.mjs 把 `apps/tray/assets` 搬到 `dist/assets`。
- */
-function installBlanks(): void {
-  try {
-    const r = installBundledBlanks(join(__dirname, "assets", "card-frames"), CARD_ART_BLANKS_PATH);
-    if (r.bundled === 0) log("✗ 插件裡找不到內建的空框（assets/card-frames）");
-    else if (r.written > 0) log(`· 卡面替換：空框放好 ${r.written} 張（${CARD_ART_BLANKS_PATH}）`);
-  } catch (err) {
-    log(`✗ 空框寫不進資料夾：${err instanceof Error ? err.message : String(err)}`);
-  }
-}
-
-/**
- * 內建的預設卡面 MOD 複製到玩家資料夾。開機一次；玩家刪掉的不補回來
- * （規則見 `installDefaultMods`）。要在第一次 `reloadCardArt` 之前跑。
- */
-function installCardMods(): void {
-  try {
-    const r = installDefaultMods(join(__dirname, "assets", "card-mods"), CARD_ART_DIR);
-    if (r.bundled === 0) log("✗ 插件裡找不到內建的卡面 MOD（assets/card-mods）");
-    else if (r.written > 0) log(`· 卡面替換：預設 MOD 放好 ${r.written} 張（${CARD_ART_DIR}）`);
-  } catch (err) {
-    log(`✗ 預設卡面 MOD 寫不進資料夾：${err instanceof Error ? err.message : String(err)}`);
-  }
-}
-
-async function cardArtPageState(): Promise<CardArtPageState> {
-  return {
-    dir: CARD_ART_DIR,
-    files: cardArtScan.files,
-    sent: cardArtScan.entries.length,
-    names: cardNames !== null,
-    blanks: countBlanks(CARD_ART_BLANKS_PATH),
-    status: (await engine?.cardArtStatus().catch(() => null)) ?? null,
-  };
-}
+// 模組 › 卡面替換 → card-art-runtime.ts（2026-10-18 搬出去）
 
 // 迪特赫姆的快速比賽與等待人數 → lobby-runtime.ts（2026-10-18 搬出去）
 
