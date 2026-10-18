@@ -17,12 +17,13 @@ function channels(text: string, call: RegExp): string[] {
   return [...text.matchAll(call)].map((m) => m[1] as string);
 }
 
-describe("IPC 頻道（處理器從 main.ts 拆到 pages/*.ts 之後）", () => {
+describe("IPC 頻道（處理器從 main.ts 拆到 pages/*.ts、*-runtime.ts 之後）", () => {
   const preload = readFileSync(join(SRC, "preload.ts"), "utf8");
-  const mains = [
-    readFileSync(join(SRC, "main.ts"), "utf8"),
-    ...readdirSync(join(SRC, "pages")).map((f) => readFileSync(join(SRC, "pages", f), "utf8")),
-  ].join("\n");
+  // src 底下每一支都掃（處理器可能在 main.ts、pages/、web-runtime.ts…），preload 自己除外
+  const mains = readdirSync(SRC, { recursive: true, encoding: "utf8" })
+    .filter((f) => f.endsWith(".ts") && f !== "preload.ts")
+    .map((f) => readFileSync(join(SRC, f), "utf8"))
+    .join("\n");
   const invoked = channels(preload, /ipcRenderer\.invoke\(\s*"(ulr:[a-z-]+)"/g);
   const handled = channels(mains, /\.handle\(\s*"(ulr:[a-z-]+)"/g);
 
