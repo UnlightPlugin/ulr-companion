@@ -68,48 +68,23 @@ import {
   findBrowser,
   HIDDEN_STAGES,
   loadExtensionArgs,
-  isBonusItemOrder,
-  isBonusItemPlace,
   isCharaPickerMode,
-  isQuestPanelMode,
-  isRaidRewardMode,
-  normalizeBonusClimb,
-  normalizeRaidDiscoverRules,
-  RAID_DISCOVER_ACTIONS,
-  RAID_DISCOVER_BOSSES,
-  RAID_FRAGMENTS,
   resolveDebugPort,
   ROOM_ERROR_AP_SHORT,
   SELECTABLE_STAGES,
-  summarizeQuestBonus,
 } from "@ulr/cdp-adapter";
 import type {
-  BonusClimbConfig,
-  BonusItemOrder,
-  BonusItemPlace,
-  QuestBonusStats,
   CardArtStatus,
   CharaPickerMode,
   CharaPickerReport,
-  BattleSurrenderOptions,
   LobbyStandReport,
   DeckEditReport,
   DeckSnapshot,
   DuelAffordability,
   HiddenStageStatus,
-  ItemPanelStatus,
-  QuestPanelMode,
-  QuestTreasureStatus,
-  RaidDiscoverAction,
-  RaidDiscoverBoss,
-  RaidDiscoverSetting,
   LobbyQuickPressed,
   LobbyTierCount,
   MatchContext,
-  RaidRewardMode,
-  RaidRewardStatus,
-  RaidSurrenderStatus,
-  RaidViewStatus,
   RoomGateReport,
 } from "@ulr/cdp-adapter";
 import type { CharaFiles, DeckContent, Inventory, RoomKind } from "@ulr/deck-library";
@@ -247,7 +222,16 @@ import {
   updateProfile,
   userDataDirFor,
 } from "./profiles.js";
+import { registerBonusPage } from "./pages/bonus-page.js";
+import { battleSurrenderOptions, registerDietPage } from "./pages/diet-page.js";
+import { registerQuestPage } from "./pages/quest-page.js";
+import {
+  describeRaidRewardMode,
+  raidDiscoverSetting,
+  registerRaidPage,
+} from "./pages/raid-page.js";
 import { startRuleFeed } from "./rule-feed.js";
+import type { TrayContext } from "./tray-context.js";
 import { TitleButton } from "./title-button.js";
 import type { AutoUpdater } from "./updater.js";
 import { consumeUpdatedFlag, startAutoUpdate } from "./updater.js";
@@ -560,11 +544,7 @@ async function attachTitleButton(): Promise<void> {
 function applyPrefs(next: Partial<LinkPrefs>): void {
   engine?.setPrefs(next);
   const prefs = engine?.prefs;
-  if (prefs !== undefined) {
-    profile = { ...profile, prefs };
-    // 臨時配置不落地：它本來就不在清單裡，寫回去會憑空生出一份。
-    if (!ephemeral) store = updateProfile(profile.id, { prefs });
-  }
+  if (prefs !== undefined) patchProfile({ prefs });
   pushState();
   refreshTray();
 }
@@ -572,6 +552,28 @@ function applyPrefs(next: Partial<LinkPrefs>): void {
 function pushState(): void {
   window?.webContents.send("ulr:state", snapshot());
 }
+
+/**
+ * 改這份配置：先改記憶體，不是命令列臨時建的配置（`ephemeral`）才寫回設定檔 ——
+ * 臨時配置本來就不在清單裡，寫回去會憑空生出一份。
+ */
+function patchProfile(patch: Partial<Omit<Profile, "id">>): void {
+  profile = { ...profile, ...patch };
+  if (!ephemeral) store = updateProfile(profile.id, patch);
+}
+
+/** 拆到 pages/*.ts 的設定處理器用的（見 tray-context.ts）。profile／engine 每次讀都是當下的。 */
+const trayCtx: TrayContext = {
+  get profile() {
+    return profile;
+  },
+  get engine() {
+    return engine;
+  },
+  patchProfile: (patch) => patchProfile(patch),
+  log: (line) => log(line),
+  pushState: () => pushState(),
+};
 
 /** 一族瀏覽器帶除錯埠開的方式。`target` = 捷徑「目標」欄整行；沒裝就是 `null`。 */
 interface BrowserSetup {
@@ -703,10 +705,6 @@ interface StagePageState {
 
 async function stageStatus(): Promise<HiddenStageStatus | null> {
   return (await engine?.hiddenStageStatus().catch(() => null)) ?? null;
-}
-
-function describeRaidRewardMode(mode: RaidRewardMode): string {
-  return mode === "all" ? "全部通知" : mode === "none" ? "不再通知" : "只通知一次";
 }
 
 // ---------------------------------------------------------------------------
@@ -853,148 +851,6 @@ async function cardArtPageState(): Promise<CardArtPageState> {
     names: cardNames !== null,
     blanks: countBlanks(CARD_ART_BLANKS_PATH),
     status: (await engine?.cardArtStatus().catch(() => null)) ?? null,
-  };
-}
-
-/** 渦那一頁要畫的東西：兩支注入腳本的狀態＋結算面板的模式。 */
-interface RaidPageState {
-  rewardMode: RaidRewardMode;
-  share: boolean;
-  teamShare: boolean;
-  autoDelete: boolean;
-  autoDeletePrompt: boolean;
-  itemShortcut: boolean;
-  historyButton: boolean;
-  discoverSkipOpening: boolean;
-  discoverRules: Record<string, RaidDiscoverAction>;
-  discoverRulesOn: boolean;
-  /** 規則表的列（BOSS）與欄（碎片）：畫面照這份畫，不自己抄一份 */
-  discoverBosses: readonly RaidDiscoverBoss[];
-  discoverFragments: { key: string; short: string; css: string }[];
-  view: RaidViewStatus | null;
-  reward: RaidRewardStatus | null;
-  items: ItemPanelStatus | null;
-}
-
-async function raidPageState(): Promise<RaidPageState> {
-  return {
-    rewardMode: profile.raidRewardMode,
-    share: profile.raidShare,
-    teamShare: profile.raidTeamShare,
-    autoDelete: profile.raidAutoDelete,
-    autoDeletePrompt: profile.raidAutoDeletePrompt,
-    itemShortcut: profile.raidItemShortcut,
-    historyButton: profile.raidHistoryButton,
-    discoverSkipOpening: profile.raidDiscoverSkipOpening,
-    discoverRules: profile.raidDiscoverRules,
-    discoverRulesOn: profile.raidDiscoverRulesOn,
-    discoverBosses: RAID_DISCOVER_BOSSES,
-    discoverFragments: RAID_FRAGMENTS.map((f) => ({ key: f.key, short: f.short, css: f.css })),
-    view: (await engine?.raidViewStatus().catch(() => null)) ?? null,
-    reward: (await engine?.raidRewardStatus().catch(() => null)) ?? null,
-    items: (await engine?.itemPanelStatus().catch(() => null)) ?? null,
-  };
-}
-
-/** 推給頁面的發現渦設定：規則表關著就推空的（規則留在配置裡，打開就回來）。 */
-function raidDiscoverSetting(p: Profile): RaidDiscoverSetting {
-  return {
-    skipOpening: p.raidDiscoverSkipOpening,
-    rules: p.raidDiscoverRulesOn ? p.raidDiscoverRules : {},
-  };
-}
-
-/** 任務那幾頁要畫的東西：物品捷徑、寶箱標註、確認框的設定＋兩支注入腳本的狀態。 */
-interface QuestPageState {
-  stackShortcut: boolean;
-  passShortcut: boolean;
-  treasureMarks: boolean;
-  rewardPanel: QuestPanelMode;
-  endPanel: QuestPanelMode;
-  skipResult: boolean;
-  items: ItemPanelStatus | null;
-  treasure: QuestTreasureStatus | null;
-  /** 學到的 HighLow 開始星數：每一級的最小／最大 step、幾筆。 */
-  bonus: QuestBonusStats;
-}
-
-async function questPageState(): Promise<QuestPageState> {
-  return {
-    stackShortcut: profile.questStackShortcut,
-    passShortcut: profile.questPassShortcut,
-    treasureMarks: profile.questTreasureMarks,
-    rewardPanel: profile.questRewardPanel,
-    endPanel: profile.questEndPanel,
-    skipResult: profile.questSkipResult,
-    items: (await engine?.itemPanelStatus().catch(() => null)) ?? null,
-    treasure: (await engine?.questTreasureStatus().catch(() => null)) ?? null,
-    bonus: summarizeQuestBonus(engine?.questBonusSamples ?? readQuestBonus()),
-  };
-}
-
-/**
- * 迪特赫姆那幾頁（物品捷徑、GEM UP、投降）要畫的東西：開關＋物品欄那支的狀態＋
- * 投降那支（渦戰投降鈕的注入腳本，對戰 MENU 歸它管）的狀態。
- */
-interface DietPageState {
-  itemShortcut: boolean;
-  gemUp: boolean;
-  surrenderNoConfirm: boolean;
-  surrenderOutside: boolean;
-  surrenderWinSkip: boolean;
-  items: ItemPanelStatus | null;
-  surrender: RaidSurrenderStatus | null;
-}
-
-function battleSurrenderOptions(): BattleSurrenderOptions {
-  return {
-    dietNoConfirm: profile.dietSurrenderNoConfirm,
-    outside: profile.surrenderOutside,
-    dietWinSkip: profile.dietSurrenderWinSkip,
-  };
-}
-
-async function dietPageState(): Promise<DietPageState> {
-  return {
-    itemShortcut: profile.dietItemShortcut,
-    gemUp: profile.dietGemUp,
-    surrenderNoConfirm: profile.dietSurrenderNoConfirm,
-    surrenderOutside: profile.surrenderOutside,
-    surrenderWinSkip: profile.dietSurrenderWinSkip,
-    items: (await engine?.itemPanelStatus().catch(() => null)) ?? null,
-    surrender: (await engine?.raidSurrenderStatus().catch(() => null)) ?? null,
-  };
-}
-
-/** 獎勵 › 物品捷徑要畫的東西：開關、畫在哪、差距大時先用哪一種＋物品欄那支的狀態。 */
-interface BonusPageState {
-  itemShortcut: boolean;
-  place: BonusItemPlace;
-  order: BonusItemOrder;
-  /** High／Low 跟下一個卡片、得到卡片一起顯示。 */
-  highLow: boolean;
-  /** 跳過擲骰動畫。 */
-  fast: boolean;
-  /** 用道具救起來之後快轉。 */
-  rescueFast: boolean;
-  /** 結束後不看第二次結算。 */
-  skipEnd: boolean;
-  /** 自動爬星：開關＋勝場、敗場兩組目標。 */
-  climb: BonusClimbConfig;
-  items: ItemPanelStatus | null;
-}
-
-async function bonusPageState(): Promise<BonusPageState> {
-  return {
-    itemShortcut: profile.bonusItemShortcut,
-    place: profile.bonusItemPlace,
-    order: profile.bonusItemOrder,
-    highLow: profile.bonusHighLow,
-    fast: profile.bonusFast,
-    rescueFast: profile.bonusRescueFast,
-    skipEnd: profile.bonusSkipEnd,
-    climb: profile.bonusClimb,
-    items: (await engine?.itemPanelStatus().catch(() => null)) ?? null,
   };
 }
 
@@ -4475,7 +4331,7 @@ app.whenReady().then(() => {
   engine.setQuestItemShortcut("passes", profile.questPassShortcut);
   engine.setDietOverlay("dietStack", profile.dietItemShortcut);
   engine.setDietOverlay("gemUp", profile.dietGemUp);
-  engine.setBattleSurrender(battleSurrenderOptions());
+  engine.setBattleSurrender(battleSurrenderOptions(profile));
   engine.setBonusItemShortcut(profile.bonusItemShortcut);
   engine.setBonusItemOrder(profile.bonusItemOrder);
   engine.setBonusItemPlace(profile.bonusItemPlace);
@@ -4489,13 +4345,7 @@ app.whenReady().then(() => {
   engine.setQuestPanel("end", profile.questEndPanel);
   engine.setQuestSkipResult(profile.questSkipResult);
   engine.onRaidAutoDeleteChanged((setting) => {
-    profile = { ...profile, raidAutoDelete: setting.enabled, raidAutoDeletePrompt: setting.prompt };
-    if (!ephemeral) {
-      store = updateProfile(profile.id, {
-        raidAutoDelete: setting.enabled,
-        raidAutoDeletePrompt: setting.prompt,
-      });
-    }
+    patchProfile({ raidAutoDelete: setting.enabled, raidAutoDeletePrompt: setting.prompt });
     log(
       setting.enabled
         ? "· 自動刪除死渦已開啟（在遊戲裡開的）"
@@ -4504,16 +4354,14 @@ app.whenReady().then(() => {
     pushState();
   });
   engine.onRaidRewardModeChanged((mode) => {
-    profile = { ...profile, raidRewardMode: mode };
-    if (!ephemeral) store = updateProfile(profile.id, { raidRewardMode: mode });
+    patchProfile({ raidRewardMode: mode });
     log(`· 渦結算通知改為「${describeRaidRewardMode(mode)}」（在遊戲裡切的）`);
     pushState();
   });
   // 畫面設定（解析度／畫面大小）：只在遊戲的 Option › plugin 分頁改，托盤只負責記住。
   engine.setDisplay(profile.display);
   engine.onDisplayChanged((display) => {
-    profile = { ...profile, display };
-    if (!ephemeral) store = updateProfile(profile.id, { display });
+    patchProfile({ display });
     log(`· 畫面設定改為 解析度 ${display.render}、畫面大小 ${display.size}（在遊戲裡改的）`);
   });
 
@@ -4544,8 +4392,7 @@ app.whenReady().then(() => {
   ipcMain.handle("ulr:set-tint", (_event, tint: number | null) => {
     engine?.setReadyTint(tint);
     const applied = engine?.readyTint ?? null;
-    profile = { ...profile, readyTint: applied };
-    if (!ephemeral) store = updateProfile(profile.id, { readyTint: applied });
+    patchProfile({ readyTint: applied });
     pushState();
     return snapshot();
   });
@@ -4648,8 +4495,7 @@ app.whenReady().then(() => {
 
   ipcMain.handle("ulr:cost-in-game", (_event, on: unknown) => {
     if (typeof on === "boolean" && on !== profile.customCostInGame) {
-      profile = { ...profile, customCostInGame: on };
-      if (!ephemeral) store = updateProfile(profile.id, { customCostInGame: on });
+      patchProfile({ customCostInGame: on });
       pushCostRuleToEngine();
       log(
         on
@@ -4686,8 +4532,7 @@ app.whenReady().then(() => {
    */
   ipcMain.handle("ulr:deck-apply-delay", (_event, raw: unknown): number => {
     const next = normalizeApplyDelaySeconds(raw);
-    profile = { ...profile, applyDelaySeconds: next };
-    if (!ephemeral) store = updateProfile(profile.id, { applyDelaySeconds: next });
+    patchProfile({ applyDelaySeconds: next });
     pushState();
     return next;
   });
@@ -4702,8 +4547,7 @@ app.whenReady().then(() => {
    */
   ipcMain.handle("ulr:deck-mode", async (_event, raw: unknown): Promise<DeckMode> => {
     if (!isDeckMode(raw) || raw === profile.deckMode) return profile.deckMode;
-    profile = { ...profile, deckMode: raw };
-    if (!ephemeral) store = updateProfile(profile.id, { deckMode: raw });
+    patchProfile({ deckMode: raw });
     log(
       raw === "plugin"
         ? "· 牌組替換：插件模式（四房各存牌組、只用 Deck1；Deck2／Deck3 會收進庫裡清空）"
@@ -4723,8 +4567,7 @@ app.whenReady().then(() => {
    */
   ipcMain.handle("ulr:chara-picker", (_event, raw: unknown): CharaPickerMode => {
     if (!isCharaPickerMode(raw) || raw === profile.charaPicker) return profile.charaPicker;
-    profile = { ...profile, charaPicker: raw };
-    if (!ephemeral) store = updateProfile(profile.id, { charaPicker: raw });
+    patchProfile({ charaPicker: raw });
     pushCharaPicker();
     pushState();
     return profile.charaPicker;
@@ -4734,8 +4577,7 @@ app.whenReady().then(() => {
   ipcMain.handle("ulr:deck-cloud-sync", (_event, on: unknown): boolean => {
     if (typeof on === "boolean") {
       // 跟 `ulr:stages-set` 同一招：先改記憶體、非臨時配置才落地。
-      profile = { ...profile, deckCloudSync: on };
-      if (!ephemeral) store = updateProfile(profile.id, { deckCloudSync: on });
+      patchProfile({ deckCloudSync: on });
       if (on) {
         log("· 牌組跨電腦同步已開啟");
         void runDeckSync();
@@ -4751,8 +4593,7 @@ app.whenReady().then(() => {
 
   ipcMain.handle("ulr:editor-step", (_event, raw: unknown): number => {
     const next = normalizeEditStep(raw);
-    profile = { ...profile, editStep: next };
-    if (!ephemeral) store = updateProfile(profile.id, { editStep: next });
+    patchProfile({ editStep: next });
     return next;
   });
 
@@ -4766,8 +4607,7 @@ app.whenReady().then(() => {
    */
   ipcMain.handle("ulr:editor-unit", (_event, raw: unknown): number => {
     const next = normalizeEditUnit(raw);
-    profile = { ...profile, editUnit: next };
-    if (!ephemeral) store = updateProfile(profile.id, { editUnit: next });
+    patchProfile({ editUnit: next });
     return next;
   });
 
@@ -4862,8 +4702,7 @@ app.whenReady().then(() => {
    */
   ipcMain.handle("ulr:match-prefs", (_event, patch: unknown): MatchPrefsResult => {
     const next = normalizeMatchPrefs({ ...profile.match, ...(patch as object) });
-    profile = { ...profile, match: next };
-    if (!ephemeral) store = updateProfile(profile.id, { match: next });
+    patchProfile({ match: next });
     pushState();
     return { match: next };
   });
@@ -4884,19 +4723,12 @@ app.whenReady().then(() => {
     // **不能用 `editProfile`**。臨時配置（`--port` 對不上任何一份時建的）不在
     // 清單裡，`editProfile` 對它是完全的空操作：開關會在下一次重畫時彈回去，
     // 而畫面上看起來就是「按了沒反應」。
-    profile = { ...profile, hiddenStages: on };
-    if (!ephemeral) store = updateProfile(profile.id, { hiddenStages: on });
+    patchProfile({ hiddenStages: on });
     engine?.setHiddenStages(on);
     log(on ? "· 隱藏地圖已啟用（開房選單會多四張）" : "· 隱藏地圖已停用，選單回官方那 11 項");
     pushState();
     return { enabled: on, stages: HIDDEN_STAGES, status: await stageStatus() };
   });
-
-  // -------------------------------------------------------------------------
-  // 渦：獎勵標記與結算通知
-  // -------------------------------------------------------------------------
-
-  ipcMain.handle("ulr:raid-state", async (): Promise<RaidPageState> => raidPageState());
 
   // -------------------------------------------------------------------------
   // 模組：卡面替換
@@ -4929,328 +4761,11 @@ app.whenReady().then(() => {
     return cardArtPageState();
   });
 
-  ipcMain.handle("ulr:raid-reward-mode", async (_event, raw: unknown): Promise<RaidPageState> => {
-    if (isRaidRewardMode(raw)) {
-      // 跟 `ulr:stages-set` 同一招：先改記憶體、非臨時配置才落地。
-      profile = { ...profile, raidRewardMode: raw };
-      if (!ephemeral) store = updateProfile(profile.id, { raidRewardMode: raw });
-      engine?.setRaidRewardMode(raw);
-      log(`· 渦結算通知改為「${describeRaidRewardMode(raw)}」`);
-      pushState();
-    }
-    return raidPageState();
-  });
-
-  ipcMain.handle("ulr:raid-share", async (_event, on: unknown): Promise<RaidPageState> => {
-    if (typeof on === "boolean") {
-      profile = { ...profile, raidShare: on };
-      if (!ephemeral) store = updateProfile(profile.id, { raidShare: on });
-      engine?.setRaidShare(on);
-      log(on ? "· 插件互傳渦狀態已開啟" : "· 插件互傳渦狀態已關閉（只用 ulgg）");
-      pushState();
-    }
-    return raidPageState();
-  });
-
-  ipcMain.handle("ulr:raid-team-share", async (_event, on: unknown): Promise<RaidPageState> => {
-    if (typeof on === "boolean") {
-      profile = { ...profile, raidTeamShare: on };
-      if (!ephemeral) store = updateProfile(profile.id, { raidTeamShare: on });
-      engine?.setRaidTeamShare(on);
-      log(
-        on
-          ? "· 分享打渦隊伍已開啟"
-          : "· 分享打渦隊伍已關閉（下一輪會把 Cloudflare Workers 上自己的隊伍撤掉）",
-      );
-      pushState();
-    }
-    return raidPageState();
-  });
-
-  /** 插件視窗這邊打開自動刪除時，遊戲內的提示鈕也一起恢復。 */
-  ipcMain.handle("ulr:raid-auto-delete", async (_event, on: unknown): Promise<RaidPageState> => {
-    if (typeof on === "boolean") {
-      const prompt = on ? true : profile.raidAutoDeletePrompt;
-      profile = { ...profile, raidAutoDelete: on, raidAutoDeletePrompt: prompt };
-      if (!ephemeral)
-        store = updateProfile(profile.id, { raidAutoDelete: on, raidAutoDeletePrompt: prompt });
-      engine?.setRaidAutoDelete({ enabled: on, prompt });
-      log(on ? "· 自動刪除死渦已開啟" : "· 自動刪除死渦已停用");
-      pushState();
-    }
-    return raidPageState();
-  });
-
-  ipcMain.handle("ulr:raid-item-shortcut", async (_event, on: unknown): Promise<RaidPageState> => {
-    if (typeof on === "boolean") {
-      profile = { ...profile, raidItemShortcut: on };
-      if (!ephemeral) store = updateProfile(profile.id, { raidItemShortcut: on });
-      engine?.setItemShortcut(on);
-      log(on ? "· 渦房物品捷徑已開啟" : "· 渦房物品捷徑已關閉（好友與物品鈕放回來）");
-      pushState();
-    }
-    return raidPageState();
-  });
-
-  ipcMain.handle("ulr:raid-history-button", async (_event, on: unknown): Promise<RaidPageState> => {
-    if (typeof on === "boolean") {
-      profile = { ...profile, raidHistoryButton: on };
-      if (!ephemeral) store = updateProfile(profile.id, { raidHistoryButton: on });
-      engine?.setRaidHistoryButton(on);
-      log(on ? "· 渦房 History 鈕已顯示" : "· 渦房 History 鈕已隱藏（渦獎勵照樣記錄）");
-      pushState();
-    }
-    return raidPageState();
-  });
-
-  /** 發現渦之後：跳過開場（一個開關）＋「BOSS × 碎片」規則（公開／僅限好友／刪除／不動）。 */
-  const applyRaidDiscover = (patch: Partial<Profile>): void => {
-    profile = { ...profile, ...patch };
-    if (!ephemeral) store = updateProfile(profile.id, patch);
-    engine?.setRaidDiscover(raidDiscoverSetting(profile));
-    pushState();
-  };
-
-  ipcMain.handle("ulr:raid-discover-skip", async (_event, on: unknown): Promise<RaidPageState> => {
-    if (typeof on === "boolean") {
-      applyRaidDiscover({ raidDiscoverSkipOpening: on });
-      log(on ? "· 發現渦：跳過開場動畫" : "· 發現渦：開場動畫照播");
-    }
-    return raidPageState();
-  });
-
-  /** 規則表整個開關：關掉時規則留著、不推下去。 */
-  ipcMain.handle(
-    "ulr:raid-discover-rules-on",
-    async (_event, on: unknown): Promise<RaidPageState> => {
-      if (typeof on === "boolean") {
-        applyRaidDiscover({ raidDiscoverRulesOn: on });
-        log(
-          on
-            ? "· 發現渦：照規則表做（公開／好友／渦碼／刪除）"
-            : "· 發現渦：規則表暫停（規則留著）",
-        );
-      }
-      return raidPageState();
-    },
-  );
-
-  /** 一次改一格或一整組（keys），同一個動作。 */
-  ipcMain.handle(
-    "ulr:raid-discover-rule",
-    async (_event, keys: unknown, action: unknown): Promise<RaidPageState> => {
-      if (
-        Array.isArray(keys) &&
-        keys.every((k) => typeof k === "string") &&
-        RAID_DISCOVER_ACTIONS.includes(action as RaidDiscoverAction)
-      ) {
-        const next: Record<string, unknown> = { ...profile.raidDiscoverRules };
-        for (const k of keys as string[]) {
-          if (action === "keep") delete next[k];
-          else next[k] = action;
-        }
-        // 認不得的鍵在這裡丟掉
-        applyRaidDiscover({ raidDiscoverRules: normalizeRaidDiscoverRules(next) });
-      }
-      return raidPageState();
-    },
-  );
-
-  ipcMain.handle("ulr:quest-state", (): Promise<QuestPageState> => questPageState());
-
-  ipcMain.handle(
-    "ulr:quest-item-shortcut",
-    // `part`：`stack` 水沙捷徑、`passes` 通行證捷徑，各自開關。
-    async (_event, part: unknown, on: unknown): Promise<QuestPageState> => {
-      if ((part === "stack" || part === "passes") && typeof on === "boolean") {
-        const key = part === "stack" ? "questStackShortcut" : "questPassShortcut";
-        profile = { ...profile, [key]: on };
-        if (!ephemeral) store = updateProfile(profile.id, { [key]: on });
-        engine?.setQuestItemShortcut(part, on);
-        const name = part === "stack" ? "水沙捷徑" : "通行證捷徑";
-        log(on ? `· 任務房${name}已開啟` : `· 任務房${name}已關閉`);
-        pushState();
-      }
-      return questPageState();
-    },
-  );
-
-  ipcMain.handle("ulr:diet-state", (): Promise<DietPageState> => dietPageState());
-
-  ipcMain.handle(
-    "ulr:diet-toggle",
-    // `part`：`dietStack` 水捷徑、`gemUp` GEM UP，各自開關。
-    async (_event, part: unknown, on: unknown): Promise<DietPageState> => {
-      if ((part === "dietStack" || part === "gemUp") && typeof on === "boolean") {
-        const key = part === "dietStack" ? "dietItemShortcut" : "dietGemUp";
-        profile = { ...profile, [key]: on };
-        if (!ephemeral) store = updateProfile(profile.id, { [key]: on });
-        engine?.setDietOverlay(part, on);
-        const name = part === "dietStack" ? "物品捷徑" : "GEM UP";
-        log(on ? `· 迪城${name}已開啟` : `· 迪城${name}已關閉`);
-        pushState();
-      }
-      return dietPageState();
-    },
-  );
-
-  ipcMain.handle(
-    "ulr:surrender-option",
-    // `part`：`noConfirm` 迪城投降不確認、`outside` 投降鈕放 MENU 外面（渦、亞城也算）、
-    // `winSkip` 迪城對手投降時直接到獎勵遊戲。
-    async (_event, part: unknown, on: unknown): Promise<DietPageState> => {
-      if (
-        (part === "noConfirm" || part === "outside" || part === "winSkip") &&
-        typeof on === "boolean"
-      ) {
-        const key =
-          part === "noConfirm"
-            ? "dietSurrenderNoConfirm"
-            : part === "winSkip"
-              ? "dietSurrenderWinSkip"
-              : "surrenderOutside";
-        profile = { ...profile, [key]: on };
-        if (!ephemeral) store = updateProfile(profile.id, { [key]: on });
-        engine?.setBattleSurrender(battleSurrenderOptions());
-        if (part === "noConfirm") log(on ? "· 迪城投降改成直接投降" : "· 迪城投降照官方跳確認");
-        else if (part === "winSkip")
-          log(on ? "· 迪城對手投降時直接到獎勵遊戲" : "· 迪城對手投降照官方跳通知框");
-        else log(on ? "· 投降鈕放到 MENU 外面" : "· 投降鈕收回 MENU 裡");
-        pushState();
-      }
-      return dietPageState();
-    },
-  );
-
-  ipcMain.handle("ulr:bonus-state", (): Promise<BonusPageState> => bonusPageState());
-
-  // 三選一：無捷徑（off）、按鈕左上（above）、蓋在使用物品上（cover）。關的時候位置不動，
-  // 下次打開還是上次選的地方
-  ipcMain.handle("ulr:bonus-mode", async (_event, mode: unknown): Promise<BonusPageState> => {
-    if (mode === "off" || isBonusItemPlace(mode)) {
-      const on = mode !== "off";
-      const place = mode === "off" ? profile.bonusItemPlace : mode;
-      profile = { ...profile, bonusItemShortcut: on, bonusItemPlace: place };
-      if (!ephemeral)
-        store = updateProfile(profile.id, { bonusItemShortcut: on, bonusItemPlace: place });
-      engine?.setBonusItemPlace(place);
-      engine?.setBonusItemShortcut(on);
-      log(
-        mode === "off"
-          ? "· 獎勵遊戲物品捷徑已關閉"
-          : mode === "cover"
-            ? "· 獎勵遊戲物品捷徑：蓋在使用物品上"
-            : "· 獎勵遊戲物品捷徑：畫在按鈕左上",
-      );
-      pushState();
-    }
-    return bonusPageState();
-  });
-
-  ipcMain.handle("ulr:bonus-order", async (_event, order: unknown): Promise<BonusPageState> => {
-    if (isBonusItemOrder(order)) {
-      profile = { ...profile, bonusItemOrder: order };
-      if (!ephemeral) store = updateProfile(profile.id, { bonusItemOrder: order });
-      engine?.setBonusItemOrder(order);
-      pushState();
-    }
-    return bonusPageState();
-  });
-
-  ipcMain.handle("ulr:bonus-highlow", async (_event, on: unknown): Promise<BonusPageState> => {
-    if (typeof on === "boolean") {
-      profile = { ...profile, bonusHighLow: on };
-      if (!ephemeral) store = updateProfile(profile.id, { bonusHighLow: on });
-      engine?.setBonusHighLow(on);
-      log(on ? "· 獎勵遊戲 High Low：跟下一個卡片一起顯示" : "· 獎勵遊戲 High Low：照官方");
-      pushState();
-    }
-    return bonusPageState();
-  });
-
-  ipcMain.handle("ulr:bonus-fast", async (_event, on: unknown): Promise<BonusPageState> => {
-    if (typeof on === "boolean") {
-      profile = { ...profile, bonusFast: on };
-      if (!ephemeral) store = updateProfile(profile.id, { bonusFast: on });
-      engine?.setBonusFast(on);
-      log(on ? "· 獎勵遊戲：跳過擲骰動畫" : "· 獎勵遊戲：擲骰動畫照官方");
-      pushState();
-    }
-    return bonusPageState();
-  });
-
-  ipcMain.handle("ulr:bonus-rescue-fast", async (_event, on: unknown): Promise<BonusPageState> => {
-    if (typeof on === "boolean") {
-      profile = { ...profile, bonusRescueFast: on };
-      if (!ephemeral) store = updateProfile(profile.id, { bonusRescueFast: on });
-      engine?.setBonusRescueFast(on);
-      log(on ? "· 獎勵遊戲：用道具救起來之後快轉" : "· 獎勵遊戲：用道具之後照官方");
-      pushState();
-    }
-    return bonusPageState();
-  });
-
-  ipcMain.handle("ulr:bonus-skip-end", async (_event, on: unknown): Promise<BonusPageState> => {
-    if (typeof on === "boolean") {
-      profile = { ...profile, bonusSkipEnd: on };
-      if (!ephemeral) store = updateProfile(profile.id, { bonusSkipEnd: on });
-      engine?.setBonusSkipEnd(on);
-      log(on ? "· 獎勵遊戲：結束後直接回房間" : "· 獎勵遊戲：結束後照官方看結算");
-      pushState();
-    }
-    return bonusPageState();
-  });
-
-  // 整份設定一起來（開關＋兩組目標）；不合理的數字在 normalizeBonusClimb 裡夾回範圍
-  ipcMain.handle("ulr:bonus-climb", async (_event, config: unknown): Promise<BonusPageState> => {
-    const next = normalizeBonusClimb(config);
-    const toggled = next.on !== profile.bonusClimb.on;
-    profile = { ...profile, bonusClimb: next };
-    if (!ephemeral) store = updateProfile(profile.id, { bonusClimb: next });
-    engine?.setBonusClimb(next);
-    if (toggled) log(next.on ? "· 獎勵遊戲：自動爬星開啟" : "· 獎勵遊戲：自動爬星已關閉");
-    pushState();
-    return bonusPageState();
-  });
-
-  ipcMain.handle("ulr:quest-treasure", async (_event, on: unknown): Promise<QuestPageState> => {
-    if (typeof on === "boolean") {
-      profile = { ...profile, questTreasureMarks: on };
-      if (!ephemeral) store = updateProfile(profile.id, { questTreasureMarks: on });
-      engine?.setQuestTreasure(on);
-      log(on ? "· 任務地圖寶箱標註已開啟" : "· 任務地圖寶箱標註已關閉");
-      pushState();
-    }
-    return questPageState();
-  });
-
-  ipcMain.handle(
-    "ulr:quest-panel",
-    async (_event, part: unknown, mode: unknown): Promise<QuestPageState> => {
-      if ((part === "reward" || part === "end") && isQuestPanelMode(mode)) {
-        const patch = part === "reward" ? { questRewardPanel: mode } : { questEndPanel: mode };
-        profile = { ...profile, ...patch };
-        if (!ephemeral) store = updateProfile(profile.id, patch);
-        engine?.setQuestPanel(part, mode);
-        const what = part === "reward" ? "寶箱面板" : "任務結束確認框";
-        const how = mode === "auto" ? "自動按 OK" : mode === "hide" ? "不顯示" : "照官方";
-        log(`· 任務${what}：${how}`);
-        pushState();
-      }
-      return questPageState();
-    },
-  );
-
-  ipcMain.handle("ulr:quest-skip-result", async (_event, on: unknown): Promise<QuestPageState> => {
-    if (typeof on === "boolean") {
-      profile = { ...profile, questSkipResult: on };
-      if (!ephemeral) store = updateProfile(profile.id, { questSkipResult: on });
-      engine?.setQuestSkipResult(on);
-      log(on ? "· 任務打完怪物：跳過結算" : "· 任務打完怪物：照官方看結算");
-      pushState();
-    }
-    return questPageState();
-  });
+  // 渦／任務／迪城／獎勵那幾頁的開關（pages/*.ts）
+  registerRaidPage(ipcMain, trayCtx);
+  registerQuestPage(ipcMain, trayCtx);
+  registerDietPage(ipcMain, trayCtx);
+  registerBonusPage(ipcMain, trayCtx);
 
   /** 重新推一次。給「等太久放棄了」那個收尾狀態用的按鈕。 */
   ipcMain.handle("ulr:stages-retry", async (): Promise<StagePageState> => {
