@@ -66,13 +66,13 @@ export interface SignedRelease {
 // Release notes 有寫。詳見 docs/release.md §2。
 export const CURRENT_RELEASE: SignedRelease | null = {
   manifest: {
-    version: "2.5.0",
-    url: "https://github.com/UnlightPlugin/ulr-companion/releases/download/v2.5.0/ULR-Companion-2.5.0-win.zip",
-    sha256: "08e0273a55ba3ab83d39c35bf4b9167c020980e19ce25d36415d549cd46968d7",
-    notes: "牌譜與記牌；南瓜王碎片照區塊；zip 自動更新修好",
+    version: "2.5.1",
+    url: "https://github.com/UnlightPlugin/ulr-companion/releases/download/v2.5.1/ULR-Companion-2.5.1-win.zip",
+    sha256: "7288b7890fce56619542f431b3d693a66cbb58c0ad4883deb7f42ead771c1010",
+    notes: "任務清單標贈送者；自動更新不再卡在等對戰結束",
   },
   signature:
-    "4tIMKntOCiW9kwunmtruT5dBFuFFeuerbTofIFEnmBOkUUZjvnpoDHRypEeqH6kBUHnL0AFUv8BFDxmz+crnDg==",
+    "GK2INnItpF61MHCbkSIneJYZNOcnhNRj1+F2wQ0Q4n3WlCmv5k9ro6IW0gCRmgMWVVvP5Q1zUTy7vz48zmV1Aw==",
 };
 
 // 發版時把上面那行換成 `npm run release:sign` 印出來的那一段（形狀如下，
