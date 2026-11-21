@@ -179,7 +179,7 @@ function setup() {
       },
       cache: { json: { get: (k: string) => tables[k] } },
     },
-    crypto: webcrypto,
+    crypto: countedCrypto,
     lang: "tcn",
     [BINDING]: (payload: string) => reports.push(JSON.parse(payload) as KifuReport),
   };
@@ -199,12 +199,36 @@ function setup() {
   return { m, back, window, reports, run, startMatch };
 }
 
+/**
+ * 還沒算完的雜湊有幾個。webcrypto 在執行緒池算，**要等多久看機器多忙** —— 以前 settle
+ * 只讓 50 次 setImmediate，完整測試平行跑時偶爾來不及，每次紅的是不同條。
+ */
+let digesting = 0;
+const countedCrypto = {
+  subtle: {
+    digest: (algorithm: string, data: Parameters<typeof webcrypto.subtle.digest>[1]) => {
+      digesting++;
+      return webcrypto.subtle.digest(algorithm, data).finally(() => {
+        digesting--;
+      });
+    },
+  },
+};
+
+/** 讓真的時間過去，直到雜湊都算完（最多 5 秒），再多轉幾圈讓後續的 then 跑完。 */
+async function drain() {
+  const deadline = process.hrtime.bigint() + 5_000_000_000n;
+  do {
+    await new Promise((r) => setImmediate(r));
+  } while (digesting > 0 && process.hrtime.bigint() < deadline);
+  for (let j = 0; j < 10; j++) await new Promise((r) => setImmediate(r));
+}
+
 /** 等雜湊（webcrypto 是真的非同步）與計時器 */
 async function settle() {
   for (let i = 0; i < 5; i++) {
     await vi.advanceTimersByTimeAsync(250);
-    // webcrypto 在執行緒池算，要讓真的時間過去
-    for (let j = 0; j < 10; j++) await new Promise((r) => setImmediate(r));
+    await drain();
   }
 }
 
