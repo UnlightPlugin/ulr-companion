@@ -157,6 +157,14 @@ export interface RunnerOptions {
    * 觸發的狀態。
    */
   onModeChange?: (info: { pvp: boolean; rule: string | null }) => void;
+  /**
+   * 「這一場還在打」變了（開打、打完、投降、換場）。
+   *
+   * ⚠ 同 `onModeChange`：**不能靠 `onStep` 傳。** NPC 戰整段短路、一步都不走，
+   * 打完變回 false 時沒人通知托盤 —— 2026-11-21 托盤連跑 12 天，`armed` 停在
+   * 某一場的 true，自動更新一直「等對戰結束」、永遠裝不上（Moon 掛機打渦）。
+   */
+  onArmedChange?: (armed: boolean) => void;
   /** 每一步的決策都丟出來，讓 CLI／UI 可以顯示。 */
   onStep?: (info: {
     input: ArbiterInput;
@@ -308,6 +316,13 @@ export class ArbiterRunner {
     return raw === "A" || raw === "B" ? raw : null;
   }
 
+  /** 變了才通知（tick 每秒四次）。 */
+  #setArmed(armed: boolean): void {
+    if (armed === this.#armed) return;
+    this.#armed = armed;
+    this.#options.onArmedChange?.(armed);
+  }
+
   /** 同一個錯訊只報一次，換了才再報。tick 每秒四次，不去重會把終端機洗掉。 */
   #reportError(message: string): void {
     if (this.#lastError === message) return;
@@ -319,7 +334,7 @@ export class ArbiterRunner {
     if (report.type === "ok-patch-installed") {
       // 座位可能在裝上去之後才知道（還沒進對戰時是 null）。
       if (report.seat === "A" || report.seat === "B") this.#seat = report.seat;
-      this.#armed = report.armed;
+      this.#setArmed(report.armed);
       return;
     }
     if (report.type === "ok-patch-rearmed") {
@@ -330,7 +345,7 @@ export class ArbiterRunner {
       // 完全不像座位問題（docs/battle-events.md）。
       this.#seat = report.seat === "A" || report.seat === "B" ? report.seat : null;
       this.#state = initialState();
-      this.#armed = true;
+      this.#setArmed(true);
       return;
     }
     if (report.type === "ok-released") {
@@ -401,7 +416,7 @@ export class ArbiterRunner {
 
     if (beat === null || beat === undefined) {
       // patch 不在頁面上了 —— 幾乎一定是玩家重載了遊戲。
-      this.#armed = false;
+      this.#setArmed(false);
       this.#displayCap = undefined;
       this.#reportError("頁面上的攔截不見了（遊戲重載過？）—— 重新裝一次");
       // ⚠ **要真的重裝，不能只印錯誤。** 見 `onPatchLost` 的說明：
@@ -415,7 +430,7 @@ export class ArbiterRunner {
       this.#phaseId = beat.phaseId;
       this.#displayCap = undefined;
     }
-    this.#armed = beat.armed;
+    this.#setArmed(beat.armed);
 
     /**
      * ⚠⚠ **對手是 NPC 就整組停手**（玩家 2026-08-09 指定：打渦、打任務都不要生效）。

@@ -628,6 +628,31 @@ describe("ArbiterRunner：對手是 NPC 就整組停手（玩家 2026-08-09 指�
     ]);
   });
 
+  it("⚠ NPC 戰打完 armed 變回 false 也要通知（onStep 不會走）", async () => {
+    // 2026-11-21：托盤只靠 onStep／接上時更新 armed，掛機打渦打完停在 true，
+    // 自動更新一直等「對戰結束」、永遠裝不上。
+    const changes: boolean[] = [];
+    const bridge = new FakeBridge();
+    bridge.pvp = false;
+    bridge.rule = "raid";
+    bridge.armed = false;
+    const runner = new ArbiterRunner(bridge, {
+      ...OPTIONS,
+      tickIntervalMs: 5,
+      onArmedChange: (a) => changes.push(a),
+    });
+    await runner.start();
+    await new Promise((r) => setTimeout(r, 20));
+    bridge.armed = true;
+    await new Promise((r) => setTimeout(r, 20));
+    bridge.armed = false;
+    await new Promise((r) => setTimeout(r, 20));
+    runner.stop();
+
+    expect(changes).toEqual([true, false]);
+    expect(runner.armed).toBe(false);
+  });
+
   it("回到對戰之後要恢復正常仲裁", async () => {
     const bridge = new FakeBridge();
     bridge.pvp = false;

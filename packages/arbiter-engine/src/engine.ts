@@ -3668,6 +3668,9 @@ export class ArbiterEngine {
            * `Runtime.evaluate`，而每一次都在頁面上重跑一次安裝腳本。
            */
           onPatchLost: () => void this.#reinstall(adapter),
+          // 托盤的「對戰中」與自動更新的「等對戰結束」都看這個；NPC 戰沒有 onStep，
+          // 只靠下面那條的話打完永遠停在 true（見 RunnerOptions.onArmedChange）
+          onArmedChange: (armed) => this.#emit({ armed }),
           onError: (err) => this.#emit({ error: err.message }),
           onStep: () => {
             const runnerNow = this.#runner;
