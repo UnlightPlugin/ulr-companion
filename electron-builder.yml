@@ -34,8 +34,10 @@ electronLanguages:
   - ja
   - ko
 
-# 壓縮率換打包時間。玩家只下載一次，我們每次發版多等一分鐘。
-compression: maximum
+# ⚠ **不要改回 maximum。** 2026-11-22 拿 2.5.1 的 win-unpacked 量：7za -mx=5 要 19 秒、
+# 126.0 MB；-mx=9 要 135 秒、125.1 MB —— 慢 7 倍只省 0.7%。electron-builder 的 maximum
+# 對 zip 還會再加碼，整個 npm run dist 拖到 7 分半（「每次多等一分鐘」是當初估錯的）。
+compression: normal
 
 win:
   # ⚠ **不要用 portable。** portable 是「單一 exe，執行時解到暫存目錄再跑」——
