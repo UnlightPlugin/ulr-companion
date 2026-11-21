@@ -51,6 +51,15 @@ const CHECK_INTERVAL_MS = 60 * 60 * 1000;
 const FIRST_CHECK_DELAY_MS = 60 * 1000;
 
 /**
+ * 已經下載好、但遇到對戰時，多久再看一次「打完了沒」。
+ *
+ * ⚠ 不能等每小時那一輪：掛機（Moon）一場接一場打，整點剛好落在兩場之間的機會
+ * 很小，玩家看到的是「對戰早就結束了，更新卻一直沒裝」。`isBusy()` 只是讀一個
+ * 欄位，密一點沒有成本。
+ */
+const IDLE_RETRY_MS = 5 * 1000;
+
+/**
  * 發布清單的網址。環境變數可以覆蓋，**但一定有預設值**。
  *
  * ⚠ 舊版沒有預設值，於是自動更新對**所有玩家**都是關掉的 —— 打包版沒有人會
@@ -140,16 +149,33 @@ export function startAutoUpdate(options: UpdaterOptions): AutoUpdater {
    * 沒有盡頭。會讓它失敗的原因（安裝目錄寫不進去、換檔腳本被擋）都不是等一個
    * 小時就會好的事；真的處理掉了，重開插件就會再試。
    */
-  let abandoned: string | null = null;
+  let abandoned: { version: string; reason: string } | null = null;
+  /** 下載好了、在等對戰結束的那個輪詢。 */
+  let idleTimer: ReturnType<typeof setInterval> | null = null;
 
   const log = (line: string): void => options.onLog?.(line);
 
-  /** 套用的結果講成一句話（手動檢查要回給畫面）。 */
+  const stopIdleWatch = (): void => {
+    if (idleTimer !== null) clearInterval(idleTimer);
+    idleTimer = null;
+  };
+
+  /**
+   * 套用的結果講成一句話（手動檢查要回給畫面）。
+   *
+   * ⚠ **原因要直接寫在這句話裡**，不能寫「原因在記錄裡」—— 玩家不知道記錄檔在哪。
+   */
   const applyResult = async (ready: { version: string; path: string }): Promise<string> => {
     const r = await applyIfIdle(ready);
-    if (r === "busy") return `${ready.version} 已下載，對戰結束後自動套用`;
-    if (r === "applying") return `正在套用 ${ready.version}，插件會自己重新啟動`;
-    return `${ready.version} 沒有裝上，原因寫在記錄裡`;
+    if (r.kind === "busy") {
+      idleTimer ??= setInterval(() => {
+        if (staged !== null && !options.isBusy()) void check();
+      }, IDLE_RETRY_MS);
+      return `${ready.version} 已下載，對戰結束後自動套用`;
+    }
+    stopIdleWatch();
+    if (r.kind === "applying") return `正在套用 ${ready.version}，插件會自己重新啟動`;
+    return `${ready.version} 沒有裝上：${r.reason}`;
   };
 
   const runCheck = async (): Promise<string> => {
@@ -157,24 +183,23 @@ export function startAutoUpdate(options: UpdaterOptions): AutoUpdater {
     try {
       // 已經備好一版了 → 這一輪只做「能不能套用」的判斷，不重複下載。
       if (staged !== null) return await applyResult(staged);
+      // 還沒發過版（404）回 `null`；簽章驗不過是 throw —— 它要嘛是發版流程出錯，
+      // 要嘛是有人在冒充發布來源，兩種都不該安靜略過。
       const manifest = await fetchManifest(feed);
-      // ⚠ `null` 有兩種可能：還沒發過版（404），或**簽章驗不過**。後者要看得見 ——
-      // 它要嘛是發版流程出錯，要嘛是有人在冒充發布來源，兩種都不該安靜略過。
-      if (manifest === null) return "沒有查到可用的發布清單";
+      if (manifest === null) return "還沒有發布過任何一版";
       // ⚠ **只往新的走。** 舊清單的簽章永遠有效，所以「版本不一樣就更新」
       // 等於對重播舊清單毫無抵抗力 —— 見 `isNewerVersion()`。
       if (!isNewerVersion(manifest.version, options.currentVersion)) {
         return `已經是最新版（最新發布 ${manifest.version}）`;
       }
-      if (manifest.version === abandoned) {
-        return `${manifest.version} 這次執行裝不上去，重開插件會再試一次`;
+      if (manifest.version === abandoned?.version) {
+        return `${manifest.version} 沒有裝上：${abandoned.reason}（重開插件會再試一次）`;
       }
 
       log(
         `↓ 有新版 ${manifest.version}${manifest.notes === undefined ? "" : `：${manifest.notes}`}`,
       );
       const path = await download(manifest);
-      if (path === null) return `${manifest.version} 下載失敗，原因寫在記錄裡`;
       staged = { version: manifest.version, path };
       log(`✓ ${manifest.version} 已下載，等對戰結束再套用`);
       return await applyResult(staged);
@@ -182,7 +207,7 @@ export function startAutoUpdate(options: UpdaterOptions): AutoUpdater {
       // 靜默更新的「靜默」不包括錯誤。查不到原因的失敗比失敗本身麻煩。
       const message = err instanceof Error ? err.message : String(err);
       log(`✗ 檢查更新失敗：${message}`);
-      return `檢查失敗：${message}`;
+      return `更新失敗：${message}`;
     }
   };
 
@@ -228,31 +253,33 @@ export function startAutoUpdate(options: UpdaterOptions): AutoUpdater {
   const applyIfIdle = async (ready: {
     version: string;
     path: string;
-  }): Promise<"busy" | "applying" | "failed"> => {
-    if (options.isBusy()) return "busy";
+  }): Promise<{ kind: "busy" } | { kind: "applying" } | { kind: "failed"; reason: string }> => {
+    if (options.isBusy()) return { kind: "busy" };
 
     if (ready.path.toLowerCase().endsWith(".zip")) {
       log(`⟳ 套用 ${ready.version}（換檔，換完會自己重新啟動）`);
       markUpdating();
-      const started = await applyZipUpdate({
+      const problem = await applyZipUpdate({
         zipPath: ready.path,
         version: ready.version,
         exePath: process.execPath,
+        // 換完要開回同一個配置（`--profile <id>`），多開的每一份才各自回來。
+        exeArgs: process.argv.slice(1),
         workDir: join(app.getPath("userData"), "updates"),
         onLog: log,
       });
-      if (!started) {
+      if (problem !== null) {
         // 換不上去（安裝目錄沒有寫入權、換檔腳本起不來）。⚠ 紙條要撕掉，否則
         // 下一次手動開啟會被當成「更新後自動起來的」而不跳視窗。
         clearUpdating();
         // ⚠ 已下載的那一份留著沒有用，重抓一次也一樣 —— 見 `abandoned`。
         staged = null;
-        abandoned = ready.version;
+        abandoned = { version: ready.version, reason: problem };
         log(`  ${ready.version} 在插件重新啟動之前不會再自動重試`);
-        return "failed";
+        return { kind: "failed", reason: problem };
       }
       options.quit();
-      return "applying";
+      return { kind: "applying" };
     }
 
     log(`⟳ 套用 ${ready.version}（靜默安裝，裝完會自己重新啟動）`);
@@ -276,12 +303,13 @@ export function startAutoUpdate(options: UpdaterOptions): AutoUpdater {
       const child = spawn(ready.path, ["/S"], { detached: true, stdio: "ignore", env });
       child.unref();
     } catch (err) {
-      log(`✗ 啟動安裝檔失敗：${err instanceof Error ? err.message : String(err)}`);
+      const message = err instanceof Error ? err.message : String(err);
+      log(`✗ 啟動安裝檔失敗：${message}`);
       clearUpdating();
-      return "failed";
+      return { kind: "failed", reason: `安裝檔開不起來（${message}）` };
     }
     options.quit();
-    return "applying";
+    return { kind: "applying" };
   };
 
   const first = setTimeout(() => void tick(), FIRST_CHECK_DELAY_MS);
@@ -291,6 +319,7 @@ export function startAutoUpdate(options: UpdaterOptions): AutoUpdater {
       stopped = true;
       clearTimeout(first);
       clearInterval(timer);
+      stopIdleWatch();
     },
     checkNow: check,
   };
@@ -345,7 +374,8 @@ export function consumeUpdatedFlag(): boolean {
 }
 
 /**
- * 拿發布清單並**驗簽章**。驗不過回 `null`。
+ * 拿發布清單並**驗簽章**。還沒發過版（404）回 `null`；其他 HTTP 錯誤與驗章失敗
+ * 都 throw，讓它進記錄、也讓手動檢查的那句話講得出原因。
  *
  * ⚠ **驗章在讀任何欄位之前。** 先比版本再驗章的話，一份沒簽的清單仍然能
  * 控制流程要不要往下走。這裡的順序是：HTTP → 驗章 → 才開始相信 `version`。
@@ -356,9 +386,12 @@ export function consumeUpdatedFlag(): boolean {
 async function fetchManifest(feed: string): Promise<UpdateManifest | null> {
   const res = await fetch(feed, { headers: { accept: "application/json" } });
   // 404 = 還沒發過任何一版。這是正常狀態，不是錯誤。
-  if (!res.ok) return null;
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`更新伺服器回了 HTTP ${res.status}`);
   const raw: unknown = await res.json();
-  return verifySignedFeed(raw, UPDATE_PUBLIC_KEY);
+  const manifest = verifySignedFeed(raw, UPDATE_PUBLIC_KEY);
+  if (manifest === null) throw new Error("發布清單的簽章驗不過，這一版不會裝");
+  return manifest;
 }
 
 /**
@@ -395,12 +428,12 @@ function isAllowedDownload(url: string): boolean {
   }
 }
 
-async function download(manifest: UpdateManifest): Promise<string | null> {
+async function download(manifest: UpdateManifest): Promise<string> {
   if (!isAllowedDownload(manifest.url)) {
     throw new Error(`安裝檔的網址不在白名單裡：${manifest.url}`);
   }
   const res = await fetch(manifest.url);
-  if (!res.ok) return null;
+  if (!res.ok) throw new Error(`下載 ${manifest.version} 失敗（HTTP ${res.status}）`);
 
   // 先看 Content-Length —— 能在開始讀之前就擋掉的話就不要讀。
   const declared = Number(res.headers.get("content-length") ?? "0");

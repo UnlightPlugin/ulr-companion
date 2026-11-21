@@ -18,6 +18,14 @@
  * 玩家看到的是「插件自己消失了，而且再也沒回來」。所以腳本第一件事是寫一個
  * 記號檔，我們看到它才退出；看不到就留一行 log、照常跑。
  *
+ * ## ⚠ PowerShell 不能 `detached` 叫起來（2026-10-18 的 2.4.0）
+ *
+ * `spawn(..., { detached: true })` 的 PowerShell 5.1 **一行都不跑就以結束碼 0
+ * 退出**（DETACHED_PROCESS 沒有主控台，它的主控台主機起不來）。不加 detached
+ * 又會跟著我們一起被收掉。所以分兩段：我們叫起來的那一份只當跳板，用
+ * `Start-Process` 把自己重開成獨立的程序（`-Detached`）就結束，真正換檔的是那一份。
+ * 2.3.0 起每一次 zip 更新都卡在這，log 寫的卻是「防毒擋掉」。
+ *
  * ## ⚠ Windows 擋的是「覆寫執行中的 exe」，不是「動那個目錄」
  *
  * 這是整件事成立的關鍵，也是「zip 沒辦法自我更新」這個誤解的來源：
@@ -71,26 +79,33 @@ export interface ZipUpdateOptions {
   version: string;
   /** 現在跑的那支 exe（`process.execPath`）。 */
   exePath: string;
+  /**
+   * 換完重開時帶的參數（現在這一份的 `--profile <id>` 之類）。
+   *
+   * ⚠ 不帶的話多開的每一份都會開回預設配置，搶同一份 userData，最後只剩一份。
+   */
+  exeArgs: readonly string[];
   /** 暫存區（`%APPDATA%\ulr-companion\port-*\updates`）。 */
   workDir: string;
   onLog?: (line: string) => void;
 }
 
 /**
- * 把 zip 換上去。**回 `true` 代表換檔腳本已經起來了（它自己回報的），呼叫端要
+ * 把 zip 換上去。**回 `null` 代表換檔腳本已經起來了（它自己回報的），呼叫端要
  * 立刻退出。**
  *
- * 回 `false` 代表這一版沒換成（原因已經寫進 log），程式繼續正常跑 ——
- * 更新失敗不該影響仲裁，那是玩家真正在用的東西。
+ * 回字串代表這一版沒換成，字串是**給玩家看的原因**（設置 › 關於 直接顯示，
+ * 玩家不知道記錄檔在哪）。程式繼續正常跑 —— 更新失敗不該影響仲裁。
  */
-export async function applyZipUpdate(options: ZipUpdateOptions): Promise<boolean> {
+export async function applyZipUpdate(options: ZipUpdateOptions): Promise<string | null> {
   const log = (line: string): void => options.onLog?.(line);
   const installDir = dirname(options.exePath);
+  const manual = "請到 GitHub 下載 zip 自己解壓覆蓋";
 
   if (!isWritable(installDir)) {
     log(`✗ 裝不上新版：${installDir} 寫不進去（裝在 Program Files 之類的地方？）`);
     log("  請自己到 GitHub 下載新的 zip 解壓覆蓋，或把插件搬到使用者目錄底下。");
-    return false;
+    return `插件資料夾沒有寫入權限（${installDir}），${manual}，或把插件搬到使用者目錄底下`;
   }
 
   const stage = join(options.workDir, `stage-${options.version}`);
@@ -99,11 +114,12 @@ export async function applyZipUpdate(options: ZipUpdateOptions): Promise<boolean
     mkdirSync(stage, { recursive: true });
     if (!extract(options.zipPath, stage)) {
       log("✗ 解壓縮失敗，這一版沒有裝上");
-      return false;
+      return `解壓縮失敗（磁碟滿了？），${manual}`;
     }
   } catch (err) {
-    log(`✗ 解壓縮失敗：${err instanceof Error ? err.message : String(err)}`);
-    return false;
+    const message = err instanceof Error ? err.message : String(err);
+    log(`✗ 解壓縮失敗：${message}`);
+    return `解壓縮失敗：${message}`;
   }
 
   // zip 裡可能是「檔案直接放根目錄」，也可能是「包了一層資料夾」。
@@ -112,7 +128,7 @@ export async function applyZipUpdate(options: ZipUpdateOptions): Promise<boolean
   const source = payloadRoot(stage);
   if (source === null) {
     log("✗ 解壓出來的東西裡找不到 exe，這一版沒有裝上");
-    return false;
+    return `下載的 zip 裡找不到程式本體，${manual}`;
   }
 
   const script = join(options.workDir, `apply-${options.version}.ps1`);
@@ -120,20 +136,27 @@ export async function applyZipUpdate(options: ZipUpdateOptions): Promise<boolean
   // 而那正是唯一能說明「上一次到底跑到哪」的東西。
   const scriptLog = join(options.workDir, `apply-${options.version}.log`);
   const ready = join(options.workDir, `apply-${options.version}.ready`);
+  const cancel = join(options.workDir, `apply-${options.version}.cancel`);
   try {
     writeFileSync(script, swapScript(), "ascii");
     // 上一次留下來的記號不算數。
     rmSync(ready, { force: true });
+    rmSync(cancel, { force: true });
   } catch (err) {
-    log(`✗ 寫換檔腳本失敗：${err instanceof Error ? err.message : String(err)}`);
-    return false;
+    const message = err instanceof Error ? err.message : String(err);
+    log(`✗ 寫換檔腳本失敗：${message}`);
+    return `寫換檔腳本失敗：${message}`;
   }
+
+  // 重開時的參數走 base64：要穿過「我們 → 跳板 → 換檔腳本 → Start-Process」
+  // 三層命令列，每層的引號規則都不一樣，base64 的字元哪一層都不用跳脫。
+  const exeArgs = Buffer.from(options.exeArgs.map(quoteArg).join(" "), "utf8").toString("base64");
 
   let child: ChildProcess;
   try {
-    // ⚠ **一定要 detached + unref**：這支腳本要活得比我們久（它第一件事就是
-    // 等我們死掉）。掛在我們底下的話，我們一退出它就跟著被收掉，而症狀是
-    // 「更新之後版本沒變，也沒有任何錯誤」。
+    // ⚠ **不能 detached**（見檔頭）：detached 的 PowerShell 一行都不跑就結束。
+    // 這一份只是跳板，它用 `Start-Process` 把真正換檔的那一份叫起來 —— 那一份
+    // 不是我們的子程序，我們退出時不會被收掉。
     //
     // ⚠ **要清掉 `ELECTRON_RUN_AS_NODE`**：腳本最後會把新版叫起來，帶著這個
     // 變數的話新版會被當成純 Node 跑，第一行就炸在 `app.setPath`
@@ -165,32 +188,49 @@ export async function applyZipUpdate(options: ZipUpdateOptions): Promise<boolean
         scriptLog,
         "-Ready",
         ready,
+        "-Cancel",
+        cancel,
+        // ⚠ 空字串不能傳：PowerShell 5.1 會把 `""` 吞掉，`-ExeArgs` 就少了值，
+        // 整支腳本在參數繫結就退出（直接雙擊開的插件就沒有參數）。
+        ...(exeArgs.length > 0 ? ["-ExeArgs", exeArgs] : []),
       ],
-      { detached: true, stdio: "ignore", env, windowsHide: true },
+      { stdio: "ignore", env, windowsHide: true },
     );
     child.unref();
   } catch (err) {
-    log(`✗ 啟動換檔腳本失敗：${err instanceof Error ? err.message : String(err)}`);
-    return false;
+    const message = err instanceof Error ? err.message : String(err);
+    log(`✗ 啟動換檔腳本失敗：${message}`);
+    return `PowerShell 叫不起來（${message}），${manual}`;
   }
 
   const problem = await waitForReady(child, ready);
   if (problem !== null) {
-    // 放棄了就把它收掉 —— 晚到的腳本會在我們還活著的時候搬檔案、再叫一份新的起來。
+    // 放棄了就叫它別做 —— 晚到的腳本會在我們還活著的時候搬檔案、再叫一份新的起來。
+    // 跳板已經結束的話 kill 收不到真正那一份，所以靠記號檔。
     try {
+      writeFileSync(cancel, "1");
       child.kill();
     } catch {
       /* 本來就沒起來 */
     }
     log(`✗ 換檔腳本沒有起來（${problem}），這一版沒有裝上`);
     log("  有些防毒／端點防護會擋掉背景的 PowerShell。請自己到 GitHub 下載新的 zip 解壓覆蓋。");
-    return false;
+    return `換檔腳本沒有起來（${problem}），可能被防毒擋掉了，${manual}`;
   }
-  return true;
+  return null;
+}
+
+/** Windows 命令列的一個參數。有空白或引號才包起來。 */
+function quoteArg(arg: string): string {
+  if (arg.length > 0 && !/[\s"]/.test(arg)) return arg;
+  return `"${arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, "$1$1")}"`;
 }
 
 /**
  * 等換檔腳本寫出記號檔。回 `null` 是起來了，否則回一句說明。
+ *
+ * ⚠ 我們叫起來的是**跳板**，它把真正那一份叫起來就以 0 結束 —— 那時記號檔
+ * 多半還沒寫，所以結束碼 0 要繼續等，不是失敗。
  *
  * ⚠ `error` 的監聽**不能拿掉**：`spawn()` 失敗（找不到 `powershell.exe`、被拒絕）
  * 是從這個事件出來的，而沒有人聽的 `error` 會變成主程序的未捕捉例外。
@@ -213,7 +253,8 @@ function waitForReady(child: ChildProcess, ready: string): Promise<string | null
     }, 250);
     child.on("error", (err) => finish(err.message));
     child.once("exit", (code) => {
-      finish(existsSync(ready) ? null : `一起來就結束了，結束碼 ${String(code)}`);
+      if (existsSync(ready)) finish(null);
+      else if (code !== 0) finish(`一起來就結束了，結束碼 ${String(code)}`);
     });
   });
 }
@@ -379,10 +420,28 @@ function swapScript(): string {
   [string]$Exe,
   [string]$Stage,
   [string]$Log,
-  [string]$Ready
+  [string]$Ready,
+  [string]$Cancel,
+  [string]$ExeArgs,
+  [switch]$Detached
 )
 $ErrorActionPreference = 'Stop'
 function Say($m) { try { Add-Content -LiteralPath $Log -Value ("[" + (Get-Date -Format o) + "] " + $m) } catch {} }
+
+# A PowerShell started detached by the app exits at once without running anything,
+# and one started attached dies with the app. So the copy the app starts only
+# relaunches itself through Start-Process (not a child of the app) and exits.
+if (-not $Detached) {
+  $q = [char]34
+  $a = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File $q$PSCommandPath$q -Detached" +
+    " -ParentPid $ParentPid -Source $q$Source$q -Target $q$Target$q -Exe $q$Exe$q -Stage $q$Stage$q" +
+    " -Log $q$Log$q -Ready $q$Ready$q -Cancel $q$Cancel$q"
+  # An empty value would be dropped and leave -ExeArgs without an argument.
+  if ($ExeArgs) { $a += " -ExeArgs $ExeArgs" }
+  Say "relaunching detached"
+  Start-Process -FilePath 'powershell.exe' -ArgumentList $a -WindowStyle Hidden
+  exit 0
+}
 
 # The app only quits once it sees this file. If we cannot write it, stop here.
 Set-Content -LiteralPath $Ready -Value $PID
@@ -392,6 +451,15 @@ for ($i = 0; $i -lt ${WAIT_SECONDS}; $i++) {
   $p = Get-Process -Id $ParentPid -ErrorAction SilentlyContinue
   if ($null -eq $p) { break }
   Start-Sleep -Seconds 1
+}
+
+# The app gave up waiting for us and kept running: swapping now would pull the
+# files out from under it and start a second copy.
+if (Test-Path -LiteralPath $Cancel) {
+  Say "cancelled by the app"
+  try { Remove-Item -LiteralPath $Cancel -Force } catch {}
+  try { Remove-Item -LiteralPath $Ready -Force } catch {}
+  exit 0
 }
 
 Say "copying $Source -> $Target"
@@ -416,7 +484,13 @@ Get-ChildItem -LiteralPath $Source -Recurse -File | ForEach-Object {
 Say "done, failures=$failed"
 
 Say "relaunching $Exe"
-try { Start-Process -FilePath $Exe -WorkingDirectory $Target } catch { Say ("relaunch failed: " + $_.Exception.Message) }
+$args0 = ''
+try { if ($ExeArgs) { $args0 = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($ExeArgs)) } } catch {}
+Say "  args: $args0"
+try {
+  if ($args0) { Start-Process -FilePath $Exe -ArgumentList $args0 -WorkingDirectory $Target }
+  else { Start-Process -FilePath $Exe -WorkingDirectory $Target }
+} catch { Say ("relaunch failed: " + $_.Exception.Message) }
 
 # The log lives outside the stage folder, so the whole payload can go.
 try { Remove-Item -LiteralPath $Stage -Recurse -Force } catch {}
