@@ -337,6 +337,61 @@ export type {
 } from "./patch-input-rescue.js";
 
 export {
+  buildCardCountPatchScript,
+  buildCardCountSetEnabledExpression,
+  buildCardCountSetHistoryExpression,
+  CARD_COUNT_SCRIPT_VERSION,
+  CARD_COUNT_STATUS_EXPRESSION,
+  CARD_COUNT_UNINSTALL_EXPRESSION,
+  isCardCountReport,
+  parseCardCountStatus,
+} from "./patch-card-count.js";
+export type {
+  CardCountCard,
+  CardCountOpponent,
+  CardCountPatchOptions,
+  CardCountReport,
+  CardCountStatus,
+} from "./patch-card-count.js";
+
+export { buildKifuOverlayScript, KIFU_OVERLAY_CLOSE_EXPRESSION } from "./kifu-overlay.js";
+export type { KifuOverlayOptions } from "./kifu-overlay.js";
+
+export {
+  buildKifuHashUrlsExpression,
+  buildKifuPatchScript,
+  buildKifuReadTableExpression,
+  buildKifuReadUrlExpression,
+  buildKifuTextureInfoExpression,
+  isIdLike,
+  isKifuReport,
+  KIFU_FONT_FILES_EXPRESSION,
+  KIFU_FORMAT_VERSION,
+  KIFU_ID_MIN_LENGTH,
+  KIFU_SCENES,
+  KIFU_SCRIPT_VERSION,
+  KIFU_SKIP_EVENTS,
+  KIFU_STATUS_EXPRESSION,
+  KIFU_TABLES,
+  KIFU_UNINSTALL_EXPRESSION,
+  parseKifuStatus,
+} from "./patch-kifu.js";
+export type {
+  KifuEndReport,
+  KifuEvent,
+  KifuEventsReport,
+  KifuLoaderAsset,
+  KifuMeta,
+  KifuPatchOptions,
+  KifuPlayerInfo,
+  KifuReport,
+  KifuStartReport,
+  KifuStatus,
+  KifuTextureInfo,
+  KifuUrlHash,
+} from "./patch-kifu.js";
+
+export {
   AP_RESTORE_ITEM_IDS,
   BONUS_CLIMB_CHARA_VALUE_RANGE,
   BONUS_CLIMB_EASY_DICE,

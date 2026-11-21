@@ -13,6 +13,7 @@
     "@ulr/arbiter-link": "*",
     "@ulr/cdp-adapter": "*",
     "@ulr/cost-engine": "*",
+    "@ulr/kifu": "*",
     "@ulr/rule-schema": "*"
   }
 }

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      牌譜播放器。圖是 ~/.ulr-companion/battle/store 裡存下來的**當時版本**的遊戲美術，
+      主程序給 file:// 網址；字型同理（BradleyGratis）。不連任何網路。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src file: data:; font-src file:"
+    />
+    <title>牌譜</title>
+    <link rel="stylesheet" href="app.css" />
+    <link rel="stylesheet" href="kifu/player.css" />
+  </head>
+  <body class="kifu">
+    <main class="kp">
+      <section class="kp-stage">
+        <canvas id="board" width="760" height="680"></canvas>
+        <div class="kp-bar">
+          <button id="kFirst" title="開頭（Home）">⏮</button>
+          <button id="kPrevTurn" title="上一回合（PageUp）">«</button>
+          <button id="kPrev" title="上一步（←）">‹</button>
+          <button id="kPlay" title="播放／暫停（空白鍵）">▶</button>
+          <button id="kNext" title="下一步（→）">›</button>
+          <button id="kNextTurn" title="下一回合（PageDown）">»</button>
+          <button id="kLast" title="最後（End）">⏭</button>
+          <input type="range" id="kSeek" min="0" max="0" value="0" />
+          <select id="kSpeed" title="播放速度">
+            <option value="0">照實際時間</option>
+            <option value="400">快</option>
+            <option value="900" selected>普通</option>
+            <option value="1800">慢</option>
+          </select>
+          <span id="kPos" class="dim"></span>
+        </div>
+      </section>
+      <aside class="kp-side">
+        <div class="kp-head" id="kTitle">讀取中…</div>
+        <div class="kp-warn" id="kWarn"></div>
+        <div class="kp-count" id="kCount"></div>
+        <ol class="kp-log" id="kLog"></ol>
+      </aside>
+    </main>
+    <script src="kifu/viewer.js"></script>
+    <script src="kifu/player.js"></script>
+  </body>
+</html>

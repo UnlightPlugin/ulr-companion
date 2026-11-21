@@ -1,0 +1,145 @@
+body.kifu {
+  margin: 0;
+  background: var(--bg-lo);
+  color: var(--text);
+  font-family: var(--sans);
+  overflow: hidden;
+}
+.kp {
+  display: flex;
+  height: 100vh;
+}
+.kp-stage {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  padding: 8px;
+  gap: 6px;
+  /* 畫布照視窗高度縮放，比例固定 760:680 */
+  width: calc((100vh - 60px) * 760 / 680 + 16px);
+  max-width: 70vw;
+}
+#board {
+  width: 100%;
+  aspect-ratio: 760 / 680;
+  background: #000;
+  border: 1px solid var(--line);
+  image-rendering: auto;
+}
+.kp-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.kp-bar button {
+  min-width: 30px;
+  padding: 3px 6px;
+  background: var(--panel-hi);
+  color: var(--text);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  cursor: pointer;
+}
+.kp-bar button:hover {
+  background: var(--tab-hover);
+}
+#kSeek {
+  flex: 1;
+}
+#kSpeed {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--rule);
+}
+#kPos {
+  min-width: 92px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.kp-side {
+  flex: 1;
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--line);
+  background: var(--panel);
+}
+.kp-head {
+  padding: 8px 10px;
+  font-family: var(--serif);
+  font-size: 14px;
+  border-bottom: 1px solid var(--rule);
+}
+.kp-warn:empty {
+  display: none;
+}
+.kp-warn {
+  padding: 6px 10px;
+  color: var(--amber);
+  font-size: 12px;
+  border-bottom: 1px solid var(--rule);
+}
+.kp-count {
+  padding: 6px 10px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--rule);
+}
+.kp-count:empty {
+  display: none;
+}
+.kp-count table {
+  border-collapse: collapse;
+  width: 100%;
+}
+.kp-count td,
+.kp-count th {
+  padding: 1px 4px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.kp-count th {
+  color: var(--dim);
+  font-weight: normal;
+}
+.kp-count td:first-child,
+.kp-count th:first-child {
+  text-align: left;
+}
+.kp-log {
+  flex: 1;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  font-size: 12.5px;
+}
+.kp-log li {
+  padding: 2px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.kp-log li:hover {
+  background: var(--panel-hi);
+}
+.kp-log li.cur {
+  background: var(--tab-off);
+  color: #fff;
+}
+.kp-log li.k-turn,
+.kp-log li.k-phase {
+  color: var(--amber);
+}
+.kp-log li.k-damage {
+  color: #ff8a8a;
+}
+.kp-log li.k-heal {
+  color: var(--green);
+}
+.kp-log .t {
+  display: inline-block;
+  width: 46px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}

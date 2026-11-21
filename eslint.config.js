@@ -23,7 +23,12 @@ export default tseslint.config(
     // 專案沒裝 `globals`，所以這裡手動列出用到的那幾個就好。
     // tools/ 底下的維護腳本同一回事。⚠ 只列進版控的那一支：本機的
     // release-local.mjs 自己用 `/* global */` 宣告，兩邊都給會變 no-redeclare。
-    files: ["scripts/**/*.mjs", "tools/scrape-raid-treasure.mjs", "tools/build-quest-treasure.mjs"],
+    files: [
+      "scripts/**/*.mjs",
+      "tools/scrape-raid-treasure.mjs",
+      "tools/build-quest-treasure.mjs",
+      "tools/build-public-decks.mjs",
+    ],
     languageOptions: {
       globals: {
         console: "readonly",
@@ -31,6 +36,7 @@ export default tseslint.config(
         Buffer: "readonly",
         fetch: "readonly",
         setTimeout: "readonly",
+        URL: "readonly",
       },
     },
   },

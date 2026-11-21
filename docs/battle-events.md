@@ -1,5 +1,9 @@
 # 戰鬥事件目錄（2026-08-02 雙邊實測）
 
+> ⚠ **2026-09-23 改版後事件全部改名**（`cardclickedA` → `card_submit_player`／`_opponent` 這種相對命名、
+> 骰子變 1～6、移動階段沒有 `phase_start`…）。這份記的是改版前的協定，觀察方法與 §12 的結論仍然有效，
+> 事件名與參數請看 [kifu.md](kifu.md) 與 `packages/kifu/src/replay.ts` 檔頭的對照表（2026-10-23 讀原始碼＋實錄）。
+
 WP-09 的產出。用 `companion watch` 同時接兩個客戶端，錄同一場對戰的 5 分鐘，
 再把兩份 log 對起來。
 

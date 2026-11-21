@@ -1,0 +1,15 @@
+{
+  "name": "@ulr/kifu",
+  "version": "0.0.0",
+  "private": true,
+  "description": "牌譜：錄下來的戰鬥事件怎麼落地、版本快照（資料表＋美術）怎麼存，之後整理與重播也在這裡。",
+  "license": "MIT",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@ulr/cdp-adapter": "*"
+  }
+}

@@ -18,8 +18,9 @@ const TABS = [
       { id: "seconds", label: "秒數上限" },
       // 加速的引擎與協商都做好了，但連預告頁都拿掉了（玩家 2026-10-04）：
       // 戰鬥長度是伺服器排程的，加速客戶端動畫幾乎沒效果。
-      { id: "count", label: "記牌", todo: true },
-      { id: "replay", label: "牌譜", todo: true },
+      { id: "count", label: "記牌" },
+      { id: "replay", label: "牌譜" },
+      { id: "stats", label: "戰績" },
     ],
   },
   {
@@ -368,6 +369,9 @@ function renderBody() {
   // 任務那兩頁同理。
   if (onQuestPage()) startQuestPolling();
   else stopQuestPolling();
+  // 牌譜清單同理（要讀檔）。
+  if (onKifuPage()) startKifuPolling();
+  else stopKifuPolling();
   // 迪特赫姆的物品捷徑／GEM UP 同理。
   if (onDietPage()) startDietPolling();
   else stopDietPolling();

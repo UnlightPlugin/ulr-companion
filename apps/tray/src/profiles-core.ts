@@ -407,6 +407,13 @@ export interface Profile {
   /** 任務地圖的寶箱標註：每格旁邊畫寶箱實際是什麼。預設關（官方原樣）。 */
   questTreasureMarks: boolean;
   /**
+   * 錄牌譜：每場戰鬥的事件流＋當時版本的資料表與美術存在 ~/.ulr-companion/battle。
+   * 預設開（純觀測、不改遊戲行為）。
+   */
+  kifuRecord: boolean;
+  /** 記牌面板：戰鬥中顯示公牌還剩什麼。所有模式都開，預設開（玩家 2026-10-23）。 */
+  cardCounter: boolean;
+  /**
    * 任務踩到寶箱時的「獲得寶箱」面板：`show` 照官方、`auto` 看一下就自動按 OK、
    * `hide` 不顯示直接關。預設 `show`。
    */
@@ -753,6 +760,9 @@ export function normalizeProfile(raw: unknown): Profile | null {
     questStackShortcut: r["questStackShortcut"] === true,
     questPassShortcut: r["questPassShortcut"] === true,
     questTreasureMarks: r["questTreasureMarks"] === true,
+    // 舊設定檔沒有這兩欄 → 開（玩家 2026-10-23：記牌全模式都開、可在托盤關）
+    kifuRecord: r["kifuRecord"] !== false,
+    cardCounter: r["cardCounter"] !== false,
     // 舊設定檔沒有這兩欄 → 照官方。
     questRewardPanel: isQuestPanelMode(r["questRewardPanel"]) ? r["questRewardPanel"] : "show",
     questEndPanel: isQuestPanelMode(r["questEndPanel"]) ? r["questEndPanel"] : "show",
@@ -856,6 +866,8 @@ export function defaultProfile(kind: ClientKind = "desktop"): Profile {
     questStackShortcut: false,
     questPassShortcut: false,
     questTreasureMarks: false,
+    kifuRecord: true,
+    cardCounter: true,
     questRewardPanel: "show",
     questEndPanel: "show",
     questSkipResult: false,

@@ -123,6 +123,35 @@ import {
   parseInputRescueStatus,
 } from "./patch-input-rescue.js";
 import type {
+  CardCountCard,
+  CardCountOpponent,
+  CardCountReport,
+  CardCountStatus,
+} from "./patch-card-count.js";
+import {
+  buildCardCountPatchScript,
+  buildCardCountSetEnabledExpression,
+  buildCardCountSetHistoryExpression,
+  CARD_COUNT_STATUS_EXPRESSION,
+  CARD_COUNT_UNINSTALL_EXPRESSION,
+  isCardCountReport,
+  parseCardCountStatus,
+} from "./patch-card-count.js";
+import { buildKifuOverlayScript, KIFU_OVERLAY_CLOSE_EXPRESSION } from "./kifu-overlay.js";
+import type { KifuReport, KifuStatus, KifuTextureInfo, KifuUrlHash } from "./patch-kifu.js";
+import {
+  buildKifuHashUrlsExpression,
+  buildKifuPatchScript,
+  buildKifuReadTableExpression,
+  buildKifuReadUrlExpression,
+  buildKifuTextureInfoExpression,
+  isKifuReport,
+  KIFU_FONT_FILES_EXPRESSION,
+  KIFU_STATUS_EXPRESSION,
+  KIFU_UNINSTALL_EXPRESSION,
+  parseKifuStatus,
+} from "./patch-kifu.js";
+import type {
   BonusClimbConfig,
   BonusItemOrder,
   BonusItemPlace,
@@ -460,6 +489,8 @@ export class CdpAdapter {
   #cardArtHandlers = new Set<(report: CardArtReport) => void>();
   #assetRepairHandlers = new Set<(report: AssetRepairReport) => void>();
   #inputRescueHandlers = new Set<(report: InputRescueReport) => void>();
+  #kifuHandlers = new Set<(report: KifuReport) => void>();
+  #cardCountHandlers = new Set<(report: CardCountReport) => void>();
   #raidRewardHandlers = new Set<(report: RaidRewardReport) => void>();
   #raidItemDeltaHandlers = new Set<(report: RaidItemDeltaReport) => void>();
   #raidCodesHandlers = new Set<(report: RaidCodesReport) => void>();
@@ -1713,6 +1744,126 @@ export class CdpAdapter {
     return await this.evaluate<string>(INPUT_RESCUE_UNINSTALL_EXPRESSION);
   }
 
+  // ── 記牌面板 ────────────────────────────────────────────────────────────
+
+  /** 訂閱「公牌表跟實際的牌對不上」（改版換牌；那一場不顯示記牌）。 */
+  onCardCount(handler: (report: CardCountReport) => void): () => void {
+    this.#cardCountHandlers.add(handler);
+    return () => this.#cardCountHandlers.delete(handler);
+  }
+
+  /** 裝上記牌面板。先拆再裝。公牌表由呼叫端給（@ulr/kifu 的 PUBLIC_DECKS）。 */
+  async installCardCount(
+    decks: Readonly<Record<string, readonly CardCountCard[]>>,
+    enabled: boolean,
+    history: Readonly<Record<string, CardCountOpponent>> = {},
+  ): Promise<CardCountStatus> {
+    const raw = await this.evaluate<string>(
+      buildCardCountPatchScript({ bindingName: REPORT_BINDING_NAME, decks, enabled, history }),
+    );
+    return parseCardCountStatus(raw);
+  }
+
+  /** 換掉記牌面板上的對手紀錄。回 `"ok"` 或 `"not-installed"`。 */
+  async setCardCountHistory(history: Readonly<Record<string, CardCountOpponent>>): Promise<string> {
+    return await this.evaluate<string>(buildCardCountSetHistoryExpression(history));
+  }
+
+  /** 開關記牌面板。回 `"ok"` 或 `"not-installed"`。 */
+  async setCardCountEnabled(enabled: boolean): Promise<string> {
+    return await this.evaluate<string>(buildCardCountSetEnabledExpression(enabled));
+  }
+
+  async cardCountStatus(): Promise<CardCountStatus> {
+    return parseCardCountStatus(await this.evaluate<string>(CARD_COUNT_STATUS_EXPRESSION));
+  }
+
+  async uninstallCardCount(): Promise<string> {
+    return await this.evaluate<string>(CARD_COUNT_UNINSTALL_EXPRESSION);
+  }
+
+  // ── 遊戲裡的復盤畫面 ──────────────────────────────────────────────────
+
+  /**
+   * 在遊戲畫布上蓋一層播放器（托盤的 viewer.js 原封不動）。回 `"ok N"`、戰鬥中回 `"in-battle"`。
+   * `data` 是 @ulr/kifu 的 KifuViewerData，圖與字型要先換成 data URL。
+   */
+  async openKifuOverlay(viewerSource: string, data: unknown): Promise<string> {
+    return await this.evaluate<string>(buildKifuOverlayScript({ viewerSource, data }));
+  }
+
+  async closeKifuOverlay(): Promise<string> {
+    return await this.evaluate<string>(KIFU_OVERLAY_CLOSE_EXPRESSION);
+  }
+
+  // ── 牌譜錄製 ────────────────────────────────────────────────────────────
+
+  /** 訂閱牌譜的三種回報：一場開始、一批事件、一場結束。 */
+  onKifu(handler: (report: KifuReport) => void): () => void {
+    this.#kifuHandlers.add(handler);
+    return () => this.#kifuHandlers.delete(handler);
+  }
+
+  /**
+   * 裝上牌譜錄製。先拆再裝（正在錄的那場會先收尾送出）。遊戲一重載就沒了，每次接上都要裝。
+   * 不在戰鬥裡也裝得起來 —— 腳本自己等下一場。
+   */
+  async installKifu(): Promise<KifuStatus> {
+    const raw = await this.evaluate<string>(
+      buildKifuPatchScript({ bindingName: REPORT_BINDING_NAME }),
+    );
+    return parseKifuStatus(raw);
+  }
+
+  async kifuStatus(): Promise<KifuStatus> {
+    return parseKifuStatus(await this.evaluate<string>(KIFU_STATUS_EXPRESSION));
+  }
+
+  async uninstallKifu(): Promise<string> {
+    return await this.evaluate<string>(KIFU_UNINSTALL_EXPRESSION);
+  }
+
+  /** 讀一份資料表的 JSON 文字（版本快照用）。表不存在回 `null`。 */
+  async kifuReadTable(name: string): Promise<string | null> {
+    const v = await this.evaluate<unknown>(buildKifuReadTableExpression(name));
+    return typeof v === "string" ? v : null;
+  }
+
+  /** 幾張貼圖在 Phaser 裡的來源網址與切法（版本快照用）。 */
+  async kifuTextureInfo(
+    keys: readonly string[],
+    usedFrames: Readonly<Record<string, readonly string[]>> = {},
+  ): Promise<KifuTextureInfo[]> {
+    if (keys.length === 0) return [];
+    const raw = await this.evaluate<string>(buildKifuTextureInfoExpression(keys, usedFrames));
+    const v: unknown = JSON.parse(raw);
+    if (!Array.isArray(v)) {
+      throw new Error(
+        `讀貼圖失敗：${String((v as { error?: unknown } | null)?.error ?? raw.slice(0, 120))}`,
+      );
+    }
+    return v as KifuTextureInfo[];
+  }
+
+  /** 從瀏覽器快取讀檔、算 SHA-256（只回雜湊）。 */
+  async kifuHashUrls(urls: readonly string[]): Promise<KifuUrlHash[]> {
+    if (urls.length === 0) return [];
+    const raw = await this.evaluate<string>(buildKifuHashUrlsExpression(urls));
+    return JSON.parse(raw) as KifuUrlHash[];
+  }
+
+  /** 遊戲從美術目錄載入的字型檔網址（版本快照用）。 */
+  async kifuFontFiles(): Promise<string[]> {
+    const v: unknown = JSON.parse(await this.evaluate<string>(KIFU_FONT_FILES_EXPRESSION));
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+  }
+
+  /** 讀一個檔的內容（從瀏覽器快取）。失敗回 `null`。 */
+  async kifuReadUrl(url: string): Promise<Buffer | null> {
+    const v = await this.evaluate<unknown>(buildKifuReadUrlExpression(url));
+    return typeof v === "string" ? Buffer.from(v, "base64") : null;
+  }
+
   // ── 物品欄：點得到外面、渦房／任務房排序、兩房的物品捷徑 ─────────────────
 
   /**
@@ -2360,6 +2511,14 @@ export class CdpAdapter {
     }
     if (isInputRescueReport(parsed)) {
       dispatch(this.#inputRescueHandlers, parsed);
+      return;
+    }
+    if (isKifuReport(parsed)) {
+      dispatch(this.#kifuHandlers, parsed);
+      return;
+    }
+    if (isCardCountReport(parsed)) {
+      dispatch(this.#cardCountHandlers, parsed);
       return;
     }
     if (isRoomGateReport(parsed)) {

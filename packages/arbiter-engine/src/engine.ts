@@ -30,6 +30,8 @@
  * | **對手還沒開**   | 側通道是 solo → 秒數自動退回滿版 30 秒        |
  */
 
+import { PUBLIC_DECKS, type KifuStore } from "@ulr/kifu";
+import { KifuRecorder, kifuPageOf, type KifuSaved } from "./kifu-recorder.js";
 import type { MatchDriver } from "./match-session.js";
 import {
   fetchObservedRaids,
@@ -111,6 +113,9 @@ import type {
   EditDeckRead,
   HiddenStageStatus,
   InputRescueReport,
+  KifuReport,
+  CardCountOpponent,
+  CardCountReport,
   BonusClimbConfig,
   BonusItemOrder,
   BonusItemPlace,
@@ -307,6 +312,13 @@ export interface EngineOptions {
    * 補裝時就不會又把上一個人的牌推回頁面。
    */
   onPageReload?: () => void;
+  /**
+   * 牌譜存在哪。不給就不錄（CLI 預設不錄；托盤給 `~/.ulr-companion/battle`）。
+   * 錄不錄由 `setKifuEnabled()` 切，預設錄。
+   */
+  kifuStore?: KifuStore;
+  /** 一場牌譜存好（含版本快照）之後叫。 */
+  onKifuSaved?: (saved: KifuSaved) => void;
 }
 
 /**
@@ -1195,6 +1207,118 @@ export class ArbiterEngine {
     } catch (err) {
       this.#log(`✗ 畫面解鎖注入失敗：${describe(err)}`);
     }
+  }
+
+  // ── 牌譜 ──────────────────────────────────────────────────────────────
+
+  #kifu: KifuRecorder | null = null;
+  #kifuEnabled = true;
+
+  #kifuRecorder(): KifuRecorder | null {
+    const store = this.#options.kifuStore;
+    if (store === undefined) return null;
+    if (this.#kifu === null) {
+      this.#kifu = new KifuRecorder({
+        store,
+        log: (line) => this.#log(line),
+        ...(this.#options.onKifuSaved ? { onSaved: this.#options.onKifuSaved } : {}),
+      });
+    }
+    return this.#kifu;
+  }
+
+  /**
+   * 牌譜錄製。**每次接上遊戲與遊戲重載後都會自己叫一次**；關掉時拆掉（正在錄的那場先收尾存好）。
+   */
+  async #syncKifu(): Promise<void> {
+    const adapter = this.#adapter;
+    const rec = this.#kifuRecorder();
+    if (adapter === null || rec === null) return;
+    rec.resetSession();
+    try {
+      if (!this.#kifuEnabled) {
+        await adapter.uninstallKifu();
+        return;
+      }
+      const status = await adapter.installKifu();
+      if (!status.installed) this.#log(`· 牌譜錄製還沒裝上：${status.reason ?? "原因不明"}`);
+    } catch (err) {
+      this.#log(`✗ 牌譜錄製注入失敗：${describe(err)}`);
+    }
+  }
+
+  #onKifu(report: KifuReport): void {
+    const adapter = this.#adapter;
+    this.#kifuRecorder()?.handle(report, adapter === null ? null : kifuPageOf(adapter));
+  }
+
+  #cardCounter = true;
+  /** 記牌面板底下的對手紀錄（托盤從牌譜整理好推進來）。 */
+  #opponentHistory: Record<string, CardCountOpponent> = {};
+
+  /** 換掉對手紀錄。接著遊戲的話當場推到面板上。 */
+  setOpponentHistory(history: Record<string, CardCountOpponent>): void {
+    this.#opponentHistory = history;
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    void adapter
+      .setCardCountHistory(history)
+      .catch((err: unknown) => this.#log(`✗ 對手紀錄推不上去：${describe(err)}`));
+  }
+
+  /** 記牌面板開關（托盤「戰鬥 › 記牌」）。接著遊戲的話當場切。 */
+  setCardCounter(on: boolean): void {
+    this.#cardCounter = on;
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    void adapter
+      .setCardCountEnabled(on)
+      .then((r) => (r === "not-installed" ? this.#syncCardCount() : undefined))
+      .catch((err: unknown) => this.#log(`✗ 記牌面板切換失敗：${describe(err)}`));
+  }
+
+  /** 記牌面板。**每次接上遊戲與遊戲重載後都會自己叫一次**；公牌表從 @ulr/kifu 來。 */
+  async #syncCardCount(): Promise<void> {
+    const adapter = this.#adapter;
+    if (adapter === null) return;
+    try {
+      const decks: Record<string, readonly (readonly [string, number, string, number])[]> = {};
+      for (const [stage, d] of Object.entries(PUBLIC_DECKS)) decks[stage] = d.cards;
+      const status = await adapter.installCardCount(
+        decks,
+        this.#cardCounter,
+        this.#opponentHistory,
+      );
+      if (!status.installed) this.#log(`· 記牌面板還沒裝上：${status.reason ?? "原因不明"}`);
+    } catch (err) {
+      this.#log(`✗ 記牌面板注入失敗：${describe(err)}`);
+    }
+  }
+
+  #onCardCount(report: CardCountReport): void {
+    this.#log(
+      `· 地點 ${report.stage} 的公牌表跟實際抽到的牌對不上（${report.detail}）—— 可能改版換牌了，這一場不顯示記牌`,
+    );
+  }
+
+  get cardCounter(): boolean {
+    return this.#cardCounter;
+  }
+
+  /**
+   * 在遊戲裡放一份牌譜（蓋在遊戲畫布上）。沒接上遊戲回 `"not-connected"`、戰鬥中回 `"in-battle"`。
+   */
+  async showKifuInGame(viewerSource: string, data: unknown): Promise<string> {
+    const adapter = this.#adapter;
+    if (adapter === null) return "not-connected";
+    return await adapter.openKifuOverlay(viewerSource, data);
+  }
+
+  /** 托盤的開關。關掉時正在錄的那場會先收尾存好。 */
+  async setKifuEnabled(enabled: boolean): Promise<void> {
+    if (this.#kifuEnabled === enabled) return;
+    this.#kifuEnabled = enabled;
+    await this.#syncKifu();
   }
 
   /** 官方某個請求等不到伺服器回覆、把畫面鎖住了，已經解開。那個操作本身沒成功。 */
@@ -3448,6 +3572,12 @@ export class ArbiterEngine {
         // 官方請求逾時把畫面鎖死時自己解開（聽 unhandledrejection，不輪詢）。
         adapter.onInputRescue((r) => this.#onInputRescue(r));
         await this.#syncInputRescue();
+        // 牌譜錄製（包 MainA 的 init，等下一場；正在打的那場走輪詢、標成中途接上）。
+        adapter.onKifu((r) => this.#onKifu(r));
+        await this.#syncKifu();
+        // 記牌面板（同樣包 MainA 的 init 等下一場）。
+        adapter.onCardCount((r) => this.#onCardCount(r));
+        await this.#syncCardCount();
         // 物品欄＋渦房／任務房的物品捷徑（輪詢等面板類別載進來、等玩家進房）。
         await this.#syncItemPanel();
         // 任務地圖的寶箱標註（輪詢等玩家開任務地圖）＋學 HighLow 的開始星數。
@@ -3611,6 +3741,10 @@ export class ArbiterEngine {
           await adapter.uninstallAssetGuard();
           // 畫面解鎖：收監聽。
           await adapter.uninstallInputRescue();
+          // 牌譜：正在錄的那場先收尾送出，再還原 MainA 的 init／game_result。
+          await adapter.uninstallKifu();
+          // 記牌面板：拆監聽、收面板。
+          await adapter.uninstallCardCount();
           // ⚠ 物品欄同理：留著的話捷徑還在、官方的好友與物品鈕藏著，開關卻沒人管了。
           // 拆的時候把兩顆官方鈕放回來、面板類別還原。
           await adapter.uninstallItemPanelPatch();
@@ -3705,6 +3839,10 @@ export class ArbiterEngine {
       await this.#syncAssetGuard();
       // ⚠ 畫面解鎖也是。症狀是「又開始點不動、只能重載」。
       await this.#syncInputRescue();
+      // ⚠ 牌譜錄製也是。症狀是「重載之後打的都沒有牌譜」，而且一行錯誤都沒有。
+      await this.#syncKifu();
+      // ⚠ 記牌面板也是。症狀是「重載之後記牌面板不見了」。
+      await this.#syncCardCount();
       // ⚠ 物品欄也是。症狀是「渦房的物品捷徑不見了、好友與物品鈕又回來了」。
       await this.#syncItemPanel();
       // ⚠ 寶箱標註也是。症狀是「任務地圖上的卡面不見了」。

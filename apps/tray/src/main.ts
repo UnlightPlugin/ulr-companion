@@ -58,6 +58,12 @@ import { ensureCardArtDir } from "./card-art.js";
 import { trayIconPng } from "./icon.js";
 import type { IconState } from "./icon.js";
 import { launchAtLoginEnabled, launchInstance, setLaunchAtLogin } from "./launch.js";
+import {
+  kifuStore,
+  openKifuViewer,
+  registerKifuPage,
+  startOpponentHistory,
+} from "./kifu-runtime.js";
 import { openLogFile } from "./log-file.js";
 import { readRaidBattles, writeRaidBattles } from "./raid-battle-store.js";
 import { readRaidOutcomes, writeRaidOutcomes } from "./raid-outcome-store.js";
@@ -801,6 +807,8 @@ app.whenReady().then(() => {
     },
     // ⚠⚠ 同一個分頁換帳號**不會斷線**，只會重載 —— 見 onDeckPageReload。
     onPageReload: () => onDeckPageReload(),
+    // 牌譜：冒煙測試（ephemeral）不落地
+    ...(ephemeral ? {} : { kifuStore: kifuStore() }),
   });
 
   // ⚠ 要在 engine 建好之後 —— loadCostRule 會呼叫 engine.setCostOverrides()。
@@ -881,6 +889,11 @@ app.whenReady().then(() => {
   engine.setBonusSkipEnd(profile.bonusSkipEnd);
   engine.setBonusClimb(profile.bonusClimb);
   engine.setQuestTreasure(profile.questTreasureMarks);
+  // 牌譜錄製與記牌面板（接上遊戲時才裝到頁面上）
+  void engine.setKifuEnabled(profile.kifuRecord);
+  engine.setCardCounter(profile.cardCounter);
+  // 記牌面板底下的對手紀錄（從牌譜整理，每分鐘看一次有沒有新的）
+  if (!ephemeral) startOpponentHistory(engine);
   engine.setQuestPanel("reward", profile.questRewardPanel);
   engine.setQuestPanel("end", profile.questEndPanel);
   engine.setQuestSkipResult(profile.questSkipResult);
@@ -1075,6 +1088,12 @@ app.whenReady().then(() => {
   // 渦／任務／迪城／獎勵那幾頁的開關（pages/*.ts）
   registerRaidPage(ipcMain, trayCtx);
   registerQuestPage(ipcMain, trayCtx);
+  registerKifuPage(
+    ipcMain,
+    trayCtx,
+    (file) => openKifuViewer(file, join(__dirname, "preload.cjs"), join(__dirname, "renderer")),
+    join(__dirname, "renderer"),
+  );
   registerDietPage(ipcMain, trayCtx);
   registerBonusPage(ipcMain, trayCtx);
 

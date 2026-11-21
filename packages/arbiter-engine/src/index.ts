@@ -15,6 +15,9 @@ export {
 } from "./engine.js";
 export type { CostPhase, CostState, EngineOptions, EngineStatus } from "./engine.js";
 
+export { KifuRecorder, kifuPageOf } from "./kifu-recorder.js";
+export type { KifuRecorderOptions, KifuSaved } from "./kifu-recorder.js";
+
 export {
   DEFAULT_RAID_PUBLIC_TIMEOUT_MS,
   fetchObservedRaids,

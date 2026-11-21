@@ -254,4 +254,30 @@ contextBridge.exposeInMainWorld("ulr", {
   steamExt: {
     install: () => ipcRenderer.invoke("ulr:steam-ext-install"),
   },
+
+  /**
+   * 牌譜（戰鬥 › 牌譜、播放器視窗）。
+   *
+   * ⚠ 收的是**清單裡的檔名**，不是路徑 —— 主程序只認 `~/.ulr-companion/battle/kifu` 裡有的。
+   */
+  kifu: {
+    /** 錄過的牌譜（新的在前） */
+    list: () => ipcRenderer.invoke("ulr:kifu-list"),
+    /** 開播放器視窗放這一份 */
+    play: (file: string) => ipcRenderer.invoke("ulr:kifu-play", file),
+    /** 在遊戲畫面上放這一份（戰鬥中不開） */
+    playInGame: (file: string) => ipcRenderer.invoke("ulr:kifu-play-ingame", file),
+    /** 播放器視窗現在要放哪一份 */
+    current: () => ipcRenderer.invoke("ulr:kifu-current"),
+    /** 一份牌譜的播放資料（逐步盤面＋當時的貼圖與資料表） */
+    data: (file: string) => ipcRenderer.invoke("ulr:kifu-data", file),
+    /** 播放器開著時換了一份 */
+    onFile: (handler: (file: string) => void) => {
+      ipcRenderer.on("ulr:kifu-file", (_event, file: string) => handler(file));
+    },
+    /** 錄不錄 */
+    record: (on: boolean) => ipcRenderer.invoke("ulr:kifu-record", on),
+    /** 記牌面板開不開 */
+    counter: (on: boolean) => ipcRenderer.invoke("ulr:card-counter", on),
+  },
 });

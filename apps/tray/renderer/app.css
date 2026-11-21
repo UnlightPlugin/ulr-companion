@@ -1062,3 +1062,23 @@ footer .cell.grow {
 .dot.paired {
   background: var(--green);
 }
+
+/* 戰鬥 › 牌譜 的清單 */
+.kifu-list {
+  width: 100%;
+  border-collapse: collapse;
+}
+.kifu-list th,
+.kifu-list td {
+  padding: 3px 8px;
+  text-align: left;
+  white-space: nowrap;
+}
+.kifu-list th {
+  color: var(--dim);
+  font-weight: normal;
+  border-bottom: 1px solid var(--rule);
+}
+.kifu-list td:last-child {
+  text-align: right;
+}

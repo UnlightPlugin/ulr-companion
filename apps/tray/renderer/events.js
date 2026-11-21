@@ -19,6 +19,18 @@ $("content").addEventListener("change", (e) => {
     });
   }
   if (t.id === "ready") return void set({ readyEnabled: t.checked });
+  if (t.id === "kifuRecordOn") {
+    return void window.ulr.kifu.record(t.checked).then(() => {
+      if (snap !== null) snap.profile.kifuRecord = t.checked;
+      renderBody();
+    });
+  }
+  if (t.id === "cardCounterOn") {
+    return void window.ulr.kifu.counter(t.checked).then(() => {
+      if (snap !== null) snap.profile.cardCounter = t.checked;
+      renderBody();
+    });
+  }
   if (t.id === "seconds") {
     dragging = false;
     return void set({ phaseSeconds: Number(t.value) });
@@ -309,6 +321,11 @@ $("content").addEventListener("input", (e) => {
 $("content").addEventListener("click", (e) => {
   const btn = e.target.closest("button");
   if (!btn) return;
+
+  // --- 戰鬥 › 牌譜 ---
+  if (btn.dataset.kifuplay !== undefined) return void window.ulr.kifu.play(btn.dataset.kifuplay);
+  if (btn.dataset.kifuingame !== undefined)
+    return void window.ulr.kifu.playInGame(btn.dataset.kifuingame);
 
   // --- 模組 › 卡面替換 ---
   if (btn.id === "modsOpen") return void window.ulr.mods.cardsOpen();
