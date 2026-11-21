@@ -373,6 +373,40 @@ async function deckInventory(): Promise<Inventory | null> {
   }
 }
 
+/** 正在重讀庫存；重讀途中又來一則就再讀一次（不要並排跑兩趟）。 */
+let inventoryRefreshing = false;
+let inventoryRefreshAgain = false;
+
+/**
+ * 官方重讀了角色卡清單：庫存快取當場過期、重讀一次。換卡的結果因此變了的話，
+ * `deckInventory()` 會自己重推頁面的預載與選單卡面。
+ *
+ * ## 為什麼不能等 5 分鐘的 TTL（2026-11-08 實機）
+ *
+ * TTL 只在有人呼叫 `deckInventory()` 時才生效，而 `pushDeckState()` 直接拿快取用。
+ * 勞爾剛合成出 L4（694）換進迪城那一副、自動存檔也存了，但快取裡 694 還是 0 張 ——
+ * 於是每次進房預載都「臨時用 L3 代替」把 693 塞進 Deck1 記憶體：畫面顯示 L3、
+ * 伺服器上是 L4，一直到頁面重載都沒好（11 分鐘以上）。
+ *
+ * ⚠ 讀的是頁面上的 registry，不多送請求；觸發點本來就是官方自己剛讀完。
+ */
+async function refreshInventory(): Promise<void> {
+  if (inventoryRefreshing) {
+    inventoryRefreshAgain = true;
+    return;
+  }
+  inventoryRefreshing = true;
+  try {
+    do {
+      inventoryRefreshAgain = false;
+      if (inventoryCache !== null) inventoryCache = { ...inventoryCache, at: 0 };
+      await deckInventory();
+    } while (inventoryRefreshAgain);
+  } finally {
+    inventoryRefreshing = false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 手上沒有的角色卡：寫進遊戲時臨時換成同一個角色的另一張
 //
@@ -1810,6 +1844,10 @@ function officialTick(now: DeckRead, entered: boolean): boolean {
  */
 export function startDeckRuntime(engine: ArbiterEngine): void {
   engine.onDeckEdit((report) => void onDeckReport(report));
+  // 官方重讀了角色卡清單（合成、拿卡）→ 庫存快取作廢重讀，見 refreshInventory。
+  engine.onInventoryReread((registry) => {
+    if (registry === "chara_card") void refreshInventory();
+  });
   deckTimer = setInterval(() => void deckTick(), DECK_TICK_MS);
   // 最愛卡片鈕（存進牌組庫，跟牌組一起上雲）。
   engine.onCharaPicker((report) => onCharaPicker(report));

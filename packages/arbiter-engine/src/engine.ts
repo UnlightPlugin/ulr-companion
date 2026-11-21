@@ -537,6 +537,8 @@ export class ArbiterEngine {
   #lobbyHandlers = new Set<(press: LobbyQuickPressed) => void>();
   /** 誰在等「玩家在牌組編輯畫面點了什麼」。 */
   #deckHandlers = new Set<(report: DeckEditReport) => void>();
+  /** 官方重讀了道具清單（不含剛裝上時那一次）：托盤的庫存快取要跟著作廢。見 onInventoryReread。 */
+  #inventoryRereadHandlers = new Set<(registry: string) => void>();
   /**
    * 牌組庫介面現在該顯示什麼。`null` = 呼叫端還沒給過（那就不裝）。
    *
@@ -2041,6 +2043,17 @@ export class ArbiterEngine {
 
   /** 官方重讀了道具清單：變多的記一行；碎片、渦幣、抽獎券、異化礦材跟結算列的對帳。 */
   #onRaidItemDelta(report: RaidItemDeltaReport): void {
+    // 托盤的庫存快取（牌組庫拿來判「手上有沒有這張」）跟著作廢 —— 合成、拿卡都會走到這裡。
+    // ⚠ 不管 changes 有沒有東西都要通知：changes 只列變多的，合成用掉的不列。
+    if (report.initial !== true) {
+      for (const h of this.#inventoryRereadHandlers) {
+        try {
+          h(report.registry);
+        } catch {
+          // 托盤那邊出事不能擋住這裡的記帳
+        }
+      }
+    }
     if (report.changes.length > 0) {
       const up = report.changes.map(
         (c) => `${c.name} +${c.after - c.before}（${c.before}→${c.after}）`,
@@ -2426,6 +2439,18 @@ export class ArbiterEngine {
   onDeckEdit(handler: (report: DeckEditReport) => void): () => void {
     this.#deckHandlers.add(handler);
     return () => this.#deckHandlers.delete(handler);
+  }
+
+  /**
+   * 官方重讀了某一份道具清單（`chara_card`／`weapon_card`／`event_card`／`avatar_item`）。
+   *
+   * 托盤的牌組庫拿一份庫存快取判「手上有沒有這張」，手上沒有的會臨時換成同角色的另一張
+   * 再塞進遊戲。快取沒跟上的話，剛合成出來的卡會被當成沒有 —— 2026-11-08 實機：勞爾合成
+   * L4 換進牌組之後，進房預載一直把 L4 換回 L3，畫面顯示 L3、伺服器上卻是 L4。
+   */
+  onInventoryReread(handler: (registry: string) => void): () => void {
+    this.#inventoryRereadHandlers.add(handler);
+    return () => this.#inventoryRereadHandlers.delete(handler);
   }
 
   /**
