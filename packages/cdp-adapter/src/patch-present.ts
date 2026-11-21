@@ -83,6 +83,32 @@
  * - 只在 `Friend.is_quest_present === true` 時畫。右下角 FRIENDLIST 鈕開的是同一個
  *   面板，那裡沒有東西可以送。
  *
+ * ## 收到的任務：任務清單上標贈送者（v5，2026-11-22）
+ *
+ * 任務清單（`db_quest_data`，客戶端原樣存進 registry 的 `quest_data`）每一筆只有
+ * `quest_pid / quest_id / is_present / quest_find / is_check`，**沒有贈送者**。
+ * 贈送者只出現在一個地方：進大廳時官方本來就會要的 `achievement_update`，回應存在
+ * `Lobby.achievement_data`，裡面的 `quest_pre_notice` 就是大廳那則「某某送了你任務」：
+ *
+ * ```
+ *   quest_pre_notice: [{ player_name: "莫里亞蒂博士", stamp_id: null, quest_id: 478 }, …]
+ * ```
+ *
+ * ⚠ 通知**只來一次**（看過伺服器就不再送），而且**沒有 quest_pid**。所以：
+ *
+ * 1. 看到新的通知陣列就收進「待配對」（同一個陣列物件只收一次；記在 window 上的
+ *    WeakSet，重裝不清 —— 不然每次重裝都多收一份）
+ * 2. 拿待配對去對 `quest_data` 裡 `is_present: true`、同一個 `quest_id`、還沒配過的那筆，
+ *    照通知順序對發現時刻（`quest_find`）最早的。同一張任務被兩個人各送一次時只能照順序猜
+ * 3. 配到了就照 `quest_pid` 記下來；任務從清單上消失（打完、刪掉）就丟。待配對放 7 天
+ *
+ * 記在遊戲頁的 localStorage（`ulr.gifter.` ＋角色名＋註冊時間）。插件沒開著時收到的
+ * 通知補不回來。
+ *
+ * 畫在清單那一列的空白處：任務名後面到稀有度圖示（x=79）之間，靠右、字體照抄任務名。
+ * 太長就截斷加「…」。說明走 hover，掛在那一列官方自己的 `list_zone` 上 —— 我們的字
+ * 不 setInteractive，免得搶掉官方的點擊。
+ *
  * ⚠⚠ **注入腳本裡的註解不能有反引號。** 整段腳本住在一個 template literal
  * 裡，一個沒跳脫的反引號會讓字串提早結束。所以詳細的東西寫在這個檔頭。
  */
@@ -93,11 +119,17 @@ import { embedJson } from "./embed.js";
 const FLAG = "__ulrPresent";
 
 /**
+ * 收過的 `quest_pre_notice` 陣列（WeakSet）。**重裝不清**：大廳的通知陣列在頁面上一直
+ * 留著，重裝後再收一次就變成兩份待配對。遊戲重載才清（那時陣列也沒了）。
+ */
+const NOTICE_SEEN = "__ulrPresentNoticeSeen";
+
+/**
  * 腳本版本。**改動注入腳本裡任何一行就 +1**，修 bug 也算。
  *
  * engine 看到頁面上的版本跟這個不一樣就重裝，所以這個數字一定要跟著動。
  */
-export const PRESENT_SCRIPT_VERSION = 4;
+export const PRESENT_SCRIPT_VERSION = 5;
 
 /** 盯著 `friend_panel` 與 Quest socket 換人沒有的間隔。跟 patch-lobby 一樣 500ms。 */
 export const DEFAULT_PRESENT_POLL_MS = 500;
@@ -121,6 +153,15 @@ const TAIPEI_UTC_OFFSET_HOURS = 8;
 
 /** localStorage 鍵的前綴。後面接角色名與註冊時間。 */
 export const PRESENT_STORAGE_PREFIX = "ulr.present.";
+
+/** 收到的任務的贈送者記錄（見檔頭 v5）。後面接角色名與註冊時間。 */
+export const GIFTER_STORAGE_PREFIX = "ulr.gifter.";
+
+/** 還沒對上任務的通知留幾天。 */
+const GIFTER_PENDING_DAYS = 7;
+
+/** 贈送者名字的右緣：清單列裡稀有度圖示（x=79、寬 16）的左緣再空 4 px。讀不到圖示時用。 */
+const GIFTER_FALLBACK_RIGHT = 67;
 
 /** 面板右緣往內縮多少。照抄左邊「顯示方法」離面板左緣的距離（124 - 116）。 */
 const RIGHT_MARGIN = 8;
@@ -150,6 +191,8 @@ export interface PresentStatus {
   mounted: boolean;
   /** 還在等玩家打開贈送面板。**不是錯誤**（跟 `patch-lobby` 同一個欄位）。 */
   waiting: boolean;
+  /** 記著贈送者的收到的任務有幾筆（見檔頭 v5）。 */
+  gifters: number;
   reason: string | null;
 }
 
@@ -181,6 +224,18 @@ const TOOLTIP: Record<string, string> = {
   kr: "오늘 남은 퀘스트 전송 횟수 (이 기기에서 기록)\n공식 서버 값이 아니며, 다른 기기에서 보낸 것은 포함되지 않습니다",
   scn: "今日剩余赠送次数（本机记录）\n不是官方服务器提供的数字，其他设备送出的不计入",
   tcn: "今日剩餘贈送次數（本機記錄）\n不是官方伺服器提供的數字，其他裝置送出的不計入",
+};
+
+/**
+ * 任務清單上贈送者名字的 hover 說明。`__NAME__` 換成名字。第二行講來源：
+ * 官方清單不帶這個，是進大廳那則通知插件記下的（沒開插件時收到的就沒有）。
+ */
+const GIFTER_TOOLTIP: Record<string, string> = {
+  ja: "送り主: __NAME__\nロビーの通知からこの端末で記録（公式のリストには表示されません）",
+  en: "Gifted by __NAME__\nRecorded on this device from the lobby notice (not shown in the official list).",
+  kr: "보낸 사람: __NAME__\n로비 알림에서 이 기기에 기록 (공식 목록에는 표시되지 않음)",
+  scn: "赠送者：__NAME__\n进大厅时的通知由本机记录（官方列表不显示）",
+  tcn: "贈送者：__NAME__\n進大廳時的通知由本機記錄（官方清單不顯示）",
 };
 
 // ---------------------------------------------------------------------------
@@ -222,6 +277,24 @@ const SHARED = `
       }
     } catch (e) {}
   }
+
+  /** 拆掉任務清單上一個贈送者名字：字、說明、掛在官方 list_zone 上的 hover。 */
+  function dropGift(g) {
+    try {
+      if (g.zone && g.over) {
+        g.zone.off("pointerover", g.over);
+        g.zone.off("pointerout", g.out);
+      }
+    } catch (e) {}
+    try { if (g.text && g.text.destroy) g.text.destroy(); } catch (e) {}
+    try { if (g.tip && g.tip.destroy) g.tip.destroy(); } catch (e) {}
+  }
+
+  function dropAllGifts(st) {
+    var list = st.gift || [];
+    for (var i = 0; i < list.length; i++) dropGift(list[i]);
+    st.gift = [];
+  }
 `;
 
 /**
@@ -241,6 +314,11 @@ export function buildPresentPatchScript(options: PresentPatchOptions = {}): stri
     margin: RIGHT_MARGIN,
     fallbackRight: FALLBACK_RIGHT,
     fallbackRowY: FALLBACK_ROW_Y,
+    gifterPrefix: GIFTER_STORAGE_PREFIX,
+    gifterTooltip: GIFTER_TOOLTIP,
+    gifterPendingMs: GIFTER_PENDING_DAYS * 24 * 3600 * 1000,
+    gifterFallbackRight: GIFTER_FALLBACK_RIGHT,
+    noticeSeen: NOTICE_SEEN,
   };
 
   return `(function () {
@@ -256,6 +334,7 @@ export function buildPresentPatchScript(options: PresentPatchOptions = {}): stri
     // ⚠ 不拆的話重裝後監聽變兩份，送一次記兩次。
     unhookSocket(st);
     detach(st);
+    dropAllGifts(st);
     delete window[FLAG];
   }
 
@@ -449,6 +528,160 @@ export function buildPresentPatchScript(options: PresentPatchOptions = {}): stri
   }
 
   // -------------------------------------------------------------------------
+  // 收到的任務：贈送者（見檔頭 v5）
+  // -------------------------------------------------------------------------
+
+  function gifterKey() {
+    var k = accountKey();
+    return k === null ? null : CFG.gifterPrefix + k.slice(CFG.storagePrefix.length);
+  }
+
+  function loadGifts(key) {
+    try {
+      var r = JSON.parse(window.localStorage.getItem(key) || "null");
+      if (r && typeof r === "object" && r.byPid && typeof r.byPid === "object" && Array.isArray(r.pending)) return r;
+    } catch (e) {}
+    return { byPid: {}, pending: [] };
+  }
+
+  function questData() {
+    try {
+      var v = window.game.registry.get("quest_data");
+      return Array.isArray(v) ? v : null;
+    } catch (e) { return null; }
+  }
+
+  /** 大廳那份 achievement_update 回應裡的贈送通知。進大廳才有。 */
+  function noticeList() {
+    var L = sceneOf("Lobby");
+    var a = L && L.achievement_data;
+    return a && Array.isArray(a.quest_pre_notice) ? a.quest_pre_notice : null;
+  }
+
+  /** 收新的通知、拿待配對去對任務清單、丟掉已經不在清單上的。 */
+  function syncGifts(st) {
+    var key = gifterKey();
+    if (key === null) return;
+    var seen = window[CFG.noticeSeen];
+    if (!seen) { seen = new WeakSet(); window[CFG.noticeSeen] = seen; }
+    var list = noticeList();
+    var fresh = list !== null && !seen.has(list);
+    var quests = questData();
+    if (!fresh && quests === st.giftQuests && key === st.giftKey) return;
+
+    var rec = loadGifts(key);
+    var now = Date.now();
+    if (fresh) {
+      seen.add(list);
+      for (var i = 0; i < list.length; i++) {
+        var n = list[i];
+        if (n && typeof n.player_name === "string" && n.player_name.length > 0 && typeof n.quest_id === "number") {
+          rec.pending.push({ quest_id: n.quest_id, name: n.player_name, at: now });
+        }
+      }
+    }
+    if (quests !== null) {
+      var live = {};
+      for (var q = 0; q < quests.length; q++) if (quests[q] && quests[q].quest_pid) live[quests[q].quest_pid] = true;
+      for (var pid in rec.byPid) if (!live[pid]) delete rec.byPid[pid];
+      // 照通知順序配發現時刻最早、還沒配過的那筆
+      var free = quests.filter(function (x) { return x && x.is_present === true && !rec.byPid[x.quest_pid]; })
+        .sort(function (a, b) { return String(a.quest_find).localeCompare(String(b.quest_find)); });
+      var left = [];
+      for (var p = 0; p < rec.pending.length; p++) {
+        var pe = rec.pending[p], hit = -1;
+        for (var f = 0; f < free.length; f++) if (free[f].quest_id === pe.quest_id) { hit = f; break; }
+        if (hit >= 0) {
+          rec.byPid[free[hit].quest_pid] = { name: pe.name, at: pe.at };
+          free.splice(hit, 1);
+        } else if (now - pe.at < CFG.gifterPendingMs) {
+          left.push(pe);
+        }
+      }
+      rec.pending = left;
+    }
+    try { window.localStorage.setItem(key, JSON.stringify(rec)); } catch (e) {}
+    st.gifts = rec.byPid;
+    st.giftQuests = quests;
+    st.giftKey = key;
+  }
+
+  /** 任務清單每一列：收到的、記著贈送者的，在稀有度圖示左邊寫名字。 */
+  function paintGifts(st) {
+    // 官方換頁／重排會把整列拆掉重建，我們的字跟著列一起走了：說明與 hover 也收掉
+    st.gift = st.gift.filter(function (g) {
+      if (g.row && g.row.scene && g.text && g.text.scene) return true;
+      dropGift(g);
+      return false;
+    });
+    var Q = sceneOf("Quest");
+    if (!Q || !Array.isArray(Q.quest_list) || !st.gifts) return;
+    for (var i = 0; i < Q.quest_list.length; i++) {
+      var row = Q.quest_list[i];
+      var d = row && row.quest_list_data;
+      if (!row || !row.scene || !d || d.is_present !== true) continue;
+      var info = st.gifts[d.quest_pid];
+      if (!info || typeof info.name !== "string") continue;
+      var had = null;
+      for (var g = 0; g < st.gift.length; g++) if (st.gift[g].row === row) had = st.gift[g];
+      if (had && had.name === info.name) continue;
+      if (had) { dropGift(had); st.gift.splice(st.gift.indexOf(had), 1); }
+      mountGift(st, Q, row, info.name);
+    }
+  }
+
+  function mountGift(st, Q, row, name) {
+    var ref = row.list_name;
+    var rs = ref && ref.style;
+    // 字體照抄同一列的任務名
+    var style = rs
+      ? { fontFamily: rs.fontFamily, fontSize: rs.fontSize, color: rs.color, resolution: rs.resolution || 2 }
+      : { fontFamily: "font_light", fontSize: 11, color: "#ffffff", resolution: 2 };
+    var icon = row.list_rarity_icon;
+    var right = icon && typeof icon.x === "number"
+      ? icon.x - (icon.displayWidth || 16) * (typeof icon.originX === "number" ? icon.originX : 0.5) - 4
+      : CFG.gifterFallbackRight;
+    var y = ref && typeof ref.y === "number" ? ref.y : 0;
+    var oy = ref && typeof ref.originY === "number" ? ref.originY : 0.5;
+    var text = Q.add.text(right, y, name, style).setOrigin(1, oy);
+    // 不能蓋到任務名：放不下就截斷加省略號
+    var left = ref && typeof ref.x === "number"
+      ? ref.x + (ref.width || 0) * (1 - (typeof ref.originX === "number" ? ref.originX : 0)) + 6
+      : right - 70;
+    var room = right - left;
+    var s = name;
+    while (s.length > 1 && text.width > room) {
+      s = s.slice(0, -1);
+      text.setText(s + "…");
+    }
+    if (room < 12) text.setVisible(false);
+    row.add(text);
+
+    var tip = Q.add.container(row.x + right, row.y - 10);
+    var label = Q.add.text(0, 0, pick(CFG.gifterTooltip, gameLang()).replace("__NAME__", name), {
+      fontFamily: "font_light", fontSize: 11, resolution: 2, color: "#ffffff",
+      padding: { left: 5, right: 5, top: 3, bottom: 4 }
+    }).setOrigin(1, 1);
+    var back = Q.add.rectangle(0, 0, label.width, label.height, 0, 0.85).setOrigin(1, 1);
+    tip.add(back);
+    tip.add(label);
+    tip.setVisible(false);
+    try { tip.setDepth(100); } catch (e) {}
+
+    // hover 掛在官方那一列的 list_zone 上；我們的字不 setInteractive（不搶點擊）
+    var zone = row.list_zone || null;
+    var over = function () { try { tip.setVisible(true); } catch (e) {} };
+    var out = function () { try { tip.setVisible(false); } catch (e) {} };
+    try {
+      if (zone && typeof zone.on === "function") {
+        zone.on("pointerover", over);
+        zone.on("pointerout", out);
+      }
+    } catch (e) {}
+    st.gift.push({ row: row, name: name, text: text, tip: tip, zone: zone, over: over, out: out });
+  }
+
+  // -------------------------------------------------------------------------
   // 主迴圈
   // -------------------------------------------------------------------------
 
@@ -457,6 +690,8 @@ export function buildPresentPatchScript(options: PresentPatchOptions = {}): stri
     if (!st) return;
     try {
       hookSocket(st);
+      syncGifts(st);
+      paintGifts(st);
       var panel = presentPanel();
       if (panel === null) {
         if (st.panel !== null) detach(st);
@@ -488,6 +723,10 @@ export function buildPresentPatchScript(options: PresentPatchOptions = {}): stri
     timer: null,
     onPre: null,
     onError: null,
+    gift: [],
+    gifts: null,
+    giftQuests: undefined,
+    giftKey: null,
     reason: null
   };
   st.onPre = function (ok) { onPre(st, ok); };
@@ -505,6 +744,7 @@ export function buildPresentPatchScript(options: PresentPatchOptions = {}): stri
     max: st.max,
     mounted: st.text !== null,
     waiting: st.text === null,
+    gifters: st.gifts ? Object.keys(st.gifts).length : 0,
     reason: st.reason
   });
 })()`;
@@ -518,7 +758,7 @@ export const PRESENT_STATUS_EXPRESSION = `(function () {
     if (!st) {
       return JSON.stringify({
         installed: false, version: null, remain: null, max: ${DEFAULT_PRESENT_MAX},
-        mounted: false, waiting: false, reason: null
+        mounted: false, waiting: false, gifters: 0, reason: null
       });
     }
     return JSON.stringify({
@@ -529,12 +769,13 @@ export const PRESENT_STATUS_EXPRESSION = `(function () {
       mounted: st.text !== null && st.text !== undefined,
       // 腳本裝著、等玩家打開贈送面板 —— 不是錯誤，UI 不要報紅。
       waiting: st.text === null || st.text === undefined,
+      gifters: st.gifts ? Object.keys(st.gifts).length : 0,
       reason: st.reason
     });
   } catch (e) {
     return JSON.stringify({
       installed: false, version: null, remain: null, max: ${DEFAULT_PRESENT_MAX},
-      mounted: false, waiting: false, reason: String((e && e.message) || e)
+      mounted: false, waiting: false, gifters: 0, reason: String((e && e.message) || e)
     });
   }
 })()`;
@@ -551,6 +792,7 @@ export const PRESENT_UNINSTALL_EXPRESSION = `(function () {
     for (var i = 0; i < items.length; i++) {
       try { if (items[i] && items[i].destroy) items[i].destroy(); } catch (e) {}
     }
+    dropAllGifts(st);
     delete window[FLAG];
     return "ok";
   } catch (e) {
@@ -576,6 +818,7 @@ export function parsePresentStatus(raw: string): PresentStatus {
       max: DEFAULT_PRESENT_MAX,
       mounted: false,
       waiting: false,
+      gifters: 0,
       reason: `頁面回了讀不懂的東西：${raw.slice(0, 120)}`,
     };
   }
@@ -587,6 +830,7 @@ export function parsePresentStatus(raw: string): PresentStatus {
     max: typeof o.max === "number" ? o.max : DEFAULT_PRESENT_MAX,
     mounted: o.mounted === true,
     waiting: o.waiting === true,
+    gifters: typeof o.gifters === "number" ? o.gifters : 0,
     reason: typeof o.reason === "string" ? o.reason : null,
   };
 }

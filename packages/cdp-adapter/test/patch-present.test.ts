@@ -591,3 +591,216 @@ describe("好友面板的贈送次數", () => {
     expect(parsed.reason).toContain("doctype");
   });
 });
+
+// ---------------------------------------------------------------------------
+// 收到的任務：贈送者（v5）
+//
+// 形狀照 2026-11-22 對著跑著的客戶端讀到的：
+//   Lobby.achievement_data.quest_pre_notice = [{ player_name, stamp_id, quest_id }]
+//   registry quest_data = [{ quest_pid, quest_id, is_present, quest_find, is_check }]
+//   Quest.quest_list[i]：Container(x=620, y=52+16i)，list_name Text(-82,0)、
+//     list_rarity_icon Image(79,0) 16x16、list_zone Zone 264x16
+// ---------------------------------------------------------------------------
+
+interface QuestRow extends FakeContainer {
+  scene: unknown;
+  quest_list_data: Record<string, unknown>;
+  list_name: FakeText;
+  list_rarity_icon: FakeObject & { displayWidth: number };
+  list_zone: FakeObject;
+}
+
+function questRow(i: number, data: Record<string, unknown>, name = "夜鬼花園4"): QuestRow {
+  const row = new FakeContainer(620, 52 + 16 * i) as QuestRow;
+  row.scene = {};
+  row.quest_list_data = data;
+  row.list_name = new FakeText(-82, 0, name, {
+    fontFamily: "font_light",
+    fontSize: "11px",
+    color: "#fff",
+  });
+  row.list_name.setOrigin(0, 0.5);
+  row.list_rarity_icon = Object.assign(new FakeObject("Image", 79, 0), { displayWidth: 16 });
+  row.list_rarity_icon.setOrigin(0.5, 0.5);
+  row.list_zone = new FakeObject("Zone", 0, 0);
+  const destroy = row.destroy.bind(row);
+  row.destroy = () => {
+    for (const c of row.list) c.destroy();
+    row.scene = null;
+    destroy();
+  };
+  return row;
+}
+
+function withQuests(game: FakeGame) {
+  const factory: FakeFactory = {
+    text: (x, y, t, style) => new FakeText(x, y, t, { ...style }),
+    container: (x, y) => new FakeContainer(x, y),
+    rectangle: (x, y) => new FakeObject("Rectangle", x, y),
+  };
+  const quest = game.quest as unknown as { add: FakeFactory; quest_list: QuestRow[] };
+  quest.add = factory;
+  quest.quest_list = [];
+  const lobby: { achievement_data: { quest_pre_notice: unknown[] } | null } = {
+    achievement_data: null,
+  };
+  game.window.game.scene.keys.Lobby = lobby;
+  let questData: Record<string, unknown>[] | undefined;
+  game.window.game.registry = {
+    get: (k: string) => (k === "player" ? game.player : k === "quest_data" ? questData : undefined),
+  };
+  return {
+    quest,
+    /** 進大廳：官方 achievement_update 換一份新的回應物件 */
+    lobby(notices: unknown[]) {
+      lobby.achievement_data = { quest_pre_notice: notices };
+    },
+    /** 任務清單刷新：registry 換一份新陣列、清單列整批重建 */
+    quests(list: Record<string, unknown>[]) {
+      questData = list;
+      for (const r of quest.quest_list) r.destroy();
+      quest.quest_list = list.map((d, i) => questRow(i, d));
+    },
+  };
+}
+
+const GIFT_KEY = "ulr.gifter.不要樂奈|2025-04-24T01:57:22.000Z";
+const Q478 = {
+  quest_pid: "Wvtp",
+  quest_id: 478,
+  is_present: true,
+  quest_find: "2026-11-21T14:11:03.000Z",
+  is_check: 1,
+};
+const Q1015 = {
+  quest_pid: "HOAO",
+  quest_id: 1015,
+  is_present: true,
+  quest_find: "2026-11-21T14:10:57.000Z",
+  is_check: 1,
+};
+const Q461 = {
+  quest_pid: "0YTw",
+  quest_id: 461,
+  is_present: false,
+  quest_find: "2026-11-21T00:17:43.000Z",
+  is_check: 0,
+};
+
+function giftText(row: QuestRow): FakeText | undefined {
+  return row.list.find((o): o is FakeText => o instanceof FakeText && !o.destroyed);
+}
+
+describe("收到的任務：清單上標贈送者", () => {
+  it("大廳通知對到清單上收到的那筆，名字畫在稀有度圖示左邊、字體照抄任務名", () => {
+    const game = makeGame();
+    const w = withQuests(game);
+    w.lobby([
+      { player_name: "莫里亞蒂博士", stamp_id: null, quest_id: 478 },
+      { player_name: "莫里亞蒂博士", stamp_id: null, quest_id: 1015 },
+    ]);
+    w.quests([Q461, Q1015, Q478]);
+    install(game);
+
+    const [own, a, b] = w.quest.quest_list;
+    expect(giftText(own!)).toBeUndefined();
+    const t = giftText(b!)!;
+    expect(t.text).toBe("莫里亞蒂博士");
+    // 稀有度圖示 79、寬 16、置中 → 左緣 71，再空 4
+    expect(t.x).toBe(67);
+    expect(t.originX).toBe(1);
+    expect(t.style.fontSize).toBe("11px");
+    expect(giftText(a!)!.text).toBe("莫里亞蒂博士");
+    expect(status(game).gifters).toBe(2);
+    expect(JSON.parse(game.storage.getItem(GIFT_KEY)!).byPid).toEqual({
+      Wvtp: expect.objectContaining({ name: "莫里亞蒂博士" }),
+      HOAO: expect.objectContaining({ name: "莫里亞蒂博士" }),
+    });
+  });
+
+  it("名字不蓋到任務名：放不下就截斷加省略號", () => {
+    const game = makeGame();
+    const w = withQuests(game);
+    w.lobby([{ player_name: "一二三四五六七八九十", stamp_id: null, quest_id: 478 }]);
+    w.quests([Q478]);
+    // 任務名很長：-82 起、寬 8×9=72 → 右緣 -10，留 6 → 名字左緣最多到 -4，右緣 67 → 71 px
+    w.quest.quest_list[0]!.list_name.setText("通往王座之路一二三");
+    install(game);
+    const t = giftText(w.quest.quest_list[0]!)!;
+    expect(t.width).toBeLessThanOrEqual(71);
+    expect(t.text.endsWith("…")).toBe(true);
+  });
+
+  it("hover 掛在官方那一列的 list_zone 上，我們的字不搶點擊", () => {
+    const game = makeGame();
+    const w = withQuests(game);
+    w.lobby([{ player_name: "莫里亞蒂博士", stamp_id: null, quest_id: 478 }]);
+    w.quests([Q478]);
+    install(game);
+    const row = w.quest.quest_list[0]!;
+    expect(giftText(row)!.interactive).toBe(false);
+    expect(row.list_zone.count("pointerover")).toBe(1);
+  });
+
+  it("通知先到、清單後到也對得上；同一份通知重裝不會收兩次", () => {
+    const game = makeGame();
+    const w = withQuests(game);
+    w.lobby([{ player_name: "莫里亞蒂博士", stamp_id: null, quest_id: 478 }]);
+    install(game);
+    install(game); // 重裝：同一個通知陣列
+    expect(JSON.parse(game.storage.getItem(GIFT_KEY)!).pending).toHaveLength(1);
+
+    w.quests([Q478]);
+    tick();
+    expect(giftText(w.quest.quest_list[0]!)!.text).toBe("莫里亞蒂博士");
+    expect(JSON.parse(game.storage.getItem(GIFT_KEY)!).pending).toHaveLength(0);
+  });
+
+  it("清單重建（換頁、刷新）後重畫；任務不在清單上了就丟掉記錄", () => {
+    const game = makeGame();
+    const w = withQuests(game);
+    w.lobby([{ player_name: "莫里亞蒂博士", stamp_id: null, quest_id: 478 }]);
+    w.quests([Q478]);
+    install(game);
+    const first = giftText(w.quest.quest_list[0]!)!;
+
+    w.quests([Q461, Q478]);
+    tick();
+    expect(first.destroyed).toBe(true);
+    expect(giftText(w.quest.quest_list[1]!)!.text).toBe("莫里亞蒂博士");
+
+    w.quests([Q461]); // 打完了
+    tick();
+    expect(JSON.parse(game.storage.getItem(GIFT_KEY)!).byPid).toEqual({});
+    expect(status(game).gifters).toBe(0);
+  });
+
+  it("同一張任務兩個人各送一次：照通知順序配發現時刻早的", () => {
+    const game = makeGame();
+    const w = withQuests(game);
+    const early = { ...Q478, quest_pid: "early", quest_find: "2026-11-21T10:00:00.000Z" };
+    const late = { ...Q478, quest_pid: "late", quest_find: "2026-11-21T12:00:00.000Z" };
+    w.lobby([
+      { player_name: "甲", stamp_id: null, quest_id: 478 },
+      { player_name: "乙", stamp_id: null, quest_id: 478 },
+    ]);
+    w.quests([late, early]);
+    install(game);
+    const byPid = JSON.parse(game.storage.getItem(GIFT_KEY)!).byPid;
+    expect(byPid.early.name).toBe("甲");
+    expect(byPid.late.name).toBe("乙");
+  });
+
+  it("拆除時名字、說明、hover 都收掉", () => {
+    const game = makeGame();
+    const w = withQuests(game);
+    w.lobby([{ player_name: "莫里亞蒂博士", stamp_id: null, quest_id: 478 }]);
+    w.quests([Q478]);
+    install(game);
+    const row = w.quest.quest_list[0]!;
+    const t = giftText(row)!;
+    expect(run(game, PRESENT_UNINSTALL_EXPRESSION)).toBe("ok");
+    expect(t.destroyed).toBe(true);
+    expect(row.list_zone.count("pointerover")).toBe(0);
+  });
+});
