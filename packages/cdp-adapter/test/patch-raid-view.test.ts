@@ -1334,6 +1334,27 @@ describe("渦房的獎勵標記", () => {
       });
     });
 
+    it("預期碎片：南瓜王看到的 stage 4 不算數，照區塊推（M2 → 綠，不是紅）", () => {
+      const now = Date.now();
+      const pk = { profound_id: "p-pk", name: "南瓜王·P", monster_id: 30138, map_index: 2 };
+      const { raid, window, reports } = setup([ROW({ ...pk, limit: now + 3_600_000 })]);
+      window.__ulrRaidStages = { "p-pk": { stage: 4, src: "battle", at: now } };
+      run(window, buildRaidViewPatchScript({ bindingName: BINDING }));
+      const dead = [ROW({ ...pk, hp: 0, limit: now + 600_000 })];
+      raid.raid_list = dead;
+      poll?.();
+      raid.raid_list = [...dead];
+      poll?.();
+      raid.raid_list = [];
+      poll?.();
+      const tracks = reports.filter((r) => r.type === "raid-track");
+      expect(tracks.find((t) => t.monsterId === 30138)).toMatchObject({
+        stage: 4,
+        expectFrag: "時間的碎片",
+        expectSrc: "block",
+      });
+    });
+
     it("上傳快照不收舊版用發現畫面記的 stage（那時的對法會套錯渦）；戰鬥記的照收", () => {
       const now = Date.now();
       const { window } = setup([

@@ -94,6 +94,8 @@
  * - 都沒有就不畫 —— 不猜
  * - 碎片隨機的怪（龍鯉，raid-treasure.ts 的 RAID_RANDOM_FRAGMENT_MONSTERS）上面哪一種都不用、不畫：
  *   牠 stage 永遠 4，公式會一律畫紅（2026-10-10 六次對一次）
+ * - 南瓜王（RAID_STAGE_FROM_MAP_MONSTERS）stage 也永遠 4，但碎片照區塊走：只照區塊推、畫實心
+ *   （source "block"），看到的／公開渦表的 stage 都不用（2026-11-21，444 筆零例外）
  *
  * ## 獎勵表：邊打邊學（見 raid-learned.ts）
  *
@@ -154,6 +156,7 @@ import {
   RAID_MAP_COUNT,
   RAID_OWN_FRAME_TINT,
   RAID_RANDOM_FRAGMENT_MONSTERS,
+  RAID_STAGE_FROM_MAP_MONSTERS,
   RAID_STAGE_START_MAP,
   type RaidFragment,
 } from "./raid-treasure.js";
@@ -927,6 +930,8 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
     mapCount: RAID_MAP_COUNT,
     // 碎片隨機的怪（龍鯉）：stage、學到的表、區塊都不拿來畫
     randomFragMonsters: RAID_RANDOM_FRAGMENT_MONSTERS,
+    // 看到的 stage 是假的、碎片照區塊走的怪（南瓜王）：只照區塊推，而且當實證
+    stageFromMapMonsters: RAID_STAGE_FROM_MAP_MONSTERS,
     statuses: Object.fromEntries(
       RAID_STATUSES.map((s) => [s.code, { short: s.short, kind: s.kind }]),
     ),
@@ -1130,6 +1135,7 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
    */
   function fragInfo(st, G, r) {
     if (r && CFG.randomFragMonsters.indexOf(r.monster_id) !== -1) return null;
+    if (r && CFG.stageFromMapMonsters.indexOf(r.monster_id) !== -1) return blockFrag(r);
     var own = seenStage(r);
     if (own && typeof r.rarity === "number") {
       var fo = fragByFormula(r.rarity, own.stage);
@@ -1152,6 +1158,16 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
       if (fm) return { frag: fm, coin: false, source: "map", stage: ms };
     }
     return null;
+  }
+  /**
+   * 看到的 stage 是假的怪（南瓜王，raid-treasure.ts 的 RAID_STAGE_FROM_MAP_MONSTERS）：只照區塊推。
+   * 444 筆結算零例外，當實證畫實心（source "block"）。區塊不知道就 null —— 看到的 stage、公開渦表的
+   * stage 都不用（一律是 4，套公式全畫紅）。
+   */
+  function blockFrag(r) {
+    var ms = typeof r.rarity === "number" ? stageByMap(r) : null;
+    var f = ms !== null ? fragByFormula(r.rarity, ms) : null;
+    return f ? { frag: f, coin: false, source: "block", stage: ms } : null;
   }
   /** 推測來的（學到的表、照區塊推）：畫空心／半透明 */
   function guessed(fi) { return fi.source === "learned" || fi.source === "map"; }
@@ -2263,8 +2279,8 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
     return skip;
   }
   /**
-   * 這個渦照規則該怎麼辦：{ action, fragment }。碎片只用自己看到的 stage（發現時的 raid_title）；
-   * 妖精與碎片隨機的怪只看 any 那格。判不出碎片回 fragment null、action keep。
+   * 這個渦照規則該怎麼辦：{ action, fragment }。碎片只用自己看到的 stage（發現時的 raid_title），
+   * 南瓜王照區塊推；妖精與碎片隨機的怪只看 any 那格。判不出碎片回 fragment null、action keep。
    */
   function discoverPlan(st, G, r) {
     var rules = (st.discover && st.discover.rules) || {};
@@ -2273,6 +2289,10 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
     var fk = null;
     if (mons.indexOf("mc1004") === 0 || CFG.randomFragMonsters.indexOf(r.monster_id) !== -1) {
       fk = "any";
+    } else if (CFG.stageFromMapMonsters.indexOf(r.monster_id) !== -1) {
+      // 南瓜王：發現時的 stage 一律是 4，照區塊推
+      var bf = blockFrag(r);
+      if (bf) fk = bf.frag.key;
     } else {
       var own = seenStage(r);
       var f = own && typeof r.rarity === "number" ? fragByFormula(r.rarity, own.stage) : null;
@@ -2639,7 +2659,7 @@ export function buildRaidViewPatchScript(options: RaidViewPatchOptions = {}): st
         label(L().ranking);
         objs.push(cellBar(R, ix, y, cellW, D + 2));
         var fx = addFragIcon(R, G, ix + 3, y, fi, 16, D + 2, objs);
-        var how = (fi.source === "map" ? L().fromMap : L().fromStage).replace("__S__", fi.stage);
+        var how = (fi.source === "map" || fi.source === "block" ? L().fromMap : L().fromStage).replace("__S__", fi.stage);
         objs.push(R.add.text(fx, y, fi.frag.item + "  (" + how + ")", valueStyle()).setOrigin(0, 0.5).setDepth(D + 2));
         y += LINE;
       }

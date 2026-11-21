@@ -92,16 +92,33 @@ export const RAID_STAGE_START_MAP: Readonly<Record<number, number>> = {
   30113: 6, // 爬行者 M7→2、M8→3、M9→4
   30116: 11, // 深奧之者 M1→2、M4→5
   30119: 5, // 玄帝 M5→1、M6→2、M8→4
+  // 南瓜王（stage 是假的，見 RAID_STAGE_FROM_MAP_MONSTERS）
+  30137: 1, // 南瓜王·G（渦I）
+  30138: 1, // 南瓜王·P
+  30139: 1, // 南瓜王·S
 };
+
+/**
+ * 看到的 stage 是假的、碎片要照區塊推的怪。南瓜王三隻不管在哪個區塊，戰鬥設定與 raid_title 的
+ * stage 都是 4，碎片卻跟著區塊走：2026-10～11 的 444 筆結算（P 392、G 44、S 8，★1／★3）零例外，
+ * M1～M5 依序黃綠藍紅紫（＝區塊當 stage 套公式，起點跟黑死獸一樣是 M1）。
+ * 拿看到的 stage 套公式會一律畫紅（2026-11-20 Discord 綠被改成紅就是這樣）。
+ * 這幾隻照區塊推的結果當實證，不畫成推測。
+ */
+export const RAID_STAGE_FROM_MAP_MONSTERS: readonly number[] = [30137, 30138, 30139];
 
 /**
  * 碎片是隨機的怪：stage 套公式是錯的，學到的表也只是上一次的運氣。
  *
  * 龍鯉（渦IV，30129）：2026-10-10 的 8 筆全是 M4、stage 4，★1 六筆拿到黃紫紅紫紫綠、
  * ★4 兩筆紫綠。公式會一律畫紅（6 次對 1 次），所以不畫。Discord 通報那邊
- * （arbiter-link raid-feed 的 RANDOM_FRAGMENT_BOSSES）早就這樣擋了。
+ * （arbiter-link raid-feed 的 RANDOM_FRAGMENT_MONSTERS）早就這樣擋了。
+ *
+ * 舊妖精（魔性的鱗粉 30017，2026-11-21）：6 筆 stage 全是 3，公式 0 中 6
+ * （★5 M8 黃、M9 綠綠；★6 M7 黃、M9 藍、M11 黃）。規則還看不出來，先不畫。
+ * 新妖精（30140）只有 2 筆（★6 M5 紫），stage 公式跟照區塊推都對得上，分不出來、照舊。
  */
-export const RAID_RANDOM_FRAGMENT_MONSTERS: readonly number[] = [30129];
+export const RAID_RANDOM_FRAGMENT_MONSTERS: readonly number[] = [30129, 30017];
 
 /** 渦房地圖的區塊數（map_index 1～11）。 */
 export const RAID_MAP_COUNT = 11;

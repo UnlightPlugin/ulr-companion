@@ -340,19 +340,61 @@ const FRAGMENT_DISPLAY: Record<RaidFragmentKey, { short: string; icon: string }>
 const RANDOM_FRAGMENT_BOSSES = ["龍鯉", "龙鲤"];
 
 /**
+ * 同上，照 `monsterId`（妖精新舊兩隻同名，只能看 id）。跟 cdp-adapter `raid-treasure.ts` 的
+ * `RAID_RANDOM_FRAGMENT_MONSTERS` 同一份（arbiter-engine 的 raid-fragment-parity 測試對）。
+ * 龍鯉 30129；舊妖精 30017（stage 永遠 3，公式 0 中 6）。
+ */
+export const RAID_FEED_RANDOM_FRAGMENT_MONSTERS: readonly number[] = [30129, 30017];
+
+/**
+ * 看到的 stage 是假的、碎片照區塊走的 BOSS → 起點區塊。南瓜王三隻 stage 永遠是 4，
+ * 碎片卻是 M1～M5 依序黃綠藍紅紫（2026-11-21，444 筆結算零例外）。跟 cdp-adapter
+ * `raid-treasure.ts` 的 `RAID_STAGE_FROM_MAP_MONSTERS`／`RAID_STAGE_START_MAP` 同一份。
+ */
+export const RAID_FEED_STAGE_FROM_MAP: Readonly<Record<number, number>> = {
+  30137: 1, // 南瓜王·G
+  30138: 1, // 南瓜王·P
+  30139: 1, // 南瓜王·S
+};
+
+/** 渦房地圖的區塊數（map_index 1～11）。 */
+const RAID_MAP_COUNT = 11;
+
+function fragmentOfStage(rarity: number, stage: number): RaidFragmentKey | null {
+  const code = (((rarity === 6 ? stage + 1 : stage) % 5) + 5) % 5;
+  return FRAGMENT_BY_CODE[code] ?? null;
+}
+
+/**
  * 這個渦掉哪種碎片。**不用 map_index 公式**（見 docs/raid-feed.md），依序：
  *
  * 1. 玩家實際看到的 stage（算法跟頁面的 `fragByFormula` 一樣：★6 往後錯一格）
  * 2. ulrmap 獎勵表查到的（怪＋★＋區塊，實際結算整理出來的表）
+ *
+ * 例外：南瓜王（{@link RAID_FEED_STAGE_FROM_MAP}）看到的 stage 是假的，只照區塊推，推不出來才看查表。
  */
 export function raidFeedFragment(
-  r: Pick<RaidFeedIn, "stage" | "rarity" | "name"> & { lookupFragment?: RaidFragmentKey | null },
+  r: Pick<RaidFeedIn, "stage" | "rarity" | "name"> &
+    Partial<Pick<RaidFeedIn, "monsterId" | "mapIndex">> & {
+      lookupFragment?: RaidFragmentKey | null;
+    },
 ): RaidFragmentKey | null {
   if (r.name !== null && RANDOM_FRAGMENT_BOSSES.some((n) => r.name?.includes(n))) return null;
+  const monsterId = r.monsterId ?? null;
+  if (monsterId !== null && RAID_FEED_RANDOM_FRAGMENT_MONSTERS.includes(monsterId)) return null;
+  const start = monsterId === null ? undefined : RAID_FEED_STAGE_FROM_MAP[monsterId];
+  if (start !== undefined) {
+    const map = r.mapIndex ?? null;
+    if (map !== null && r.rarity !== null && map >= 1 && map <= RAID_MAP_COUNT) {
+      const stage = ((((map - start) % RAID_MAP_COUNT) + RAID_MAP_COUNT) % RAID_MAP_COUNT) + 1;
+      const f = stage <= 5 ? fragmentOfStage(r.rarity, stage) : null;
+      if (f !== null) return f;
+    }
+    return r.lookupFragment ?? null;
+  }
   if (r.stage !== null && r.rarity !== null) {
-    const code = (((r.rarity === 6 ? r.stage + 1 : r.stage) % 5) + 5) % 5;
-    const f = FRAGMENT_BY_CODE[code];
-    if (f !== undefined) return f;
+    const f = fragmentOfStage(r.rarity, r.stage);
+    if (f !== null) return f;
   }
   return r.lookupFragment ?? null;
 }

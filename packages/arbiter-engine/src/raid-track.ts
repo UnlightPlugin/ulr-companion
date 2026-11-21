@@ -629,6 +629,7 @@ const EXPECT_SOURCE: Readonly<Record<string, string>> = {
   feed: "公開渦通報",
   learned: "學到的表",
   map: "照區塊推",
+  block: "照區塊",
 };
 
 /**

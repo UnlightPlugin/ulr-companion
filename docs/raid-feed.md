@@ -51,6 +51,12 @@ Discord 的公開渦通知照舊，但**不要 VPS、不要小號、不要登入
      沒有 `cmem` 才看它（2026-10-04 修；之前渦 I 要等有人開打才知道）。
      查不到的組 30 分鐘後再查。查表在 Worker 的 alarm 裡、發這一批之前做，所以還沒發的直接帶碎片。
   3. 都沒有 → `❓`，之後知道了再改訊息。
+- **南瓜王例外（2026-11-21）**：三隻（G 30137／P 30138／S 30139）看到的 stage 永遠是 4，碎片卻照區塊走，
+  M1～M5 依序黃綠藍紅紫（444 筆結算零例外，跟黑死獸同一套）。照上面的順序 stage 會蓋掉 ulrmap 查到的，
+  一律變紅 —— 11-20 Discord「推的時候是綠、後來變紅」就是插件送 stage 4 上來造成的。現在這三隻只照區塊推
+  （`RAID_FEED_STAGE_FROM_MAP`），區塊不知道才看查表，stage 不用。舊妖精（30017）stage 永遠 3、公式 0 中 6，
+  跟龍鯉一樣不推（`RAID_FEED_RANDOM_FRAGMENT_MONSTERS`）。兩份表跟 cdp-adapter 的對，見
+  `arbiter-engine/test/raid-fragment-parity.test.ts`。
 
 ### 辨識同一個渦
 

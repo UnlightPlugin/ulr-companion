@@ -141,6 +141,27 @@ describe("raidFeedFragment", () => {
     expect(raidFeedFragment({ stage: 2, rarity: null, name: "屠殺者" })).toBeNull();
     expect(raidFeedFragment({ stage: 2, rarity: 1, name: "龍鯉" })).toBeNull();
   });
+
+  it("舊妖精（30017）不推，新妖精（30140）同名照舊", () => {
+    const fairy = { stage: 3, rarity: 6, name: "魔性的鱗粉" };
+    expect(raidFeedFragment({ ...fairy, monsterId: 30017 })).toBeNull();
+    expect(raidFeedFragment({ ...fairy, monsterId: 30140, stage: 4 })).toBe("death");
+  });
+
+  it("南瓜王：stage 永遠 4 不算數，照區塊 M1～M5 是黃綠藍紅紫", () => {
+    for (const monsterId of [30137, 30138, 30139]) {
+      const got = [1, 2, 3, 4, 5].map((mapIndex) =>
+        raidFeedFragment({ stage: 4, rarity: 1, name: "南瓜王·P", monsterId, mapIndex }),
+      );
+      expect(got, String(monsterId)).toEqual(["memory", "time", "soul", "life", "death"]);
+    }
+  });
+
+  it("南瓜王沒區塊：不拿 stage 套，退回查表", () => {
+    const r = { stage: 4, rarity: 1, name: "南瓜王·P", monsterId: 30138, mapIndex: null };
+    expect(raidFeedFragment(r)).toBeNull();
+    expect(raidFeedFragment({ ...r, lookupFragment: "time" })).toBe("time");
+  });
 });
 
 describe("raidFeedTier", () => {

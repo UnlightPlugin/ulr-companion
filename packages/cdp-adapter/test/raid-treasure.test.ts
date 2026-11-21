@@ -16,6 +16,7 @@ import {
   parseRaidStatusCode,
   RAID_RANDOM_FRAGMENT_MONSTERS,
   RAID_TREASURE_TABLE,
+  RAID_STAGE_FROM_MAP_MONSTERS,
   raidStageByMap,
   raidTierOf,
 } from "@ulr/cdp-adapter";
@@ -171,6 +172,16 @@ describe("改版後：照怪＋區塊推 stage", () => {
   it("實測到的每一筆都對得上", () => {
     for (const [m, map, stage] of SEEN)
       expect(raidStageByMap(m, 1, map), `${m} M${map}`).toBe(stage);
+  });
+
+  it("南瓜王：照區塊 M1～M5 推 stage 1～5（看到的 stage 永遠 4 不算數）", () => {
+    for (const m of RAID_STAGE_FROM_MAP_MONSTERS) {
+      expect(
+        [1, 2, 3, 4, 5].map((map) => raidStageByMap(m, 1, map)),
+        String(m),
+      ).toEqual([1, 2, 3, 4, 5]);
+    }
+    expect(RAID_STAGE_FROM_MAP_MONSTERS).toEqual([30137, 30138, 30139]);
   });
 
   it("區塊繞一圈：誘引之者 M11 之後是 M1", () => {
